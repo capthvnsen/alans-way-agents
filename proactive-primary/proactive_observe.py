@@ -7,6 +7,24 @@ import os
 import stat
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
+MAC_STATE_FILE = "/var/lib/hermes-alans-way/mac-state.json"
+
+
+def mac_state():
+    try:
+        path = Path(os.environ.get("HERMES_MAC_STATE_FILE") or MAC_STATE_FILE)
+        if path.is_symlink() or path.stat().st_size > 4096:
+            return None
+        doc = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("state") not in ("online", "offline"):
+        return None
+    def field(key):
+        value = doc.get(key)
+        return value[:64] if isinstance(value, str) else None
+    return {"state": doc["state"], "since": field("since"),
+            "lastSeenOnline": field("lastSeenOnline")}
 
 
 def read_source(home: Path, relative: str):
@@ -67,6 +85,15 @@ def collect(home: Path, ledger, ctx=None):
     native = collect_native(ctx, snapshot["tasks"]) if ctx is not None else {}
     for watch_id, value in native.items():
         signatures["task:" + watch_id] = sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    mac = mac_state()
+    if mac is not None:
+        # since identifies the transition, not just the direction, so a repeat
+        # offline->online flip is a new event rather than a deduped replay.
+        signatures["mac"] = mac["since"] or mac["state"]
+    from .proactive_board import collect_board, board_signature
+    board = collect_board(home)
+    if board:
+        signatures["board"] = board_signature(board)
     tasks = []
     now = datetime.now(timezone.utc)
     for task in snapshot["tasks"]:
@@ -94,12 +121,13 @@ def collect(home: Path, ledger, ctx=None):
         preferences[key] = [value[:100] for value in preferences[key][:8]]
     preferences["reviewed_at_utc"] = now.isoformat()
     preferences["native_task_status"] = native
+    preferences["workspace_mac"] = mac
     by_id = {task["id"]: task for task in snapshot["tasks"]}
     goals = [{"source": "approved-watch", "summary": task["scope"], "watch_id": task["id"],
               "approved_at": by_id[task["id"]]["approved_at"], "status": task["status"]}
              for task in tasks]
     return {"memory": memory, "schedule": schedule, "tasks": tasks,
-            "preferences": preferences, "goals": goals}, signatures
+            "preferences": preferences, "goals": goals, "board": board}, signatures
 
 
 def observe(runtime):

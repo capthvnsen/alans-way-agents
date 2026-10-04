@@ -24,6 +24,17 @@ another host.
 For VPS window input, incomplete accessibility trees, or screenshots returned
 as `MEDIA:` paths, read [VPS desktop operations](references/vps-desktop.md).
 
+## Work around an offline Mac
+
+Every `workspace_browser` result carries the serving `host` and the Mac's
+last seen state, and tool results add a `[workspace] ...` notice line while
+the Mac is down or when it comes back online. When a task needs Mac-only
+resources — local files, Mac logins, a tab handoff waiting on the Mac — and
+`mac.state` is `offline`, do not improvise on the VPS: mark the kanban card
+`blocked` with a "needs Mac" note, tell the user, and stop. The Mac
+availability watcher turns the next offline→online flip into a context event
+for the lead bot's review, which can unblock the card and resume the task.
+
 ## Operate a browser tab
 
 1. Find the assigned tab, or open a task-specific tab in the background. Tabs

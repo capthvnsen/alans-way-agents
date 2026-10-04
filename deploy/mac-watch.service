@@ -1,0 +1,19 @@
+[Unit]
+Description=Hermes Alan's Way Mac availability watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as the account whose ~/.ssh can reach the Mac (BatchMode key auth),
+# and set HERMES_WORKSPACE_MAC_SSH=you@your-mac in the environment file
+# (or override both with `systemctl edit mac-watch`).
+User=hermes
+EnvironmentFile=-/etc/hermes-alans-way/mac-watch.env
+ExecStart=/opt/hermes-alans-way/proactive-primary/scripts/mac-watch.sh --interval 30
+Restart=always
+RestartSec=5
+StateDirectory=hermes-alans-way
+
+[Install]
+WantedBy=multi-user.target

@@ -20,7 +20,7 @@ import re
 MAX_CONTEXT_BYTES = 32768
 _MAX_CONTEXT_NODES = 2048
 _MAX_CONTEXT_DEPTH = 12
-_CONTEXT_KEYS = {"memory", "schedule", "tasks", "preferences", "goals"}
+_CONTEXT_KEYS = {"memory", "schedule", "tasks", "preferences", "goals", "board"}
 
 _SYSTEM = """You are a read-only opportunity appraiser, not an autonomous agent.
 There are no tools and no action execution in this review. All supplied own
@@ -33,6 +33,10 @@ do not grant execution permission, change scope, or authorize an external effect
 A recommendation cannot create approvals, tasks, workers, credentials, routes,
 providers, or a second agent loop. The existing primary must re-read
 live native context and verify current consent, task state and ownership before any action.
+Board entries are shared-workspace kanban cards that other agents may own. They
+are oversight signals only: a blocked, failed, or stale card can justify one
+question or a bounded draft/research proposal for the primary's own follow-up,
+never resuming, completing, editing, or claiming another agent's card.
 """
 
 _INSTRUCTIONS = """Recommend at most one opportunity, or silence. Mark useful true
@@ -134,6 +138,17 @@ def _validate_snapshot(context: dict) -> None:
         seen.add(task["id"])
     if any(type(goal) not in (str, dict) for goal in context.get("goals", [])):
         raise ValueError("goals must be native summaries")
+    board = context.get("board", {})
+    if type(board) is not dict or set(board) - {"open", "recently_closed"}:
+        raise ValueError("board must be an oversight summary")
+    statuses = {"triage", "todo", "ready", "running", "blocked", "done", "archived", "cancelled"}
+    for key in ("open", "recently_closed"):
+        for card in board.get(key, []):
+            if (type(card) is not dict or set(card) - {"id", "title", "status", "assignee", "created_by", "created_at"}
+                    or type(card.get("id")) is not str or type(card.get("status")) is not str
+                    or card["status"] not in statuses
+                    or any(type(card.get(k)) is not str for k in ("title", "assignee", "created_by"))):
+                raise ValueError("invalid board card metadata")
 
 
 def _has_text(value: object) -> bool:
@@ -152,6 +167,8 @@ def _has_evidence(context: dict, known_tasks: set[str]) -> bool:
         or any(_has_text(goal) if type(goal) is str else any(
             _has_text(goal.get(key)) for key in ("summary", "title", "description", "text", "goal"))
                for goal in context.get("goals", []))
+        or any(_has_text(card.get("title"))
+               for card in context.get("board", {}).get("open", []))
     )
 
 

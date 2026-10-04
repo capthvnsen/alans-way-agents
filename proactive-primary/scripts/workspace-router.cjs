@@ -23,15 +23,18 @@
 //   --vps-script PATH          browser-mcp.cjs path on this host
 //                              (default: sibling copy, then the deployed copy)
 //   --vps-connection PATH      VPS browser connection.json
+//   --mac-state-file PATH      mac-watch state file
+//                              (default: /var/lib/hermes-alans-way/mac-state.json)
 // Environment fallbacks: HERMES_WORKSPACE_BOT_ID, HERMES_BOT_NAME,
 //   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_MAC_NODE,
 //   HERMES_WORKSPACE_MAC_MCP, HERMES_WORKSPACE_VPS_MCP,
-//   HERMES_WORKSPACE_CONNECTION.
+//   HERMES_WORKSPACE_CONNECTION, HERMES_MAC_STATE_FILE.
 // With no Mac ssh configured the router always serves the local VPS host.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const readline = require('node:readline');
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -40,12 +43,6 @@ function arg(name) {
 
 const botId = arg('--bot-id') || process.env.HERMES_WORKSPACE_BOT_ID || '';
 const botName = arg('--bot-name') || process.env.HERMES_BOT_NAME || '';
-if (!botId) {
-  process.stderr.write(
-    'workspace-router: --bot-id (or HERMES_WORKSPACE_BOT_ID) is required.\n',
-  );
-  process.exit(1);
-}
 const macSsh = arg('--mac-ssh') || process.env.HERMES_WORKSPACE_MAC_SSH || '';
 const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || 'node';
 const macScript =
@@ -63,6 +60,10 @@ const vpsConnection =
   arg('--vps-connection') ||
   process.env.HERMES_WORKSPACE_CONNECTION ||
   path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'browser', 'connection.json');
+const macStateFile =
+  arg('--mac-state-file') ||
+  process.env.HERMES_MAC_STATE_FILE ||
+  '/var/lib/hermes-alans-way/mac-state.json';
 
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -89,7 +90,83 @@ function probeMac(timeoutMs) {
   });
 }
 
+// Read the mac-watch state file. A missing or malformed file means
+// "unknown": the router still decides on its own probe and reports mac: null.
+function readMacState(file) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!doc || (doc.state !== 'online' && doc.state !== 'offline')) return null;
+    const text = (key) => (typeof doc[key] === 'string' ? doc[key].slice(0, 64) : null);
+    return { state: doc.state, since: text('since'), lastSeenOnline: text('lastSeenOnline') };
+  } catch {
+    return null;
+  }
+}
+
+// Human-readable line appended to tool results — the channel the agent sees.
+// Only meaningful when this connection fell back to the VPS host.
+function workspaceNotice(host, mac) {
+  if (!mac || host !== 'vps') return null;
+  if (mac.state === 'online') {
+    return (
+      `[workspace] Mac is back online as of ${mac.since || 'unknown'} — ` +
+      'tasks waiting on Mac-local resources can resume.'
+    );
+  }
+  return (
+    `[workspace] Mac unreachable since ${mac.since || 'unknown'} — ` +
+    'routed to VPS browser; Mac-local files unavailable.'
+  );
+}
+
+// Additive decoration of one outbound JSON-RPC message: structured host state
+// under result._meta.workspace plus, for tool results, the notice as an extra
+// text content item. Anything not a result object passes through untouched.
+function annotateResult(msg, host, mac, notice) {
+  if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
+  msg.result._meta = { ...(msg.result._meta || {}), workspace: { host, mac } };
+  if (notice && Array.isArray(msg.result.content)) {
+    msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
+  }
+  return msg;
+}
+
+// Per-connection line annotator for the backend's stdout. The state file is
+// re-read per message so a mid-session flip is seen; the "back online" notice
+// fires once per online transition while the offline one rides every tool
+// result, since either may be the agent's only signal that host changed.
+function makeAnnotator(host, macConfigured, stateFile) {
+  let onlineAnnounced = false;
+  return function annotateLine(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return line;
+    const mac = macConfigured ? readMacState(stateFile) : null;
+    let notice = null;
+    if (mac && Array.isArray(msg.result.content)) {
+      if (mac.state === 'online') {
+        if (!onlineAnnounced) notice = workspaceNotice(host, mac);
+        onlineAnnounced = true;
+      } else {
+        onlineAnnounced = false;
+        notice = workspaceNotice(host, mac);
+      }
+    }
+    return JSON.stringify(annotateResult(msg, host, mac, notice));
+  };
+}
+
 async function main() {
+  if (!botId) {
+    process.stderr.write(
+      'workspace-router: --bot-id (or HERMES_WORKSPACE_BOT_ID) is required.\n',
+    );
+    process.exit(1);
+  }
   const macUp = macSsh ? await probeMac(8000) : false;
 
   let cmd;
@@ -122,7 +199,19 @@ async function main() {
     );
   }
 
-  const child = spawn(cmd, args, { stdio: 'inherit' });
+  const child = spawn(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] });
+  const annotate = makeAnnotator(macUp ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
+  readline
+    .createInterface({ input: child.stdout, crlfDelay: Infinity })
+    .on('line', (line) => {
+      let out;
+      try {
+        out = annotate(line);
+      } catch {
+        out = line;
+      }
+      process.stdout.write(out + '\n');
+    });
   child.on('error', (e) => {
     process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
     process.exit(1);
@@ -139,4 +228,8 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { readMacState, workspaceNotice, annotateResult, makeAnnotator };

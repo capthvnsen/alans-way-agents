@@ -48,7 +48,8 @@ Restart the gateway. `hermes plugins list` should show `proactive-primary`.
 | Observer | 30s check for approved watches, bounded automatic opportunities |
 | Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
 | `workspace_browser` MCP | `status`, `tabs`, `open`, `snapshot`, `screenshot`, `action` — per-bot scoped Chromium tabs on Mac or VPS |
-| Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → next MCP connection re-routes |
+| Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → next MCP connection re-routes. Tool results carry the serving host and mac-watch state |
+| mac-watch | optional systemd watcher (`deploy/`) probes the Mac every 30s and publishes a JSON state file the router and observer read |
 
 ## The workspace_browser tools
 
@@ -63,6 +64,38 @@ and the app's bundled `browser-mcp.cjs` (inside the installed `.app`).
 VPS-only usage works with no Mac: the router detects the missing/unreachable
 host and serves the local VPS browser host directly.
 
+## Mac availability watcher
+
+`proactive-primary/scripts/mac-watch.sh` probes the Mac over ssh on an
+interval (default 30s) and keeps a JSON state file —
+`{"state","since","lastSeenOnline","lastTransition"}` — that the router and
+the proactive observer read instead of probing themselves. The router adds
+the serving host and Mac state to `workspace_browser` results; the observer
+turns an offline→online flip into a context event for the lead bot's review,
+so kanban cards blocked on Mac-only work can resume. Transitions are logged
+to `mac-events.log` beside the state file.
+
+The observer also sweeps the shared `kanban.db` read-only
+(`proactive_board.py`): open and recently-closed cards ride into the lead
+bot's review context, so a blocked or changed card from another agent can
+surface as one bounded opportunity — never a reason to touch someone else's
+card. Combined with the connector's overseer role (`HERMES_OVERSEER_BOTS` /
+`HERMES_OVERSEER_BOT_IDS`, see `integration.md` in the app repo), the lead
+can answer "who is working where" and release a runaway tab.
+
+```sh
+sudo cp deploy/mac-watch.service /etc/systemd/system/
+sudo mkdir -p /etc/hermes-alans-way
+echo 'HERMES_WORKSPACE_MAC_SSH=you@your-mac' | sudo tee /etc/hermes-alans-way/mac-watch.env
+sudo systemctl enable --now mac-watch.service
+```
+
+Adjust `ExecStart` to the installed script path and `User=` to the account
+whose ssh keys reach the Mac. Environment variables:
+`HERMES_WORKSPACE_MAC_SSH` (required — the same ssh alias the router probes),
+`HERMES_MAC_STATE_FILE` (default `/var/lib/hermes-alans-way/mac-state.json`;
+the unit's `StateDirectory` creates the parent directory).
+
 ## Safety model (short version)
 
 - Human takeover wins always: control epochs invalidate queued agent actions.
@@ -76,7 +109,8 @@ host and serves the local VPS browser host directly.
 ## Layout
 
 ```
-proactive-primary/    the plugin (plugin.yaml + tools + observer + skills + router)
+proactive-primary/    the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
+deploy/               systemd unit for the Mac availability watcher
 hooks/                gateway startup hook (manual copy — see Install)
 docs/                 proactivity guide, experimental keeper notes
 tests/                unittest suite — python3 -m unittest discover -s tests
