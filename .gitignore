@@ -6,3 +6,4 @@ __pycache__/
 *.log
 node_modules/
 *.bak-*
+companion/
