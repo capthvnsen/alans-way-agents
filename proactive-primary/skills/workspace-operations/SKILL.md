@@ -59,9 +59,15 @@ app opens them for the user while the tab stays yours to keep working.
 3. Prefer `action=batch` for multi-step work — up to 25 actions in one call,
    run in order, stopping at the first error; each step reports its own result.
    Every round-trip is a separate tool call otherwise, so batching is the fast,
-   cheap path. Use `action=eval` with `code` to run JS in the page: read DOM
-   state, extract data, or complete a whole interaction in one call. Keep the
-   return value small; results cap near 48KB. Both take the same epoch.
+   cheap path. Put `wait` steps between actions that change the page
+   (`{action:"wait", selector:".results", timeout:8000}` or `text` instead of
+   `selector`) so later steps land on a ready page instead of racing it. Use
+   `action=eval` with `code` to run JS in the page: read DOM state, extract
+   data, or complete a whole interaction in one call. `eval` awaits Promises,
+   so `await new Promise(r => setTimeout(r, 500))` and polling loops work
+   inside it; state you store on `window` (for example `window.__h = {}`)
+   persists between eval calls on that tab. Keep the return value small;
+   results cap near 48KB. Both take the same epoch.
 4. On `human_has_control`, wait for the user to give control back. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
    timed-out submission as uncertain and check its effects before resubmitting.
