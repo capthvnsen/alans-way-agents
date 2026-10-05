@@ -72,6 +72,20 @@ const macStateFile =
   process.env.HERMES_MAC_STATE_FILE ||
   '/var/lib/hermes-alans-way/mac-state.json';
 
+// Reuse one ssh connection between the probe and the backend spawn: the
+// probe's handshake becomes the spawn's (~5ms vs a full handshake), and
+// later respawns ride it for ControlPersist seconds. %C hashes the
+// destination, so the socket name needs no host-derived parts.
+const sshControlPath = path.join(process.env.TMPDIR || '/tmp', 'wsr-%C');
+const sshControlArgs = [
+  '-o',
+  'ControlMaster=auto',
+  '-o',
+  'ControlPersist=120',
+  '-o',
+  `ControlPath=${sshControlPath}`,
+];
+
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
@@ -79,7 +93,7 @@ const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 // serving — a closed app still has the script on disk, so file-existence
 // alone would route to a dead host. The API answers 401 without auth, which
 // still proves liveness; a refused connection means the app is not running.
-function probeMac(timeoutMs) {
+function probeMac(timeoutMs, connectTimeout = 6) {
   return new Promise((resolve) => {
     const alive =
       `{ conn="$HOME/Library/Application Support/Hermes Workspace/connection.json"; ` +
@@ -91,7 +105,18 @@ function probeMac(timeoutMs) {
       .join('; ') + '; exit 1';
     const child = spawn(
       'ssh',
-      ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=yes', macSsh, probe],
+      [
+        '-T',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        `ConnectTimeout=${connectTimeout}`,
+        '-o',
+        'StrictHostKeyChecking=yes',
+        ...sshControlArgs,
+        macSsh,
+        probe,
+      ],
       { stdio: ['ignore', 'pipe', 'ignore'] },
     );
     let output = '';
@@ -122,6 +147,18 @@ function readMacState(file) {
   } catch {
     return null;
   }
+}
+
+// A state-file verdict only counts while mac-watch is alive to refresh it:
+// the watcher rewrites the file every interval (~30s), so an mtime older
+// than ~45s is a dead watcher's last word, not a current state.
+function freshMacState(file, maxAgeMs = 45000) {
+  try {
+    if (Date.now() - fs.statSync(file).mtimeMs > maxAgeMs) return null;
+  } catch {
+    return null;
+  }
+  return readMacState(file);
 }
 
 // Human-readable line appended to tool results — the channel the agent sees.
@@ -196,7 +233,17 @@ async function main() {
     );
     process.exit(1);
   }
-  const macScript = macSsh ? await probeMac(8000) : null;
+  // A fresh mac-watch "offline" verdict skips the probe entirely: the
+  // watcher already paid the ssh timeout, so paying it again on every lazy
+  // respawn just adds seconds while the Mac is down. A fresh "online" still
+  // probes — the liveness check stays the authority — but on a shorter
+  // connect timeout since the file may have just gone stale-positive. A
+  // missing or stale file probes as before.
+  const macSeen = macSsh ? freshMacState(macStateFile) : null;
+  const macScript =
+    macSsh && (!macSeen || macSeen.state === 'online')
+      ? await probeMac(8000, macSeen ? 4 : 6)
+      : null;
 
   let cmd;
   let args;
@@ -211,6 +258,7 @@ async function main() {
       'BatchMode=yes',
       '-o',
       'StrictHostKeyChecking=yes',
+      ...sshControlArgs,
       macSsh,
       remote.join(' '),
     ];
@@ -221,9 +269,10 @@ async function main() {
     args = [vpsScript, '--bot-id', botId];
     if (botName) args.push('--bot-name', botName);
     args.push('--connection', vpsConnection);
+    const reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
     process.stderr.write(
       macSsh
-        ? 'workspace-router: Mac unreachable — routing to VPS browser host\n'
+        ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
         : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
     );
   }

@@ -68,10 +68,13 @@ as `MEDIA:` paths, read [VPS desktop operations](references/vps-desktop.md).
 ## The connector layer self-heals — never operate on it
 
 `workspace_browser_*` tools are served by a routing connector that probes the
-Mac at spawn and re-routes automatically when Mac availability flips. If a
-browser tool call errors or the tools seem missing, retry once: a dead
-connector is respawned fresh and re-probes on its own. If it still fails,
-report the failure in one line and stop.
+Mac at spawn and re-routes automatically when Mac availability flips. The
+first call of a session pays a few seconds of warmup while the connector
+probes the Mac and connects; later calls on that connection are fast, so a
+slow first response is warmup, not a failure. If a browser tool call errors
+or the tools seem missing, retry once: a dead connector is respawned fresh
+and re-probes on its own. If it still fails, report the failure in one line
+and stop.
 
 Never repair the connector layer yourself: do not kill connector/router
 processes, run `hermes mcp test` loops, read or edit router scripts, ssh to
@@ -110,10 +113,18 @@ app opens them for the user while the tab stays yours to keep working.
    Sign-ins are shared live within each host's browser profile. Tabs,
    control, and task ownership remain separate. Mac and VPS profiles have
    independent authentication.
-2. Read a fresh snapshot or screenshot. Use its refs and current control epoch
-   for the next action, then inspect the result. The browser tools target that
-   tab directly in the background and leave the real mouse alone. Completion requires observed
-   page state, rather than the absence of a tool error.
+2. Read a fresh snapshot, tightly bounded. `workspace_browser_snapshot`
+   accepts `maxChars`, `maxElements`, and `since` — keep the bounds small
+   enough that the payload stays readable, and pass `since=` the previous
+   snapshot's generation for a cheap `{unchanged:true}` re-check instead of
+   a re-sent tree. Request a screenshot only when the DOM view cannot answer
+   the question; `workspace_browser_screenshot` accepts `format`
+   (`jpeg`|`png`|`webp`), `quality`, and `maxWidth` — jpeg around 70 quality
+   at 1280px is the fast default. Use the snapshot's refs and current
+   control epoch for the next action, then inspect the result. The browser
+   tools target that tab directly in the background and leave the real
+   mouse alone. Completion requires observed page state, rather than the
+   absence of a tool error.
 3. Prefer `action=batch` for multi-step work — up to 25 actions in one call,
    run in order, stopping at the first error; each step reports its own result.
    Every round-trip is a separate tool call otherwise, so batching is the fast,

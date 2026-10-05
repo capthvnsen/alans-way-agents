@@ -7,10 +7,10 @@
 #
 #   {"state":"online","since":"<iso>","lastSeenOnline":"<iso>","lastTransition":"<iso>"}
 #
-# The file is rewritten atomically (tmp + mv), only on transitions plus a
-# periodic refresh so a stale mtime distinguishes a dead watcher from a
-# steady state. Every transition also appends one line to mac-events.log in
-# the same directory.
+# The file is rewritten atomically (tmp + mv) every tick, so a stale mtime
+# distinguishes a dead watcher from a steady state — the workspace router
+# only trusts an offline verdict while the file is fresh. Every transition
+# also appends one line to mac-events.log in the same directory.
 #
 #   mac-watch.sh [--mac-ssh USER@HOST] [--interval SECONDS]
 #                [--state-file PATH] [--once]
@@ -69,7 +69,6 @@ write_state() {
   mv "$tmp" "$STATE_FILE"
 }
 
-WRITES=0
 tick() {
   ts=$(iso_now)
   if probe >/dev/null 2>&1; then current=online; else current=offline; fi
@@ -78,15 +77,10 @@ tick() {
     printf '%s %s -> %s\n' "$ts" "${STATE:-unknown}" "$current" >> "$EVENTS_LOG"
     STATE="$current" SINCE="$ts" LAST_TRANSITION="$ts"
     write_state
-    WRITES=0
     return
   fi
   if [ "$current" = "online" ]; then LAST_SEEN="$ts"; fi
-  WRITES=$((WRITES + 1))
-  if [ ! -f "$STATE_FILE" ] || [ "$WRITES" -ge 20 ]; then
-    write_state
-    WRITES=0
-  fi
+  write_state
 }
 
 if [ "$ONCE" -eq 1 ]; then

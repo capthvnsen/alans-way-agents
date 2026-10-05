@@ -80,6 +80,21 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn('action:"claim"', self.normalized)
         self.assertIn("do not wait, ask, or describe a handoff", self.normalized)
 
+    def test_bounded_snapshot_and_screenshot_params_documented(self):
+        # Snapshots must stay cheap: bound the payload, re-check by
+        # generation, and reach for pixels only when the DOM cannot answer.
+        for param in [
+            "maxChars",
+            "maxElements",
+            "since=",
+            "{unchanged:true}",
+            "format",
+            "quality",
+            "maxWidth",
+        ]:
+            with self.subTest(param=param):
+                self.assertIn(param, self.normalized)
+
 
 ROUTER_PATH = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
 
@@ -133,6 +148,22 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
 
     def test_probe_mode_exists(self):
         self.assertIn("--probe", self.source)
+
+    def test_both_ssh_calls_reuse_a_control_master(self):
+        # The probe and the backend spawn each paid a full ssh handshake —
+        # ~4.5s of warmup on every lazy respawn. A shared ControlMaster
+        # socket makes the spawn's handshake nearly free.
+        self.assertIn("ControlMaster=auto", self.source)
+        self.assertIn("ControlPersist=120", self.source)
+        self.assertIn("wsr-%C", self.source)
+        self.assertGreaterEqual(self.source.count("...sshControlArgs"), 2)
+
+    def test_fresh_offline_state_skips_the_probe(self):
+        # A fresh mac-watch "offline" verdict must short-circuit to the VPS
+        # leg — the watcher already paid the ssh timeout, so probing again
+        # just adds seconds per respawn while the Mac is down.
+        self.assertIn("freshMacState(macStateFile)", self.source)
+        self.assertIn("macSeen.state === 'offline'", self.source)
 
 
 class ConnectorSelfHealSkillTests(unittest.TestCase):
