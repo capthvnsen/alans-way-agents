@@ -1,6 +1,6 @@
-name: proactive-primary
-version: "0.2.0"
-description: "Event-driven reviews by one designated Hermes primary."
+name: alans-way
+version: "0.3.0"
+description: "Alan's Way agent side: a designated proactive primary plus the workspace-browser skill and router scripts for the Hermes desktop companion."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"

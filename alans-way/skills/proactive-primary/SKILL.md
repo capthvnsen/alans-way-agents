@@ -28,15 +28,15 @@ macOS support; this skill invokes Hermes tools rather than OS-specific commands.
 
 ## Prerequisites
 
-The optional `proactive-primary` plugin must expose `proactive_control`; its skill
-is loaded as `proactive-primary:proactive-primary`, and `/proactivity` is its
+The `alans-way` plugin must expose `proactive_control`; its skill
+is loaded as `alans-way:proactive-primary`, and `/proactivity` is its
 control entry point. Require the existing primary's exact profile and session
 key to be explicitly bound. Missing tools or binding mean stop, not fallback.
 Use the installed tool schema; supported fields and actions may vary by release.
 
 Automatic dispatch also requires the separately reviewed native drop-in hook
-`hooks/proactive-primary/HOOK.yaml` + `handler.py`, installed under this profile's
-`$HERMES_HOME/hooks/proactive-primary/`. The hook is trusted by placement, not
+`hooks/alans-way/HOOK.yaml` + `handler.py`, installed under this profile's
+`$HERMES_HOME/hooks/alans-way/`. The hook is trusted by placement, not
 by `plugins.enabled`; plugin enablement does not install or gate native hooks.
 The native `gateway:startup` hook stamps the current gateway process in private
 `$HERMES_HOME/companion/proactivity/gateway-owner.json` (PID and timestamp).

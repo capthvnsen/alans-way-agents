@@ -242,7 +242,9 @@ def register(ctx, *, home=None, background=True):
                       handler=runtime.control, check_fn=lambda: True)
     ctx.register_command("proactivity", runtime.command,
                          description="Status, pause, resume, and configure proactive work")
-    ctx.register_skill("proactive-primary", Path(__file__).parent / "skills" / "proactive-primary" / "SKILL.md")
+    skills_dir = Path(__file__).parent / "skills"
+    ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
+    ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")
     ctx.on_unload(runtime.close)
     if hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute

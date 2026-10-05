@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT / "proactive-primary"
+PLUGIN = ROOT / "alans-way"
 
 
 def load_plugin():
@@ -36,7 +36,7 @@ class PluginTests(unittest.TestCase):
             self.assertFalse(guard.gateway_ready(home, registered))
 
     def test_gateway_hook_is_passive_for_non_startup_events(self):
-        hook = ROOT / "hooks/proactive-primary/handler.py"
+        hook = ROOT / "hooks/alans-way/handler.py"
         spec = importlib.util.spec_from_file_location("proactive_hook_test", hook)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -113,6 +113,8 @@ class PluginTests(unittest.TestCase):
             runtime = module.register(facade, home=Path(directory), background=False)
             self.assertIn(("tool", "proactive_control"), facade.calls)
             self.assertIn(("command", "proactivity"), facade.calls)
+            self.assertIn(("skill", "proactive-primary"), facade.calls)
+            self.assertIn(("skill", "workspace-operations"), facade.calls)
             self.assertFalse(runtime.gateway_ready())
             self.assertIsNone(runtime.tick())
             runtime.close()

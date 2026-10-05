@@ -1,6 +1,6 @@
 # Proactivity for the existing primary
 
-`proactive-primary` is an optional plugin-bundled workflow for the existing cloud
+`alans-way` ships `proactive-primary`, an optional plugin-bundled workflow for the existing cloud
 primary, not a new bot or an always-on AI loop. It observes relevant changes and
 lets that primary choose one useful action, question, or silent no-op. Native
 Hermes memory, schedules, tasks, sessions, delegation and approvals remain the
@@ -11,22 +11,22 @@ foundation. This is not finished Mac/phone canonical handoff or guaranteed deliv
 Target the existing `default` primary profile; do not rename it or create another
 owner. The plugin is intended for Linux and macOS. Review the complete plugin
 folder, not only its skill, before importing it. Use Hermes' supported local
-plugin-folder discovery: place the reviewed `proactive-primary/` folder
-under the active profile's `$HERMES_HOME/proactive-primary/`.
+plugin-folder discovery: place the reviewed `alans-way/` folder
+under the active profile's `$HERMES_HOME/alans-way/`.
 
 Check your installed Hermes' plugin support and available capabilities first.
 For a locally discovered plugin, the supported enable command is:
 
 ```sh
 hermes plugins list
-hermes plugins enable proactive-primary
+hermes plugins enable alans-way
 ```
 
 Hermes also supports a reviewed repository subdirectory install; inspect/pin the
 source before enabling, and keep native hook installation separate:
 
 ```sh
-hermes plugins install capthvnsen/hermes-companion/proactive-primary --no-enable
+hermes plugins install capthvnsen/alans-way-agents#alans-way --no-enable
 ```
 
 Enabling plugin discovery is distinct from enabling automatic proactivity or
@@ -39,9 +39,9 @@ explicit gateway-injection permission, not the plugin's persisted policy:
 ```yaml
 plugins:
   enabled:
-    - proactive-primary
+    - alans-way
   entries:
-    proactive-primary:
+    alans-way:
       allow_gateway_injection: true
 ```
 
@@ -65,7 +65,7 @@ Binding verifies the active profile's existing native routing-index record and
 supports direct Telegram routes in this alpha. It always leaves policy paused.
 It reads metadata only: no native session creation or state/database edits.
 Never guess a key from a bot label or publish a real route. The registered skill
-is `proactive-primary:proactive-primary`; `/proactivity` is its chat control entry
+is `alans-way:proactive-primary`; `/proactivity` is its chat control entry
 point. There is no automatic retarget from a recently received message.
 
 After validation and native injection permission, enable the toolset for the
@@ -91,8 +91,8 @@ structured JSON for integrations.
 ## Separate native gateway hook
 
 Automatic dispatch requires a second, explicitly reviewed installation: the native
-drop-in hook `hooks/proactive-primary/HOOK.yaml` and `handler.py`. Manually copy the
-reviewed pair into the active profile's `$HERMES_HOME/hooks/proactive-primary/`,
+drop-in hook `hooks/alans-way/HOOK.yaml` and `handler.py`. Manually copy the
+reviewed pair into the active profile's `$HERMES_HOME/hooks/alans-way/`,
 without overwriting an existing hook without review. A plugin-subdirectory install
 will not install the repository's separate `hooks/` folder; obtain both files from
 the same reviewed revision.

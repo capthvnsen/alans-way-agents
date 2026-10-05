@@ -7,7 +7,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "proactive-primary" / "skills" / "proactive-primary" / "SKILL.md"
+SKILL = ROOT / "alans-way" / "skills" / "proactive-primary" / "SKILL.md"
 DOCS = ROOT / "docs" / "proactivity.md"
 
 
@@ -25,7 +25,7 @@ class ProactiveSkillTests(unittest.TestCase):
             "$HERMES_HOME/companion/proactivity", "ordinary chat", "priorities",
             "schema", "read back", "survives restart", "general memory",
             "Never automatically resume", "unsupported", "/proactivity",
-            "proactive-primary:proactive-primary",
+            "alans-way:proactive-primary",
         ):
             with self.subTest(requirement=requirement):
                 self.assertTrue(requirement in " ".join(content.split()), f"Missing contract: {requirement}")
@@ -91,10 +91,10 @@ class ProactiveSkillTests(unittest.TestCase):
         self.assertTrue(DOCS.is_file(), "A concise public proactivity guide must exist")
         content = DOCS.read_text(encoding="utf-8")
         for requirement in (
-            "$HERMES_HOME/proactive-primary", "hermes plugins enable proactive-primary",
+            "$HERMES_HOME/alans-way", "hermes plugins enable alans-way",
             "plugins:", "enabled:", "entries:", "allow_gateway_injection: true",
             "fragment", "Do not replace", "existing", "session_key", "default",
-            "proactive-primary:proactive-primary", "/proactivity", "proactive_control",
+            "alans-way:proactive-primary", "/proactivity", "proactive_control",
             "$HERMES_HOME/companion/proactivity", "22:00–08:00", "America/Denver",
             "upper limits, not quotas", "zero model turns", "not a sandbox",
             "acceptance is not turn completion or platform delivery", "Do not retry",

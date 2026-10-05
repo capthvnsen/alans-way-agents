@@ -10,15 +10,15 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTER = ROOT / "proactive-primary" / "scripts" / "workspace-router.cjs"
-WATCH = ROOT / "proactive-primary" / "scripts" / "mac-watch.sh"
+ROUTER = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
+WATCH = ROOT / "alans-way" / "scripts" / "mac-watch.sh"
 NODE = shutil.which("node")
 SH = shutil.which("sh")
 
 
 def plugin():
     name = "companion_workspace_mac_test"
-    path = ROOT / "proactive-primary"
+    path = ROOT / "alans-way"
     spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

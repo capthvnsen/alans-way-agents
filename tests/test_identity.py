@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def plugin():
     name = "companion_identity_test"
-    path = ROOT / "proactive-primary"
+    path = ROOT / "alans-way"
     spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

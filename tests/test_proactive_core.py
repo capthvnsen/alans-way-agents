@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 
-CORE_PATH = Path(__file__).resolve().parents[1] / "proactive-primary" / "proactive_core.py"
+CORE_PATH = Path(__file__).resolve().parents[1] / "alans-way" / "proactive_core.py"
 
 
 def load_core():

@@ -5,10 +5,10 @@ This repo is what you install *on the machine running your Hermes agents*
 (usually a VPS). The companion repo holds the Mac desktop app — this one holds
 what your agents need to think and act:
 
-- **`proactive-primary/`** — a native Hermes plugin: one designated primary bot
+- **`alans-way/`** — a native Hermes plugin: one designated primary bot
   gets bounded, event-driven proactivity — reviewing its own work, watching
   approved tasks, and surfacing useful things to do, on a schedule you control.
-- **`hooks/proactive-primary/`** — a gateway startup hook that arms the plugin
+- **`hooks/alans-way/`** — a gateway startup hook that arms the plugin
   only inside the real gateway process.
 - **Workspace browser wiring** — `setup-workspace.sh` writes a managed
   `workspace_browser` block into your Hermes config pointing at
@@ -28,19 +28,19 @@ git clone https://github.com/capthvnsen/alans-way-agents
 cd alans-way-agents
 
 # 1. Plugin + bundled skills (tools, observer, /proactivity commands)
-hermes plugins install ./proactive-primary
+hermes plugins install ./alans-way
 # or straight from GitHub, no clone:
-# hermes plugins install https://github.com/capthvnsen/alans-way-agents#proactive-primary
+# hermes plugins install https://github.com/capthvnsen/alans-way-agents#alans-way
 
 # 2. Gateway hook — arms proactivity only inside the gateway process
-cp -r hooks/proactive-primary ~/.hermes/hooks/
+cp -r hooks/alans-way ~/.hermes/hooks/
 
 # 3. Browser tools for one bot profile (repeat per bot)
 ./setup-workspace.sh --bot-id YOUR_BOT_ID --bot-name "Scout" \
     --mac-ssh you@your-mac --config ~/.hermes/config.yaml
 ```
 
-Restart the gateway. `hermes plugins list` should show `proactive-primary`.
+Restart the gateway. `hermes plugins list` should show `alans-way`.
 
 ### What each piece does
 
@@ -68,7 +68,7 @@ host and serves the local VPS browser host directly.
 
 ## Mac availability watcher
 
-`proactive-primary/scripts/mac-watch.sh` probes the Mac over ssh on an
+`alans-way/scripts/mac-watch.sh` probes the Mac over ssh on an
 interval (default 30s) and keeps a JSON state file —
 `{"state","since","lastSeenOnline","lastTransition"}` — that the router and
 the proactive observer read instead of probing themselves. The router adds
@@ -127,7 +127,7 @@ VPS browser owns.
 ## Layout
 
 ```
-proactive-primary/    the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
+alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher
 hooks/                gateway startup hook (manual copy — see Install)
 docs/                 proactivity guide, experimental keeper notes

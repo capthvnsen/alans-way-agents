@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 
-PATH = Path(__file__).resolve().parents[1] / "proactive-primary/proactive_review.py"
+PATH = Path(__file__).resolve().parents[1] / "alans-way/proactive_review.py"
 SILENT = {"useful": False, "action": "ask", "task_id": None}
 
 

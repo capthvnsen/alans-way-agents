@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-PATH = Path(__file__).resolve().parents[1] / "proactive-primary/proactive_native.py"
+PATH = Path(__file__).resolve().parents[1] / "alans-way/proactive_native.py"
 if PATH.is_file():
     spec = importlib.util.spec_from_file_location("proactive_native_under_test", PATH)
     native = importlib.util.module_from_spec(spec)
