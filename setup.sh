@@ -187,7 +187,13 @@ fi
 # ---------------------------------------------------------------- plugin
 step "Plugin"
 if hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
-  ok "plugin already installed"
+  if diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$HERMES_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
+    ok "plugin already installed and current"
+  else
+    hermes plugins install --force "file://$REPO_DIR#$PLUGIN_NAME" >/dev/null 2>&1 \
+      && ok "plugin updated from $REPO_DIR (restart the gateway to load it)" \
+      || warn "could not update the installed plugin — run: hermes plugins install --force file://$REPO_DIR#$PLUGIN_NAME"
+  fi
 else
   hermes plugins install "file://$REPO_DIR#$PLUGIN_NAME" && ok "plugin installed from $REPO_DIR" \
     || { bad "plugin install failed"; exit 1; }
