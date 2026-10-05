@@ -49,7 +49,12 @@ command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >
 
 ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
+warn() { echo "  warn $1"; }
 skip() { echo "  skip $1"; }
+
+# browser-mcp gives a browser action up to 90s; Hermes must wait longer or it
+# abandons a batch that is still running and the agent retries on top of it.
+TOOL_TIMEOUT=120
 
 if [ "$VERIFY" = 1 ]; then
   FAILS=0
@@ -97,6 +102,26 @@ if [ "$VERIFY" = 1 ]; then
     else
       bad "no workspace_browser block in $CONFIG"
     fi
+    timeout=$(python3 - "$CONFIG" <<'PY' 2>/dev/null || true
+import re, sys
+inside = False
+for line in open(sys.argv[1]):
+    if re.match(r"^  workspace_browser:\s*$", line):
+        inside = True
+    elif inside and re.match(r"^ {0,2}\S", line):
+        break
+    elif inside and (m := re.match(r"^    timeout:\s*(\d+)\s*$", line)):
+        print(m.group(1))
+        break
+PY
+)
+    if [ -z "$timeout" ]; then
+      skip "workspace_browser timeout not set (Hermes default applies; ${TOOL_TIMEOUT}s recommended)"
+    elif [ "$timeout" -lt "$TOOL_TIMEOUT" ]; then
+      bad "workspace_browser timeout ${timeout}s is below ${TOOL_TIMEOUT}s — long browser actions get cut off; re-run setup or set timeout: $TOOL_TIMEOUT"
+    else
+      ok "workspace_browser timeout ${timeout}s"
+    fi
   else
     skip "config check (no --config given)"
   fi
@@ -129,6 +154,9 @@ $MARK_BEGIN
       - $(yaml_quote "$ROUTER")
       - --bot-id
       - $(yaml_quote "$BOT_ID")$BOT_NAME_BLOCK
+    lazy: true
+    connect_timeout: 12
+    timeout: $TOOL_TIMEOUT
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
 $MARK_END
