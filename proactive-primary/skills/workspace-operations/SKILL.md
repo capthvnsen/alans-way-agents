@@ -60,8 +60,12 @@ app opens them for the user while the tab stays yours to keep working.
    run in order, stopping at the first error; each step reports its own result.
    Every round-trip is a separate tool call otherwise, so batching is the fast,
    cheap path. Put `wait` steps between actions that change the page
-   (`{action:"wait", selector:".results", timeout:8000}` or `text` instead of
-   `selector`) so later steps land on a ready page instead of racing it. Use
+   (`{action:"wait", selector:".results", timeout:8000}` — `text`, `url`, and
+   `visible:true` conditions also work) so later steps land on a ready page
+   instead of racing it. Prefer `visible:true`: an element that exists but is
+   collapsed or hidden will otherwise pass the wait and fail at input. Click
+   failures name what covers the element; if a click still cannot land, drive
+   that step with eval or a different selector rather than retrying. Use
    `action=eval` with `code` to run JS in the page: read DOM state, extract
    data, or complete a whole interaction in one call. `eval` awaits Promises,
    so `await new Promise(r => setTimeout(r, 500))` and polling loops work
