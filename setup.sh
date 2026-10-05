@@ -317,6 +317,39 @@ EOF
     $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
       || warn "units written but not started — start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+    # The observer and router read the watcher's default state file under
+    # /var/lib, which only a root system unit's StateDirectory provides.
+    if [ -n "$MAC_SSH" ] && [ "$SYSCTL" = "systemctl" ] && [ "$(id -u)" = 0 ]; then
+      if [ ! -f "$UNIT_DIR/mac-watch.service" ]; then
+        mkdir -p /etc/hermes-alans-way
+        printf 'HERMES_WORKSPACE_MAC_SSH=%s\n' "$MAC_SSH" > /etc/hermes-alans-way/mac-watch.env
+        cat > "$UNIT_DIR/mac-watch.service" <<EOF
+[Unit]
+Description=Hermes Alan's Way Mac availability watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/hermes-alans-way/mac-watch.env
+ExecStart=/bin/sh $REPO_DIR/alans-way/scripts/mac-watch.sh --interval 30
+Restart=always
+RestartSec=5
+StateDirectory=hermes-alans-way
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "wrote $UNIT_DIR/mac-watch.service"
+      fi
+      systemctl daemon-reload 2>/dev/null || true
+      systemctl enable --now mac-watch.service >/dev/null 2>&1 \
+        && ok "Mac availability watcher enabled" \
+        || warn "could not start mac-watch.service — the bot won't notice the Mac going on or offline"
+    elif [ -n "$MAC_SSH" ]; then
+      warn "Mac availability watcher not installed (needs root + systemd) — see README 'mac-watch'"
+    fi
   else
     warn "systemd unavailable or skipped — see docs/vps-browser.md for manual unit setup"
   fi

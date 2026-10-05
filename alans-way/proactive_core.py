@@ -47,7 +47,9 @@ class Policy:
     min_watch_interval_seconds: int = 300
     min_interval_seconds: int = 7200
     event_ttl_seconds: int = 259200
-    unresolved_ttl_seconds: int = 21600
+    # A primary's proactive turn is capped at 20 work minutes, so an hour
+    # without a resolve means it never will; longer only delays every watch.
+    unresolved_ttl_seconds: int = 3600
     max_pending: int = 64
     debounce_seconds: int = 120
 

@@ -43,7 +43,7 @@ class PolicyTests(unittest.TestCase):
             "min_watch_interval_seconds": 300,
             "min_interval_seconds": 7200,
             "event_ttl_seconds": 259200,
-            "unresolved_ttl_seconds": 21600,
+            "unresolved_ttl_seconds": 3600,
             "max_pending": 64,
             "debounce_seconds": 120,
         }
