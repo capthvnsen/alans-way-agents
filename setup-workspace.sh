@@ -90,9 +90,10 @@ if [ "$VERIFY" = 1 ]; then
     skip "vps connection file absent at $CONN (only needed on the VPS host)"
   fi
   if [ -n "$CONFIG" ]; then
-    if [ -f "$CONFIG" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG" \
-        || grep -q '^  workspace_browser:' "$CONFIG"; }; then
-      ok "workspace_browser block present in $CONFIG"
+    if [ -f "$CONFIG" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG"; then
+      ok "managed workspace_browser block present in $CONFIG"
+    elif [ -f "$CONFIG" ] && grep -q '^  workspace_browser:' "$CONFIG"; then
+      ok "workspace_browser entry present in $CONFIG (unmanaged — re-run setup to manage it)"
     else
       bad "no workspace_browser block in $CONFIG"
     fi

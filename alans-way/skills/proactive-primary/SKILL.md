@@ -1,7 +1,7 @@
 ---
 name: proactive-primary
 description: "Review work; change proactivity preferences in chat."
-version: 0.1.0
+version: 0.2.0
 author: capthvnsen, Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -62,6 +62,13 @@ proactive_control(action="resume")
 proactive_control(action="configure", settings={"quiet_start": 23, "quiet_end": 8})
 proactive_control(action="configure", settings={"max_daily_wakes": 1})
 proactive_control(action="review")
+proactive_control(action="record_task", task={
+    "id": "rent_due", "title": "Rent payment", "owner": "primary",
+    "scope": "Check rent payment posts; remind if missing",
+    "next_action": "Check bank feed on the 1st", "status": "active",
+    "approved": True, "cadence_seconds": 86400, "due_at": "2026-02-02T00:00:00+00:00"})
+proactive_control(action="report_signal", task_id="rent_due",
+                  signal="payment posted 2026-02-01")
 ```
 
 A user-requested `review` asks for one bounded review; it does not authorize a
@@ -89,6 +96,49 @@ profile's `$HERMES_HOME/companion/proactivity`. Do not hand-edit those files,
 write another profile, or persist proactivity settings in general memory.
 Pause/stop survives restart. Never automatically resume paused or cancelled work
 from stale events, a specialist's output, or a newly started session.
+
+## Standing Watches
+
+A watch is a durable, user-approved standing check in the ledger — "watch this
+flight", "check this subscription before it renews", "alert me if this inbox
+thread revives". Create one only when the user explicitly asks for the standing
+behavior; a watch is consent bookkeeping, not a discovered task, so never mint
+one speculatively to fill the schedule.
+
+A watch is a `record_task` task with schedule fields:
+
+- `next_review_at` — timezone-aware ISO timestamp. When it passes, a `watch_due`
+  wake fires the bound primary. Re-arm by recording the watch again with a new
+  `next_review_at`, or let `cadence_seconds` advance it automatically.
+- `cadence_seconds` (300–604800) — a fixed re-arm grid. Each dispatch schedules
+  the next grid point; a dormant stretch does not replay missed slots.
+- `due_at` — a hard deadline. The engine escalates (about a week out, three
+  days, one day, four hours, then overdue) and overdue watches keep
+  resurfacing instead of firing once and going silent.
+- `notify_when` — the user's own report rule ("only if the price drops",
+  "only if a reply arrives"). It filters what reaches the conversation; it is
+  never permission to widen scope or skip native approvals.
+- `signal`/`signal_at` — the last reported observation, written via
+  `report_signal(task_id, signal)`. A changed signal wakes the watch; an
+  identical signal dedupes durably, so routine "nothing changed" findings stay
+  silent without burning wakes.
+
+When a `[Companion scheduled watch]` message arrives, treat it as the standing
+contract firing — it skips the opportunity appraiser because the user already
+approved the cadence. Run the check with real tools inside the recorded scope
+and `execution_host`, then:
+
+1. Write what you observed with `report_signal` so repeats dedupe.
+2. Report to the bound conversation only when `notify_when` says the result is
+   meaningful or it needs a decision — silence is a valid outcome.
+3. Re-arm (`record_task` with a new `next_review_at`) if the watch continues,
+   or `finish_task` when it is satisfied, cancelled, or blocked.
+4. `resolve` the event so the next wake can claim.
+
+Scheduled wakes draw on their own daily budget (`max_daily_watch_wakes`,
+default 8) separate from speculative reviews, so a handful of standing watches
+cannot starve, or be starved by, inferred opportunities. One unresolved event
+still gates the next — finish or resolve before expecting another wake.
 
 ## Procedure
 
@@ -208,7 +258,8 @@ reachability). They are oversight signals, not assignments.
 ## Silence and Budgets
 
 Defaults: quiet 22:00–08:00 in America/Denver; at most 3 proactive wakes per local
-day, with at most 1 low-purpose wake within the total. These are upper limits,
+day, with at most 1 low-purpose wake within the total, plus a separate ceiling of
+8 scheduled-watch wakes. These are upper limits,
 not quotas. Load the live policy because user preferences can be stricter. A
 low-purpose allowance does not justify an empty check-in. No catch-up messages
 for missed quiet-hour work, and no catch-up filler when the budget is unused.

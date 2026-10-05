@@ -141,7 +141,7 @@ class ProactiveSkillTests(unittest.TestCase):
                     arguments = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
                     self.assertIn(arguments["action"], {
                         "status", "pause", "resume", "configure", "review",
-                        "record_task", "finish_task",
+                        "record_task", "finish_task", "report_signal",
                     })
                     if arguments["action"] == "configure":
                         self.assertIsInstance(arguments["settings"], dict)

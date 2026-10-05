@@ -125,6 +125,107 @@ class PluginTests(unittest.TestCase):
             self.assertIsNone(runtime.tick())
             runtime.close()
 
+    def test_watch_due_dispatches_without_appraiser_and_re_arms_cadence(self):
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(
+                facade, home,
+                appraiser=lambda *_: self.fail("approved watches skip appraisal"))
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            runtime.ledger.record_task({"id": "rent", "title": "Rent",
+                "scope": "Check rent posts", "next_action": "Check feed",
+                "owner": "primary", "status": "active", "approved": True,
+                "next_review_at": past, "cadence_seconds": 3600,
+                "notify_when": "payment missing"})
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            message = facade.received[0][0]
+            self.assertIn("[Companion scheduled watch]", message)
+            self.assertIn("payment missing", message)
+            self.assertEqual(facade.received[0][1]["session_key"],
+                             "agent:main:telegram:dm:123456789")
+            # The fired instance was re-armed to the next grid point, not replayed.
+            watch = runtime.ledger.snapshot()["tasks"][0]
+            self.assertGreater(datetime.fromisoformat(watch["next_review_at"]),
+                               datetime.now(timezone.utc))
+            self.assertEqual(runtime.observe(), 0)
+            runtime.close()
+
+    def test_re_armed_or_finished_watch_makes_queued_wake_stale(self):
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            watch = {"id": "flight", "title": "Flight", "scope": "Track fare",
+                     "next_action": "Check price", "owner": "primary",
+                     "status": "active", "approved": True,
+                     "next_review_at": (datetime.now(timezone.utc)
+                                        - timedelta(hours=1)).isoformat()}
+            runtime.ledger.record_task(watch)
+            self.assertEqual(runtime.observe(), 1)
+            # The agent handled it early and re-armed — the queued wake is stale.
+            watch["next_review_at"] = (datetime.now(timezone.utc)
+                                     + timedelta(days=1)).isoformat()
+            runtime.ledger.record_task(watch)
+            self.assertEqual(runtime.tick()["status"], "stale")
+            self.assertEqual(facade.received, [])
+            # A finished watch's queued wake is rejected outright.
+            watch["next_review_at"] = (datetime.now(timezone.utc)
+                                       - timedelta(minutes=5)).isoformat()
+            runtime.ledger.record_task(watch)
+            self.assertEqual(runtime.observe(), 1)
+            runtime.ledger.finish_task("flight", "done")
+            self.assertEqual(runtime.tick()["status"], "rejected")
+            self.assertEqual(facade.received, [])
+            runtime.close()
+
+    def test_report_signal_control_action_round_trips(self):
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.ledger.record_task({"id": "inbox", "title": "T", "scope": "S",
+                "next_action": "N", "owner": "primary", "status": "active", "approved": True})
+            result = __import__("json").loads(runtime.control(
+                {"action": "report_signal", "task_id": "inbox", "signal": "2 unread"}))
+            self.assertIs(result["ok"], True)
+            task = runtime.ledger.snapshot()["tasks"][0]
+            self.assertEqual(task["signal"], "2 unread")
+            self.assertTrue(task["signal_at"])
+            result = __import__("json").loads(runtime.control(
+                {"action": "report_signal", "task_id": "ghost", "signal": "x"}))
+            self.assertIs(result["ok"], False)
+            runtime.close()
+
     def test_registration_does_not_start_another_agent_or_cli_injection(self):
         class Facade:
             def __init__(self):

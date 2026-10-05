@@ -4,11 +4,13 @@ from hashlib import sha256
 from pathlib import Path
 import json
 import os
+import re
 import stat
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
 DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
 MAC_STATE_FILE = "/var/lib/hermes-alans-way/mac-state.json"
+WATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 
 
 def mac_state():
@@ -132,7 +134,8 @@ def collect(home: Path, ledger, ctx=None):
         except (KeyError, ValueError, TypeError):
             continue
         allowed = {"id", "title", "scope", "next_action", "status", "owner", "approved",
-                   "native_task_id", "next_review_at", "execution_host"}
+                   "native_task_id", "next_review_at", "due_at", "notify_when",
+                   "cadence_seconds", "signal", "signal_at", "execution_host"}
         tasks.append({k: (v[:300] if isinstance(v, str) and k not in {"id", "native_task_id"} else v)
                       for k, v in task.items() if k in allowed})
         if task.get("native_task_id"):
@@ -158,12 +161,116 @@ def collect(home: Path, ledger, ctx=None):
             "documents": documents, "capabilities": skills or []}, signatures
 
 
+def _parse_time(value):
+    """Aware ISO timestamp to epoch seconds, or None."""
+    if type(value) is not str:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        return None
+    return moment.timestamp()
+
+
+def _review_tag(lag):
+    """An unhandled due review resurfaces twice more across a week, then rests.
+
+    Re-fire windows double as self-healing retries: a wake that expired
+    undispatched gets a fresh event instead of silently muting the watch.
+    """
+    if lag < 86400:
+        return ""
+    if lag < 3 * 86400:
+        return "r1"
+    if lag < 7 * 86400:
+        return "r2"
+    return None
+
+
+def _deadline_tag(delta):
+    """Escalating windows as a watch's due_at approaches, plus overdue nudges."""
+    if delta > 7 * 86400:
+        return None
+    if delta > 3 * 86400:
+        return "w"
+    if delta > 86400:
+        return "d3"
+    if delta > 4 * 3600:
+        return "d1"
+    if delta > 0:
+        return "h4"
+    if delta > -86400:
+        return "over"
+    return "gone"
+
+
+def _due_instance(nra_ts, cadence, now_ts):
+    """The schedule instance a watch is currently owed, or None.
+
+    A cadence watch owes its latest missed grid slot, so a week of downtime
+    collapses to one wake instead of replaying every slot — and instead of
+    never firing because the oldest missed slot fell outside retry buckets.
+    Re-arming happens at dispatch; the slot name stays stable meanwhile.
+    """
+    if nra_ts is None:
+        return None
+    if type(cadence) is int and 300 <= cadence <= 604800 and nra_ts <= now_ts:
+        return nra_ts + int((now_ts - nra_ts) // cadence) * cadence
+    return nra_ts
+
+
+def _watch_eligible(task):
+    return (type(task) is dict
+            and task.get("approved") is True
+            and task.get("status") == "active"
+            and type(task.get("id")) is str
+            and WATCH_ID.fullmatch(task["id"]) is not None)
+
+
+def _admit_due(runtime, tasks, now, active, *, limit=4):
+    """Admit scheduled watch wakes; returns how many events were queued.
+
+    Evidence names the specific fired instance, so each cadence tick and each
+    escalation bucket dedupes independently while a pending wake for the same
+    watch suppresses pile-up. Bounded work per tick keeps observation cheap.
+    """
+    admitted = 0
+    now_ts = now.timestamp()
+    for task in tasks.values():
+        if not _watch_eligible(task):
+            continue
+        # Re-arming happens at dispatch, not admission: the evidence epoch
+        # must still match next_review_at when the wake fires, or the
+        # stale-instance check would retire every cadence watch it queued.
+        prefix = f"watchdue:{task['id']}:"
+        tags = []
+        due_ts = _parse_time(task.get("due_at"))
+        if due_ts is not None:
+            tag = _deadline_tag(due_ts - now_ts)
+            if tag is not None:
+                tags.append(f"d{int(due_ts)}:{tag}")
+        instance = _due_instance(_parse_time(task.get("next_review_at")),
+                                 task.get("cadence_seconds"), now_ts)
+        if instance is not None and instance <= now_ts:
+            tag = _review_tag(now_ts - instance)
+            if tag is not None:
+                tags.append(f"r{int(instance)}:{tag}")
+        if not tags or active or admitted >= limit:
+            continue
+        if not runtime.store.pending_matching(prefix):
+            admitted += int(runtime.store.record_event("watch_due", prefix + tags[0], purpose=True))
+    return admitted
+
+
 def observe(runtime):
     context, signatures = collect(runtime.home, runtime.ledger, runtime.ctx)
     purposeful = bool(context["tasks"])
     counts = runtime.store.status()["counts"]
     active = any(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
     admitted = 0
+    now = datetime.now(timezone.utc)
     with runtime.ledger.transaction() as state:
         previous = state["observations"]
         for source, digest in signatures.items():
@@ -173,4 +280,20 @@ def observe(runtime):
                 kind = "task_changed" if source.startswith("task:") else "context_changed"
                 admitted += int(runtime.store.record_event(kind, evidence, purpose=purposeful))
             previous[source] = digest
+        # A reported signal change on an approved watch is an opted-in event:
+        # the collector writes state, the observer diffs it, a change wakes.
+        for task in state["tasks"].values():
+            if not _watch_eligible(task):
+                continue
+            key = "watch:" + task["id"]
+            digest = (sha256(json.dumps([task.get("signal"), task.get("signal_at")],
+                                        separators=(",", ":")).encode()).hexdigest()
+                      if type(task.get("signal")) is str else None)
+            old = previous.get(key)
+            if digest is not None and old is not None and old != digest and not active:
+                evidence = sha256((key + ":" + digest).encode()).hexdigest()
+                admitted += int(runtime.store.record_event("task_changed", evidence, purpose=True))
+            previous[key] = digest
+        admitted += _admit_due(runtime, state["tasks"], now, active)
+        previous["__heartbeat"] = now.isoformat()
     return admitted

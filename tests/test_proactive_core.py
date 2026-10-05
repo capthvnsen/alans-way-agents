@@ -39,6 +39,7 @@ class PolicyTests(unittest.TestCase):
             "quiet_end": 8,
             "max_daily_wakes": 3,
             "max_low_purpose_wakes": 1,
+            "max_daily_watch_wakes": 8,
             "min_interval_seconds": 7200,
             "event_ttl_seconds": 259200,
             "unresolved_ttl_seconds": 21600,
@@ -375,7 +376,8 @@ class StoreTests(unittest.TestCase):
     def test_corrupt_persisted_policy_fails_closed_without_silent_repair(self):
         store = self.configured()
         store.record_event("task_changed", "opaque-before-corruption", purpose=True, now=self.now)
-        corrupt_values = ["not-json", json.dumps({"enabled": "true"}), json.dumps({"enabled": True})]
+        corrupt_values = ["not-json", json.dumps({"enabled": "true"}),
+                          json.dumps({"enabled": True, "unknown_field": 1})]
         for corrupt in corrupt_values:
             with self.subTest(corrupt=corrupt):
                 with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
@@ -405,6 +407,70 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sum(status["counts"].values()), 4096)
         self.assertLessEqual(len(status["audit"]), 256)
         self.assertFalse(store.record_event("context_changed", "opaque-history-0", now=self.now + timedelta(seconds=8193)))
+
+    def test_older_policy_rows_backfill_newer_fields(self):
+        """A row written before a policy field existed is schema drift, not
+        corruption: missing keys take defaults, the binding survives upgrade,
+        and the next update rewrites the full current schema."""
+        store = self.configured()
+        old = self.core.Policy().to_dict()
+        old.pop("max_daily_watch_wakes")
+        old.update({"enabled": True, "session_key": "route:upgraded"})
+        with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
+            db.execute("UPDATE policy SET settings=? WHERE singleton=1", (json.dumps(old),))
+        loaded = store.load_policy()
+        self.assertTrue(loaded.enabled)
+        self.assertEqual(loaded.session_key, "route:upgraded")
+        self.assertEqual(loaded.max_daily_watch_wakes, 8)
+        self.assertIs(store.status()["policy_valid"], True)
+        store.update_policy({"debounce_seconds": 5})
+        with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db:
+            raw = json.loads(db.execute("SELECT settings FROM policy").fetchone()[0])
+        self.assertIn("max_daily_watch_wakes", raw)
+
+    def test_watch_wakes_have_an_independent_daily_budget(self):
+        store = self.configured(min_interval_seconds=0)
+        for index in range(3):
+            store.record_event("task_changed", f"opaque-spec-{index}", purpose=True, now=self.now)
+        for _ in range(3):
+            self.assertIsNotNone(store.claim(now=self.now))
+        self.assertIsNone(store.claim(now=self.now))  # speculative cap spent
+        store.record_event("watch_due", "watchdue:w1:r1700000000:lag", purpose=True, now=self.now)
+        claim = store.claim(now=self.now)
+        self.assertEqual(claim["kind"], "watch_due")
+        # The watch lane does not refund the speculative lane either.
+        store.record_event("task_changed", "opaque-spec-more", purpose=True, now=self.now)
+        self.assertIsNone(store.claim(now=self.now))
+
+    def test_watch_budget_exhaustion_leaves_speculative_lane_open(self):
+        store = self.configured(min_interval_seconds=0)
+        for index in range(9):
+            store.record_event("watch_due", f"watchdue:w{index}:r1700000000:lag", purpose=True, now=self.now)
+        claimed = sum(store.claim(now=self.now) is not None for _ in range(9))
+        self.assertEqual(claimed, 8)
+        store.record_event("task_changed", "opaque-still-open", purpose=True, now=self.now)
+        self.assertIsNotNone(store.claim(now=self.now))
+
+    def test_watch_due_orders_between_manual_review_and_change_events(self):
+        store = self.configured(min_interval_seconds=0)
+        for kind, evidence in [("task_changed", "opaque-task"),
+                               ("worker_update", "opaque-worker"),
+                               ("watch_due", "watchdue:w:r1700000000:lag"),
+                               ("manual_review", "opaque-manual")]:
+            store.record_event(kind, evidence, purpose=True, now=self.now)
+        order = [store.claim(now=self.now)["evidence"] for _ in range(4)]
+        self.assertEqual(order, ["opaque-manual", "watchdue:w:r1700000000:lag",
+                                 "opaque-task", "opaque-worker"])
+
+    def test_pending_matching_suppresses_pile_up_per_watch(self):
+        store = self.configured()
+        self.assertFalse(store.pending_matching("watchdue:w1:"))
+        store.record_event("watch_due", "watchdue:w1:r1700000000:lag", purpose=True, now=self.now)
+        self.assertTrue(store.pending_matching("watchdue:w1:"))
+        self.assertFalse(store.pending_matching("watchdue:w2:"))
+        claim = store.claim(now=self.now)
+        self.assertIsNotNone(claim)
+        self.assertFalse(store.pending_matching("watchdue:w1:"))
 
     def test_private_sqlite_file_is_isolated_and_never_follows_a_symlink(self):
         self.state_dir.mkdir(mode=0o700)

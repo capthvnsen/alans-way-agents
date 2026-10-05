@@ -181,6 +181,21 @@ records block continuation; the ledger never overrides a native terminal state.
 The observer checks every 30 seconds without a model call when nothing changes.
 Initial snapshots and the plugin's own bookkeeping do not create wakes.
 
+## Standing watches
+
+An approved watch can carry a schedule: `next_review_at` fires a `watch_due`
+wake; `cadence_seconds` re-arms on a fixed grid at dispatch, so missed slots
+neither strand the watch nor replay a backlog; `due_at` escalates through
+bounded deadline windows and re-surfaces while overdue. `notify_when` is the
+user's report condition — a filter, never new scope. `report_signal` persists
+a bounded observation the observer diffs durably, waking on change; identical
+signals stay silent and the first write baselines.
+
+Wakes dispatch deterministically — no appraiser veto — while dedupe, quiet
+hours, spacing and a separate daily budget
+(`max_daily_watch_wakes`, default 8) still apply. A re-armed instance retires
+as stale; a finished watch's queued wake is rejected.
+
 Telegram remains the conversation owner. A watch's `execution_host` is `cloud`
 or `mac`; omitting it on a progress update preserves the existing choice.
 Explicitly local work uses existing Mac tools. An offline Mac blocks that local

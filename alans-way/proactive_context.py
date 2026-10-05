@@ -15,8 +15,13 @@ DEFAULT_PREFERENCES = {
     "autonomy": "read_research_draft_continue_approved",
 }
 TASK_FIELDS = {"id", "title", "scope", "next_action", "owner", "status", "approved",
-               "native_task_id", "native_board", "next_review_at", "artifact", "verification",
+               "native_task_id", "native_board", "next_review_at", "due_at",
+               "notify_when", "cadence_seconds", "artifact", "verification",
                "consent_reference", "execution_host"}
+
+# Signal bookkeeping is written only through report_signal; record_task saves
+# must carry it forward or re-arming a watch would erase its last observation.
+SIGNAL_FIELDS = ("signal", "signal_at")
 
 
 def _text(value, maximum=2000):
@@ -57,7 +62,8 @@ class Ledger:
     def snapshot(self):
         with self.transaction() as data:
             return {"preferences": copy.deepcopy(data["preferences"]),
-                    "tasks": copy.deepcopy(list(data["tasks"].values()))}
+                    "tasks": copy.deepcopy(list(data["tasks"].values())),
+                    "observed_at": data["observations"].get("__heartbeat")}
 
     def preferences(self, changes):
         if not isinstance(changes, dict) or set(changes) - set(DEFAULT_PREFERENCES):
@@ -88,10 +94,16 @@ class Ledger:
         for name in ("native_task_id", "native_board", "artifact", "verification", "consent_reference"):
             if name in task:
                 _text(task[name], 1000)
-        if task.get("next_review_at"):
-            moment = datetime.fromisoformat(task["next_review_at"])
-            if moment.tzinfo is None:
-                raise ValueError("review time needs timezone")
+        if "notify_when" in task:
+            _text(task["notify_when"], 300)
+        if "cadence_seconds" in task:
+            if type(task["cadence_seconds"]) is not int or not 300 <= task["cadence_seconds"] <= 604800:
+                raise ValueError("cadence_seconds must be an integer in [300, 604800]")
+        for name in ("next_review_at", "due_at"):
+            if task.get(name):
+                moment = datetime.fromisoformat(task[name])
+                if moment.tzinfo is None:
+                    raise ValueError(f"{name} needs timezone")
         with self.transaction() as data:
             old = data["tasks"].get(task["id"])
             if old and (old["status"] in {"done", "cancelled"} or old["scope"] != task["scope"]
@@ -102,7 +114,41 @@ class Ledger:
             saved = copy.deepcopy(task)
             saved["execution_host"] = task.get("execution_host", old.get("execution_host", "cloud") if old else "cloud")
             saved["approved_at"] = old["approved_at"] if old else datetime.now(timezone.utc).isoformat()
+            for key in SIGNAL_FIELDS:
+                if old is not None and key in old:
+                    saved[key] = old[key]
             data["tasks"][task["id"]] = saved
+
+    def report_signal(self, task_id, signal):
+        """Record a bounded observed state on an approved watch.
+
+        The observer diffs the digest and wakes on change, so any authorized
+        surface — the woken primary or a scheduled check — can feed a watch
+        without touching dispatch internals. Unchanged signals stay silent.
+        """
+        if (type(task_id) is not str
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", task_id) is None):
+            raise ValueError("invalid watch id")
+        signal = _text(signal, 1000)
+        with self.transaction() as data:
+            task = data["tasks"].get(task_id)
+            if not task or task.get("status") in {"done", "cancelled"}:
+                raise ValueError("unknown or terminal watch")
+            if task.get("signal") == signal:
+                return
+            task["signal"] = signal
+            task["signal_at"] = datetime.now(timezone.utc).isoformat()
+
+    def arm_review(self, task_id, next_review_at):
+        """Advance a watch's next review time without touching consent fields."""
+        moment = datetime.fromisoformat(next_review_at)
+        if type(task_id) is not str or moment.tzinfo is None:
+            raise ValueError("review time needs timezone")
+        with self.transaction() as data:
+            task = data["tasks"].get(task_id)
+            if not task or task.get("status") in {"done", "cancelled"}:
+                raise ValueError("unknown or terminal watch")
+            task["next_review_at"] = next_review_at
 
     def finish_task(self, task_id, status, *, artifact=None, verification=None):
         if status not in {"done", "cancelled", "waiting", "blocked"}:

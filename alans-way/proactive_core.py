@@ -36,6 +36,10 @@ class Policy:
     quiet_end: int = 8
     max_daily_wakes: int = 3
     max_low_purpose_wakes: int = 1
+    # Scheduled watches are opted-in contracts, not inferred opportunities, so
+    # they get their own daily budget — an 8/day default supports a few
+    # standing cadences without inflating the speculative-wake ceiling.
+    max_daily_watch_wakes: int = 8
     min_interval_seconds: int = 7200
     event_ttl_seconds: int = 259200
     unresolved_ttl_seconds: int = 21600
@@ -59,6 +63,7 @@ class Policy:
         bounds = {
             "quiet_start": (0, 23), "quiet_end": (0, 23),
             "max_daily_wakes": (0, 3), "max_low_purpose_wakes": (0, 1),
+            "max_daily_watch_wakes": (0, 24),
             "min_interval_seconds": (0, 31536000),
             "event_ttl_seconds": (1, 31536000),
             "unresolved_ttl_seconds": (60, 31536000),
@@ -168,9 +173,13 @@ class Store:
             if row is None or row["revision"] != revision:
                 raise ValueError("invalid persisted policy revision")
             settings = json.loads(row["settings"])
-            if type(settings) is not dict or set(settings) != {f.name for f in fields(Policy)}:
-                raise ValueError("persisted policy must contain all settings")
-            return Policy.from_dict(settings), revision
+            if type(settings) is not dict or set(settings) - {f.name for f in fields(Policy)}:
+                raise ValueError("persisted policy contains unknown settings")
+            # Fields added after the row was written inherit their defaults;
+            # update_policy rewrites the row fully, healing the schema.
+            merged = Policy().to_dict()
+            merged.update(settings)
+            return Policy.from_dict(merged), revision
         except (ValueError, TypeError, UnicodeError) as exc:
             if strict:
                 raise ValueError("invalid persisted policy; explicit local repair required") from exc
@@ -194,8 +203,9 @@ class Store:
                     self._audit(db, "route_dropped", revision + 1, dropped)
                 dropped = db.execute("""UPDATE events SET status='dropped' WHERE sequence IN (
                     SELECT sequence FROM events WHERE status='pending' ORDER BY purpose DESC,
-                    CASE kind WHEN 'manual_review' THEN 0 WHEN 'task_changed' THEN 1
-                    WHEN 'worker_update' THEN 2 ELSE 3 END, created_at, sequence LIMIT -1 OFFSET ?)""", (new.max_pending,)).rowcount
+                    CASE kind WHEN 'manual_review' THEN 0 WHEN 'watch_due' THEN 1
+                    WHEN 'task_changed' THEN 2 WHEN 'worker_update' THEN 3 ELSE 4 END,
+                    created_at, sequence LIMIT -1 OFFSET ?)""", (new.max_pending,)).rowcount
                 self._audit(db, "queue_dropped", revision + 1, dropped)
                 db.execute("UPDATE policy SET settings=?, revision=? WHERE singleton=1", (json.dumps(new.to_dict()), revision + 1))
                 self._audit(db, "policy_changed", revision + 1)
@@ -217,7 +227,7 @@ class Store:
         a non-aware clock is a caller error and raises ValueError.
         """
         timestamp = self._timestamp(now)
-        if (type(kind) is not str or kind not in {"task_changed", "worker_update", "context_changed", "manual_review"}
+        if (type(kind) is not str or kind not in {"task_changed", "worker_update", "context_changed", "manual_review", "watch_due"}
                 or type(evidence) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", evidence) is None
                 or type(purpose) is not bool):
             return False
@@ -237,6 +247,20 @@ class Store:
                 (event_id, kind, evidence, purpose, policy.session_key, timestamp, revision))
             self._audit(db, "admitted", revision, cursor.rowcount)
             return cursor.rowcount == 1
+
+    def pending_matching(self, evidence_prefix: str) -> bool:
+        """True while a pending event's evidence starts with the prefix.
+
+        Lets the observer skip admitting a second wake for a watch that
+        already has one queued — escalation buckets refine evidence, so exact
+        dedupe alone would let the same due watch pile up pending entries.
+        """
+        if type(evidence_prefix) is not str or not evidence_prefix:
+            return False
+        with self._transaction() as db:
+            return db.execute(
+                "SELECT 1 FROM events WHERE status='pending' AND substr(evidence,1,?)=? LIMIT 1",
+                (len(evidence_prefix), evidence_prefix)).fetchone() is not None
 
     def claim(self, now: datetime | None = None) -> dict | None:
         """Reserve one eligible existing event, or do nothing.
@@ -265,17 +289,25 @@ class Store:
             local = datetime.fromtimestamp(timestamp, ZoneInfo(policy.timezone))
             midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
             next_midnight = midnight + timedelta(days=1)
-            budget = db.execute("""SELECT COUNT(*) AS total, COALESCE(SUM(purpose=0),0) AS low
+            budget = db.execute("""SELECT COUNT(*) AS total, COALESCE(SUM(purpose=0),0) AS low,
+                COALESCE(SUM(kind='watch_due'),0) AS watches
                 FROM events WHERE claimed_at>=? AND claimed_at<?""",
                 (midnight.timestamp(), next_midnight.timestamp())).fetchone()
-            if budget["total"] >= policy.max_daily_wakes:
+            # Scheduled watches draw on their own daily budget; speculative
+            # wakes still share the tighter cap. Either side may be open while
+            # the other is spent.
+            allow_watch = budget["watches"] < policy.max_daily_watch_wakes
+            allow_other = budget["total"] - budget["watches"] < policy.max_daily_wakes
+            if not allow_watch and not allow_other:
                 return None
             allow_low = budget["low"] < policy.max_low_purpose_wakes
             event = db.execute("""SELECT * FROM events WHERE status='pending' AND created_at<=?
-                AND (purpose=1 OR ?)
+                AND ((kind='watch_due' AND ?) OR (kind!='watch_due' AND ? AND (purpose=1 OR ?)))
                 ORDER BY purpose DESC, CASE kind WHEN 'manual_review' THEN 0
-                WHEN 'task_changed' THEN 1 WHEN 'worker_update' THEN 2 ELSE 3 END,
-                created_at, sequence LIMIT 1""", (timestamp - policy.debounce_seconds, allow_low)).fetchone()
+                WHEN 'watch_due' THEN 1 WHEN 'task_changed' THEN 2
+                WHEN 'worker_update' THEN 3 ELSE 4 END,
+                created_at, sequence LIMIT 1""",
+                (timestamp - policy.debounce_seconds, allow_watch, allow_other, allow_low)).fetchone()
             if event is None:
                 return None
             db.execute("UPDATE events SET status='dispatching', claimed_at=? WHERE id=?", (timestamp, event["id"]))

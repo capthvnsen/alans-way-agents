@@ -8,15 +8,25 @@ def handle(event_type, context, *, home=None):
     if event_type != "gateway:startup":
         return
     source_home = Path(__file__).resolve().parents[2]
-    target_home = Path(home) if home is not None else source_home
     actual_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser().absolute()
-    if home is None and target_home.absolute() != actual_home:
+    if home is None and source_home.absolute() != actual_home:
         return
+    # Under gateway.multiplex_profiles the one gateway:startup emit can land in
+    # any served profile's hooks scope. Whichever profile's copy runs, the
+    # launch home's plugin runtime must still arm, so stamp it alongside the
+    # scoped home when this handler lives under <home>/profiles/<name>/hooks/.
+    bases = {source_home}
+    if source_home.parent.name == "profiles":
+        bases.add(source_home.parent.parent)
+    targets = set(bases) if home is None else {Path(home)}
     candidates = [
-        source_home / "alans-way/gateway_guard.py",                    # repo / copied layout
-        source_home / "plugins/alans-way/gateway_guard.py",            # installed ~/.hermes layout
-        source_home / "proactive-primary/gateway_guard.py",            # pre-rename repo layout
-        source_home / "plugins/proactive-primary/gateway_guard.py",    # pre-rename installed layout
+        base / suffix
+        for base in bases
+        for suffix in ("alans-way/gateway_guard.py",            # repo / copied layout
+                       "plugins/alans-way/gateway_guard.py",    # installed ~/.hermes layout
+                       "proactive-primary/gateway_guard.py",    # pre-rename repo layout
+                       "plugins/proactive-primary/gateway_guard.py")
+    ] + [
         Path(os.environ.get("HERMES_ALANS_WAY_PLUGIN") or os.environ.get("HERMES_PROACTIVE_PRIMARY_PLUGIN", "")).expanduser() / "gateway_guard.py"
         if os.environ.get("HERMES_ALANS_WAY_PLUGIN") or os.environ.get("HERMES_PROACTIVE_PRIMARY_PLUGIN") else None,
     ]
@@ -28,4 +38,5 @@ def handle(event_type, context, *, home=None):
         return
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.mark_gateway_ready(target_home)
+    for target in targets:
+        module.mark_gateway_ready(target)

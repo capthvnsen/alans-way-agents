@@ -115,6 +115,12 @@ if [ "$VERIFY" = 1 ]; then
   fi
   [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
     && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
+  for profile_home in "$HERMES_HOME"/profiles/*/; do
+    [ -d "$profile_home" ] || continue
+    [ -f "$profile_home/hooks/$PLUGIN_NAME/handler.py" ] \
+      && ok "gateway hook present for $(basename "$profile_home")" \
+      || warn "gateway hook missing for profile $(basename "$profile_home") — a profile-scoped startup emit cannot arm the gateway"
+  done
   CONN_DIR="$HOME/.local/share/hermes-alans-way/browser"
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
@@ -189,12 +195,26 @@ done
 # ---------------------------------------------------------------- hook
 step "Gateway hook"
 mkdir -p "$HERMES_HOME/hooks"
-if [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ]; then
-  ok "hook already installed"
-else
-  cp -r "$REPO_DIR/hooks/$PLUGIN_NAME" "$HERMES_HOME/hooks/" && ok "hook installed to $HERMES_HOME/hooks/$PLUGIN_NAME" \
-    || bad "hook copy failed"
-fi
+install_hook() {
+  local target="$1"
+  mkdir -p "$target"
+  if [ -f "$target/handler.py" ] && cmp -s "$REPO_DIR/hooks/$PLUGIN_NAME/handler.py" "$target/handler.py" \
+      && cmp -s "$REPO_DIR/hooks/$PLUGIN_NAME/HOOK.yaml" "$target/HOOK.yaml"; then
+    ok "hook current in $target"
+  else
+    cp -r "$REPO_DIR/hooks/$PLUGIN_NAME/." "$target/" && ok "hook installed to $target" \
+      || bad "hook copy failed"
+  fi
+}
+install_hook "$HERMES_HOME/hooks/$PLUGIN_NAME"
+# Under gateway.multiplex_profiles the single gateway:startup emit can resolve
+# a served profile's hooks dir instead of the launch home's — an empty profile
+# hooks dir silently leaves the gateway unarmed. Seed every profile so any
+# scope the emit lands in still stamps the owner marker.
+for profile_home in "$HERMES_HOME"/profiles/*/; do
+  [ -d "$profile_home" ] || continue
+  install_hook "$profile_home/hooks/$PLUGIN_NAME"
+done
 
 # ------------------------------------------------------- browser host (VPS)
 if [ "$SKIP_BROWSER" = 0 ]; then

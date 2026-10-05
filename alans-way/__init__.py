@@ -95,6 +95,8 @@ class Runtime:
         if live.enabled is not True or event["session_key"] != live.session_key:
             self.store.finish(event_id, "rejected")
             return {"id": event_id, "status": "rejected"}
+        if event["kind"] == "watch_due":
+            return self._dispatch_watch_due(event)
         context = {"tasks": []}
         try:
             context = self.review_context()
@@ -154,6 +156,103 @@ class Runtime:
         self.store.finish(event_id, status)
         return {"id": event_id, "status": status}
 
+    def _dispatch_watch_due(self, event):
+        """Dispatch a user-approved scheduled watch without an LLM appraisal.
+
+        A watch is a standing contract the user opted into — dedupe, budgets,
+        quiet hours and route checks already ran in claim(); the appraiser's
+        job is to gate *inferred* opportunities, not to veto scheduled work.
+        The fired instance's epoch is embedded in the evidence, so a watch
+        that was re-armed or moved since admission is recognized as stale.
+        """
+        event_id = event["id"]
+        parts = event["evidence"].split(":")
+        watch_id = parts[1] if len(parts) >= 3 and parts[0] == "watchdue" else None
+        marker = parts[2] if len(parts) >= 3 else ""
+        epoch = None
+        if marker[:1] in ("r", "d") and marker[1:].isdigit():
+            epoch = int(marker[1:])
+        watch = next(
+            (t for t in self.ledger.snapshot()["tasks"] if t.get("id") == watch_id),
+            None,
+        )
+        if watch_id is None or epoch is None or watch is None \
+                or watch.get("approved") is not True or watch.get("status") != "active":
+            self.store.finish(event_id, "rejected")
+            return {"id": event_id, "status": "rejected"}
+        # Stale-instance check: the watch was re-armed or its deadline moved
+        # since this event was admitted — the scheduled moment it names is
+        # already handled, so retire it instead of double-waking. A cadence
+        # watch whose grid rolled on while the wake sat queued is stale too:
+        # the fresher slot becomes its own event.
+        from .proactive_observe import _parse_time, _due_instance
+        now_ts = datetime.now(timezone.utc).timestamp()
+        cadence = watch.get("cadence_seconds")
+        if marker[0] == "r":
+            current = _due_instance(_parse_time(watch.get("next_review_at")),
+                                    cadence, now_ts)
+        else:
+            current = _parse_time(watch.get("due_at"))
+        if current is None or int(current) != epoch:
+            self.store.finish(event_id, "resolved")
+            return {"id": event_id, "status": "stale"}
+        # A cadence watch re-arms on its fixed grid as it fires — whether or
+        # not the wake succeeds — so one failed dispatch can never strand the
+        # routine. Skipped slots are not replayed; the next grid point wins.
+        if marker[0] == "r" and type(cadence) is int and 300 <= cadence <= 604800:
+            nxt = epoch + (int((now_ts - epoch) // cadence) + 1) * cadence
+            try:
+                self.ledger.arm_review(
+                    watch_id,
+                    datetime.fromtimestamp(nxt, timezone.utc).isoformat())
+            except ValueError:
+                pass
+        live = self.store.load_policy()
+        if live.enabled is not True or event["session_key"] != live.session_key \
+                or not self.gateway_ready():
+            self.store.finish(event_id, "rejected")
+            return {"id": event_id, "status": "rejected"}
+        metadata = {"id": event_id, "kind": "watch_due", "purpose": True,
+                    "watch_id": watch_id, "fired_instance": marker,
+                    "execution_host": watch.get("execution_host", "cloud")}
+        lines = [
+            "[Companion scheduled watch]",
+            "This is a user-approved standing watch firing on schedule — bounded",
+            "contracted work, not a new opportunity and not new scope.",
+            f'Watch "{watch_id}": {watch.get("title", "")}'.rstrip(),
+            f"Scope: {watch.get('scope', '')}",
+            f"Next action: {watch.get('next_action', '')}",
+        ]
+        if watch.get("due_at"):
+            lines.append(f"Deadline: {watch['due_at']} (escalates if unhandled)")
+        if watch.get("notify_when"):
+            lines.append(f"Report only when: {watch['notify_when']}")
+        if watch.get("signal"):
+            lines.append(f"Last reported signal: {watch['signal']}")
+        lines.append(
+            "Run the check now with real tools, honoring execution_host "
+            "(mac work stays on the Mac; unreachable means finish_task "
+            "blocked plus a report of the failure, never a cloud fallback). "
+            "Write what you observed via proactive_control report_signal so "
+            "unchanged findings dedupe durably. Re-arm with record_task "
+            "(new next_review_at) unless cadence_seconds already advances "
+            "it, or finish_task when the watch is satisfied. Report to this "
+            "conversation only when the outcome is meaningful or needs a "
+            "decision — silence is a valid result. Then resolve this event "
+            "via proactive_control resolve. Native approvals still gate "
+            "external or sensitive actions; unverified work is not complete."
+        )
+        lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
+        try:
+            accepted = self.ctx.inject_message("\n".join(lines), role="user",
+                                               session_key=event["session_key"])
+            status = ("accepted_unverified" if accepted is True
+                      else "rejected" if accepted is False else "uncertain")
+        except Exception:
+            status = "uncertain"
+        self.store.finish(event_id, status)
+        return {"id": event_id, "status": status}
+
     def close(self):
         import threading
         self.closed = True
@@ -186,6 +285,8 @@ class Runtime:
                     self.store.update_policy(changes)
             elif action == "record_task":
                 self.ledger.record_task(args.get("task"))
+            elif action == "report_signal":
+                self.ledger.report_signal(args.get("task_id", ""), args.get("signal", ""))
             elif action == "finish_task":
                 self.ledger.finish_task(args.get("task_id"), args.get("status", "done"),
                                         artifact=args.get("artifact"), verification=args.get("verification"))
@@ -234,10 +335,12 @@ class Runtime:
         unresolved = sum(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused'}\n"
                 f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
-                f"Limits: up to {policy['max_daily_wakes']} reviews/day; "
+                f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
+                f"{policy['max_daily_watch_wakes']} scheduled-watch wakes; "
                 f"{policy['min_interval_seconds'] // 60} minutes between automatic reviews\n"
                 f"Telegram route: {'bound' if state['route_bound'] else 'unbound'}\n"
                 f"Gateway: {'ready' if state['gateway_ready'] else 'not armed in this process'}\n"
+                f"Observer: {state.get('observed_at') or 'no pass yet'}\n"
                 f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}\n"
                 "Limits are ceilings; nothing useful means silence.")
 

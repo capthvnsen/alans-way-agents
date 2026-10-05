@@ -1,5 +1,6 @@
 """Actual advertised schema; route bindings stay operator-only."""
-ACTIONS = ["status", "pause", "resume", "configure", "review", "record_task", "finish_task", "resolve"]
+ACTIONS = ["status", "pause", "resume", "configure", "review", "record_task",
+           "finish_task", "report_signal", "resolve"]
 TEXT = {"type": "string"}
 PREFERENCES = {
     "type": "object", "additionalProperties": False,
@@ -17,6 +18,7 @@ SETTINGS = {
         "quiet_start": {"type": "integer", "minimum": 0, "maximum": 23},
         "quiet_end": {"type": "integer", "minimum": 0, "maximum": 23},
         "max_daily_wakes": {"type": "integer", "minimum": 0, "maximum": 3},
+        "max_daily_watch_wakes": {"type": "integer", "minimum": 0, "maximum": 24},
         "max_low_purpose_wakes": {"type": "integer", "minimum": 0, "maximum": 1},
         "min_interval_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
         "event_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 31536000},
@@ -29,9 +31,11 @@ TASK = {
     "type": "object", "additionalProperties": False,
     "required": ["id", "title", "scope", "next_action", "owner", "status", "approved"],
     "properties": {**{name: TEXT for name in ["id", "title", "scope", "next_action", "owner", "native_task_id",
-                                             "native_board", "next_review_at", "artifact", "verification", "consent_reference"]},
+                                             "native_board", "next_review_at", "due_at", "notify_when",
+                                             "artifact", "verification", "consent_reference"]},
                    "status": {"type": "string", "enum": ["active", "waiting", "blocked", "done", "cancelled"]},
                    "approved": {"type": "boolean", "enum": [True]},
+                   "cadence_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},
                    "execution_host": {"type": "string", "enum": ["cloud", "mac"]}},
 }
 SCHEMA = {
@@ -42,6 +46,7 @@ SCHEMA = {
         "properties": {
             "action": {"type": "string", "enum": ACTIONS}, "settings": SETTINGS, "changes": SETTINGS,
             "task": TASK, "task_id": TEXT, "event_id": TEXT, "artifact": TEXT, "verification": TEXT,
+            "signal": TEXT,
             "status": {"type": "string", "enum": ["done", "cancelled", "waiting", "blocked"]},
         },
     },
