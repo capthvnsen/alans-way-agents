@@ -41,33 +41,83 @@ adds tools and an optional review loop inside it, it is not a second gateway.
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.
 
-## Install
+## Install — zero to working
+
+The full path has four pieces. Most are one step each; `setup.sh` detects
+what's already done and skips it, so re-running is always safe.
+
+### 1. Hermes on the VPS, with Telegram
+
+You need a stock Hermes `>= 0.21` install whose gateway can answer Telegram.
+If your Hermes has never talked to Telegram, that's the first step — and it
+doesn't need BotFather: run `hermes gateway setup` on the VPS, choose
+**Telegram → Automatic**, and scan the QR code with your phone. Hermes creates
+the bot, saves the token, and allowlists your account. (Manual BotFather token
+paste works too.)
+
+### 2. The bootstrap (one command)
 
 On the host that runs your Hermes gateway:
 
 ```sh
-git clone https://github.com/capthvnsen/alans-way-agents
-cd alans-way-agents
-
-# 1. Plugin + bundled skills (tools, observer, /proactivity commands)
-hermes plugins install "file://$(pwd)#alans-way"
-# or straight from GitHub, no clone:
-# hermes plugins install https://github.com/capthvnsen/alans-way-agents#alans-way
-
-# 2. Gateway hook — arms proactivity only inside the gateway process
-cp -r hooks/alans-way ~/.hermes/hooks/
-
-# 3. Browser tools for one bot profile (repeat per bot)
-./setup-workspace.sh --bot-id YOUR_BOT_ID --bot-name "Scout" \
-    --mac-ssh you@your-mac --config ~/.hermes/config.yaml
+curl -fsSL https://raw.githubusercontent.com/capthvnsen/alans-way-agents/main/setup.sh | bash -s -- \
+    --bot-id YOUR_NUMERIC_BOT_ID --mac-ssh you@your-mac --restart
 ```
 
-Restart the gateway. `hermes plugins list` should show `alans-way`.
+or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`
 
-Upgrading is the same path: `git pull`, re-run `setup-workspace.sh` if its
-flags changed, and restart the gateway — a running gateway keeps already
-imported code until restarted. Then verify one ordinary Telegram reply and one
-bounded browser action before relying on it.
+The bootstrap runs every step in order and says what it did:
+
+- **Preflight** — hermes version, python3, node, HERMES_HOME
+- **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
+  launch `hermes gateway setup` right there
+- **Plugin + gateway hook** — installs `alans-way` and arms the startup hook
+- **VPS browser host** — fetches the companion repo, installs the connector's
+  dependencies, writes `config.json`, and installs the Chromium/broker systemd
+  units (user units when you're not root)
+- **Desktop prerequisites** — detects whether an X11/VNC stack exists and
+  prints the exact packages to install if not (guided, never auto-installed)
+- **Workspace config** — writes the managed `workspace_browser` block into the
+  right profile's config
+- **Gateway restart** — through the detected supervisor
+- **Primary binding** — lists the Telegram DM routes that exist and asks which
+  bot is the primary (message your bot once first if none exist yet, then
+  re-run `setup.sh --bind`)
+- **Verify** — prints a pass/fail summary of the whole install
+
+Useful flags: `--profile NAME` for a named Hermes profile, `--verify` to audit
+without changing anything, `--non-interactive` for scripted runs,
+`--skip-browser` for proactivity-only installs.
+
+### Or let your agent do it
+
+If a Hermes agent already has a terminal on the VPS, paste it the prompt in
+[docs/setup-prompt.md](docs/setup-prompt.md) — it installs Tailscale between
+the machines if needed, runs the same `setup.sh`, and reports back. The
+`workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
+
+### 3. The Mac app
+
+Download `Hermes- Alan's way.app.zip` from the
+[latest release](https://github.com/capthvnsen/alans-way/releases), unzip, move
+to Applications, right-click → Open (it's unsigned). Sign in to Telegram inside
+the app, then **Settings → Agent setup**: the checklist shows what's already
+done — Telegram sign-in, discovered bots, both SSH addresses, connector
+status. Save the two SSH addresses, use **Copy setup command** (the bootstrap
+above, pre-filled) or **Copy setup prompt**, then **Test agent path**.
+
+### 4. Verify it end to end
+
+- Mac app: Test agent path → ✓ VPS reaches this Mac over ssh
+- Telegram: `/proactivity status` → route bound, gateway armed
+- Browser: ask the bot to open a page — a tab appears in the app (Mac host)
+  while the Mac is awake, on the VPS host when it isn't
+
+### Upgrading
+
+`git pull` (or re-run the `curl|bash` line), then restart the gateway — a
+running gateway keeps already-imported code until restarted. Verify one
+ordinary Telegram reply and one bounded browser action before relying on it.
 
 ### What each piece does
 
@@ -156,10 +206,11 @@ VPS browser owns.
 ```
 alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher
-hooks/                gateway startup hook (manual copy — see Install)
-docs/                 proactivity guide
+hooks/                gateway startup hook (installed by setup.sh)
+docs/                 proactivity guide, agent-driven setup prompt
 tests/                unittest suite — python3 -m unittest discover -s tests
-setup-workspace.sh    per-bot mcp_servers config writer
+setup.sh              one-command bootstrap (install, wire, restart, bind, verify)
+setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)
 ```
 
 ## Tests

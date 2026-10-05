@@ -53,7 +53,9 @@ See [Hermes plugin configuration and injection](https://hermes-agent.nousresearc
 
 The existing primary's opaque `session_key` must already exist. Binding is
 **operator-only**, using the native plugin CLI after reviewing private routing
-metadata; ordinary chat/tool controls cannot retarget the primary:
+metadata; ordinary chat/tool controls cannot retarget the primary. The
+`setup.sh` bootstrap lists the existing Telegram DM routes and asks which to
+bind — or bind manually after reviewing `hermes proactivity status`:
 
 ```sh
 hermes proactivity status

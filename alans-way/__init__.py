@@ -245,6 +245,7 @@ def register(ctx, *, home=None, background=True):
     skills_dir = Path(__file__).parent / "skills"
     ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
     ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")
+    ctx.register_skill("workspace-setup", skills_dir / "workspace-setup" / "SKILL.md")
     ctx.on_unload(runtime.close)
     if hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute
