@@ -1,9 +1,11 @@
 """Public plugin facade contracts; no Hermes internals in unit tests."""
 from pathlib import Path
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "alans-way"
@@ -45,6 +47,17 @@ class PluginTests(unittest.TestCase):
             module.handle("agent:end", {"response": "Never persist this private text"}, home=home)
             self.assertFalse((home / "companion").exists())
             module.handle("gateway:startup", {"platforms": ["telegram"]}, home=home)
+            self.assertTrue((home / "companion/proactivity/gateway-owner.json").exists())
+
+    def test_gateway_hook_accepts_the_legacy_plugin_path_environment(self):
+        hook = ROOT / "hooks/alans-way/handler.py"
+        spec = importlib.util.spec_from_file_location("proactive_hook_legacy_test", hook)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.dict(os.environ, {"HERMES_PROACTIVE_PRIMARY_PLUGIN": str(PLUGIN)}, clear=True):
+                module.handle("gateway:startup", {}, home=home)
             self.assertTrue((home / "companion/proactivity/gateway-owner.json").exists())
 
     def test_dispatch_requires_gateway_marker_and_literal_acceptance(self):

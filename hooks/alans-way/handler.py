@@ -17,7 +17,7 @@ def handle(event_type, context, *, home=None):
         source_home / "plugins/alans-way/gateway_guard.py",            # installed ~/.hermes layout
         source_home / "proactive-primary/gateway_guard.py",            # pre-rename repo layout
         source_home / "plugins/proactive-primary/gateway_guard.py",    # pre-rename installed layout
-        Path(os.environ["HERMES_ALANS_WAY_PLUGIN"] or os.environ.get("HERMES_PROACTIVE_PRIMARY_PLUGIN", "")).expanduser() / "gateway_guard.py"
+        Path(os.environ.get("HERMES_ALANS_WAY_PLUGIN") or os.environ.get("HERMES_PROACTIVE_PRIMARY_PLUGIN", "")).expanduser() / "gateway_guard.py"
         if os.environ.get("HERMES_ALANS_WAY_PLUGIN") or os.environ.get("HERMES_PROACTIVE_PRIMARY_PLUGIN") else None,
     ]
     path = next((c for c in candidates if c is not None and c.is_file() and not c.is_symlink()), None)

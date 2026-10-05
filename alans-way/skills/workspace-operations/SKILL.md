@@ -14,6 +14,16 @@ Do not ask whether you may use the browser or describe a plan first; open the
 tab, work it, and report the result. The tab is scoped to your bot id and runs
 in the background — it never moves the human's cursor or touches their tabs.
 
+## Browser authorization policy
+
+Ordinary actions in a bot-owned in-app browser tab are preauthorized and require
+no extra browser permission prompt: navigation, typing, forms, upload/download,
+research, and normal account work. Never ask merely to use the browser. Native
+Hermes approval remains mandatory for sending external messages/posts,
+purchases, bookings, deletions, financial actions, credential/permission
+changes, destructive actions, and production changes. Ownership, control epoch,
+and human takeover gates remain.
+
 Reach for the browser when:
 
 - the task lives in a web UI — dashboards, admin panels, account settings,

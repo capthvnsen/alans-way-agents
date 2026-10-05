@@ -4,18 +4,20 @@
 #
 #   ./setup-workspace.sh --bot-id 123456789 --bot-name Scout \
 #       --mac-ssh me@mymac --router /opt/alans-way/alans-way/scripts/workspace-router.cjs \
-#       [--config ~/.hermes/config.yaml]
+#       [--profile alan-local | --config ~/.hermes/config.yaml]
 #
-#   ./setup-workspace.sh --verify --mac-ssh me@mymac [--router PATH] [--config CFG]
+#   ./setup-workspace.sh --verify --mac-ssh me@mymac [--router PATH] [--profile NAME] [--config CFG]
 #
-# Without --config the block is printed for manual review/paste. With --config
-# the script replaces a previous managed block (markers below) or inserts one
-# under the profile's existing mcp_servers key; everything else is untouched.
+# Without --config/--profile the block is printed for manual review/paste.
+# --profile selects a Hermes profile and edits ~/.hermes/profiles/<name>/config.yaml;
+# --config edits an explicit file directly. The script replaces a previous managed
+# block (markers below) or inserts one under the selected profile's existing
+# mcp_servers key; everything else is untouched.
 # --verify checks the install instead of writing: router script, node, the
 # Mac ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" ROUTER="" CONFIG="" VERIFY=0
+BOT_ID="" BOT_NAME="" MAC_SSH="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
@@ -23,12 +25,27 @@ while [ $# -gt 0 ]; do
     --mac-ssh) MAC_SSH="$2"; shift 2;;
     --router) ROUTER="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
+    --profile) PROFILE="$2"; shift 2;;
     --verify) VERIFY=1; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
 
+if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
+  echo "setup-workspace: --profile and --config are mutually exclusive" >&2
+  exit 2
+fi
+if [ -n "$PROFILE" ]; then
+  case "$PROFILE" in
+    *[!0-9A-Za-z_.-]*)
+      echo "setup-workspace: bad --profile" >&2
+      exit 2;;
+  esac
+  CONFIG="${HERMES_HOME:-$HOME/.hermes}/profiles/$PROFILE/config.yaml"
+fi
+
 [ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
+command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 
 ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
@@ -89,29 +106,38 @@ case "$BOT_ID" in *[!0-9A-Za-z_-]*) echo "setup-workspace: bad --bot-id" >&2; ex
 MARK_BEGIN="# >>> alans-way workspace_browser managed block >>>"
 MARK_END="# <<< alans-way workspace_browser managed block <<<"
 
+# Emit a safe YAML double-quoted scalar. JSON string escapes are valid YAML,
+# so any value containing spaces, quotes, colons or backslashes stays parsed.
+yaml_quote() {
+  python3 -c 'import json, sys; print(json.dumps(sys.argv[1]), end="")' "$1"
+}
+
 block() {
+  BOT_NAME_BLOCK=""
+  if [ -n "$BOT_NAME" ]; then
+    BOT_NAME_BLOCK="$(printf '\n      - --bot-name\n      - %s' "$(yaml_quote "$BOT_NAME")")"
+  fi
   cat <<EOF
 $MARK_BEGIN
   workspace_browser:
-    command: node
+    command: "node"
     args:
-      - $ROUTER
+      - $(yaml_quote "$ROUTER")
       - --bot-id
-      - "$BOT_ID"$( [ -n "$BOT_NAME" ] && printf '\n      - --bot-name\n      - "%s"' "$BOT_NAME" )
+      - $(yaml_quote "$BOT_ID")$BOT_NAME_BLOCK
     env:
-      HERMES_WORKSPACE_MAC_SSH: "${MAC_SSH:-}"
+      HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
 $MARK_END
 EOF
 }
 
 if [ -z "$CONFIG" ]; then
-  echo "# Paste inside your profile's mcp_servers: in ~/.hermes/config.yaml"
+  echo "# Paste inside your profile's mcp_servers: in ~/.hermes/profiles/<name>/config.yaml"
   block | sed '1d;$d'
   exit 0
 fi
 
 [ -f "$CONFIG" ] || { echo "setup-workspace: no such config: $CONFIG" >&2; exit 1; }
-command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 
 cp "$CONFIG" "$CONFIG.bak-alans-way"
 MARK_BEGIN="$MARK_BEGIN" MARK_END="$MARK_END" BLOCK="$(block)" python3 - "$CONFIG" <<'PY'
@@ -120,6 +146,8 @@ path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ[
 lines = open(path).read().splitlines(keepends=True)
 has_managed = any(l.rstrip("\n") == mark_b for l in lines)
 out, skipping, inserted = [], False, False
+# Insert under the profile's own top-level mcp_servers key, never a nested or
+# commented one. A top-level key has no leading whitespace and no trailing text.
 for line in lines:
     if line.rstrip("\n") == mark_b:
         skipping = True
@@ -130,9 +158,11 @@ for line in lines:
             skipping = False
         continue
     out.append(line)
-    if not has_managed and not inserted and line.rstrip("\n") == "mcp_servers:":
-        out.append(block + "\n")
-        inserted = True
+    if not has_managed and not inserted:
+        stripped = line.rstrip("\n")
+        if stripped == "mcp_servers:":
+            out.append(block + "\n")
+            inserted = True
 if not has_managed and not inserted:
     out.append("\nmcp_servers:\n" + block + "\n")
 open(path, "w").writelines(out)

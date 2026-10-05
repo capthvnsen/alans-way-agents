@@ -1,5 +1,5 @@
 name: alans-way
-version: "0.3.0"
+version: "0.4.0"
 description: "Alan's Way agent side: a designated proactive primary plus the workspace-browser skill and router scripts for the Hermes desktop companion."
 author: "capthvnsen, Hermes Agent"
 license: MIT

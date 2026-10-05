@@ -45,10 +45,13 @@ const botId = arg('--bot-id') || process.env.HERMES_WORKSPACE_BOT_ID || '';
 const botName = arg('--bot-name') || process.env.HERMES_BOT_NAME || '';
 const macSsh = arg('--mac-ssh') || process.env.HERMES_WORKSPACE_MAC_SSH || '';
 const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || 'node';
-const macScript =
-  arg('--mac-script') ||
-  process.env.HERMES_WORKSPACE_MAC_MCP ||
-  '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs';
+const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
+const macScripts = configuredMacScript
+  ? [configuredMacScript]
+  : [
+      "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
+      '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs',
+    ];
 const siblingScript = path.join(__dirname, 'browser-mcp.cjs');
 const vpsScript =
   arg('--vps-script') ||
@@ -70,22 +73,25 @@ const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
 function probeMac(timeoutMs) {
   return new Promise((resolve) => {
+    const probe = macScripts.map(script => `if [ -f ${shQuote(script)} ]; then printf %s ${shQuote(script)}; exit 0; fi`).join(' ') + ' exit 1';
     const child = spawn(
       'ssh',
-      ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=yes', macSsh, 'true'],
-      { stdio: 'ignore' },
+      ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=yes', macSsh, probe],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
     );
+    let output = '';
+    child.stdout.on('data', chunk => { if (output.length < 4096) output += chunk; });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      resolve(false);
+      resolve(null);
     }, timeoutMs);
     child.on('error', () => {
       clearTimeout(timer);
-      resolve(false);
+      resolve(null);
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      resolve(code === 0);
+      resolve(code === 0 && macScripts.includes(output) ? output : null);
     });
   });
 }
@@ -167,11 +173,11 @@ async function main() {
     );
     process.exit(1);
   }
-  const macUp = macSsh ? await probeMac(8000) : false;
+  const macScript = macSsh ? await probeMac(8000) : null;
 
   let cmd;
   let args;
-  if (macUp) {
+  if (macScript) {
     // Run browser-mcp.cjs on the Mac over the same ssh session the probe used.
     const remote = [macNode, shQuote(macScript), '--bot-id', shQuote(botId)];
     if (botName) remote.push('--bot-name', shQuote(botName));

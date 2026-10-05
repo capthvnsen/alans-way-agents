@@ -17,7 +17,29 @@ what your agents need to think and act:
 - **`skills/`** — the `proactive-primary` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
 
-Works with stock Hermes `>= 0.21`. No Hermes source is patched.
+Works with stock Hermes `>= 0.21`. No Hermes source is patched: your existing
+Telegram gateway keeps owning the conversation exactly as before — the plugin
+adds tools and an optional review loop inside it, it is not a second gateway.
+
+## What it does and does not do
+
+- **Two browser hosts, no silent migration.** Bots get per-tab Chromium access
+  on the Mac (through the desktop app's connector) and on the VPS (the managed
+  browser). When the Mac is unreachable, *new* browser work routes to the VPS
+  host automatically. Work already in flight in a Mac tab blocks while the Mac
+  is asleep and resumes when it returns — the live tab is not moved between
+  machines. Watching the VPS desktop from inside the Mac app additionally needs
+  a VNC server and a noVNC viewer that you run on the VPS; see the app repo's
+  [deployment guide](https://github.com/capthvnsen/alans-way/blob/main/docs/deployment.md).
+- **Proactivity is read/research/draft by default.** The designated primary may
+  read its own state, research, and draft proposals inside bounded budgets and
+  quiet hours. Consequential actions — sending external messages or posts,
+  purchases, credential or permission changes, production changes, destructive
+  operations, new scope — always ask first. Details in
+  [docs/proactivity.md](docs/proactivity.md).
+- **No bundled account connections.** Email, calendar, Notion and similar
+  connectors exist for an agent only if you install and authorize them
+  separately in Hermes; this plugin provisions none of them.
 
 ## Install
 
@@ -28,7 +50,7 @@ git clone https://github.com/capthvnsen/alans-way-agents
 cd alans-way-agents
 
 # 1. Plugin + bundled skills (tools, observer, /proactivity commands)
-hermes plugins install ./alans-way
+hermes plugins install "file://$(pwd)#alans-way"
 # or straight from GitHub, no clone:
 # hermes plugins install https://github.com/capthvnsen/alans-way-agents#alans-way
 
@@ -42,6 +64,11 @@ cp -r hooks/alans-way ~/.hermes/hooks/
 
 Restart the gateway. `hermes plugins list` should show `alans-way`.
 
+Upgrading is the same path: `git pull`, re-run `setup-workspace.sh` if its
+flags changed, and restart the gateway — a running gateway keeps already
+imported code until restarted. Then verify one ordinary Telegram reply and one
+bounded browser action before relying on it.
+
 ### What each piece does
 
 | Piece | Effect |
@@ -50,7 +77,7 @@ Restart the gateway. `hermes plugins list` should show `alans-way`.
 | Observer | 30s check for approved watches, bounded automatic opportunities |
 | Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
 | `workspace_browser` MCP | `status`, `tabs`, `open`, `snapshot`, `screenshot`, `action` — per-bot scoped Chromium tabs on Mac or VPS |
-| Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → next MCP connection re-routes. Tool results carry the serving host and mac-watch state |
+| Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → the in-flight Mac call fails visibly and the next MCP connection re-routes to a fresh VPS session; live Mac tabs are never migrated. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional systemd watcher (`deploy/`) probes the Mac every 30s and publishes a JSON state file the router and observer read |
 
 ## The workspace_browser tools
@@ -130,7 +157,7 @@ VPS browser owns.
 alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher
 hooks/                gateway startup hook (manual copy — see Install)
-docs/                 proactivity guide, experimental keeper notes
+docs/                 proactivity guide
 tests/                unittest suite — python3 -m unittest discover -s tests
 setup-workspace.sh    per-bot mcp_servers config writer
 ```

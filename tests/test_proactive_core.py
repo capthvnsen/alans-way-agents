@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -344,7 +345,7 @@ class StoreTests(unittest.TestCase):
             self.assertNotIn(private, public)
         for entry in status["audit"]:
             self.assertEqual(set(entry), {"sequence", "action", "policy_revision", "count"})
-        with sqlite3.connect(self.state_dir / "proactivity.sqlite3") as db:
+        with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
             audit_text = repr(db.execute("SELECT * FROM audit").fetchall())
         self.assertNotIn(raw_context, audit_text)
         self.assertNotIn("private-opaque", audit_text)
@@ -355,7 +356,7 @@ class StoreTests(unittest.TestCase):
         corrupt_values = ["not-json", json.dumps({"enabled": "true"}), json.dumps({"enabled": True})]
         for corrupt in corrupt_values:
             with self.subTest(corrupt=corrupt):
-                with sqlite3.connect(self.state_dir / "proactivity.sqlite3") as db:
+                with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
                     db.execute("UPDATE policy SET settings=? WHERE singleton=1", (corrupt,))
                 try:
                     loaded = store.load_policy()
@@ -369,7 +370,7 @@ class StoreTests(unittest.TestCase):
                 self.assertFalse(restarted.status()["enabled"])
                 with self.assertRaises(ValueError):
                     restarted.update_policy({"enabled": True})
-                with sqlite3.connect(self.state_dir / "proactivity.sqlite3") as db:
+                with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
                     self.assertEqual(db.execute("SELECT settings FROM policy").fetchone()[0], corrupt)
 
     def test_history_bound_fails_closed_without_forgetting_dedupe_tombstones(self):
