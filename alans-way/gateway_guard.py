@@ -1,9 +1,17 @@
 """Gateway-only arming marker; no messages or native state modification."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import os
 import tempfile
+
+
+# gateway:startup can legitimately fire before or after plugin registration
+# inside the same gateway process, so arming must not depend on that order.
+# The pid match already proves this process wrote the marker; the grace window
+# only needs to cover startup ordering, not admit a stale same-pid file left
+# behind by a dead earlier owner.
+_GRACE_SECONDS = 600
 
 
 def hermes_home() -> Path:
@@ -44,7 +52,8 @@ def gateway_ready(home: Path, registered_at: datetime) -> bool:
         value = json.loads(path.read_text(encoding="utf-8"))
         stamped = datetime.fromisoformat(value["started_at"])
         return (type(value.get("pid")) is int and value["pid"] == os.getpid()
-                and stamped.tzinfo is not None and registered_at <= stamped
-                and stamped <= datetime.now(timezone.utc))
+                and stamped.tzinfo is not None
+                and stamped <= datetime.now(timezone.utc)
+                and stamped >= registered_at - timedelta(seconds=_GRACE_SECONDS))
     except (OSError, ValueError, KeyError, TypeError):
         return False

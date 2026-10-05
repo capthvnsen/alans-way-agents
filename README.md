@@ -71,7 +71,9 @@ The bootstrap runs every step in order and says what it did:
 - **Preflight** — hermes version, python3, node, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
-- **Plugin + gateway hook** — installs `alans-way` and arms the startup hook
+- **Plugin + gateway hook** — installs `alans-way`, arms the startup hook, and
+  enables the `proactivity` toolset for Telegram sessions (without it,
+  `proactive_control` never reaches the bound chat's tool list)
 - **VPS browser host** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker systemd
   units (user units when you're not root)

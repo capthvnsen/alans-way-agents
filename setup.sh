@@ -100,6 +100,14 @@ if [ "$VERIFY" = 1 ]; then
   step "Install state"
   have hermes && hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME" \
     && ok "plugin '$PLUGIN_NAME' installed" || bad "plugin '$PLUGIN_NAME' not in hermes plugins list"
+  CFG_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; CFG_HOME="${CFG_HOME:-$HERMES_HOME}"
+  if [ -f "$CFG_HOME/config.yaml" ]; then
+    if awk '/^platform_toolsets:/{p=1;next} p&&/^  telegram:/{t=1;next} p&&/^  [a-z_]+:/{t=0} t&&/^    - proactivity[[:space:]]*$/{f=1} END{exit !f}' "$CFG_HOME/config.yaml"; then
+      ok "proactivity toolset enabled for telegram"
+    else
+      warn "proactivity toolset not enabled for telegram — proactive_control won't be callable in Telegram sessions (run: hermes tools enable proactivity --platform telegram)"
+    fi
+  fi
   [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
     && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
   CONN_DIR="$HOME/.local/share/hermes-alans-way/browser"
@@ -158,6 +166,14 @@ else
     || { bad "plugin install failed"; exit 1; }
 fi
 hermes plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
+# The control tool must be loaded into each messaging session's platform —
+# plugin toolsets are skipped when the platform's saved list predates the
+# plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
+for platform in telegram; do
+  hermes tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
+    && ok "proactivity toolset enabled for $platform" \
+    || warn "could not enable the proactivity toolset for $platform — proactive_control will not be callable in those sessions (run: hermes tools enable proactivity --platform $platform)"
+done
 
 # ---------------------------------------------------------------- hook
 step "Gateway hook"

@@ -71,7 +71,10 @@ is `alans-way:proactive-primary`; `/proactivity` is its chat control entry
 point. There is no automatic retarget from a recently received message.
 
 After validation and native injection permission, enable the toolset for the
-existing primary's platform without replacing its other toolsets:
+existing primary's platform without replacing its other toolsets (`setup.sh`
+runs this step automatically — a saved `platform_toolsets` list that predates
+the plugin hides `proactive_control` from the session even though the tool is
+registered):
 
 ```sh
 hermes tools enable proactivity --platform telegram

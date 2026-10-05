@@ -38,6 +38,7 @@ class Policy:
     max_low_purpose_wakes: int = 1
     min_interval_seconds: int = 7200
     event_ttl_seconds: int = 259200
+    unresolved_ttl_seconds: int = 21600
     max_pending: int = 64
     debounce_seconds: int = 120
 
@@ -60,6 +61,7 @@ class Policy:
             "max_daily_wakes": (0, 3), "max_low_purpose_wakes": (0, 1),
             "min_interval_seconds": (0, 31536000),
             "event_ttl_seconds": (1, 31536000),
+            "unresolved_ttl_seconds": (60, 31536000),
             "max_pending": (1, 1024), "debounce_seconds": (0, 31536000),
         }
         for name, (low, high) in bounds.items():
@@ -140,6 +142,23 @@ class Store:
     def _expire(self, db, timestamp: float, policy: Policy, revision: int) -> None:
         expired = db.execute("UPDATE events SET status='expired' WHERE status='pending' AND created_at<=?", (timestamp - policy.event_ttl_seconds,)).rowcount
         self._audit(db, "expired", revision, expired)
+        # Dispatched-but-never-acknowledged events (accepted_unverified, or
+        # uncertain after a crash recovery) would otherwise hold the one-wake
+        # gate forever when the session cannot resolve them — e.g. the control
+        # toolset missing from the bound session's platform. Aging them out is
+        # not an eviction: dedupe tombstones remain, so nothing replays.
+        unresolved = db.execute(
+            "UPDATE events SET status='expired' WHERE status IN ('accepted_unverified','uncertain')"
+            " AND COALESCE(claimed_at, created_at)<=?",
+            (timestamp - policy.unresolved_ttl_seconds,)).rowcount
+        self._audit(db, "expired_unresolved", revision, unresolved)
+
+    def expire(self, now: datetime | None = None) -> None:
+        """Sweep pending and unresolved TTLs; safe to call before gate checks."""
+        timestamp = self._timestamp(now)
+        with self._transaction() as db:
+            policy, revision = self._policy(db)
+            self._expire(db, timestamp, policy, revision)
 
     @staticmethod
     def _policy(db, *, strict: bool = False):

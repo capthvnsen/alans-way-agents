@@ -78,6 +78,11 @@ class Runtime:
         policy = self.store.load_policy()
         if policy.enabled is not True or not policy.session_key:
             return None
+        # Expire stale unresolved dispatches before gating: a wake the session
+        # could never acknowledge (e.g. the control toolset missing from its
+        # platform) must not hold the one-wake gate open forever.
+        if hasattr(self.store, "expire"):
+            self.store.expire()
         if hasattr(self.store, "status"):
             counts = self.store.status()["counts"]
             if any(counts.get(status, 0) for status in ("dispatching", "accepted_unverified", "uncertain")):
@@ -137,7 +142,9 @@ class Runtime:
                    "to the cloud. Observe the live work-time cap (at most 20 minutes). "
                    "Do not duplicate delegated work or invent tasks. "
                    "Record verified results and acknowledge this event with proactive_control "
-                   "resolve. Caps are not quotas.\nEvent metadata: "
+                   "resolve. If that tool is not available in this session, take no further "
+                   "action — the event expires on its own and stays auditable. "
+                   "Caps are not quotas.\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
         try:
             accepted = self.ctx.inject_message(message, role="user", session_key=event["session_key"])

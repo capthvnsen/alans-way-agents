@@ -37,6 +37,29 @@ class PluginTests(unittest.TestCase):
             guard.write_private_json(home / "companion/proactivity/gateway-owner.json", value)
             self.assertFalse(guard.gateway_ready(home, registered))
 
+    def test_gateway_marker_stamped_before_registration_still_arms(self):
+        """gateway:startup may fire before plugin registration — arming must not
+        depend on that ordering, only on same-process identity and freshness."""
+        from datetime import datetime, timezone, timedelta
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            # The hook stamps the marker, then the plugin registers a moment later.
+            guard.mark_gateway_ready(home, now=datetime.now(timezone.utc) - timedelta(seconds=3))
+            registered = datetime.now(timezone.utc)
+            self.assertTrue(guard.gateway_ready(home, registered))
+
+    def test_stale_marker_from_before_the_grace_window_does_not_arm(self):
+        from datetime import datetime, timezone, timedelta
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            guard.mark_gateway_ready(home, now=datetime.now(timezone.utc) - timedelta(hours=2))
+            registered = datetime.now(timezone.utc)
+            self.assertFalse(guard.gateway_ready(home, registered))
+
     def test_gateway_hook_is_passive_for_non_startup_events(self):
         hook = ROOT / "hooks/alans-way/handler.py"
         spec = importlib.util.spec_from_file_location("proactive_hook_test", hook)

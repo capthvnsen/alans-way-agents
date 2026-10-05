@@ -41,6 +41,7 @@ class PolicyTests(unittest.TestCase):
             "max_low_purpose_wakes": 1,
             "min_interval_seconds": 7200,
             "event_ttl_seconds": 259200,
+            "unresolved_ttl_seconds": 21600,
             "max_pending": 64,
             "debounce_seconds": 120,
         }
@@ -177,6 +178,27 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(store.claim(now=self.now + timedelta(seconds=300)))
         self.assertFalse(self.store().record_event("worker_update", "opaque-stale", purpose=True, now=self.now + timedelta(seconds=301)))
         self.assertEqual(store.status()["counts"]["expired"], 1)
+
+    def test_unresolved_dispatches_expire_and_free_the_gate(self):
+        """An accepted-but-never-resolved wake must not wedge the observer.
+        Unreachable control tool (missing toolset on the platform) is exactly
+        this case: the event should age out, not hold the gate forever."""
+        store = self.configured(min_interval_seconds=0, unresolved_ttl_seconds=600)
+        store.record_event("manual_review", "opaque-wake", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        self.assertIsNotNone(event)
+        store.finish(event["id"], "accepted_unverified")
+        # Still fresh: the unresolved dispatch is live state.
+        store.expire(now=self.now + timedelta(seconds=599))
+        self.assertEqual(store.status()["counts"].get("accepted_unverified"), 1)
+        # Past the unresolved TTL it expires — dedupe tombstone remains, so the
+        # same evidence cannot re-fire, but a distinct event can claim again.
+        store.expire(now=self.now + timedelta(seconds=601))
+        counts = store.status()["counts"]
+        self.assertIsNone(counts.get("accepted_unverified"))
+        self.assertEqual(counts.get("expired"), 1)
+        self.assertTrue(store.record_event("manual_review", "opaque-wake-2", purpose=True, now=self.now))
+        self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-wake-2")
 
     def test_purpose_then_kind_priority_then_fifo_selects_work(self):
         store = self.configured(min_interval_seconds=0)
