@@ -76,7 +76,7 @@ so kanban cards blocked on Mac-only work can resume. Transitions are logged
 to `mac-events.log` beside the state file.
 
 The observer also sweeps the shared `kanban.db` read-only
-(`proactive_board.py`): open and recently-closed cards ride into the lead
+(`proactive_board.py`): open and recently-closed cards ride into the primary
 bot's review context, so a blocked or changed card from another agent can
 surface as one bounded opportunity — never a reason to touch someone else's
 card. Combined with the connector's overseer role (`HERMES_OVERSEER_BOTS` /
