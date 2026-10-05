@@ -56,10 +56,16 @@ app opens them for the user while the tab stays yours to keep working.
    for the next action, then inspect the result. The browser tools target that
    tab directly in the background and leave the real mouse alone. Completion requires observed
    page state, rather than the absence of a tool error.
-3. On `human_has_control`, wait for the user to give control back. On a stale
+3. Prefer `action=batch` for multi-step work — up to 25 actions in one call,
+   run in order, stopping at the first error; each step reports its own result.
+   Every round-trip is a separate tool call otherwise, so batching is the fast,
+   cheap path. Use `action=eval` with `code` to run JS in the page: read DOM
+   state, extract data, or complete a whole interaction in one call. Keep the
+   return value small; results cap near 48KB. Both take the same epoch.
+4. On `human_has_control`, wait for the user to give control back. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
    timed-out submission as uncertain and check its effects before resubmitting.
-4. To collaborate on another bot's tab, obtain the user's explicit grant through
+5. To collaborate on another bot's tab, obtain the user's explicit grant through
    Workspace's tab access dialog. Keep normal work in your own tabs.
 
 ## Hand a task between computers
