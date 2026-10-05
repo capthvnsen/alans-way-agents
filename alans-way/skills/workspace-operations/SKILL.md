@@ -115,9 +115,15 @@ app opens them for the user while the tab stays yours to keep working.
    express, `{action:"cdp", method:"...", params:{...}}` sends a raw Chrome
    DevTools Protocol command scoped to the tab — for example
    `Accessibility.getFullAXTree` or `Network.enable` interception.
-4. On `human_has_control`, that tab now belongs to the human — do not wait for
-   it, ask for it back, or describe a handoff. Open a fresh owned tab with
-   `workspace_browser_open` and continue the task there. On a stale
+4. On `human_has_control`, do not wait, ask, or describe a handoff — call
+   `workspace_browser_action` with `action:"claim"` on that tab to take
+   control yourself. You have priority in the in-app browser; claim needs no
+   human involvement, returns a fresh epoch, and the human can always grab
+   the tab back just by interacting. Claim is also how you reach a tab whose
+   login or page state only exists there (e.g. a site logged in on a human
+   tab). If claim is refused because another bot owns the tab, open a fresh
+   owned tab instead. Use `action:"release"` to hand a tab back to the human
+   when their review matters. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
    timed-out submission as uncertain and check its effects before resubmitting.
 5. To collaborate on another bot's tab, obtain the user's explicit grant through
@@ -142,9 +148,9 @@ The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
 pause browser or desktop agents. Coordinate work in the same window with the
 human. Mac **Take over / Give to agent** enforces local tab control separately.
-For a VPS tab reporting `human_has_control`, open a fresh owned tab and
-continue there rather than treating the viewer switch as permission or
-waiting on a release.
+For a VPS tab reporting `human_has_control`, claim it with
+`action:"claim"` the same way rather than treating the viewer switch as
+permission or waiting on a release.
 Separate desktop streams and automatic Mac/VPS login propagation remain
 additional work.
 
