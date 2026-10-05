@@ -165,6 +165,69 @@ class ObservationTests(unittest.TestCase):
                 runtime.ledger.report_signal("term", "x")
             runtime.close()
 
+    def test_due_instance_collapses_missed_slots_to_the_latest(self):
+        module = plugin()
+        observe = sys.modules[module.__name__ + ".proactive_observe"]
+        now = 1_000_000
+        # No cadence: the owed instance is simply next_review_at.
+        self.assertEqual(observe._due_instance(500, None, now), 500)
+        self.assertEqual(observe._due_instance(2_000_000, None, now), 2_000_000)
+        self.assertIsNone(observe._due_instance(None, 3600, now))
+        # Cadence: a week of missed hourly slots collapses to the latest one.
+        nra = now - 7 * 86400
+        self.assertEqual(observe._due_instance(nra, 3600, now), now - (now - nra) % 3600)
+        # A future review is owed on its own slot, not rolled backward.
+        self.assertEqual(observe._due_instance(now + 500, 3600, now), now + 500)
+        # Out-of-range cadences fall back to the plain timestamp.
+        self.assertEqual(observe._due_instance(nra, 30, now), nra)
+        self.assertEqual(observe._due_instance(nra, "3600", now), nra)
+
+    def test_arm_review_validates_target_time_and_watch(self):
+        from datetime import datetime, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.ledger.record_task({"id": "w", "title": "T", "scope": "S",
+                "next_action": "N", "owner": "primary", "status": "active", "approved": True})
+            future = (datetime.now(timezone.utc)).isoformat()
+            runtime.ledger.arm_review("w", future)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["next_review_at"], future)
+            for args in [("w", "not-a-time"), ("w", "2026-01-01"), ("ghost", future)]:
+                with self.subTest(args=args):
+                    with self.assertRaises(ValueError):
+                        runtime.ledger.arm_review(*args)
+            runtime.ledger.finish_task("w", "done")
+            with self.assertRaises(ValueError):
+                runtime.ledger.arm_review("w", future)
+            runtime.close()
+
+    def test_record_task_validates_schedule_fields(self):
+        from datetime import datetime, timezone
+        module = plugin()
+        base = {"id": "w", "title": "T", "scope": "S", "next_action": "N",
+                "owner": "primary", "status": "active", "approved": True}
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            bad = [
+                {**base, "next_review_at": "2026-01-01 10:00"},          # naive
+                {**base, "due_at": "tomorrow-ish"},
+                {**base, "due_at": "2026-01-01T10:00:00"},               # naive
+                {**base, "cadence_seconds": 299},
+                {**base, "cadence_seconds": 604801},
+                {**base, "cadence_seconds": "hourly"},
+                {**base, "cadence_seconds": True},
+                {**base, "notify_when": "x" * 301},
+            ]
+            for task in bad:
+                with self.subTest(task=task):
+                    with self.assertRaises(ValueError):
+                        runtime.ledger.record_task(task)
+            runtime.ledger.record_task({**base,
+                "next_review_at": "2026-01-01T10:00:00+00:00",
+                "due_at": "2026-02-01T10:00:00+00:00",
+                "cadence_seconds": 86400, "notify_when": "only on change"})
+            runtime.close()
+
     def test_memory_change_is_observed_once_without_persisting_its_text(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:

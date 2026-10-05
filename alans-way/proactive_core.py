@@ -40,6 +40,11 @@ class Policy:
     # they get their own daily budget — an 8/day default supports a few
     # standing cadences without inflating the speculative-wake ceiling.
     max_daily_watch_wakes: int = 8
+    # Scheduled watches are owed their grid, so they space on their own
+    # interval — sharing the speculative-wake spacing would silently turn a
+    # 30-minute cadence into a 2-hour one. The shared spacing still counts
+    # watch claims, keeping total wake density bounded.
+    min_watch_interval_seconds: int = 300
     min_interval_seconds: int = 7200
     event_ttl_seconds: int = 259200
     unresolved_ttl_seconds: int = 21600
@@ -65,6 +70,7 @@ class Policy:
             "max_daily_wakes": (0, 3), "max_low_purpose_wakes": (0, 1),
             "max_daily_watch_wakes": (0, 24),
             "min_interval_seconds": (0, 31536000),
+            "min_watch_interval_seconds": (0, 31536000),
             "event_ttl_seconds": (1, 31536000),
             "unresolved_ttl_seconds": (60, 31536000),
             "max_pending": (1, 1024), "debounce_seconds": (0, 31536000),
@@ -97,6 +103,9 @@ class Store:
     """
 
     # Never evict dedupe/uncertain records: saturation stops new admissions.
+    # Headroom kept for scheduled watches so speculative context noise can
+    # never crowd a due wake out of the pending queue entirely.
+    _WATCH_RESERVE = 8
     _MAX_EVENTS = 4096
 
     def __init__(self, state_dir: Path):
@@ -236,7 +245,12 @@ class Store:
             if not policy.session_key:
                 return False
             self._expire(db, timestamp, policy, revision)
-            if db.execute("SELECT COUNT(*) FROM events WHERE status='pending'").fetchone()[0] >= policy.max_pending:
+            pending = db.execute("SELECT COUNT(*) FROM events WHERE status='pending'").fetchone()[0]
+            reserve = min(self._WATCH_RESERVE,
+                          max(0, policy.max_pending - self._WATCH_RESERVE))
+            headroom = policy.max_pending if kind == "watch_due" \
+                else policy.max_pending - reserve
+            if pending >= headroom:
                 return False
             if db.execute("SELECT COUNT(*) FROM events").fetchone()[0] >= self._MAX_EVENTS:
                 return False
@@ -284,7 +298,10 @@ class Store:
             if quiet:
                 return None
             last_claim = db.execute("SELECT MAX(claimed_at) FROM events").fetchone()[0]
-            if last_claim is not None and timestamp - last_claim < policy.min_interval_seconds:
+            shared_open = last_claim is None or timestamp - last_claim >= policy.min_interval_seconds
+            last_watch = db.execute("SELECT MAX(claimed_at) FROM events WHERE kind='watch_due'").fetchone()[0]
+            watch_open = last_watch is None or timestamp - last_watch >= policy.min_watch_interval_seconds
+            if not shared_open and not watch_open:
                 return None
             local = datetime.fromtimestamp(timestamp, ZoneInfo(policy.timezone))
             midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -302,12 +319,13 @@ class Store:
                 return None
             allow_low = budget["low"] < policy.max_low_purpose_wakes
             event = db.execute("""SELECT * FROM events WHERE status='pending' AND created_at<=?
-                AND ((kind='watch_due' AND ?) OR (kind!='watch_due' AND ? AND (purpose=1 OR ?)))
+                AND ((kind='watch_due' AND ? AND ?) OR (kind!='watch_due' AND ? AND ? AND (purpose=1 OR ?)))
                 ORDER BY purpose DESC, CASE kind WHEN 'manual_review' THEN 0
                 WHEN 'watch_due' THEN 1 WHEN 'task_changed' THEN 2
                 WHEN 'worker_update' THEN 3 ELSE 4 END,
                 created_at, sequence LIMIT 1""",
-                (timestamp - policy.debounce_seconds, allow_watch, allow_other, allow_low)).fetchone()
+                (timestamp - policy.debounce_seconds, allow_watch, watch_open,
+                 allow_other, shared_open, allow_low)).fetchone()
             if event is None:
                 return None
             db.execute("UPDATE events SET status='dispatching', claimed_at=? WHERE id=?", (timestamp, event["id"]))

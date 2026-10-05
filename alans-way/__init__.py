@@ -344,6 +344,69 @@ class Runtime:
                 f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}\n"
                 "Limits are ceilings; nothing useful means silence.")
 
+    def watch_command(self, raw_args):
+        """/watch — the operator's direct surface over standing watches.
+
+        A typed slash command is explicit consent in itself, so these actions
+        bypass nothing: they call the same validated ledger paths the tool
+        uses, and mutation output always reads back live state.
+        """
+        parts = raw_args.strip().split(maxsplit=1)
+        action, rest = parts[0] if parts else "list", parts[1] if len(parts) > 1 else ""
+        try:
+            tasks = self.ledger.snapshot()["tasks"]
+            if action in ("list", ""):
+                if not tasks:
+                    return "No standing watches. Add one with /watch add {\"id\": ..., \"scope\": ...}."
+                def line(t):
+                    fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
+                    cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
+                    return f"- {t['id']} [{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
+                return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
+            if action == "show":
+                task = next((t for t in tasks if t["id"] == rest), None)
+                if task is None:
+                    return f"No watch {rest!r}."
+                return json.dumps(task, indent=2, sort_keys=True)
+            if action == "add":
+                payload = json.loads(rest)
+                if isinstance(payload, dict):
+                    payload["approved"] = True  # a typed /watch add is the consent
+                self.ledger.record_task(payload)
+                saved = next((t for t in self.ledger.snapshot()["tasks"]
+                              if t["id"] == payload["id"]), {})
+                fire = saved.get("next_review_at") or saved.get("due_at") or "manual"
+                return f"Watch {payload['id']} recorded ({saved.get('status')}); next: {fire}."
+            if action in ("cancel", "done", "pause", "blocked"):
+                status = {"cancel": "cancelled", "done": "done",
+                          "pause": "waiting", "blocked": "blocked"}[action]
+                task_id = rest.split()[0] if rest else ""
+                self.ledger.finish_task(task_id, status)
+                return f"Watch {task_id} is now {status}."
+            if action == "resume":
+                task_id = rest.split()[0] if rest else ""
+                task = next((t for t in tasks if t["id"] == task_id), None)
+                if task is None:
+                    return f"No watch {task_id!r}."
+                if task["status"] in {"done", "cancelled"}:
+                    return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
+                task = dict(task, status="active")
+                task = {k: v for k, v in task.items()
+                        if k not in {"signal", "signal_at", "approved_at"}}
+                self.ledger.record_task(task)
+                return f"Watch {task_id} is active again."
+            if action == "signal":
+                task_id, _, signal = rest.partition(" ")
+                if not signal.strip():
+                    return "Use /watch signal <id> <observed state>."
+                self.ledger.report_signal(task_id, signal.strip())
+                return f"Signal recorded on {task_id}."
+            return ("Use /watch list, /watch show <id>, /watch add {json}, "
+                    "/watch pause <id>, /watch resume <id>, /watch done <id>, "
+                    "/watch cancel <id>, or /watch signal <id> <text>.")
+        except (ValueError, KeyError, IndexError, TypeError):
+            return "Watch command failed — check the id or JSON payload. No change was claimed."
+
 
 def register(ctx, *, home=None, background=True):
     runtime = Runtime(ctx, Path(home) if home is not None else hermes_home(), background=background)
@@ -352,6 +415,8 @@ def register(ctx, *, home=None, background=True):
                       handler=runtime.control, check_fn=lambda: True)
     ctx.register_command("proactivity", runtime.command,
                          description="Status, pause, resume, and configure proactive work")
+    ctx.register_command("watch", runtime.watch_command,
+                         description="List, schedule, pause, or cancel standing proactive watches")
     skills_dir = Path(__file__).parent / "skills"
     ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
     ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")

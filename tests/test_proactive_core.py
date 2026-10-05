@@ -40,6 +40,7 @@ class PolicyTests(unittest.TestCase):
             "max_daily_wakes": 3,
             "max_low_purpose_wakes": 1,
             "max_daily_watch_wakes": 8,
+            "min_watch_interval_seconds": 300,
             "min_interval_seconds": 7200,
             "event_ttl_seconds": 259200,
             "unresolved_ttl_seconds": 21600,
@@ -63,6 +64,7 @@ class PolicyTests(unittest.TestCase):
             {"max_pending": 0}, {"max_pending": 1025},
             {"debounce_seconds": 1.5}, {"debounce_seconds": -1},
             {"min_interval_seconds": 2**64},
+            {"min_watch_interval_seconds": -1}, {"min_watch_interval_seconds": 2.5},
         ]
         for settings in bad:
             with self.subTest(settings=settings):
@@ -443,7 +445,7 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(store.claim(now=self.now))
 
     def test_watch_budget_exhaustion_leaves_speculative_lane_open(self):
-        store = self.configured(min_interval_seconds=0)
+        store = self.configured(min_interval_seconds=0, min_watch_interval_seconds=0)
         for index in range(9):
             store.record_event("watch_due", f"watchdue:w{index}:r1700000000:lag", purpose=True, now=self.now)
         claimed = sum(store.claim(now=self.now) is not None for _ in range(9))
@@ -471,6 +473,37 @@ class StoreTests(unittest.TestCase):
         claim = store.claim(now=self.now)
         self.assertIsNotNone(claim)
         self.assertFalse(store.pending_matching("watchdue:w1:"))
+
+    def test_watch_lane_spacing_is_independent_of_the_shared_interval(self):
+        store = self.configured(min_interval_seconds=7200, min_watch_interval_seconds=300)
+        store.record_event("task_changed", "opaque-spec", purpose=True, now=self.now)
+        store.record_event("watch_due", "watchdue:w1:r1700000000:lag", purpose=True, now=self.now)
+        self.assertIsNotNone(store.claim(now=self.now))
+        # The shared interval blocks the remaining speculative event, but the
+        # watch lane opens on its own tighter spacing.
+        store.record_event("watch_due", "watchdue:w2:r1700000300:lag", purpose=True, now=self.now)
+        self.assertIsNone(store.claim(now=self.now))
+        claim = store.claim(now=self.now + timedelta(seconds=300))
+        self.assertEqual(claim["kind"], "watch_due")
+        # A speculative claim still has to wait out the shared interval —
+        # counted from any claim, watches included.
+        self.assertIsNone(store.claim(now=self.now + timedelta(seconds=301)))
+        claim = store.claim(now=self.now + timedelta(seconds=7500))
+        self.assertEqual(claim["evidence"], "opaque-spec")
+
+    def test_pending_queue_reserves_headroom_for_scheduled_watches(self):
+        store = self.configured(max_pending=16)
+        for index in range(16):
+            admitted = store.record_event("context_changed", f"opaque-noise-{index}", now=self.now)
+            if not admitted:
+                break
+        self.assertEqual(store.status()["counts"]["pending"], 16 - self.core.Store._WATCH_RESERVE)
+        self.assertFalse(store.record_event("context_changed", "opaque-overflow", now=self.now))
+        for index in range(self.core.Store._WATCH_RESERVE):
+            self.assertTrue(store.record_event("watch_due", f"watchdue:w{index}:r1700000000:lag",
+                                               purpose=True, now=self.now))
+        self.assertFalse(store.record_event("watch_due", "watchdue:w-overflow:r1:1",
+                                            purpose=True, now=self.now))
 
     def test_private_sqlite_file_is_isolated_and_never_follows_a_symlink(self):
         self.state_dir.mkdir(mode=0o700)

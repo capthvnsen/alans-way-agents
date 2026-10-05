@@ -21,6 +21,7 @@ SETTINGS = {
         "max_daily_watch_wakes": {"type": "integer", "minimum": 0, "maximum": 24},
         "max_low_purpose_wakes": {"type": "integer", "minimum": 0, "maximum": 1},
         "min_interval_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
+        "min_watch_interval_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
         "event_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 31536000},
         "max_pending": {"type": "integer", "minimum": 1, "maximum": 1024},
         "debounce_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},

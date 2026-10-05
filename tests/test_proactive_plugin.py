@@ -184,6 +184,7 @@ class PluginTests(unittest.TestCase):
             runtime.store.update_policy({"enabled": True,
                 "session_key": "agent:main:telegram:dm:123456789",
                 "debounce_seconds": 0, "min_interval_seconds": 0,
+                "min_watch_interval_seconds": 0,
                 "quiet_start": 0, "quiet_end": 0})
             guard.mark_gateway_ready(home)
             watch = {"id": "flight", "title": "Flight", "scope": "Track fare",
@@ -207,6 +208,65 @@ class PluginTests(unittest.TestCase):
             runtime.ledger.finish_task("flight", "done")
             self.assertEqual(runtime.tick()["status"], "rejected")
             self.assertEqual(facade.received, [])
+            runtime.close()
+
+    def test_deadline_watch_dispatches_with_escalation_context(self):
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            runtime.ledger.record_task({"id": "visa", "title": "Visa",
+                "scope": "Track visa renewal", "next_action": "Check status",
+                "owner": "primary", "status": "active", "approved": True,
+                "due_at": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()})
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            message = facade.received[0][0]
+            self.assertIn("[Companion scheduled watch]", message)
+            self.assertIn("Deadline:", message)
+            runtime.close()
+
+    def test_watch_command_manages_the_ledger_directly(self):
+        import json as _json
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.assertIn("No standing watches", runtime.watch_command("list"))
+            payload = {"id": "rent", "title": "Rent", "scope": "Check rent",
+                       "next_action": "Check", "owner": "primary",
+                       "status": "active",
+                       "next_review_at": "2026-02-01T09:00:00+00:00",
+                       "cadence_seconds": 86400}
+            # A typed /watch add is the consent — no approved flag needed.
+            self.assertIn("recorded", runtime.watch_command("add " + _json.dumps(payload)))
+            self.assertIn("rent", runtime.watch_command("list"))
+            self.assertIn("every 86400s", runtime.watch_command("list"))
+            self.assertIn("failed", runtime.watch_command("add {bad json"))
+            self.assertNotIn("bad json", runtime.watch_command("list"))
+            self.assertIn("now waiting", runtime.watch_command("pause rent"))
+            self.assertIn("active again", runtime.watch_command("resume rent"))
+            self.assertIn("Signal recorded", runtime.watch_command("signal rent posted"))
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["signal"], "posted")
+            self.assertIn("cancelled", runtime.watch_command("cancel rent"))
+            self.assertIn("terminal", runtime.watch_command("resume rent"))
+            # A terminal id cannot be resurrected through add either.
+            self.assertIn("failed", runtime.watch_command("add " + _json.dumps(payload)))
+            self.assertIn("Use /watch", runtime.watch_command("frobnicate"))
             runtime.close()
 
     def test_report_signal_control_action_round_trips(self):
@@ -250,6 +310,7 @@ class PluginTests(unittest.TestCase):
             runtime = module.register(facade, home=Path(directory), background=False)
             self.assertIn(("tool", "proactive_control"), facade.calls)
             self.assertIn(("command", "proactivity"), facade.calls)
+            self.assertIn(("command", "watch"), facade.calls)
             self.assertIn(("skill", "proactive-primary"), facade.calls)
             self.assertIn(("skill", "workspace-operations"), facade.calls)
             self.assertIn(("skill", "workspace-setup"), facade.calls)

@@ -1,7 +1,7 @@
 ---
 name: proactive-primary
 description: "Review work; change proactivity preferences in chat."
-version: 0.2.0
+version: 0.3.0
 author: capthvnsen, Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -53,7 +53,8 @@ Call Hermes tools, not an improvised daemon or direct configuration-file write.
 The frontend commands are `/proactivity status`, `/proactivity pause`,
 `/proactivity resume`, `/proactivity review`, and
 `/proactivity configure {"quiet_start":23,"quiet_end":8}`; `configure` takes JSON,
-not an invented slash subcommand or shell script.
+not an invented slash subcommand or shell script. Standing watches have their
+own `/watch` command (see below).
 
 ```python
 proactive_control(action="status")
@@ -136,9 +137,25 @@ and `execution_host`, then:
 4. `resolve` the event so the next wake can claim.
 
 Scheduled wakes draw on their own daily budget (`max_daily_watch_wakes`,
-default 8) separate from speculative reviews, so a handful of standing watches
-cannot starve, or be starved by, inferred opportunities. One unresolved event
-still gates the next — finish or resolve before expecting another wake.
+default 8) and their own spacing (`min_watch_interval_seconds`, default 300s),
+separate from speculative reviews — a 30-minute cadence really means 30
+minutes. One unresolved event still gates the next — finish or resolve before
+expecting another wake.
+
+The user's direct surface is `/watch`: `list`, `show <id>`, `add {json}` (same
+`record_task` payload, `approved: true` required — a typed command is the
+consent), `pause <id>` (hold as waiting), `resume <id>`, `done <id>`,
+`cancel <id>`, and `signal <id> <text>` for manual feeds.
+
+A blocked or waiting watch does not fire — including its deadline — because a
+watch that cannot act has nothing to escalate to. Re-activation refires
+whatever is overdue. Quiet hours also defer deadline wakes; consent boundaries
+outrank urgency unless the user explicitly widens them.
+
+The collector recipe: a Hermes `cronjob` or the woken primary performs the
+check (inbox scan, price fetch, calendar diff) and writes `report_signal` —
+the observer wakes only when the signal actually changes. That is how standing
+source checks plug in without any per-source plumbing.
 
 ## Procedure
 
