@@ -100,7 +100,7 @@ the machines if needed, runs the same `setup.sh`, and reports back. The
 
 ### 3. The Mac app
 
-Download `Hermes- Alan's way.app.zip` from the
+Download `Open Alan.app.zip` from the
 [latest release](https://github.com/capthvnsen/alans-way/releases), unzip, move
 to Applications, right-click → Open (it's unsigned). Sign in to Telegram inside
 the app, then **Settings → Agent setup**: the checklist shows what's already
@@ -139,7 +139,7 @@ Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
 color. Multi-bot setups: run `setup-workspace.sh` once per profile, each with
 its own bot id (the script replaces only its own managed block).
 
-Mac path requirements: the Hermes Workspace app running on the Mac, SSH from
+Mac path requirements: the Open Alan app running on the Mac, SSH from
 this host to it (BatchMode/key auth — the probe uses `StrictHostKeyChecking`),
 and the app's bundled `browser-mcp.cjs` (inside the installed `.app`).
 VPS-only usage works with no Mac: the router detects the missing/unreachable
