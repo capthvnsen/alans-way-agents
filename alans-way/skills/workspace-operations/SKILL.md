@@ -36,10 +36,15 @@ Reach for the browser when:
   landed, or screenshot the final state
 - a link or site comes up in chat — open it in your own tab and look
 
-Prefer the local Mac browser (`workspace_browser`) as the default host: it is
-the in-app browser the user can watch, and it shares the local login state.
-Use `host:"vps"` (or `workspace_vps_browser`) when the work must keep running
-while the Mac sleeps or when the VPS is the named host.
+The in-app Mac browser is the only default host. When the Mac is reachable,
+ALL web work goes through `workspace_browser` (Mac host) — never
+`host:"vps"`, never another browser tool (browser_exec, computer-use
+drivers), and never opening a URL in the human's personal browser via
+terminal/`open`. `workspace_browser` already falls back to the VPS host on
+its own when the Mac is unreachable — an explicit `host:"vps"` is only for
+work that must keep running after the Mac sleeps, or when the user names
+the VPS as the host. If a workspace browser call fails, report the failure;
+do not silently substitute another browser.
 
 ## Choose the execution host
 

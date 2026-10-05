@@ -70,11 +70,11 @@ const macStateFile =
   '/var/lib/hermes-alans-way/mac-state.json';
 
 // Quote a value for the remote command line ssh builds from argv.
-const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
 function probeMac(timeoutMs) {
   return new Promise((resolve) => {
-    const probe = macScripts.map(script => `if [ -f ${shQuote(script)} ]; then printf %s ${shQuote(script)}; exit 0; fi`).join(' ') + ' exit 1';
+    const probe = macScripts.map(script => `if [ -f ${shQuote(script)} ]; then printf %s ${shQuote(script)}; exit 0; fi`).join('; ') + '; exit 1';
     const child = spawn(
       'ssh',
       ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=yes', macSsh, probe],
@@ -207,7 +207,7 @@ async function main() {
   }
 
   const child = spawn(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] });
-  const annotate = makeAnnotator(macUp ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
+  const annotate = makeAnnotator(macScript ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
   readline
     .createInterface({ input: child.stdout, crlfDelay: Infinity })
     .on('line', (line) => {

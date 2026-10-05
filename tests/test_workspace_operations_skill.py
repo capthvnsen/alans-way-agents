@@ -60,6 +60,47 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             self.normalized,
         )
 
+    def test_in_app_browser_is_the_only_default_host(self):
+        self.assertIn(
+            "The in-app Mac browser is the only default host.",
+            self.normalized,
+        )
+
+    def test_no_alternate_browser_paths_when_mac_reachable(self):
+        for forbidden in [
+            'host:"vps"',
+            "browser_exec",
+            "personal browser",
+        ]:
+            with self.subTest(forbidden=forbidden):
+                self.assertIn(forbidden, self.normalized)
+        self.assertIn("do not silently substitute another browser", self.normalized)
+
+    def test_human_has_control_claim_not_wait(self):
+        self.assertIn('action:"claim"', self.normalized)
+        self.assertIn("do not wait, ask, or describe a handoff", self.normalized)
+
+
+ROUTER_PATH = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
+
+
+class WorkspaceRouterRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = ROUTER_PATH.read_text(encoding="utf-8")
+
+    def test_no_dangling_macup_reference(self):
+        # The probe returns the resolved script path (macScript); a leftover
+        # macUp reference crashes the router after spawn and kills the session.
+        self.assertNotIn("macUp", self.source)
+        self.assertIn("macScript ? 'mac' : 'vps'", self.source)
+
+    def test_probe_joins_items_with_separator(self):
+        # join(' ') produces `fi if` — a bash syntax error that makes every
+        # Mac probe fail and silently pins all traffic to the VPS host.
+        self.assertIn(".join('; ')", self.source)
+        self.assertIn("+ '; exit 1'", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

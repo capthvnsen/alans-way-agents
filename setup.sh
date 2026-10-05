@@ -107,6 +107,11 @@ if [ "$VERIFY" = 1 ]; then
     else
       warn "proactivity toolset not enabled for telegram — proactive_control won't be callable in Telegram sessions (run: hermes tools enable proactivity --platform telegram)"
     fi
+    if awk '/^platform_toolsets:/{p=1;next} p&&/^  telegram:/{t=1;next} p&&/^  [a-z_]+:/{t=0} t&&/^    - browser[[:space:]]*$/{f=1} END{exit !f}' "$CFG_HOME/config.yaml"; then
+      warn "built-in 'browser' toolset still enabled for telegram — the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
+    else
+      ok "built-in browser toolset disabled for telegram"
+    fi
   fi
   [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
     && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
@@ -173,6 +178,12 @@ for platform in telegram; do
   hermes tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
     && ok "proactivity toolset enabled for $platform" \
     || warn "could not enable the proactivity toolset for $platform — proactive_control will not be callable in those sessions (run: hermes tools enable proactivity --platform $platform)"
+  # The workspace browser replaces Hermes' built-in browser tool: leaving both
+  # enabled lets the agent pick a different browser than the user's app.
+  # Reversible with: hermes tools enable browser --platform $platform
+  hermes tools disable browser --platform "$platform" >/dev/null 2>&1 \
+    && ok "built-in browser toolset disabled for $platform (workspace browser is the browser)" \
+    || warn "could not disable the built-in browser toolset for $platform — the agent may bypass the workspace browser (run: hermes tools disable browser --platform $platform)"
 done
 
 # ---------------------------------------------------------------- hook
