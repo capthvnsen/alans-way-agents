@@ -32,6 +32,12 @@ class PrintModeTests(unittest.TestCase):
         self.assertIn('- "Scout \\"The Bot\\""', out)
         self.assertIn('HERMES_WORKSPACE_MAC_SSH: "user@mac.local"', out)
 
+    def test_tool_timeout_outlasts_the_connector_action_budget(self):
+        out = run("--bot-id", "bot_123").stdout
+        # browser-mcp allows 90s for an action; Hermes must not cut it off first.
+        self.assertIn("    timeout: 120\n", out)
+        self.assertIn("    lazy: true\n", out)
+
     def test_omits_bot_name_args_when_not_given(self):
         result = run("--bot-id", "bot_123")
         self.assertNotIn("--bot-name", result.stdout)
@@ -155,6 +161,39 @@ class VerifyTests(unittest.TestCase):
             result = run("--verify", "--profile", "alan-local", env=env)
             self.assertIn("managed workspace_browser block present", result.stdout)
             self.assertIn("all checks passed", result.stdout)
+
+    def test_verify_warns_instead_of_crashing_when_the_mac_app_is_closed(self):
+        if not shutil.which("node"):
+            self.skipTest("node is required for the router probe")
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            ssh = bin_dir / "ssh"
+            ssh.write_text("#!/bin/sh\nexit 0\n")
+            ssh.chmod(0o755)
+            env = dict(os.environ, HOME=directory, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run("--verify", "--mac-ssh", "me@mac", env=env)
+            self.assertIn("warn router probe → vps (mac unreachable)", result.stdout)
+            self.assertIn("all checks passed", result.stdout)
+
+    def test_verify_fails_a_tool_timeout_shorter_than_the_action_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "mcp_servers:\n"
+                "  workspace_browser:\n"
+                "    command: node\n"
+                "    lazy: true\n"
+                "    timeout: 30\n"
+                "  other:\n"
+                "    timeout: 5\n",
+                encoding="utf-8")
+            result = run("--verify", "--config", str(config), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("workspace_browser timeout 30s is below 120s", result.stdout)
+            config.write_text(config.read_text().replace("timeout: 30", "timeout: 120"), encoding="utf-8")
+            result = run("--verify", "--config", str(config))
+            self.assertIn("workspace_browser timeout 120s", result.stdout)
 
 
 if __name__ == "__main__":
