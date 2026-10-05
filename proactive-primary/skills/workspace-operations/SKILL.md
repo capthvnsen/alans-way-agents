@@ -35,6 +35,16 @@ resources — local files, Mac logins, a tab handoff waiting on the Mac — and
 availability watcher turns the next offline→online flip into a context event
 for the lead bot's review, which can unblock the card and resume the task.
 
+## Shared links
+
+When a link appears in your Telegram chat — sent by you or the user — the Mac
+app opens it as a local browser tab assigned to your bot id, so you both see
+the same page. Before opening a duplicate, list your tabs and reuse the one
+with that URL. If no tab arrived — the Mac is unreachable or link sharing is
+off — open it yourself with `workspace_browser` (which falls back to the VPS
+desktop) or `workspace_vps_browser`. Links you send follow the same rule: the
+app opens them for the user while the tab stays yours to keep working.
+
 ## Operate a browser tab
 
 1. Find the assigned tab, or open a task-specific tab in the background. Tabs

@@ -105,6 +105,15 @@ whose ssh keys reach the Mac. Environment variables:
 `HERMES_MAC_STATE_FILE` (default `/var/lib/hermes-alans-way/mac-state.json`;
 the unit's `StateDirectory` creates the parent directory).
 
+Hermes's stock `browser_exec` (Browser Use) tool connects to its own
+`browser.cdp_url` (default `http://127.0.0.1:9222`) — nothing shares it.
+Run a dedicated Chromium there via `deploy/browser-exec-chromium.service`
+reusing the same `vps-chromium-host.cjs` supervisor with
+`deploy/browser-exec-config.json` under
+`$HERMES_VPS_BROWSER_DATA/config.json`. It keeps its own
+`--user-data-dir`; never point browser_exec at :9223, which the workspace
+VPS browser owns.
+
 ## Safety model (short version)
 
 - Human takeover wins always: control epochs invalidate queued agent actions.
