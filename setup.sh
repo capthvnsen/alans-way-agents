@@ -9,14 +9,14 @@
 #
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --skip-browser --skip-services
-#        --bind --restart --non-interactive --verify
+#        --bind --timezone IANA --restart --non-interactive --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
 DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG=""
+BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE=""
 HERMES_HOME="" DESKTOP_DIR=""
 SKIP_BROWSER=0 SKIP_SERVICES=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 
@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
     --skip-browser) SKIP_BROWSER=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
     --bind) DO_BIND=1; shift;;
+    --timezone) TIMEZONE="$2"; shift 2;;
     --restart) DO_RESTART=1; shift;;
     --non-interactive) NON_INTERACTIVE=1; shift;;
     --verify) VERIFY=1; shift;;
@@ -43,6 +44,7 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --mac-ssh HOST   how this host reaches your Mac over ssh (Tailscale name/IP)
   --profile NAME   Hermes profile to configure (default: main config)
   --bind           bind proactivity to a Telegram DM route (prompted)
+  --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
   --restart        restart the gateway at the end without asking
   --verify         check an existing install without changing anything
   --skip-browser / --skip-services / --non-interactive for constrained runs
@@ -112,6 +114,20 @@ if [ "$VERIFY" = 1 ]; then
     else
       ok "built-in browser toolset disabled for telegram"
     fi
+  fi
+  if have hermes; then
+    PSTATE="$(hermes ${PROFILE:+-p "$PROFILE"} proactivity status 2>/dev/null | python3 -c 'import json,sys
+try: s=json.load(sys.stdin)
+except Exception: s={}
+print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") is True else "paused")' 2>/dev/null)"
+    case "$PSTATE" in
+      "bound on") ok "proactivity on for the bound primary route";;
+      "bound paused") warn "proactivity bound but paused — the bot never messages first (run: hermes proactivity probe, then hermes proactivity resume)";;
+      *) warn "no primary route bound — proactivity is off (run: setup.sh --bind)";;
+    esac
+    [ "$(hermes ${PROFILE:+-p "$PROFILE"} config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
+      && ok "gateway injection allowed for $PLUGIN_NAME" \
+      || warn "gateway injection not allowed — proactive turns are dropped (run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true)"
   fi
   [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
     && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
@@ -402,6 +418,27 @@ for i, line in enumerate(sys.stdin, 1):
          if [ "$SEL_PROF" = "default" ]; then BIND_PROF=""; else BIND_PROF="-p $SEL_PROF"; fi
          if hermes $BIND_PROF proactivity bind --session-key "$SEL_KEY" >/dev/null 2>&1; then
            ok "bound primary route: $SEL_AGENT"
+           if [ -n "$TIMEZONE" ]; then
+             hermes $BIND_PROF proactivity configure --settings "{\"timezone\": \"$TIMEZONE\"}" >/dev/null 2>&1 \
+               && ok "quiet hours use $TIMEZONE" \
+               || warn "could not set timezone $TIMEZONE — quiet hours stay on the default zone"
+           else
+             warn "no --timezone given — quiet hours use the default zone (America/Denver)"
+           fi
+           # Binding always leaves policy paused; turning it on grants the gateway
+           # injection permission, so it stays an explicit human choice.
+           ON="$(ask "  Turn proactive messages on now? The bot may then message this chat first. [y/N]" "N")"
+           case "$ON" in
+             y|Y|yes)
+               if hermes $BIND_PROF config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
+                   && hermes $BIND_PROF proactivity probe >/dev/null 2>&1 \
+                   && hermes $BIND_PROF proactivity resume >/dev/null 2>&1; then
+                 ok "proactivity on"
+               else
+                 bad "could not turn proactivity on — run: hermes $BIND_PROF proactivity probe, then hermes $BIND_PROF proactivity resume"
+               fi;;
+             *) say "  proactivity stays paused — turn it on later with /proactivity resume";;
+           esac
          else
            bad "bind failed — run manually: hermes $BIND_PROF proactivity bind --session-key <key>"
          fi
@@ -429,7 +466,7 @@ cat <<'EOF'
   • On your Mac: open Hermes — Alan's Way → Settings → Agent setup → save this
     Mac's SSH address → Test agent path.
   • In Telegram: message your primary bot — /proactivity status should report
-    'bound' once you've bound a route.
+    'bound' once you've bound a route, and /proactivity resume turns it on.
   • Browser work routes to the Mac while it's reachable, else the VPS host.
 EOF
 [ "$FAILS" = 0 ] && exit 0 || { say "setup: $FAILS check(s) failed — see above."; exit 1; }
