@@ -11,8 +11,10 @@ Treat the workspace browser as your default surface for anything web-shaped.
 If a task lives in a site or web app and no API or CLI covers it — or driving
 the page is simply the most reliable path — open a tab and do the work there.
 Do not ask whether you may use the browser or describe a plan first; open the
-tab, work it, and report the result. The tab is scoped to your bot id and runs
-in the background — it never moves the human's cursor or touches their tabs.
+tab, work it, and report the result. There is no handoff, assignment, or grant
+step for your own tabs — `workspace_browser_open` IS the handoff, and it never
+requires the human. The tab is scoped to your bot id and runs in the
+background — it never moves the human's cursor or touches their tabs.
 
 ## Browser authorization policy
 
@@ -46,9 +48,9 @@ Hermes gateway owns the Telegram conversation. Workspace displays that real
 conversation; it supplies Mac/VPS browser tools and a viewer of the VPS desktop.
 
 For a task in a Workspace Mac tab, use the `workspace_browser` MCP tools. Begin
-with status and assigned tabs. Confirm the reported host and tab ownership.
+with status and your owned tabs. Confirm the reported host and tab ownership.
 For a VPS browser task, use `workspace_vps_browser`. Verify status reports
-`host: vps`, then find your assigned tab or open one. The Mac connector can
+`host: vps`, then find a tab you own or open one. The Mac connector can
 also route an explicit `host: vps` open, but the native VPS connector works
 while the Mac app is offline. Use configured VPS computer tools for desktop
 applications outside the managed browser. A connection failure means that
@@ -81,9 +83,10 @@ app opens them for the user while the tab stays yours to keep working.
 
 ## Operate a browser tab
 
-1. Find the assigned tab, or open a task-specific tab in the background. Tabs
-   exposed to your connector belong to your configured bot ID or an explicit
-   grant. Sign-ins are shared live within each host's browser profile. Tabs,
+1. List your tabs and reuse a matching one, or open a task-specific tab in
+   the background. Tabs you open belong to your bot ID — no human assignment
+   or grant is involved; grants matter only for a tab another bot owns.
+   Sign-ins are shared live within each host's browser profile. Tabs,
    control, and task ownership remain separate. Mac and VPS profiles have
    independent authentication.
 2. Read a fresh snapshot or screenshot. Use its refs and current control epoch
@@ -112,7 +115,9 @@ app opens them for the user while the tab stays yours to keep working.
    express, `{action:"cdp", method:"...", params:{...}}` sends a raw Chrome
    DevTools Protocol command scoped to the tab — for example
    `Accessibility.getFullAXTree` or `Network.enable` interception.
-4. On `human_has_control`, wait for the user to give control back. On a stale
+4. On `human_has_control`, that tab now belongs to the human — do not wait for
+   it, ask for it back, or describe a handoff. Open a fresh owned tab with
+   `workspace_browser_open` and continue the task there. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
    timed-out submission as uncertain and check its effects before resubmitting.
 5. To collaborate on another bot's tab, obtain the user's explicit grant through
@@ -137,8 +142,9 @@ The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
 pause browser or desktop agents. Coordinate work in the same window with the
 human. Mac **Take over / Give to agent** enforces local tab control separately.
-For a VPS tab reporting `human_has_control`, wait for an authorized broker
-controller to release it rather than treating the viewer switch as permission.
+For a VPS tab reporting `human_has_control`, open a fresh owned tab and
+continue there rather than treating the viewer switch as permission or
+waiting on a release.
 Separate desktop streams and automatic Mac/VPS login propagation remain
 additional work.
 
