@@ -17,7 +17,7 @@
 //   --bot-id ID                required: this bot's tab-owner identity
 //   --bot-name NAME            optional display name for the agent cursor
 //   --mac-ssh USER@HOST        Mac ssh alias/host for the Mac path
-//   --mac-node PATH            node binary on the Mac (default: node)
+//   --mac-node PATH            node binary on the Mac (default: the app's own runtime)
 //   --mac-script PATH          browser-mcp.cjs path on the Mac
 //                              (default: the installed app's bundled copy)
 //   --vps-script PATH          browser-mcp.cjs path on this host
@@ -46,7 +46,7 @@ function arg(name) {
 const botId = arg('--bot-id') || process.env.HERMES_WORKSPACE_BOT_ID || '';
 const botName = arg('--bot-name') || process.env.HERMES_BOT_NAME || '';
 const macSsh = arg('--mac-ssh') || process.env.HERMES_WORKSPACE_MAC_SSH || '';
-const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || 'node';
+const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || '';
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
 const macScripts = configuredMacScript
   ? [configuredMacScript]
@@ -88,6 +88,21 @@ const sshControlArgs = [
 
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
+// Non-interactive ssh never loads Homebrew's PATH, so a bare `node` is
+// usually missing on the Mac. The app bundle already ships a Node runtime:
+// its own Electron binary with ELECTRON_RUN_AS_NODE. PATH node is only the
+// fallback for bundles without one; an explicit --mac-node always wins.
+function macBackendCommand(script, node, id, name) {
+  const tail = [shQuote(script), '--bot-id', shQuote(id)];
+  if (name) tail.push('--bot-name', shQuote(name));
+  const args = tail.join(' ');
+  if (node) return `${node} ${args}`;
+  const bundle = /^(.*\/([^/]+)\.app)\/Contents\/Resources\//.exec(script);
+  if (!bundle) return `node ${args}`;
+  const exe = shQuote(`${bundle[1]}/Contents/MacOS/${bundle[2]}`);
+  return `if [ -x ${exe} ]; then ELECTRON_RUN_AS_NODE=1 exec ${exe} ${args}; else exec node ${args}; fi`;
+}
 
 // Probe finds the newest installed bundle AND proves the app is actually
 // serving — a closed app still has the script on disk, so file-existence
@@ -249,8 +264,6 @@ async function main() {
   let args;
   if (macScript) {
     // Run browser-mcp.cjs on the Mac over the same ssh session the probe used.
-    const remote = [macNode, shQuote(macScript), '--bot-id', shQuote(botId)];
-    if (botName) remote.push('--bot-name', shQuote(botName));
     cmd = 'ssh';
     args = [
       '-T',
@@ -260,7 +273,7 @@ async function main() {
       'StrictHostKeyChecking=yes',
       ...sshControlArgs,
       macSsh,
-      remote.join(' '),
+      macBackendCommand(macScript, macNode, botId, botName),
     ];
     process.stderr.write('workspace-router: routing to Mac browser host\n');
   } else {
@@ -349,4 +362,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { readMacState, workspaceNotice, annotateResult, makeAnnotator };
+module.exports = { readMacState, workspaceNotice, annotateResult, makeAnnotator, macBackendCommand };

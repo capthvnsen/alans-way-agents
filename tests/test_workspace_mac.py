@@ -200,6 +200,51 @@ class RouterNoticeTests(MacStateEnvTest):
             self.assertEqual(len(msg["result"]["content"]), 1)
 
 
+@unittest.skipUnless(NODE and SH, "node and sh are required for backend command tests")
+class MacBackendCommandTests(unittest.TestCase):
+    """Non-interactive ssh never loads Homebrew's PATH, so a bare `node` misses."""
+
+    def run_remote(self, home, node="", with_bundle=True):
+        bundle = Path(home) / "Apps" / "Open Alan.app"
+        script = bundle / "Contents" / "Resources" / "app" / "scripts" / "browser-mcp.cjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        if with_bundle:
+            exe = bundle / "Contents" / "MacOS" / "Open Alan"
+            exe.parent.mkdir(parents=True)
+            exe.write_text('#!/bin/sh\necho "app-binary run-as-node=$ELECTRON_RUN_AS_NODE $*"\n')
+            exe.chmod(0o755)
+        bin_dir = Path(home) / "bin"
+        bin_dir.mkdir()
+        fake_node = bin_dir / "node"
+        fake_node.write_text('#!/bin/sh\necho "path-node $*"\n')
+        fake_node.chmod(0o755)
+        command = subprocess.run(
+            [NODE, "-e", "process.stdout.write(require(process.argv[1]).macBackendCommand("
+                         "process.argv[2], process.argv[3], 'bot-1', \"Alan's bot\"))",
+             str(ROUTER), str(script), node],
+            capture_output=True, text=True, check=True).stdout
+        env = {"PATH": str(bin_dir) + os.pathsep + "/usr/bin:/bin"}
+        return subprocess.run([SH, "-c", command], env=env, capture_output=True, text=True), script
+
+    def test_default_runs_the_app_bundle_binary_as_node(self):
+        with tempfile.TemporaryDirectory() as home:
+            result, script = self.run_remote(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(),
+                             f"app-binary run-as-node=1 {script} --bot-id bot-1 --bot-name Alan's bot")
+
+    def test_falls_back_to_path_node_without_a_bundle_binary(self):
+        with tempfile.TemporaryDirectory() as home:
+            result, script = self.run_remote(home, with_bundle=False)
+            self.assertEqual(result.stdout.strip(), f"path-node {script} --bot-id bot-1 --bot-name Alan's bot")
+
+    def test_an_explicit_mac_node_wins(self):
+        with tempfile.TemporaryDirectory() as home:
+            result, script = self.run_remote(home, node="node")
+            self.assertEqual(result.stdout.strip(), f"path-node {script} --bot-id bot-1 --bot-name Alan's bot")
+
+
 @unittest.skipUnless(SH, "sh is required for watcher tests")
 class MacWatchScriptTests(MacStateEnvTest):
     def run_once(self, home, online, *args):
