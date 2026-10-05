@@ -51,6 +51,7 @@ const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_
 const macScripts = configuredMacScript
   ? [configuredMacScript]
   : [
+      '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
       '/Applications/Open Alan.app/Contents/Resources/app/scripts/browser-mcp.cjs',
       "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
       '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs',
