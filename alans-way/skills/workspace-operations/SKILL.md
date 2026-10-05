@@ -1,9 +1,33 @@
 ---
 name: workspace-operations
-description: Use for Hermes- Alan's way browser tasks, VPS desktop control, Mac/VPS browser handoff, human takeover, or sharing a tab with another bot.
+description: Use whenever a task needs a real browser — sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening — plus VPS desktop control, Mac/VPS browser handoff, human takeover, or sharing a tab with another bot.
 ---
 
 # Workspace operations
+
+## Open a browser when the task needs one
+
+Treat the workspace browser as your default surface for anything web-shaped.
+If a task lives in a site or web app and no API or CLI covers it — or driving
+the page is simply the most reliable path — open a tab and do the work there.
+Do not ask whether you may use the browser or describe a plan first; open the
+tab, work it, and report the result. The tab is scoped to your bot id and runs
+in the background — it never moves the human's cursor or touches their tabs.
+
+Reach for the browser when:
+
+- the task lives in a web UI — dashboards, admin panels, account settings,
+  booking or checkout flows, CMSs, internal tools — with no API to call
+- driving the page beats synthesizing requests: the site enforces its own
+  auth, validation, and side effects, so the UI path is the honest path
+- you must see the result to trust it — read a page, confirm a change
+  landed, or screenshot the final state
+- a link or site comes up in chat — open it in your own tab and look
+
+Prefer the local Mac browser (`workspace_browser`) as the default host: it is
+the in-app browser the user can watch, and it shares the local login state.
+Use `host:"vps"` (or `workspace_vps_browser`) when the work must keep running
+while the Mac sleeps or when the VPS is the named host.
 
 ## Choose the execution host
 
