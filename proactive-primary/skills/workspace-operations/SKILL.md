@@ -71,7 +71,13 @@ app opens them for the user while the tab stays yours to keep working.
    so `await new Promise(r => setTimeout(r, 500))` and polling loops work
    inside it; state you store on `window` (for example `window.__h = {}`)
    persists between eval calls on that tab. Keep the return value small;
-   results cap near 48KB. Both take the same epoch.
+   results cap near 48KB. Both take the same epoch. If a page renders
+   collapsed or mobile-narrow, set its layout size first
+   (`{action:"viewport", width:1440, height:900}`); clear with
+   `{action:"viewport", clear:true}`. For anything the named actions cannot
+   express, `{action:"cdp", method:"...", params:{...}}` sends a raw Chrome
+   DevTools Protocol command scoped to the tab — for example
+   `Accessibility.getFullAXTree` or `Network.enable` interception.
 4. On `human_has_control`, wait for the user to give control back. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
    timed-out submission as uncertain and check its effects before resubmitting.
