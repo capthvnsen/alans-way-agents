@@ -101,6 +101,62 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         self.assertIn(".join('; ')", self.source)
         self.assertIn("+ '; exit 1'", self.source)
 
+    def test_probe_verifies_app_liveness(self):
+        # File existence alone routes to a closed app — a dead host. The
+        # probe must also prove the workspace API answers on the Mac.
+        self.assertIn("connection.json", self.source)
+        self.assertIn("curl -s -m 4 -o /dev/null", self.source)
+        self.assertIn("/status", self.source)
+
+    def test_candidate_failure_falls_through(self):
+        # A candidate bundle that exists but is not live must skip to the
+        # next candidate, not abort the whole probe — liveness is a { … }
+        # group inside the if condition, not an early exit.
+        self.assertIn("{ conn=", self.source)
+        self.assertNotIn("|| exit 1", self.source)
+
+    def test_annotation_failure_degrades_to_passthrough(self):
+        # A one-line ReferenceError in annotation setup dropped the whole
+        # browser surface. Setup failures must degrade to passthrough.
+        self.assertIn("annotator disabled", self.source)
+        self.assertIn("(line) => line", self.source)
+
+    def test_router_self_heals_host_drift(self):
+        # A router that landed on the VPS during a transient probe miss must
+        # exit once mac-watch reports the Mac online — Hermes lazy-respawns
+        # the connector and the respawn re-probes, converging on the Mac
+        # without any manual process surgery.
+        self.assertIn("!macScript && macSsh", self.source)
+        self.assertIn("readMacState(macStateFile)", self.source)
+        self.assertIn("re-probes and routes to it", self.source)
+        self.assertIn("onlineStreak >= 2", self.source)
+
+    def test_probe_mode_exists(self):
+        self.assertIn("--probe", self.source)
+
+
+class ConnectorSelfHealSkillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.normalized = _normalized(SKILL_PATH.read_text(encoding="utf-8"))
+
+    def test_self_heal_section_present(self):
+        self.assertIn("connector layer self-heals", self.normalized.lower())
+
+    def test_retry_once_then_report(self):
+        self.assertIn("retry once", self.normalized)
+        self.assertIn("report the failure in one line and stop", self.normalized)
+
+    def test_no_connector_surgery(self):
+        self.assertIn("Never repair the connector layer yourself", self.normalized)
+        for forbidden in [
+            "kill connector/router processes",
+            "hermes mcp test",
+            "restart the gateway",
+        ]:
+            with self.subTest(forbidden=forbidden):
+                self.assertIn(forbidden, self.normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

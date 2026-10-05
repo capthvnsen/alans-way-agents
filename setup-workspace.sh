@@ -63,11 +63,13 @@ if [ "$VERIFY" = 1 ]; then
   if [ -n "$MAC_SSH" ]; then
     if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes "$MAC_SSH" true 2>/dev/null; then
       ok "mac ssh reachable: $MAC_SSH"
-      code=$(ssh -T -o BatchMode=yes -o ConnectTimeout=6 "$MAC_SSH" \
-        'curl -s -o /dev/null -m 5 -w "%{http_code}" http://127.0.0.1:9464/v1/status' 2>/dev/null || true)
-      case "$code" in
-        401|403|200) ok "mac workspace API answering on :9464 (http $code)";;
-        *) bad "mac workspace API not answering on :9464 (got '${code:-no response}')";;
+      # Run the router's own probe — the exact code path connections take —
+      # so a broken probe fails here at verify time, not mid-session.
+      decision=$(HERMES_WORKSPACE_MAC_SSH="$MAC_SSH" node "$ROUTER" --probe 2>/dev/null || true)
+      case "$decision" in
+        "mac: "*) ok "router probe → $decision";;
+        "vps (mac unreachable)") warn "router probe → $decision (ok only if the Mac app is asleep/closed right now)";;
+        *) bad "router probe returned no decision";;
       esac
     else
       bad "mac ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the Mac is asleep — this is only a failure if the Mac should be up)"
@@ -88,10 +90,11 @@ if [ "$VERIFY" = 1 ]; then
     skip "vps connection file absent at $CONN (only needed on the VPS host)"
   fi
   if [ -n "$CONFIG" ]; then
-    if [ -f "$CONFIG" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG"; then
-      ok "managed workspace_browser block present in $CONFIG"
+    if [ -f "$CONFIG" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG" \
+        || grep -q '^  workspace_browser:' "$CONFIG"; }; then
+      ok "workspace_browser block present in $CONFIG"
     else
-      bad "no managed workspace_browser block in $CONFIG"
+      bad "no workspace_browser block in $CONFIG"
     fi
   else
     skip "config check (no --config given)"

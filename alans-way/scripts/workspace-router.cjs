@@ -25,6 +25,8 @@
 //   --vps-connection PATH      VPS browser connection.json
 //   --mac-state-file PATH      mac-watch state file
 //                              (default: /var/lib/hermes-alans-way/mac-state.json)
+//   --probe                    run the Mac probe once, print the decision,
+//                              and exit — read-only, for install/verify checks
 // Environment fallbacks: HERMES_WORKSPACE_BOT_ID, HERMES_BOT_NAME,
 //   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_MAC_NODE,
 //   HERMES_WORKSPACE_MAC_MCP, HERMES_WORKSPACE_VPS_MCP,
@@ -72,9 +74,20 @@ const macStateFile =
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
+// Probe finds the newest installed bundle AND proves the app is actually
+// serving — a closed app still has the script on disk, so file-existence
+// alone would route to a dead host. The API answers 401 without auth, which
+// still proves liveness; a refused connection means the app is not running.
 function probeMac(timeoutMs) {
   return new Promise((resolve) => {
-    const probe = macScripts.map(script => `if [ -f ${shQuote(script)} ]; then printf %s ${shQuote(script)}; exit 0; fi`).join('; ') + '; exit 1';
+    const alive =
+      `{ conn="$HOME/Library/Application Support/Hermes Workspace/connection.json"; ` +
+      `[ -f "$conn" ] && ` +
+      `port=$(sed -n 's/.*"url"[^0-9]*[0-9.]*:\\([0-9]*\\).*/\\1/p' "$conn" | head -1) && ` +
+      `curl -s -m 4 -o /dev/null "http://127.0.0.1:\${port:-9464}/status"; }`;
+    const probe = macScripts
+      .map(script => `if [ -f ${shQuote(script)} ] && ${alive}; then printf %s ${shQuote(script)}; exit 0; fi`)
+      .join('; ') + '; exit 1';
     const child = spawn(
       'ssh',
       ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=yes', macSsh, probe],
@@ -168,6 +181,14 @@ function makeAnnotator(host, macConfigured, stateFile) {
 }
 
 async function main() {
+  if (process.argv.includes('--probe')) {
+    const found = macSsh ? await probeMac(12000) : null;
+    process.stdout.write(
+      found ? `mac: ${found}\n` : `vps${macSsh ? ' (mac unreachable)' : ' (no mac-ssh)'}\n`,
+    );
+    return;
+  }
+
   if (!botId) {
     process.stderr.write(
       'workspace-router: --bot-id (or HERMES_WORKSPACE_BOT_ID) is required.\n',
@@ -207,10 +228,23 @@ async function main() {
   }
 
   const child = spawn(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] });
-  const annotate = makeAnnotator(macScript ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
+
+  // Annotation is decoration — a failure here must never take down the
+  // transport (that is how a one-line ReferenceError dropped the whole
+  // browser surface). Degrade to passthrough instead.
+  let annotate;
+  try {
+    annotate = makeAnnotator(macScript ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
+  } catch (e) {
+    process.stderr.write(`workspace-router: annotator disabled: ${e.message}\n`);
+    annotate = (line) => line;
+  }
+
+  let lastActivity = Date.now();
   readline
     .createInterface({ input: child.stdout, crlfDelay: Infinity })
     .on('line', (line) => {
+      lastActivity = Date.now();
       let out;
       try {
         out = annotate(line);
@@ -232,6 +266,32 @@ async function main() {
         child.kill(s);
       } catch {}
     });
+  }
+
+  // Self-correct host drift. A connection that landed on the VPS during a
+  // transient probe miss would otherwise pin the session to the wrong host
+  // until someone killed the process by hand. Hermes lazy-respawns a dead
+  // MCP server and the respawn re-probes, so once mac-watch reports the Mac
+  // online again this process steps aside and routing re-converges on its
+  // own — no agent shell surgery, no approvals. Two consecutive online
+  // reads defend against flapping; the idle window keeps an in-flight tool
+  // call alive.
+  if (!macScript && macSsh) {
+    let onlineStreak = 0;
+    const timer = setInterval(() => {
+      const mac = readMacState(macStateFile);
+      onlineStreak = mac && mac.state === 'online' ? onlineStreak + 1 : 0;
+      if (onlineStreak >= 2 && Date.now() - lastActivity > 60000) {
+        process.stderr.write(
+          'workspace-router: Mac is online — exiting so the next connection re-probes and routes to it\n',
+        );
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+        process.exit(0);
+      }
+    }, 30000);
+    timer.unref();
   }
 }
 

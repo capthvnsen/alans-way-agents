@@ -65,6 +65,22 @@ another host.
 For VPS window input, incomplete accessibility trees, or screenshots returned
 as `MEDIA:` paths, read [VPS desktop operations](references/vps-desktop.md).
 
+## The connector layer self-heals — never operate on it
+
+`workspace_browser_*` tools are served by a routing connector that probes the
+Mac at spawn and re-routes automatically when Mac availability flips. If a
+browser tool call errors or the tools seem missing, retry once: a dead
+connector is respawned fresh and re-probes on its own. If it still fails,
+report the failure in one line and stop.
+
+Never repair the connector layer yourself: do not kill connector/router
+processes, run `hermes mcp test` loops, read or edit router scripts, ssh to
+the Mac to "check the probe", or restart the gateway from a session. That
+surgery spams the user with approval prompts and fixes nothing the next
+respawn would not. Host selection is the router's decision — there is no
+`host:` value you can pass to steer it, and none is needed. A persistent
+outage is a deployment problem; hand it to the user, not to your shell.
+
 ## Work around an offline Mac
 
 Every `workspace_browser` result carries the serving `host` and the Mac's
