@@ -1,6 +1,13 @@
 name: proactive-primary
-version: "0.1.0"
+version: "0.2.0"
 description: "Event-driven reviews by one designated Hermes primary."
 author: "capthvnsen, Hermes Agent"
+license: MIT
+homepage: "https://github.com/capthvnsen/alans-way-agents"
+requires_hermes: ">=0.21"
+tags:
+  - proactivity
+  - orchestrator
+  - workspace
 provides_tools:
   - proactive_control

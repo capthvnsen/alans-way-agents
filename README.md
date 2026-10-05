@@ -29,6 +29,8 @@ cd alans-way-agents
 
 # 1. Plugin + bundled skills (tools, observer, /proactivity commands)
 hermes plugins install ./proactive-primary
+# or straight from GitHub, no clone:
+# hermes plugins install https://github.com/capthvnsen/alans-way-agents#proactive-primary
 
 # 2. Gateway hook — arms proactivity only inside the gateway process
 cp -r hooks/proactive-primary ~/.hermes/hooks/
