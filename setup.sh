@@ -237,7 +237,23 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   step "VPS browser host"
   [ -n "$DESKTOP_DIR" ] || DESKTOP_DIR="$([ "$(id -u)" = 0 ] && echo /opt/hermes-alans-way/browser || echo "$HOME/.local/share/hermes-alans-way/app")"
   if [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ]; then
-    ok "browser scripts already at $DESKTOP_DIR"
+    if [ -d "$DESKTOP_DIR/.git" ]; then
+      OLD_LOCK="$(cksum < "$DESKTOP_DIR/desktop/package-lock.json" 2>/dev/null || true)"
+      OLD_REV="$(git -C "$DESKTOP_DIR" rev-parse HEAD 2>/dev/null || true)"
+      if git -C "$DESKTOP_DIR" pull --ff-only -q 2>/dev/null; then
+        if [ "$OLD_REV" != "$(git -C "$DESKTOP_DIR" rev-parse HEAD)" ]; then
+          BROWSER_UPDATED=1; ok "updated browser scripts in $DESKTOP_DIR"
+          [ "$OLD_LOCK" = "$(cksum < "$DESKTOP_DIR/desktop/package-lock.json")" ] \
+            || rm -rf "$DESKTOP_DIR/desktop/node_modules"
+        else
+          ok "browser scripts at $DESKTOP_DIR are current"
+        fi
+      else
+        warn "could not update $DESKTOP_DIR (local changes?) — using it as is"
+      fi
+    else
+      warn "browser scripts at $DESKTOP_DIR are not a git checkout, so setup can't update them — move it aside and re-run to reinstall"
+    fi
   else
     mkdir -p "$(dirname "$DESKTOP_DIR")"
     if [ -d "$SCRIPT_DIR/../hermes-companion/desktop/scripts" ]; then
@@ -317,6 +333,12 @@ EOF
     $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
       || warn "units written but not started — start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+    # Chromium keeps running so open tabs and sign-ins survive an update.
+    if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
+      $SYSCTL restart hermes-alans-way-browser.service >/dev/null 2>&1 \
+        && ok "browser host restarted on the new scripts" \
+        || warn "could not restart hermes-alans-way-browser.service — restart it to load the update"
+    fi
     # The observer and router read the watcher's default state file under
     # /var/lib, which only a root system unit's StateDirectory provides.
     if [ -n "$MAC_SSH" ] && [ "$SYSCTL" = "systemctl" ] && [ "$(id -u)" = 0 ]; then
