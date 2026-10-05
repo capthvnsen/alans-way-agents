@@ -7,6 +7,7 @@ import os
 import stat
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
+DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
 MAC_STATE_FILE = "/var/lib/hermes-alans-way/mac-state.json"
 
 
@@ -28,7 +29,7 @@ def mac_state():
 
 
 def read_source(home: Path, relative: str):
-    if relative not in SOURCES:
+    if relative not in SOURCES + DOCUMENTS:
         raise ValueError("unsupported observation source")
     path = home / relative
     try:
@@ -49,20 +50,43 @@ def read_source(home: Path, relative: str):
         text = body.decode("utf-8")
         if any(ord(c) < 32 and c not in "\n\t\r" for c in text):
             return None
-        return {"digest": sha256(body).hexdigest(), "text": text}
+        return {"digest": sha256(body).hexdigest(), "text": text,
+                "modified": datetime.fromtimestamp(before.st_mtime, timezone.utc).isoformat()}
     except (OSError, UnicodeError, ValueError):
         return None
 
 
+def capabilities(home: Path):
+    try:
+        root = home / "skills"
+        if root.is_symlink() or not root.is_dir():
+            return None
+        names = []
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if len(names) >= 48:
+                break
+            if entry.is_symlink() or not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name == entry.name.encode("ascii", "ignore").decode() and \
+                    entry.name.replace("-", "").replace("_", "").replace(".", "").isalnum():
+                names.append(entry.name[:64])
+        return names
+    except OSError:
+        return None
+
+
 def collect(home: Path, ledger, ctx=None):
-    memory, schedule, signatures = [], [], {}
-    for source in SOURCES:
+    memory, schedule, documents, signatures = [], [], [], {}
+    for source in SOURCES + DOCUMENTS:
         value = read_source(home, source)
         if value is None:
             continue
         signatures[source] = value["digest"]
         if source.startswith("memories/"):
             memory.append({"source": Path(source).name, "text": value["text"][:3072]})
+        elif source in DOCUMENTS:
+            documents.append({"source": source, "text": value["text"][:3072],
+                              "modified": value["modified"]})
         else:
             try:
                 document = json.loads(value["text"])
@@ -94,6 +118,9 @@ def collect(home: Path, ledger, ctx=None):
     board = collect_board(home)
     if board:
         signatures["board"] = board_signature(board)
+    skills = capabilities(home)
+    if skills is not None:
+        signatures["skills"] = sha256("\n".join(skills).encode()).hexdigest()
     tasks = []
     now = datetime.now(timezone.utc)
     for task in snapshot["tasks"]:
@@ -127,7 +154,8 @@ def collect(home: Path, ledger, ctx=None):
               "approved_at": by_id[task["id"]]["approved_at"], "status": task["status"]}
              for task in tasks]
     return {"memory": memory, "schedule": schedule, "tasks": tasks,
-            "preferences": preferences, "goals": goals, "board": board}, signatures
+            "preferences": preferences, "goals": goals, "board": board,
+            "documents": documents, "capabilities": skills or []}, signatures
 
 
 def observe(runtime):

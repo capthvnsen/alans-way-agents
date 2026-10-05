@@ -80,8 +80,15 @@ The observer also sweeps the shared `kanban.db` read-only
 bot's review context, so a blocked or changed card from another agent can
 surface as one bounded opportunity — never a reason to touch someone else's
 card. Combined with the connector's overseer role (`HERMES_OVERSEER_BOTS` /
-`HERMES_OVERSEER_BOT_IDS`, see `integration.md` in the app repo), the lead
+`HERMES_OVERSEER_BOT_IDS`, see `integration.md` in the app repo), the primary
 can answer "who is working where" and release a runaway tab.
+
+Review context also carries `documents` — excerpts and modified times of the
+primary's own identity files (`SOUL.md`, `AGENTS.md`, `IDENTITY.md`) — and
+`capabilities`, the installed skill names. With `schedule` (enabled cron
+metadata) that lets the appraiser weigh the wider remit: an upcoming
+commitment worth surfacing, a capability gap worth one `ask` or a bounded
+skill-building proposal, or a stale identity document worth a draft update.
 
 ```sh
 sudo cp deploy/mac-watch.service /etc/systemd/system/
