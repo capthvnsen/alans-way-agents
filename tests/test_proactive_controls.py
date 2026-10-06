@@ -2,9 +2,11 @@
 from pathlib import Path
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,13 +28,43 @@ class ControlTests(unittest.TestCase):
             runtime = module.Runtime(None, Path(directory))
             route = "agent:main:telegram:dm:123456789"
             runtime.store.update_policy({"session_key": route})
-            self.assertIn("Proactivity: enabled", runtime.command("resume"))
-            configured = runtime.command('configure {"quiet_start":23}')
-            self.assertIn("23:00–08:00", configured)
-            self.assertNotIn(route, configured)
-            self.assertNotIn('"audit"', configured)
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                self.assertIn("Proactivity: enabled", runtime.command("resume"))
+                configured = runtime.command('configure {"quiet_start":23}')
+                self.assertIn("23:00–08:00", configured)
+                self.assertNotIn(route, configured)
+                self.assertNotIn('"audit"', configured)
+                self.assertIn("Proactivity: paused", runtime.command("pause"))
+                self.assertIn("no useful opportunity", runtime.command("review"))
+            runtime.close()
+
+    def test_mutations_and_watch_disclosure_stay_on_the_bound_route(self):
+        """Plugin slash commands bypass the gateway's slash access check, so
+        any session that can message the bot could otherwise pause, retune or
+        read private watch scopes. Read-only status stays open; an unbound
+        install stays fully open so setup can bind it."""
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            route = "agent:main:telegram:dm:123456789"
+            runtime.ledger.record_task({"id": "rent", "title": "Rent watch",
+                "scope": "Check rent postings", "next_action": "Check",
+                "owner": "primary", "status": "active", "approved": True})
+            # Unbound: everything works — setup needs to reach these controls.
+            self.assertIn("Standing watches", runtime.watch_command("list"))
             self.assertIn("Proactivity: paused", runtime.command("pause"))
-            self.assertIn("no useful opportunity", runtime.command("review"))
+            runtime.store.update_policy({"session_key": route})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:main:telegram:dm:999"}):
+                denied = runtime.command("pause")
+                self.assertIn("bound", denied)
+                self.assertNotIn("Proactivity: paused", denied)
+                self.assertNotIn("rent", runtime.watch_command("list"))
+                self.assertNotIn("Rent watch", runtime.watch_command("show rent"))
+                # Read-only status remains usable from any session.
+                self.assertIn("Proactivity:", runtime.command("status"))
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                self.assertIn("Proactivity: paused", runtime.command("pause"))
+                self.assertIn("rent", runtime.watch_command("list"))
             runtime.close()
 
     def test_interactive_review_returns_now_while_paused_without_queue_or_injection(self):

@@ -321,9 +321,35 @@ class Runtime:
         except Exception:
             return json.dumps({"ok": False, "error": "Invalid or unsupported proactivity control; no success is claimed"})
 
+    def _caller_session_key(self):
+        """The route Hermes bound around this command handler's session.
+
+        The gateway binds HERMES_SESSION_* as contextvars while dispatching a
+        plugin slash command; ``get_session_env`` reads them with an
+        os.environ fallback for hosts where Hermes is not importable.
+        """
+        try:
+            from gateway.session_context import get_session_env
+            return get_session_env("HERMES_SESSION_KEY") or ""
+        except Exception:
+            import os
+            return os.environ.get("HERMES_SESSION_KEY", "")
+
+    def _bound_route_only(self):
+        """Mutating or disclosing chat controls belong to the bound route.
+
+        Plugin slash commands bypass the gateway's slash access check, so any
+        session that can message the bot could otherwise pause, retune or read
+        private watch scopes. An unbound install stays open so setup works.
+        """
+        bound = self.store.load_policy().session_key
+        return not bound or self._caller_session_key() == bound
+
     def command(self, raw_args):
         parts = raw_args.strip().split(maxsplit=1)
         action = parts[0] if parts else "status"
+        if action != "status" and not self._bound_route_only():
+            return "Proactivity controls are only available on the bound conversation."
         args = {"action": action}
         if action == "configure":
             try:
@@ -363,6 +389,8 @@ class Runtime:
         bypass nothing: they call the same validated ledger paths the tool
         uses, and mutation output always reads back live state.
         """
+        if not self._bound_route_only():
+            return "Watch controls are only available on the bound conversation."
         parts = raw_args.strip().split(maxsplit=1)
         action, rest = parts[0] if parts else "list", parts[1] if len(parts) > 1 else ""
         try:
