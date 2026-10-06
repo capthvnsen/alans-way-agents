@@ -273,13 +273,20 @@ def observe(runtime):
     now = datetime.now(timezone.utc)
     with runtime.ledger.transaction() as state:
         previous = state["observations"]
+        # The baseline may only advance for a change the store actually
+        # admitted: a diff consumed while the gate is busy or admission was
+        # refused (headroom, storage_full, dedupe) is a change never woken
+        # for, so it stays outstanding for a later pass.
         for source, digest in signatures.items():
             old = previous.get(source)
-            if old is not None and old != digest and not active:
+            if old is None or old == digest:
+                previous[source] = digest
+            elif not active:
                 evidence = sha256((source + ":" + digest).encode()).hexdigest()
                 kind = "task_changed" if source.startswith("task:") else "context_changed"
-                admitted += int(runtime.store.record_event(kind, evidence, purpose=purposeful))
-            previous[source] = digest
+                if runtime.store.record_event(kind, evidence, purpose=purposeful):
+                    admitted += 1
+                    previous[source] = digest
         # A reported signal change on an approved watch is an opted-in event:
         # the collector writes state, the observer diffs it, a change wakes.
         for task in state["tasks"].values():
@@ -290,10 +297,13 @@ def observe(runtime):
                                         separators=(",", ":")).encode()).hexdigest()
                       if type(task.get("signal")) is str else None)
             old = previous.get(key)
-            if digest is not None and old is not None and old != digest and not active:
+            if old is None or old == digest or digest is None:
+                previous[key] = digest
+            elif not active:
                 evidence = sha256((key + ":" + digest).encode()).hexdigest()
-                admitted += int(runtime.store.record_event("task_changed", evidence, purpose=True))
-            previous[key] = digest
+                if runtime.store.record_event("task_changed", evidence, purpose=True):
+                    admitted += 1
+                    previous[key] = digest
         admitted += _admit_due(runtime, state["tasks"], now, active)
         previous["__heartbeat"] = now.isoformat()
     return admitted
