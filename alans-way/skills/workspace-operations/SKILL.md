@@ -207,7 +207,8 @@ read as text.
 
 Desktop apps, on the Mac and on the Linux machine, use `workspace_computer_apps`,
 then `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
-`ref` from that snapshot. Pass `since=` the previous snapshot's generation
+`ref` from that snapshot. `type` replaces the text of a ref and does not send
+keystrokes. Pass `since=` the previous snapshot's generation
 for a cheap `{unchanged:true}` when that desktop tree is the same. The action
 result includes `generation`. When it says `unchanged`, do not snapshot again.
 When it includes `elements`, that is the fresh tree. On a Mac,
