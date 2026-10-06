@@ -384,5 +384,40 @@ class NodePreflightTests(unittest.TestCase):
             self.assertIn("below 22", result.stdout)
 
 
+class MacConnectorCopyTests(unittest.TestCase):
+    def test_copies_the_whole_connector_when_the_mac_has_no_npm(self):
+        # A computer with only the downloaded app has no npm and maybe no
+        # swiftc. The router runs the connector with the app's runtime and
+        # node_modules, so the copy must still land complete without them.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "hermes_home"
+            home.mkdir()
+            app = root / "app"
+            (app / "desktop" / "scripts").mkdir(parents=True)
+            (app / "desktop" / "src").mkdir()
+            (app / "desktop" / "node_modules" / "@modelcontextprotocol").mkdir(parents=True)
+            for name in ("browser-mcp.cjs", "mac-computer.swift"):
+                (app / "desktop" / "scripts" / name).write_text("// stub\n", encoding="utf-8")
+            for name in ("computer.cjs", "core.cjs", "vps-computer.cjs", "connector-reload.cjs"):
+                (app / "desktop" / "src" / name).write_text("// stub\n", encoding="utf-8")
+            log = root / "remote.log"
+            bin_dir = logging_hermes_bin(root, root / "hermes.log")
+            for tool, body in (("ssh", 'case "$*" in *npm*|*swiftc*) exit 127;; esac; exit 0'), ("scp", "exit 0")):
+                path = bin_dir / tool
+                path.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{log}"\n{body}\n')
+                path.chmod(0o755)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(
+                [SH, str(SCRIPT), "--bot-id", "111222333", "--mac-ssh", "me@mac", "--desktop-dir", str(app),
+                 "--skip-services", "--non-interactive", "--hermes-home", str(home)],
+                capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+            remote = log.read_text(encoding="utf-8")
+            self.assertIn("Mac connector updated", result.stdout, result.stdout + result.stderr)
+            self.assertIn("core.cjs", remote)
+            self.assertIn("vps-computer.cjs", remote)
+
+
 if __name__ == "__main__":
     unittest.main()
