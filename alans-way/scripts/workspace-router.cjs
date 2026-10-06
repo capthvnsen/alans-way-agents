@@ -253,17 +253,60 @@ function freshMacState(file, maxAgeMs = 45000) {
 
 // Human-readable line appended to tool results — the channel the agent sees.
 // Only meaningful when this connection fell back to the VPS host.
-function workspaceNotice(host, mac) {
+const RESUME_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+function resumePath(stateFile) {
+  return path.join(path.dirname(stateFile), 'resume-url.json');
+}
+
+function pageUrlFromMessage(msg) {
+  const parts = msg && msg.result && msg.result.content;
+  if (!Array.isArray(parts)) return null;
+  for (const part of parts) {
+    if (!part || part.type !== 'text' || typeof part.text !== 'string') continue;
+    const match = part.text.match(/"url"\s*:\s*"(https:\/\/[^"\\]{8,500})"/);
+    if (!match) continue;
+    try {
+      const url = new URL(match[1]);
+      if (url.username || url.password || url.protocol !== 'https:') continue;
+      url.hash = '';
+      if (url.href.length > 500) continue;
+      return url.href;
+    } catch { /* a bad url is not a page to resume */ }
+  }
+  return null;
+}
+
+function writeResume(file, url) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ url, at: Date.now() }));
+    fs.renameSync(tmp, file);
+  } catch { /* remembering a page must not break the tool result */ }
+}
+
+function readResume(file, now = Date.now()) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!data || typeof data.url !== 'string' || typeof data.at !== 'number') return null;
+    if (now - data.at > RESUME_MAX_AGE_MS) return null;
+    return data.url;
+  } catch { return null; }
+}
+
+function workspaceNotice(host, mac, resumeUrl) {
   if (!mac || host !== 'vps') return null;
   if (mac.state === 'online') {
     return (
       `[workspace] Mac is back online as of ${mac.since || 'unknown'} — ` +
-      'tasks waiting on Mac-local resources can resume.'
+      'tasks waiting on Mac-local resources can resume. New web work goes to the in-app Mac browser.'
     );
   }
+  const page = resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
   return (
     `[workspace] Mac unreachable since ${mac.since || 'unknown'} — ` +
-    'routed to VPS browser; Mac-local files unavailable.'
+    `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the Mac keep going. Mac-local files are unavailable.`
   );
 }
 
@@ -285,6 +328,7 @@ function annotateResult(msg, host, mac, notice) {
 // result, since either may be the agent's only signal that host changed.
 function makeAnnotator(host, macConfigured, stateFile) {
   let onlineAnnounced = false;
+  const remembered = resumePath(stateFile);
   return function annotateLine(line) {
     let msg;
     try {
@@ -294,15 +338,20 @@ function makeAnnotator(host, macConfigured, stateFile) {
       return null;
     }
     if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return line;
+    if (host === 'mac') {
+      const seen = pageUrlFromMessage(msg);
+      if (seen) writeResume(remembered, seen);
+    }
     const mac = macConfigured ? readMacState(stateFile) : null;
+    const resume = host === 'vps' ? readResume(remembered) : null;
     let notice = null;
     if (mac && Array.isArray(msg.result.content)) {
       if (mac.state === 'online') {
-        if (!onlineAnnounced) notice = workspaceNotice(host, mac);
+        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume);
         onlineAnnounced = true;
       } else {
         onlineAnnounced = false;
-        notice = workspaceNotice(host, mac);
+        notice = workspaceNotice(host, mac, resume);
       }
     }
     return JSON.stringify(annotateResult(msg, host, mac, notice));
@@ -491,6 +540,10 @@ module.exports = {
   readMacState,
   freshMacState,
   workspaceNotice,
+  pageUrlFromMessage,
+  readResume,
+  writeResume,
+  resumePath,
   annotateResult,
   makeAnnotator,
   macBackendCommand,

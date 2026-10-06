@@ -136,6 +136,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
         self.assertIn("Open the same URL with `cua_alans_way_open`", self.normalized)
+        self.assertIn("If the `[workspace]` line names a page, open that URL.", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
         self.assertIn("A closed laptop is not this handoff.", self.normalized)
