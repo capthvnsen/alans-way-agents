@@ -178,6 +178,7 @@ path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ[
 lines = open(path).read().splitlines(keepends=True)
 has_managed = any(l.rstrip("\n") == mark_b for l in lines)
 out, skipping, inserted = [], False, False
+in_servers, adopting = False, False
 # Insert under the profile's own top-level mcp_servers key, never a nested or
 # commented one. A top-level key has no leading whitespace and no trailing text.
 for line in lines:
@@ -188,6 +189,21 @@ for line in lines:
     if skipping:
         if line.rstrip("\n") == mark_e:
             skipping = False
+        continue
+    stripped = line.rstrip("\n")
+    if stripped and not stripped.startswith((" ", "#")):
+        in_servers = stripped == "mcp_servers:"
+    # A hand-pasted, unmarked entry is replaced in place; a second
+    # workspace_browser key would leave Hermes silently using one of them.
+    if adopting:
+        if not stripped or stripped.startswith("   "):
+            continue
+        adopting = False
+    if not has_managed and in_servers and stripped == "  workspace_browser:":
+        if not inserted:
+            out.append(block + "\n")
+            inserted = True
+        adopting = True
         continue
     out.append(line)
     if not has_managed and not inserted:

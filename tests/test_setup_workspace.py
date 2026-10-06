@@ -83,6 +83,27 @@ class ConfigEditTests(unittest.TestCase):
             self.assertIn('- "newbot"', text)
             self.assertIn("  other:\n    command: echo", text)
 
+    def test_adopts_a_hand_written_entry_instead_of_duplicating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "mcp_servers:\n"
+                "  workspace_browser:\n"
+                "    command: node\n"
+                "    args:\n"
+                "      - /old/router.cjs\n"
+                "    timeout: 30\n"
+                "  other:\n    command: echo\n"
+                "model:\n  default: gpt-4\n",
+                encoding="utf-8")
+            run("--bot-id", "newbot", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertEqual(text.count("workspace_browser:"), 1)
+            self.assertNotIn("/old/router.cjs", text)
+            self.assertIn('- "newbot"', text)
+            self.assertIn("  other:\n    command: echo", text)
+            self.assertIn("model:\n  default: gpt-4", text)
+
     def test_special_chars_are_quoted_safely(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.yaml"
