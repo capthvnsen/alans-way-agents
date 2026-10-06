@@ -89,7 +89,7 @@ class PluginTests(unittest.TestCase):
         self.assertLess(abs((datetime.now(timezone.utc) - started).total_seconds()), 86400)
 
     def test_gateway_hook_is_passive_for_non_startup_events(self):
-        hook = ROOT / "hooks/alans-way/handler.py"
+        hook = ROOT / "alans-way/gateway-hook/handler.py"
         spec = importlib.util.spec_from_file_location("proactive_hook_test", hook)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -101,7 +101,7 @@ class PluginTests(unittest.TestCase):
             self.assertTrue((home / "companion/proactivity/gateway-owner.json").exists())
 
     def test_gateway_hook_accepts_the_legacy_plugin_path_environment(self):
-        hook = ROOT / "hooks/alans-way/handler.py"
+        hook = ROOT / "alans-way/gateway-hook/handler.py"
         spec = importlib.util.spec_from_file_location("proactive_hook_legacy_test", hook)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

@@ -11,28 +11,29 @@ this plugin, and do not replace this plugin with a git checkout.
 
 ## Drive the other repo; don't reimplement it
 
-Fetch and follow this page exactly. Its text block is the setup:
+Fetch this page and follow it for Tailscale, the Mac app, and SSH keys:
 
 https://raw.githubusercontent.com/capthvnsen/alans-way/main/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
-That page connects Tailscale, installs the Mac app, and pins SSH keys. When
-it tells you to run `setup.sh` from `alans-way-agents`, clone that repo only
-to run the script, and pass `--skip-plugin` so this installed copy stays in
-place:
+The Mac app requires an Apple Silicon Mac. This plugin is already installed,
+so do not run a `setup.sh` line from that page that omits `--skip-plugin`.
+Use this command instead. `--non-interactive` means you do not wait for
+`setup.sh` prompts; ask the proactivity question yourself first. Add
+`--profile <name>` unless the profile is `default`.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
 ~/alans-way-agents/setup.sh --skip-plugin --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<mac-host> --timezone <IANA-zone> --non-interactive \
-    --bind --proactive <yes|no> --restart
+    --bind --proactive <yes|no> [--profile <name>] --restart
 ```
 
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
-audit. Follow its prompts. If it asks which Telegram route is the primary,
-pick the bot matching the conversation you're in unless the user said
-otherwise — do not bind a different bot's route silently.
+audit. If it asks which Telegram route is the primary, pick the bot matching
+the conversation you're in unless the user said otherwise — do not bind a
+different bot's route silently.
 
 ## Order of work
 
