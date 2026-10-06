@@ -192,9 +192,8 @@ pending queue also reserves headroom so speculative noise cannot starve them.
 A re-armed instance retires as stale; a finished watch's queued wake is
 rejected. `/watch list|show|add {json}|pause|resume|done|cancel|signal` is the
 operator's direct surface over the ledger; like mutating `/proactivity`
-actions and the `proactive_control` tool, it answers only on the bound
-conversation; status stays open. A multiplexed gateway dispatches those
-slash commands on the launch profile only — other profiles use the tool.
+actions and `proactive_control`, it answers only on the bound
+conversation; status stays open.
 
 Telegram remains the conversation owner. A watch's `execution_host` is `cloud`
 or `mac`; omitting it preserves the existing choice. Explicitly local work

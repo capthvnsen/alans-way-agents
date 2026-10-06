@@ -363,6 +363,8 @@ class Runtime:
         Plugin slash commands bypass the gateway's slash access check, so any
         session that can message the bot could otherwise pause, retune or read
         private watch scopes. An unbound install stays open so setup works.
+        A multiplexed gateway dispatches slash commands on the launch profile's
+        runtime only; other profiles reach this store through the tool.
         """
         bound = self.store.load_policy().session_key
         return not bound or self._caller_session_key() == bound
