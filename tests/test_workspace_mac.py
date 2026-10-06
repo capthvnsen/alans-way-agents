@@ -587,7 +587,7 @@ class DeadBackendFallbackTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "for last in \"$@\"; do :; done\n"
                 "case \"$last\" in\n"
-                "  *conn_script*) printf %s \"/Users/x/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
+                "  *conn_script*) printf %s \"/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
                 "  *) exit 1 ;;\n"  # the remote backend dies instantly
                 "esac\n",
                 encoding="utf-8")
