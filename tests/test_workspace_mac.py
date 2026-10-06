@@ -615,6 +615,24 @@ class MacWatchScriptTests(MacStateEnvTest):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((state_dir / "mac-state.json").read_text())["state"], "online")
 
+    def test_without_node_it_warns_and_the_ssh_fallback_has_keepalives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "ssh").write_text('#!/bin/sh\necho "$@" >> "%s/args"\nexit 0\n' % directory)
+            (bin_dir / "ssh").chmod(0o755)
+            path = str(bin_dir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+            if shutil.which("node", path=path):
+                self.skipTest("node is on the minimal PATH")
+            env = dict(os.environ, PATH=path, HERMES_WORKSPACE_MAC_SSH="test@mac",
+                       HERMES_MAC_STATE_FILE=str(Path(directory) / "s" / "mac-state.json"))
+            result = subprocess.run(["/bin/sh", str(WATCH), "--once"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("probing sshd only", result.stderr)
+            args = (Path(directory) / "args").read_text()
+            self.assertIn("ServerAliveInterval=5", args)
+            self.assertIn("ServerAliveCountMax=2", args)
+
 
 @unittest.skipUnless(NODE, "node is required for router tests")
 class WindowsRouterTests(unittest.TestCase):
@@ -814,30 +832,48 @@ class RouterHelperTests(unittest.TestCase):
             self.assertIn("Reopen https://docs.example/d/abc and continue.", json.loads(line)["result"]["content"][1]["text"])
 
     def test_a_large_result_is_annotated_without_parsing_it(self):
+        # Both key orders: {"jsonrpc","id","result"} and what the MCP SDK
+        # really writes, {"result":...,"jsonrpc":"2.0","id":N}.
         out = self.js(r"""
 const router = require(process.argv[1]);
-const pending = new Map([[7, { method: 'tools/call' }]]);
-const big = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'image', data: 'A'.repeat(3000000), mimeType: 'image/png' }] } });
-const realParse = JSON.parse;
-JSON.parse = (text, ...rest) => { if (String(text).length > 100000) throw new Error('parsed a screenshot'); return realParse(text, ...rest); };
 const fs = require('fs'), os = require('os'), path = require('path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsr-'));
 const state = path.join(dir, 'mac-state.json');
 fs.writeFileSync(state, JSON.stringify({ state: 'offline', since: 'T0' }));
-router.noteServerRpc(big, pending);
-const out = router.makeAnnotator('vps', true, state)(big);
-JSON.parse = realParse;
-const msg = JSON.parse(out);
-process.stdout.write(JSON.stringify({ pending: pending.size, parts: msg.result.content.map((p) => p.type), meta: msg.result._meta, same: msg.result.content[0].data.length }));
+const content = [{ type: 'image', data: 'A'.repeat(3000000), mimeType: 'image/png' }];
+const lines = {
+  idFirst: JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content } }),
+  sdk: JSON.stringify({ result: { content }, jsonrpc: '2.0', id: 7 }),
+  sdkStringId: JSON.stringify({ result: { content }, jsonrpc: '2.0', id: 'abc' }),
+};
+const realParse = JSON.parse;
+const out = {};
+for (const [name, line] of Object.entries(lines)) {
+  const id = name === 'sdkStringId' ? 'abc' : 7;
+  const pending = new Map([[id, { method: 'tools/call' }]]);
+  JSON.parse = (text, ...rest) => { if (String(text).length > 100000 && text !== undefined && !/^"/.test(text)) throw new Error('parsed a screenshot'); return realParse(text, ...rest); };
+  router.noteServerRpc(line, pending);
+  const annotated = router.makeAnnotator('vps', true, state)(line);
+  JSON.parse = realParse;
+  const msg = JSON.parse(annotated);
+  out[name] = { pending: pending.size, parts: msg.result.content.map((p) => p.type), meta: msg.result._meta.workspace.mac.state, id: msg.id, size: msg.result.content[0].data.length };
+}
+// An unrecognised big shape (isError after content) is parsed, not skipped.
+const odd = JSON.stringify({ result: { content, isError: true }, jsonrpc: '2.0', id: 9 });
+const pendingOdd = new Map([[9, {}]]);
+router.noteServerRpc(odd, pendingOdd);
+const oddMsg = JSON.parse(router.makeAnnotator('vps', true, state)(odd));
+out.odd = { pending: pendingOdd.size, parts: oddMsg.result.content.map((p) => p.type), host: oddMsg.result._meta.workspace.host };
+process.stdout.write(JSON.stringify(out));
 """)
         data = json.loads(out)
-        self.assertEqual(data["pending"], 0)
-        self.assertEqual(data["parts"], ["image", "text"])
-        self.assertEqual(data["meta"]["workspace"]["host"], "vps")
-        self.assertEqual(data["meta"]["workspace"]["mac"]["state"], "offline")
-        self.assertEqual(data["same"], 3000000)
+        for name, expected_id in (("idFirst", 7), ("sdk", 7), ("sdkStringId", "abc")):
+            with self.subTest(shape=name):
+                self.assertEqual(data[name], {"pending": 0, "parts": ["image", "text"], "meta": "offline",
+                                              "id": expected_id, "size": 3000000})
+        self.assertEqual(data["odd"], {"pending": 0, "parts": ["image", "text"], "host": "vps"})
 
-    def test_restore_mirror_posts_the_bot_and_returns_only_valid_ids(self):
+    def test_restore_mirror_reports_what_the_host_did(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = Path(directory) / "connection.json"
             connection.write_text(json.dumps({"url": "http://127.0.0.1:9", "token": "tok"}))
@@ -845,59 +881,87 @@ process.stdout.write(JSON.stringify({ pending: pending.size, parts: msg.result.c
 const router = require(process.argv[1]);
 (async () => {
   const calls = [];
-  const fetchImpl = async (url, opts) => {
-    calls.push({ url: String(url), method: opts.method, body: opts.body, headers: opts.headers });
-    return { ok: true, json: async () => ({ map: { 'tab-1': 'vps-1', 'bad id': 'x', 'tab-2': '../etc' } }) };
-  };
-  const map = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1', botName: 'Al', fetchImpl });
-  const refused = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1',
-    fetchImpl: async () => ({ ok: false, json: async () => ({}) }) });
-  const empty = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1',
-    fetchImpl: async () => ({ ok: true, json: async () => ({ map: {} }) }) });
-  const none = await router.restoreMirror({ connectionFile: '/nonexistent', botId: 'bot-1', fetchImpl });
-  process.stdout.write(JSON.stringify({ map, refused, empty, none, call: calls[0] }));
+  const ok = (body, status = 200) => async (url, opts) => { calls.push({ url: String(url), method: opts.method, body: opts.body, headers: opts.headers }); return { ok: status < 300, status, json: async () => body }; };
+  const timeout = () => { const e = new Error('timed out'); e.name = 'TimeoutError'; throw e; };
+  const args = (fetchImpl) => ({ connectionFile: process.argv[2], botId: 'bot-1', botName: 'Al', timeoutMs: 50, retryMs: 50, fetchImpl });
+  const restored = await router.restoreMirror(args(ok({
+    map: { 'tab-1': 'vps-1', 'tab-3': 'vps-3', 'bad id': 'x', 'tab-2': '../etc' },
+    verification: { 'tab-1': 'verified', 'tab-3': 'review_required' } })));
+  const first = calls[0];
+  const none404 = await router.restoreMirror(args(ok({}, 404)));
+  const none = await router.restoreMirror(args(ok({ map: {} })));
+  const down500 = await router.restoreMirror(args(ok({}, 500)));
+  const downRefused = await router.restoreMirror(args(async () => { throw new TypeError('fetch failed'); }));
+  const downNoFile = await router.restoreMirror({ ...args(ok({})), connectionFile: '/nonexistent' });
+  let n = 0;
+  const slowThenFast = await router.restoreMirror(args(async (url, opts) => {
+    n += 1;
+    if (n === 1) timeout();
+    return { ok: true, status: 200, json: async () => ({ map: { a: 'b' } }) };
+  }));
+  let m = 0;
+  const pending = await router.restoreMirror(args(async () => { m += 1; timeout(); }));
+  process.stdout.write(JSON.stringify({ restored, none404, none, down500, downRefused, downNoFile, slowThenFast, retries: n, pending, attempts: m, first }));
 })();
 """, str(connection))
             data = json.loads(out)
-            self.assertEqual(data["map"], {"tab-1": "vps-1"})
-            self.assertIsNone(data["refused"])
-            self.assertIsNone(data["empty"])
-            self.assertIsNone(data["none"])
-            self.assertEqual(data["call"]["url"], "http://127.0.0.1:9/v1/restore")
-            self.assertEqual(data["call"]["method"], "POST")
-            self.assertEqual(json.loads(data["call"]["body"]), {"bot": "bot-1"})
-            self.assertEqual(data["call"]["headers"]["Authorization"], "Bearer tok")
-            self.assertEqual(data["call"]["headers"]["X-Hermes-Bot"], "bot-1")
+            self.assertEqual(data["restored"], {"status": "restored", "map": {"tab-1": "vps-1", "tab-3": "vps-3"},
+                                                "review": ["vps-3"]})
+            for key in ("none404", "none"):
+                self.assertEqual(data[key], {"status": "none"})
+            for key in ("down500", "downRefused", "downNoFile"):
+                self.assertEqual(data[key], {"status": "down"})
+            self.assertEqual(data["slowThenFast"]["map"], {"a": "b"})
+            self.assertEqual(data["retries"], 2)
+            self.assertEqual(data["pending"], {"status": "pending"})
+            self.assertEqual(data["attempts"], 2)
+            self.assertEqual(data["first"]["url"], "http://127.0.0.1:9/v1/restore")
+            self.assertEqual(data["first"]["method"], "POST")
+            self.assertEqual(json.loads(data["first"]["body"]), {"bot": "bot-1"})
+            self.assertEqual(data["first"]["headers"]["Authorization"], "Bearer tok")
+            self.assertEqual(data["first"]["headers"]["X-Hermes-Bot"], "bot-1")
 
-    def test_failover_notice_names_restored_tabs_and_logins(self):
+    def test_failover_notice_names_restored_tabs_without_overclaiming_logins(self):
         out = self.js(r"""
 const r = require(process.argv[1]);
 process.stdout.write(JSON.stringify([
-  r.continuationNotice({ map: { 'h-1': 'v-1', 'h-2': 'v-2' } }),
+  r.continuationNotice({ map: { 'h-1': 'v-1', 'h-2': 'v-2' }, review: ['v-2'] }),
   r.continuationNotice({ continued: { url: 'https://docs.example/d/abc', tabId: 'v-9' } }),
   r.continuationNotice({}, 'Windows host'),
+  r.continuationNotice({ status: 'pending' }),
+  r.continuationNotice({ status: 'down' }),
 ]));
 """)
-        mirrored, continued, bare = json.loads(out)
-        self.assertIn("Restored 2 tabs with their logins carried over", mirrored)
+        mirrored, continued, bare, pending, down = json.loads(out)
+        self.assertIn("Restored 2 tabs", mirrored)
         self.assertIn("h-1 -> v-1, h-2 -> v-2", mirrored)
+        self.assertIn("Cookies were restored for tabs that had them", mirrored)
+        self.assertNotIn("logins carried over", mirrored)
+        self.assertIn("Look at these before acting", mirrored)
+        self.assertIn("v-2", mirrored.split("Look at these")[1])
         self.assertIn("Continued https://docs.example/d/abc as VPS tab v-9", continued)
         self.assertIn("Logins did not carry over", continued)
         self.assertIn("Windows host connection lost", bare)
-        for text in (mirrored, continued, bare):
+        self.assertIn("No tabs were mirrored", bare)
+        self.assertIn("still restoring", pending)
+        self.assertNotIn("No tabs were mirrored", pending)
+        self.assertIn("VPS browser is not responding", down)
+        self.assertNotIn("No tabs were mirrored", down)
+        for text in (mirrored, continued, bare, pending, down):
             self.assertNotIn("—", text)
 
-    def test_only_the_connector_unavailable_error_counts_toward_failover(self):
+    def test_only_the_connection_file_error_counts_toward_failover(self):
         out = self.js(r"""
 const r = require(process.argv[1]);
-const err = (text) => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text }] } });
+const err = (text) => JSON.stringify({ result: { content: [{ type: 'text', text }], isError: true }, jsonrpc: '2.0', id: 1 });
 process.stdout.write(JSON.stringify([
+  r.hostUnavailableLine(err('Configured browser unavailable: start its app or browser host first.')),
   r.hostUnavailableLine(err('Configured browser unavailable or timed out. Inspect existing task state before retrying an action.')),
   r.hostUnavailableLine(err('Timed out waiting for selector #x')),
-  r.hostUnavailableLine(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Configured browser unavailable' }] } })),
+  r.hostUnavailableLine(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Configured browser unavailable: start its app' }] } })),
 ]));
 """)
-        self.assertEqual(json.loads(out), [True, False, False])
+        self.assertEqual(json.loads(out), [True, False, False, False])
 
 
 def _posix_env(home, bin_dir, **extra):
@@ -983,7 +1047,9 @@ class HostCommandShellTests(unittest.TestCase):
              "process.stdout.write(require(process.argv[1]).linuxBackendCommand('/x/browser-mcp.cjs', '', 'bot-1', \"o'hara\"))",
              str(ROUTER)], capture_output=True, text=True, check=True).stdout
         self.assertIn("ELECTRON_RUN_AS_NODE=1", out)
+        self.assertIn("'/opt/alans-way-localapp-linux-x64'/alans-way-localapp", out)
         self.assertIn("'/opt/alans-way-localapp'/alans-way-localapp", out)
+        self.assertIn('"$HOME/.local/share/alans-way-localapp-linux-x64"/alans-way-localapp', out)
         self.assertIn("XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json", out)
         self.assertIn("--bot-name 'o'\\''hara'", out)
         self.assertEqual(subprocess.run([SH, "-n", "-c", out]).returncode, 0)
@@ -1016,12 +1082,14 @@ class HostOsTests(unittest.TestCase):
 class FakeVmHost:
     """The VPS browser host's loopback API: only POST /v1/restore is served."""
 
-    def __init__(self, mapping=None, delay=0.0):
+    def __init__(self, mapping=None, delay=0.0, first_delay=None, verification=None):
         import http.server
         import threading
         self.requests = []
         self.mapping = mapping
         self.delay = delay
+        self.first_delay = delay if first_delay is None else first_delay
+        self.verification = verification or {}
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1029,9 +1097,9 @@ class FakeVmHost:
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
                 outer.requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
                                        "bot": self.headers.get("X-Hermes-Bot"), "body": body})
-                time.sleep(outer.delay)
+                time.sleep(outer.first_delay if len(outer.requests) == 1 else outer.delay)
                 if self.path == "/v1/restore" and outer.mapping is not None:
-                    payload = json.dumps({"map": outer.mapping}).encode()
+                    payload = json.dumps({"map": outer.mapping, "verification": outer.verification}).encode()
                     self.send_response(200)
                 else:
                     payload = b"{}"
@@ -1042,6 +1110,7 @@ class FakeVmHost:
                 self.wfile.write(payload)
 
             def do_GET(self):
+                outer.requests.append({"path": self.path, "method": "GET"})
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -1071,9 +1140,14 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
   if (m.id === undefined) return;
   if (m.method === 'tools/call') {
     calls += 1;
-    if (calls >= 2 && mode === 'hang') return;
+    if (mode === 'hang' && calls >= 2) return;
     if (calls >= 2 && mode === 'die-on-call') process.exit(1);
-    if (calls >= 2 && mode === 'unavailable') return reply(m.id, 'Configured browser unavailable or timed out. Inspect existing task state before retrying an action.', true);
+    if (calls >= 2 && mode === 'unavailable') return reply(m.id, 'Configured browser unavailable: start its app or browser host first.', true);
+    if (mode === 'die-on-snapshot' && m.params.name === 'cua_alans_way_snapshot') process.exit(1);
+    if (mode === 'bigshot' && m.params.name === 'shot') {
+      // Exactly what the MCP SDK writes: result first, jsonrpc and id last.
+      return process.stdout.write(JSON.stringify({ result: { content: [{ type: 'image', data: 'A'.repeat(150000), mimeType: 'image/jpeg' }] }, jsonrpc: '2.0', id: m.id }) + '\n');
+    }
   }
   if (m.method === 'tools/list' && mode === 'die-on-list') process.exit(1);
   reply(m.id, 'mac');
@@ -1096,7 +1170,7 @@ echo call >> "$SSH_LOG"
 for last in "$@"; do :; done
 case "$last" in
   *"exit 97"*) [ -n "$MAC_DEAD" ] && exit 97; exec node "$MAC_STUB" ;;
-  *conn_script*) printf %s "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"; exit 0 ;;
+  *conn_script*) [ -f "$PROBE_DOWN" ] && exit 1; printf %s "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"; exit 0 ;;
   *) exec node "$MAC_STUB" ;;
 esac
 """
@@ -1136,7 +1210,9 @@ class HostFailoverTests(unittest.TestCase):
         environment = dict(os.environ, PATH=str(self.dir / "bin") + os.pathsep + os.environ["PATH"],
                            MAC_STUB=str(self.dir / "mac-stub.cjs"), VPS_LOG=str(self.dir / "vps.log"),
                            SSH_LOG=str(self.dir / "ssh.log"), MAC_MODE=mode,
-                           HERMES_ROUTER_CALL_DEADLINE_MS="700", **env)
+                           PROBE_DOWN=str(self.dir / "probe-down"),
+                           HERMES_ROUTER_CALL_DEADLINE_MS="700", HERMES_ROUTER_CALL_HARD_MS="1500")
+        environment.update(env)
         self.proc = subprocess.Popen(
             [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "bot1",
              "--vps-script", str(self.dir / "vps-stub.cjs"), "--vps-connection", str(connection),
@@ -1192,7 +1268,7 @@ class HostFailoverTests(unittest.TestCase):
         self.assertTrue(lost["result"]["isError"])
         text = self.text(lost)
         self.assertIn("NOT retried", text)
-        self.assertIn("Restored 1 tab with their logins carried over", text)
+        self.assertIn("Restored 1 tab", text)
         self.assertIn("h1 -> v1", text)
         self.assertEqual(lost["result"]["_meta"]["workspace"]["host"], "vps")
         after = self.call()
@@ -1227,8 +1303,18 @@ class HostFailoverTests(unittest.TestCase):
         self.assertEqual(lost["id"], lost_id)
         self.assertTrue(lost["result"]["isError"])
         self.assertIn("NOT retried", self.text(lost))
-        self.assertIn("No tabs were mirrored", self.text(lost))
+        self.assertIn("VPS browser is not responding", self.text(lost))
+        self.assertNotIn("No tabs were mirrored", self.text(lost))
         self.assertNotIn('"tools/call"', self.vps_log())
+
+    def test_both_hosts_down_is_not_reported_as_an_empty_mirror(self):
+        # The VPS host answers 404: it is up and has nothing to restore.
+        self.start("die-on-call", FakeVmHost(None))
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        self.call()
+        self.assertIn("No tabs were mirrored", self.text(self.recv()))
 
     def test_two_unavailable_errors_in_a_row_fail_over(self):
         self.start("unavailable")
@@ -1277,7 +1363,8 @@ class HostFailoverTests(unittest.TestCase):
         self.assertEqual(self.served_by(self.recv()), "vps")
 
     def test_initialize_does_not_wait_for_a_slow_restore(self):
-        self.state.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z"}))
+        self.state.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z",
+                                          "lastSeenOnline": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
         (self.dir / "router-last-self-probe").write_text(str(int(time.time() * 1000)))
         vm = FakeVmHost({"h1": "v1"}, delay=2.0)
         self.start("ok", vm)
@@ -1291,11 +1378,115 @@ class HostFailoverTests(unittest.TestCase):
         self.assertEqual(answered["id"], call_id)
         self.assertGreaterEqual(time.time() - started, 1.9)
         self.assertIn("Mac unreachable since", self.text(answered))
-        self.assertIn("Restored 1 tab with their logins carried over", self.text(answered))
+        self.assertIn("Restored 1 tab", self.text(answered))
         self.assertNotIn("Reopen the same URL", self.text(answered))
         spawns = self.vps_spawns()
         self.assertEqual(len(spawns), 2)
         self.assertIn("--tab-map", spawns[1])
+
+    def test_a_fresh_session_does_not_restore_a_mirror_the_host_has_not_touched_lately(self):
+        self.state.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z",
+                                          "lastSeenOnline": "2026-02-01T09:00:00Z"}))
+        (self.dir / "router-last-self-probe").write_text(str(int(time.time() * 1000)))
+        vm = FakeVmHost({"h1": "v1"})
+        self.start("ok", vm)
+        self.send("initialize")
+        self.recv()
+        self.send("notifications/initialized")
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "vps")
+        self.assertEqual(vm.requests, [])
+
+    def test_a_restore_still_running_on_the_host_is_retried_once_and_never_duplicated(self):
+        vm = FakeVmHost({"h1": "v1"}, delay=0.0, first_delay=1.2)
+        self.start("hang", vm, HERMES_ROUTER_RESTORE_MS="600")
+        self.handshake()
+        self.call()
+        self.recv()
+        self.call()
+        lost = self.recv()
+        self.assertIn("Restored 1 tab", self.text(lost))
+        self.assertEqual([r["path"] for r in vm.requests], ["/v1/restore", "/v1/restore"])
+
+    def test_a_restore_that_never_finishes_does_not_fall_back_to_a_cookieless_duplicate(self):
+        vm = FakeVmHost({"h1": "v1"}, delay=3.0)
+        self.start("hang", vm, HERMES_ROUTER_RESTORE_MS="400")
+        self.handshake()
+        self.call()
+        self.recv()
+        self.call()
+        lost = self.recv()
+        self.assertIn("still restoring", self.text(lost))
+        self.assertIn("NOT retried", self.text(lost))
+        time.sleep(0.5)
+        self.assertEqual([r["path"] for r in vm.requests if r["path"] != "/v1/restore"], [])
+        self.assertEqual(len([r for r in vm.requests if r["path"] == "/v1/restore"]), 2)
+
+    def test_restored_tabs_needing_a_look_are_named(self):
+        vm = FakeVmHost({"h1": "v1", "h2": "v2"}, verification={"h1": "verified", "h2": "review_required"})
+        self.start("hang", vm)
+        self.handshake()
+        self.call()
+        self.recv()
+        self.call()
+        text = self.text(self.recv())
+        self.assertIn("h1 -> v1, h2 -> v2", text)
+        self.assertIn("Look at these before acting", text)
+        self.assertIn("v2", text.split("Look at these")[1])
+
+    def test_reads_in_flight_when_the_host_dies_are_replayed_on_the_vps(self):
+        vm = FakeVmHost({"h1": "v1"})
+        self.start("die-on-snapshot", vm)
+        self.handshake()
+        snapshot = self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "h1"})
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served_by(answered)), (snapshot, "vps"))
+        self.assertFalse(answered["result"].get("isError"))
+        self.assertIn("Restored 1 tab", self.text(answered))
+        log = self.vps_log()
+        self.assertEqual(len(re.findall(r'cua_alans_way_snapshot', log)), 1)
+        spawns = self.vps_spawns()
+        self.assertIn("--tab-map", spawns[-1])
+
+    def test_a_slow_call_on_a_live_host_is_waited_for_until_the_hard_limit(self):
+        self.start("hang", HERMES_ROUTER_CALL_DEADLINE_MS="400", HERMES_ROUTER_CALL_HARD_MS="4500",
+                   HERMES_ROUTER_RECHECK_MS="500")
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        stuck = self.call()
+        # The probe answers (fake ssh finds the app), so no failover yet.
+        self.assertFalse(select.select([self.proc.stdout], [], [], 2.5)[0])
+        lost = self.recv(10)
+        self.assertEqual(lost["id"], stuck)
+        self.assertIn("NOT retried", self.text(lost))
+
+    def test_a_slow_call_fails_over_at_once_when_the_liveness_probe_fails(self):
+        self.start("hang", HERMES_ROUTER_CALL_DEADLINE_MS="400", HERMES_ROUTER_CALL_HARD_MS="60000")
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        (self.dir / "probe-down").write_text("")
+        stuck = self.call()
+        started = time.time()
+        lost = self.recv(10)
+        self.assertEqual(lost["id"], stuck)
+        self.assertLess(time.time() - started, 5)
+        self.assertIn("NOT retried", self.text(lost))
+
+    def test_a_large_sdk_ordered_screenshot_clears_its_pending_call(self):
+        # The MCP SDK writes {"result":...,"jsonrpc":"2.0","id":N}. If the id
+        # is not found, the call stays pending, the deadline fires and a
+        # healthy session is moved to the VPS.
+        self.start("bigshot", HERMES_ROUTER_CALL_DEADLINE_MS="300", HERMES_ROUTER_CALL_HARD_MS="800")
+        self.handshake()
+        shot = self.send("tools/call", name="shot", arguments={})
+        answered = self.recv()
+        self.assertEqual(answered["id"], shot)
+        self.assertEqual([p["type"] for p in answered["result"]["content"]], ["image"])
+        time.sleep(2.5)
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
 
 
 if __name__ == "__main__":

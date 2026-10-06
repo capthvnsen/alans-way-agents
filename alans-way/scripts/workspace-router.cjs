@@ -58,10 +58,18 @@ const hostOsArg = arg('--host-os') || process.env.HERMES_WORKSPACE_HOST_OS || 'm
 const hostOs = hostOsArg === 'windows' || hostOsArg === 'linux' ? hostOsArg : 'mac';
 const hostName = { windows: 'Windows host', linux: 'Linux host', mac: 'Mac' }[hostOs];
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
-const linuxScripts = [
-  '/opt/alans-way-localapp/resources/app/scripts/browser-mcp.cjs',
-  '$HOME/.local/share/alans-way-localapp/resources/app/scripts/browser-mcp.cjs',
+// `npm run package:linux` (electron-packager, x64, no asar) writes
+// alans-way-localapp-linux-x64/ with the executable beside resources/app. No
+// installer exists for Linux, so these are the places such a folder is
+// expected, as-built or renamed.
+const linuxAppRoots = [
+  '/opt/alans-way-localapp-linux-x64',
+  '/opt/alans-way-localapp',
+  '$HOME/.local/share/alans-way-localapp-linux-x64',
+  '$HOME/.local/share/alans-way-localapp',
 ];
+const shellWord = (value) => (value.startsWith('$HOME') ? `"${value}"` : shQuote(value));
+const linuxScripts = linuxAppRoots.map((root) => `${root}/resources/app/scripts/browser-mcp.cjs`);
 const macScripts = configuredMacScript
   ? [configuredMacScript]
   : hostOs !== 'mac'
@@ -173,22 +181,41 @@ function noteClientRpc(line, pending) {
     if (msg.id != null) {
       if (pending instanceof Map) {
         const args = msg.params && msg.params.arguments;
-        pending.set(msg.id, { method: msg.method, line, at: Date.now(), batch: Boolean(args && args.action === 'batch') });
+        pending.set(msg.id, {
+          method: msg.method,
+          name: msg.params && msg.params.name,
+          line,
+          at: Date.now(),
+          batch: Boolean(args && args.action === 'batch'),
+        });
       } else pending.add(msg.id);
     }
     return msg.method;
   } catch { return null; }
 }
 
-// A screenshot result is megabytes of base64: find its id from the prefix
-// instead of parsing it. Large lines are results, never requests.
+// A screenshot result is megabytes of base64: find its id from the line's
+// head or tail instead of parsing it. The MCP SDK writes
+// {"result":...,"jsonrpc":"2.0","id":N}; other servers put the id first.
+// An unrecognised shape returns undefined and the caller parses.
 const BIG_LINE = 100000;
+const ID_AT_HEAD = /^\{\s*"jsonrpc"\s*:\s*"2\.0"\s*,\s*"id"\s*:\s*(\d+|"[^"\\]*")/;
+const ID_AT_TAIL = /,\s*"id"\s*:\s*(\d+|"[^"\\]*")\s*\}$/;
+function bigLineId(line) {
+  const head = ID_AT_HEAD.exec(line.slice(0, 200));
+  if (head) return JSON.parse(head[1]);
+  const tail = ID_AT_TAIL.exec(line.slice(-120));
+  return tail ? JSON.parse(tail[1]) : undefined;
+}
+
 function noteServerRpc(line, pending) {
   try {
     if (line.length > BIG_LINE) {
-      const m = /^\{\s*"jsonrpc"\s*:\s*"2\.0"\s*,\s*"id"\s*:\s*(\d+|"[^"\\]*")/.exec(line);
-      if (m) pending.delete(JSON.parse(m[1]));
-      return;
+      const id = bigLineId(line);
+      if (id !== undefined) {
+        pending.delete(id);
+        return;
+      }
     }
     const msg = JSON.parse(line);
     if (msg && typeof msg === 'object' && msg.id != null
@@ -198,13 +225,27 @@ function noteServerRpc(line, pending) {
   } catch {}
 }
 
-// The host app is gone but ssh is alive: browser-mcp answers every call with
-// this exact message. Not "timed out" alone: a page wait that times out is an
-// ordinary result. A short line only, so a screenshot is never scanned.
+// The connector's "connection file is gone" error: the host app is not
+// running though ssh is. Not the fetch failure/timeout message ("unavailable
+// or timed out"): that is also what a slow action on a healthy host
+// produces. A short line only, so a screenshot is never scanned.
 function hostUnavailableLine(line) {
   return line.length < 4000 && /"isError"\s*:\s*true/.test(line)
-    && /Configured browser unavailable/.test(line);
+    && /Configured browser unavailable: start its app/.test(line);
 }
+
+// Tools that only read: safe to run a second time on the VPS if the host
+// dropped mid-call. Everything else may have acted.
+const READ_ONLY_TOOLS = new Set([
+  'cua_alans_way_status',
+  'cua_alans_way_tabs',
+  'cua_alans_way_snapshot',
+  'cua_alans_way_screenshot',
+  'workspace_computer_apps',
+  'workspace_computer_snapshot',
+  'workspace_computer_screenshot',
+  'workspace_computer_menu',
+]);
 
 function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
   return Boolean(
@@ -256,8 +297,7 @@ function linuxBackendCommand(script, node, id, name, scriptWord = shQuote(script
   const args = tail.join(' ');
   const env = 'HERMES_WORKSPACE_CONNECTION="${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json"; export HERMES_WORKSPACE_CONNECTION; ';
   if (node) return `${env}exec ${shQuote(node)} ${args}`;
-  const roots = ["'/opt/alans-way-localapp'", '"$HOME/.local/share/alans-way-localapp"'];
-  const checks = roots.map((root) =>
+  const checks = linuxAppRoots.map(shellWord).map((root) =>
     `if [ -x ${root}/alans-way-localapp ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/alans-way-localapp ${args}; fi;`,
   ).join(' ');
   return `${env}${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
@@ -289,7 +329,7 @@ function posixCandidates() {
   if (hostOs === 'linux') {
     return configured || [
       { word: '"$conn_script"', script: '' },
-      ...linuxScripts.map((s) => ({ word: s.startsWith('$HOME') ? `"${s}"` : shQuote(s), script: s })),
+      ...linuxScripts.map((s) => ({ word: shellWord(s), script: s })),
     ];
   }
   return [{ word: '"$conn_script"', script: '' }, ...macScripts.map((s) => ({ word: shQuote(s), script: s }))];
@@ -567,25 +607,43 @@ function loopbackClient({ connectionFile, botId, botName }) {
 }
 
 // Ask the VPS browser host to rebuild this bot's mirrored host tabs (cookies,
-// url, scroll, drafts). Returns {hostTabId: vpsTabId} or null when there is no
-// mirror or the host cannot answer. The call is idempotent on the host side.
-async function restoreMirror({ connectionFile, botId, botName, fetchImpl, timeoutMs = 20000 }) {
+// url, scroll, drafts). Resolves to one of
+//   {status:'restored', map:{hostTab:vpsTab}, review:[vpsTab...]}
+//   {status:'none'}     the host has no mirror for this bot
+//   {status:'pending'}  the host is still restoring (it opens tabs one at a
+//                       time, so a few slow pages can outlast one request)
+//   {status:'down'}     the host did not answer at all
+// The host remembers what it opened, so the one retry after a timeout returns
+// the same tabs rather than duplicating them.
+async function restoreMirror({ connectionFile, botId, botName, fetchImpl, timeoutMs = 12000, retryMs = 10000 }) {
   const client = loopbackClient({ connectionFile, botId, botName });
-  if (!client) return null;
+  if (!client) return { status: 'down' };
   const fetch = fetchImpl || globalThis.fetch;
-  try {
-    const response = await fetch(new URL('/v1/restore', client.base), {
-      method: 'POST',
-      headers: { ...client.headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bot: botId }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) return null;
-    const body = await response.json();
-    const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
-    const entries = Object.entries((body && body.map) || {}).filter(([a, b]) => idOk(a) && idOk(b)).slice(0, 50);
-    return entries.length ? Object.fromEntries(entries) : null;
-  } catch { return null; }
+  const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
+  for (const limit of [timeoutMs, retryMs]) {
+    try {
+      const response = await fetch(new URL('/v1/restore', client.base), {
+        method: 'POST',
+        headers: { ...client.headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bot: botId }),
+        signal: AbortSignal.timeout(limit),
+      });
+      if (response.status === 404) return { status: 'none' };
+      if (!response.ok) return { status: 'down' };
+      const body = await response.json();
+      const entries = Object.entries((body && body.map) || {}).filter(([a, b]) => idOk(a) && idOk(b)).slice(0, 50);
+      if (!entries.length) return { status: 'none' };
+      const verification = (body && body.verification) || {};
+      return {
+        status: 'restored',
+        map: Object.fromEntries(entries),
+        review: entries.filter(([a]) => verification[a] === 'review_required').map(([, b]) => b),
+      };
+    } catch (e) {
+      if (!e || (e.name !== 'TimeoutError' && e.name !== 'AbortError')) return { status: 'down' };
+    }
+  }
+  return { status: 'pending' };
 }
 
 // Open the last Mac https page in the local VPS browser. Cookies do not copy.
@@ -643,11 +701,20 @@ function continuationDetail(c, label = 'Mac') {
   const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
   const tabs = Object.entries((c && c.map) || {}).filter(([a, b]) => idOk(a) && idOk(b)).slice(0, 20);
   if (tabs.length) {
+    const review = ((c && c.review) || []).filter(idOk).slice(0, 20);
     return (
-      `Restored ${tabs.length} tab${tabs.length === 1 ? '' : 's'} with their logins carried over ` +
-      `(${label} tab to VPS tab): ${tabs.map(([a, b]) => `${a} -> ${b}`).join(', ')}. ` +
-      'Work in the VPS tabs from now on. A restored tab may still be loading, so snapshot it before acting.'
+      `Restored ${tabs.length} tab${tabs.length === 1 ? '' : 's'} (${label} tab to VPS tab): ` +
+      `${tabs.map(([a, b]) => `${a} -> ${b}`).join(', ')}. ` +
+      'Work in the VPS tabs from now on. Cookies were restored for tabs that had them, so a signed-in site should still be signed in; ' +
+      'if a page shows a sign-in wall, say so and stop only that page. A restored tab may still be loading, so snapshot it before acting.' +
+      (review.length ? ` Look at these before acting, their scroll or drafts were not confirmed: ${review.join(', ')}.` : '')
     );
+  }
+  if (c && c.status === 'pending') {
+    return 'The VPS browser is still restoring the tabs. List tabs again in a few seconds and work in the tab ids it shows.';
+  }
+  if (c && c.status === 'down') {
+    return `The VPS browser is not responding, so no tabs could be restored and ${label} is unreachable too. Try listing tabs again shortly; if it still fails, report that no browser is reachable.`;
   }
   const page = c && c.continued && safeResumeUrl(c.continued.url);
   if (page && idOk(c.continued.tabId)) {
@@ -679,12 +746,24 @@ function annotateResult(msg, host, mac, notice) {
 
 // A screenshot result is one huge content array and nothing else: append the
 // metadata to its text instead of parsing and re-serializing megabytes of
-// base64. Returns null when the line is not that exact shape.
-const PLAIN_RESULT = /^\{"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*"),"result":\{"content":\[/;
-function appendResultMeta(line, host, mac, notice) {
-  if (line.length < BIG_LINE || !line.endsWith(']}}') || !PLAIN_RESULT.test(line)) return null;
+// base64. Two exact shapes are recognised (id first, and the MCP SDK's
+// result-first order with the id last); anything else returns null and is
+// parsed.
+const RESULT_ID_FIRST = /^\{"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*"),"result":\{"content":\[/;
+const RESULT_SDK_TAIL = /\]\},"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*")\}$/;
+function resultShape(line) {
+  if (line.length < BIG_LINE) return null;
+  if (line.endsWith(']}}') && RESULT_ID_FIRST.test(line.slice(0, 200))) return 'id-first';
+  if (line.startsWith('{"result":{"content":[') && RESULT_SDK_TAIL.test(line.slice(-120))) return 'sdk';
+  return null;
+}
+
+function appendResultMeta(line, shape, host, mac, notice) {
   const extra = notice ? `,${JSON.stringify({ type: 'text', text: notice })}` : '';
-  return `${line.slice(0, -3)}${extra}],"_meta":${JSON.stringify({ workspace: { host, mac } })}}}`;
+  const meta = `],"_meta":${JSON.stringify({ workspace: { host, mac } })}}`;
+  if (shape === 'id-first') return `${line.slice(0, -3)}${extra}${meta}}`;
+  const tail = RESULT_SDK_TAIL.exec(line.slice(-120))[0];
+  return `${line.slice(0, line.length - tail.length)}${extra}${meta}${tail.slice(2)}`;
 }
 
 // Per-connection line annotator for the backend's stdout. The state file is
@@ -697,9 +776,9 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile, ctx.botId);
   return function annotateLine(line) {
-    const big = line.length > BIG_LINE;
+    const shape = resultShape(line);
     let msg;
-    if (!big) {
+    if (!shape) {
       try {
         msg = JSON.parse(line);
       } catch {
@@ -717,7 +796,7 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
     const resume = record ? record.url : null;
     const continued = continuedPage(record);
     let notice = null;
-    const hasContent = big || Array.isArray(msg.result.content);
+    const hasContent = Boolean(shape) || Array.isArray(msg.result.content);
     const moved = hasContent && host === 'vps' && ctx.takeMoveNotice ? ctx.takeMoveNotice() : null;
     if (moved) notice = moved;
     else if (mac && hasContent) {
@@ -731,7 +810,7 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
         notice = workspaceNotice(host, mac, resume, continued, label, ctx.restoredNote);
       }
     }
-    if (big) return appendResultMeta(line, host, mac, notice) || line;
+    if (shape) return appendResultMeta(line, shape, host, mac, notice);
     return JSON.stringify(annotateResult(msg, host, mac, notice));
   };
 }
@@ -841,12 +920,19 @@ async function main() {
   const superseded = new Set();
 
   const MAC_WATCHDOG_MS = Number(process.env.HERMES_ROUTER_MAC_WATCHDOG_MS) || 8000;
-  // Hermes gives a tool call 120s. A call that outlives these on the host is
-  // a half-open connection or a wedged app; the rest of the budget must be
-  // left for the VPS to redo the work.
-  const CALL_DEADLINE_MS = Number(process.env.HERMES_ROUTER_CALL_DEADLINE_MS) || 45000;
-  const BATCH_DEADLINE_MS = Number(process.env.HERMES_ROUTER_BATCH_DEADLINE_MS) || 100000;
-  const UNAVAILABLE_LIMIT = Number(process.env.HERMES_ROUTER_UNAVAILABLE_LIMIT) || 2;
+  // Hermes gives a tool call 120s and browser-mcp aborts an action at 90s. A
+  // call still open after the soft limit gets one liveness probe: an app that
+  // answers means the call is just slow, so keep waiting and re-check; a
+  // probe that fails or hangs (a half-open connection) fails over now. The
+  // hard limit fails over regardless, leaving the rest of the budget for the
+  // VPS to redo the work.
+  const num = (name, fallback) => Number(process.env[name]) || fallback;
+  const CALL_SOFT_MS = num('HERMES_ROUTER_CALL_DEADLINE_MS', 45000);
+  const CALL_HARD_MS = num('HERMES_ROUTER_CALL_HARD_MS', 80000);
+  const BATCH_SOFT_MS = num('HERMES_ROUTER_BATCH_DEADLINE_MS', 60000);
+  const BATCH_HARD_MS = num('HERMES_ROUTER_BATCH_HARD_MS', 100000);
+  const RECHECK_MS = num('HERMES_ROUTER_RECHECK_MS', 15000);
+  const UNAVAILABLE_LIMIT = num('HERMES_ROUTER_UNAVAILABLE_LIMIT', 2);
 
   // A wedged remote that never exits is the worst boot stall: without this,
   // the client waits out its full connect_timeout on dead air. Once the
@@ -878,12 +964,14 @@ async function main() {
     flushResumes();
     const lost = [];
     const replay = [];
+    const reads = [];
     for (const [id, req] of pendingRequests) {
-      if (req.method === 'tools/call') lost.push(id);
-      else replay.push(req);
+      if (req.method !== 'tools/call') replay.push(req);
+      else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
+      else lost.push({ id, at: req.at });
     }
-    for (const id of lost) pendingRequests.delete(id);
-    startVpsBackend({ replay, lost });
+    for (const { id } of lost) pendingRequests.delete(id);
+    startVpsBackend({ replay, reads, lost });
   }
 
   function spawnVps(extraArgs) {
@@ -920,12 +1008,28 @@ async function main() {
   // host's mirrored tabs when a mirror exists (cookies, scroll, drafts), else
   // the single remembered page. Slow when there are many tabs, so it runs
   // while the backend already answers initialize and tools/list, and the
-  // first tools/call waits for it.
-  async function prepareContinuation() {
-    const map = await restoreMirror({ connectionFile: vpsConnection, botId, botName });
-    if (map) return { map, args: ['--tab-map', JSON.stringify(map)] };
+  // first tools/call waits for it. A fresh VPS session (not a live failover)
+  // only restores when the host was seen recently enough for a mirror to be
+  // worth opening. A mirror that exists but is still restoring never falls
+  // back to the single page: that would open a cookie-less duplicate.
+  async function prepareContinuation(live) {
     const resumeFile = resumePath(macStateFile, botId);
     const record = readResumeRecord(resumeFile);
+    const seen = (readMacState(macStateFile) || {}).lastSeenOnline;
+    const recent = live || record || (seen && Date.now() - Date.parse(seen) < RESUME_MAX_AGE_MS);
+    if (!recent) return { args: [] };
+    const restoreMs = num('HERMES_ROUTER_RESTORE_MS', 12000);
+    const restored = await restoreMirror({
+      connectionFile: vpsConnection,
+      botId,
+      botName,
+      timeoutMs: restoreMs,
+      retryMs: Math.round(restoreMs * 0.8),
+    });
+    if (restored.status === 'restored') {
+      return { ...restored, args: ['--tab-map', JSON.stringify(restored.map)] };
+    }
+    if (restored.status !== 'none') return { status: restored.status, args: [] };
     let continuedTab = continuedPage(record);
     if (record && !continuedTab) {
       const continued = await continueRememberedPage({
@@ -945,9 +1049,12 @@ async function main() {
     return { continued: continuedTab, args: continuedArgs(continuedTab) };
   }
 
-  function sendLostCallErrors(ids, notice) {
+  // The error an action in flight gets when the host dropped under it. Sent
+  // once the restore has settled so it can name the tabs, but never later
+  // than ~15s before Hermes's own 120s limit on that call.
+  function sendLostCallErrors(lost, notice) {
     const mac = readMacState(macStateFile);
-    for (const id of ids) {
+    for (const { id } of lost) {
       const text =
         `This action was in flight when the ${hostName} connection dropped. It may or may not have happened and was NOT retried. ` +
         `${notice} Check the page in the VPS tab before repeating it.`;
@@ -959,6 +1066,12 @@ async function main() {
   function beginContinuation(lost = []) {
     holdCalls = true;
     let settled = false;
+    let lostSent = false;
+    const answerLost = (notice) => {
+      if (lostSent || !lost.length) return;
+      lostSent = true;
+      sendLostCallErrors(lost, notice);
+    };
     const settle = (continuation) => {
       if (settled) return;
       settled = true;
@@ -972,26 +1085,32 @@ async function main() {
       annotCtx.restoredNote = continuationDetail(continuation, hostName);
       if (annotCtx.failedOver) {
         const notice = continuationNotice(continuation, hostName);
-        if (lost.length) sendLostCallErrors(lost, notice);
-        else annotCtx.moveNotice = notice;
+        if (lostSent || !lost.length) annotCtx.moveNotice = notice;
+        else answerLost(notice);
       }
       holdCalls = false;
       for (const line of heldCalls.splice(0)) writeToChild(line);
     };
-    // The restore bounds itself; this caps the whole continuation so a held
-    // call always leaves most of Hermes's tool budget for the call itself.
-    const cap = setTimeout(() => settle({ args: [] }), 25000);
+    if (lost.length) {
+      const wait = Math.max(1000, Math.min(...lost.map((l) => l.at)) + 105000 - Date.now());
+      const timer = setTimeout(() => answerLost(continuationNotice({ status: 'pending' }, hostName)), wait);
+      timer.unref();
+    }
+    // The restore bounds itself (one retry); this caps the whole continuation
+    // so a held call always leaves most of Hermes's tool budget for the call.
+    const cap = setTimeout(() => settle({ status: 'pending', args: [] }), 25000);
     cap.unref();
-    prepareContinuation().then(
+    prepareContinuation(annotCtx.failedOver).then(
       (continuation) => { clearTimeout(cap); settle(continuation); },
       () => { clearTimeout(cap); settle({ args: [] }); },
     );
   }
 
-  function startVpsBackend({ replay = null, lost = [] } = {}) {
+  function startVpsBackend({ replay = null, reads = [], lost = [] } = {}) {
     const c = spawnVps([]);
     if (replay) replayHandshake(c, replay);
     else for (const line of bufferedStdin) c.stdin.write(`${line}\n`);
+    heldCalls.push(...reads);
     if (macSsh) beginContinuation(lost);
   }
 
@@ -1126,11 +1245,22 @@ async function main() {
     const monitor = setInterval(() => {
       if (activeHost !== 'mac' || fellBack || shuttingDown) return;
       const now = Date.now();
-      for (const req of pendingRequests.values()) {
-        const limit = req.batch ? BATCH_DEADLINE_MS : CALL_DEADLINE_MS;
-        if (req.method === 'tools/call' && now - req.at > limit) {
-          failOver(`${hostName} call exceeded ${limit}ms`);
+      for (const [id, req] of pendingRequests) {
+        if (req.method !== 'tools/call') continue;
+        const age = now - req.at;
+        const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
+        if (age > hard) {
+          failOver(`${hostName} call exceeded ${hard}ms`);
           return;
+        }
+        if (age > (req.batch ? BATCH_SOFT_MS : CALL_SOFT_MS) && !req.probing && now >= (req.recheckAt || 0)) {
+          req.probing = true;
+          probeMac(5000).then((probe) => {
+            req.probing = false;
+            if (pendingRequests.get(id) !== req) return;
+            if (probe.script) req.recheckAt = Date.now() + RECHECK_MS;
+            else failOver(`${hostName} call open ${Date.now() - req.at}ms and the probe failed`);
+          });
         }
       }
       const mac = freshMacState(macStateFile);
