@@ -44,6 +44,24 @@ class PrintModeTests(unittest.TestCase):
 
 
 class ConfigEditTests(unittest.TestCase):
+    def test_creates_managed_block_when_config_file_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "nested" / "config.yaml"
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertTrue(config.exists())
+            self.assertEqual(oct(config.stat().st_mode & 0o777), oct(0o600))
+            self.assertIn("workspace_browser:", text)
+
+    def test_creates_managed_block_from_empty_config_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text("", encoding="utf-8")
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("mcp_servers:\n", text)
+            self.assertIn("workspace_browser:", text)
+
     def test_creates_mcp_servers_block_when_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.yaml"

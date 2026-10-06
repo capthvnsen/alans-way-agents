@@ -170,7 +170,11 @@ if [ -z "$CONFIG" ]; then
   exit 0
 fi
 
-[ -f "$CONFIG" ] || { echo "setup-workspace: no such config: $CONFIG" >&2; exit 1; }
+if [ ! -f "$CONFIG" ]; then
+  mkdir -p "$(dirname "$CONFIG")"
+  : > "$CONFIG"
+  chmod 600 "$CONFIG"
+fi
 
 cp "$CONFIG" "$CONFIG.bak-alans-way"
 MARK_BEGIN="$MARK_BEGIN" MARK_END="$MARK_END" BLOCK="$(block)" python3 - "$CONFIG" <<'PY'
