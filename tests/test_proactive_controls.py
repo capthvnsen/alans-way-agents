@@ -67,6 +67,27 @@ class ControlTests(unittest.TestCase):
                 self.assertIn("rent", runtime.watch_command("list"))
             runtime.close()
 
+    def test_status_text_surfaces_observer_storage_and_gateway_health(self):
+        """A dead observer, a saturated event table or a failing appraiser
+        must be visible in /proactivity status, not only in the JSON."""
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            text = runtime.command("status")
+            self.assertIn("Gateway: not armed", text)
+            self.assertIn("Observer: stopped", text)
+            self.assertNotIn("Attention", text)
+            runtime.observer_error = "observer_failed; inspect locally before resuming"
+            runtime.appraisal_error = "appraisal_failed; inspect locally before resuming"
+            runtime.store._MAX_EVENTS = 0
+            text = runtime.command("status")
+            self.assertIn("observer_failed", text)
+            self.assertIn("appraisal_failed", text)
+            self.assertIn("storage full", text)
+            runtime.start(interval=3600)
+            self.assertIn("Observer: running", runtime.command("status"))
+            runtime.close()
+
     def test_swallowed_appraisal_errors_are_recorded_for_status(self):
         """review() returns not-useful on any failure, including plugin LLM
         trust/provider errors — that must surface in status instead of being

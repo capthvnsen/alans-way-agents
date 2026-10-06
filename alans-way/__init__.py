@@ -381,6 +381,10 @@ class Runtime:
             return "Control was requested, but its effective state could not be verified."
         policy, counts = state["policy"], state["counts"]
         unresolved = sum(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
+        attention = [state.get("observer_error"), state.get("appraisal_error")]
+        if state.get("storage_full"):
+            attention.append("event storage full — new wakes refused")
+        flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused'}\n"
                 f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
                 f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
@@ -388,8 +392,10 @@ class Runtime:
                 f"{policy['min_interval_seconds'] // 60} minutes between automatic reviews\n"
                 f"Telegram route: {'bound' if state['route_bound'] else 'unbound'}\n"
                 f"Gateway: {'ready' if state['gateway_ready'] else 'not armed in this process'}\n"
-                f"Observer: {state.get('observed_at') or 'no pass yet'}\n"
-                f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}\n"
+                f"Observer: {'running' if state.get('observer_running') else 'stopped'}; "
+                f"last pass {state.get('observed_at') or 'none yet'}\n"
+                f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}"
+                + flagged + "\n"
                 "Limits are ceilings; nothing useful means silence.")
 
     def watch_command(self, raw_args):
