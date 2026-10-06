@@ -91,7 +91,7 @@ class ProactiveSkillTests(unittest.TestCase):
         self.assertTrue(DOCS.is_file(), "A concise public proactivity guide must exist")
         content = DOCS.read_text(encoding="utf-8")
         for requirement in (
-            "$HERMES_HOME/alans-way", "hermes plugins enable alans-way",
+            "$HERMES_HOME/plugins/alans-way", "hermes plugins enable alans-way",
             "plugins:", "enabled:", "entries:", "allow_gateway_injection: true",
             "fragment", "Do not replace", "existing", "session_key", "default",
             "alans-way:proactive-primary", "/proactivity", "proactive_control",

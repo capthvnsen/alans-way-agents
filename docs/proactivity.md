@@ -13,7 +13,7 @@ Target the existing `default` primary profile; do not rename it or create anothe
 owner. The plugin is intended for Linux and macOS. Review the complete plugin
 folder, not only its skill, before importing it. Use Hermes' supported local
 plugin-folder discovery: place the reviewed `alans-way/` folder
-under the active profile's `$HERMES_HOME/alans-way/`.
+under the active profile's `$HERMES_HOME/plugins/alans-way/`.
 
 For a locally discovered plugin, the supported enable command is:
 
