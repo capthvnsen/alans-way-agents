@@ -15,7 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "alans-way-computer"
-NODE = shutil.which("node")
+NODE = shutil.which("node")  # absolute in the config: a bare `node` makes Hermes provision its own copy
 HERMES_MAIN = Path(os.environ["HERMES_MAIN"]) if os.environ.get("HERMES_MAIN") else None
 HERMES_PY = HERMES_MAIN and next((p for p in (HERMES_MAIN / ".venv/bin/python", HERMES_MAIN / ".venv/Scripts/python.exe") if p.exists()), None)
 NEEDS_HERMES = unittest.skipUnless(HERMES_PY and NODE, "set HERMES_MAIN to a Hermes checkout with a .venv, and have node on PATH")
@@ -23,6 +23,10 @@ NEEDS_HERMES = unittest.skipUnless(HERMES_PY and NODE, "set HERMES_MAIN to a Her
 FAKE_ROUTER = r"""
 const fs = require('fs');
 const readline = require('readline');
+if (process.argv.includes('--probe')) {
+  process.stdout.write(fs.readFileSync(process.env.FAKE_PROBE, 'utf8') + '\n');
+  process.exit(0);
+}
 const log = process.env.FAKE_LOG;
 const ctlFile = process.env.FAKE_CTL;
 const stateFile = process.env.FAKE_STATE;
@@ -53,6 +57,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const c = ctl();
   if (c.die_on === name) process.exit(1);
   const s = state();
+  if (c.host) { s.host = c.host; save(s); }
+  if (c.delay !== undefined) { s.delay = c.delay; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ apps: APPS });
   else if (args.pid === 103) result = fail('That app is the one in front. Leave it there; the pointer stays where it is.');
@@ -60,13 +66,19 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   else if (name === 'workspace_computer_screenshot') result = { content: [{ type: 'image', data: Buffer.from('jpegbytes').toString('base64'), mimeType: 'image/jpeg' },
     { type: 'text', text: JSON.stringify({ imageWidth: 480, imageHeight: 300, window: { x: 100, y: 100, width: 960, height: 600 } }) }] };
   else if (name === 'workspace_computer_action') {
-    if (args.pid === 104) result = fail('off_limits: That app is off limits.');
+    if (c.lost) result = fail('This action was in flight when the Mac connection dropped. It may or may not have happened and was NOT retried. Check the page in the VPS tab before repeating it.');
+    else if (c.nowindow) result = fail('That app has no window to send keys to.');
+    else if (c.nocontrol) result = fail('No control at that point. Press a ref instead.');
+    else if (c.coded) result = { isError: true, structuredContent: { code: 'off_limits' }, content: [{ type: 'text', text: 'Refused.' }] };
+    else if (args.pid === 104) result = fail('off_limits: That app is off limits.');
     else if (args.ref !== undefined && args.generation !== s.generation) result = fail('stale_ref: The app changed since your snapshot. Take a fresh snapshot.');
     else if (args.action === 'drag' && args.x2 === undefined) result = fail('bad_request: drag needs x2 and y2.');
     else { s.generation += 1; save(s); result = text({ ok: true, generation: s.generation, elements: tree(s.generation).elements }); }
   } else result = fail('Unknown browser tool.');
-  if (c.notice) { result.content.push({ type: 'text', text: c.notice }); result._meta = { workspace: { host: 'vps' } }; }
-  out({ jsonrpc: '2.0', id: msg.id, result });
+  if (c.notice) result.content.push({ type: 'text', text: c.notice });
+  result._meta = { workspace: { host: s.host || 'mac' } };
+  const reply = () => out({ jsonrpc: '2.0', id: msg.id, result });
+  if (s.delay && /snapshot|screenshot/.test(name)) setTimeout(reply, s.delay); else reply();
 });
 """
 
@@ -203,6 +215,75 @@ try:
 except OSError:
     R["stopped"] = True
 
+
+# --- host changes inside one router process: state must not survive them
+b = provider.create_backend(permission_mode="standard"); b.start()
+b.capture(mode="som", app="Notes")
+CTL.write_text(json.dumps({"host": "vps"}))
+R["flip_action"] = plain(b.click(element=1))
+R["flip_state"] = [b._pid, b._last_target, b._tree, b._shot]
+b.capture(mode="som", app="Notes")
+R["flip_click_after"] = plain(b.click(element=1))
+b.capture(mode="ax", app="Notes")
+CTL.write_text(json.dumps({"host": "mac"}))
+m = mark()
+b.capture(mode="ax", app="Notes")  # apps answers from the other host: re-resolved, no stale pid reused
+R["flip_read_calls"] = [c["name"] for c in calls(m)]
+CTL.write_text(json.dumps({"host": "vps"}))
+try:
+    b.capture(mode="ax")  # cached pid, snapshot answers from the other host
+    R["flip_cached_pid"] = None
+except Exception as e:
+    R["flip_cached_pid"] = str(e)
+b.capture(mode="ax", app="Notes")
+CTL.write_text(json.dumps({"lost": True}))
+R["lost"] = plain(b.click(element=1))
+R["lost_state"] = b._pid
+b.capture(mode="ax", app="Notes")
+for key in ("nowindow", "nocontrol", "coded"):
+    CTL.write_text(json.dumps({key: True}))
+    R["code_" + key] = plain(b.click(x=1, y=1))
+
+# --- vision is screenshot only; a cached pid skips apps; snapshot and screenshot run in parallel
+m = mark()
+vis = b.capture(mode="vision", app="Notes")
+R["vision"] = [[c["name"] for c in calls(m)], len(vis.elements), bool(vis.png_b64)]
+CTL.write_text(json.dumps({"delay": 400}))
+b.capture(mode="ax", pid=101)  # consumes the control file
+m = mark(); t0 = time.time()
+b.capture(mode="som", pid=101)
+R["parallel"] = [time.time() - t0, [c["name"] for c in calls(m)]]
+CTL.write_text(json.dumps({"delay": 0}))
+b.capture(mode="ax", pid=101)
+b.stop()
+
+# --- doctor
+import contextlib, io
+for label, probe in (("linux", "linux: /home/u/connector/browser-mcp.cjs"), ("vps", "vps (linux unreachable (ssh: timeout))"), ("junk", "")):
+    Path(os.environ["FAKE_PROBE"]).write_text(probe)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = provider.doctor()
+    R["doctor_" + label] = [rc, out.getvalue()]
+
+# --- the command is resolved the way Hermes's MCP spawn resolves it
+import shutil
+from unittest import mock
+import tools.mcp_tool_config as mcp_config
+alias_home = HOME / "alias"
+alias_home.mkdir(exist_ok=True)
+(alias_home / "config.yaml").write_text((HOME / "config.yaml").read_text().replace("command: " + shutil.which("node"), "command: hermes-only-node"))
+set_hermes_home_override(str(alias_home))
+real_resolve = mcp_config._resolve_stdio_command
+def resolve(command, env):
+    return (shutil.which("node"), env) if command == "hermes-only-node" else real_resolve(command, env)
+R["alias_unpatched"] = provider.is_available()
+with mock.patch.object(mcp_config, "_resolve_stdio_command", resolve):
+    R["alias_patched"] = provider.is_available()
+    ab = provider.create_backend(permission_mode="standard"); ab.start()
+    R["alias_apps"] = len(ab.list_apps()); ab.stop()
+set_hermes_home_override(str(HOME))
+
 # --- the real tool handler: capture_after uses the backend's sticky target
 from tools.computer_use import tool as cu
 os.environ["HERMES_INTERACTIVE"] = "1"
@@ -219,6 +300,37 @@ R["e2e_type"] = type_out if isinstance(type_out, str) else json.dumps(type_out, 
 cu.reset_backend_for_tests()
 
 print("RESULT:" + json.dumps(R, default=str))
+"""
+
+INTEGRATION = r"""
+import dataclasses, json, os
+from pathlib import Path
+from hermes_constants import set_hermes_home_override
+HOME, CTL = Path(os.environ["T_HOME"]), Path(os.environ["FAKE_CTL"])
+set_hermes_home_override(str(HOME))
+from plugins.computer_use import get_active_provider
+plain = dataclasses.asdict
+R = {}
+be = get_active_provider().create_backend(permission_mode="standard"); be.start()
+cap = be.capture(mode="som", app="Notes")
+R["first"] = [len(cap.elements), be._host]
+CTL.write_text(json.dumps({"die_on": "workspace_computer_action"}))  # the host app dies under the next action
+R["lost"] = plain(be.click(element=1))
+R["lost_state"] = be._pid
+cap = be.capture(mode="som", app="Notes")
+R["again"] = [len(cap.elements), be._host]
+R["click_after"] = plain(be.click(element=1))
+be.stop()
+print("RESULT:" + json.dumps(R, default=str))
+"""
+
+FAKE_SSH = """#!/bin/sh
+for last in "$@"; do :; done
+case "$last" in
+  *"exit 97"*) exec node "$MAC_STUB" ;;
+  *conn_script*) printf %s "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"; exit 0 ;;
+  *) exec node "$MAC_STUB" ;;
+esac
 """
 
 OLD_HERMES = r"""
@@ -261,6 +373,20 @@ class StaticTests(unittest.TestCase):
         self.assertIn("register_computer_use_provider", head)
         self.assertIn("ComputerUseProvider", head)
 
+    def test_readme_documents_the_provider_and_its_approval_config(self):
+        readme = (PLUGIN / "README.md").read_text()
+        for needle in ("computer_use.backend: alans-way-computer", "Tailscale", "command_allowlist", "plugins.isolation",
+                       *(f"cua:{a}:background" for a in ("click", "double_click", "right_click", "drag", "scroll", "key", "set_value", "focus_app"))):
+            self.assertIn(needle, readme)
+        self.assertNotIn("\u2014", readme)
+
+    def test_catalog_draft_pins_docs_to_the_sha_and_lists_known_issues(self):
+        entry = (ROOT / "docs/catalog/alans-way-computer.yaml").read_text()
+        self.assertRegex(entry, r"(?m)^sha: (0{40}|[0-9a-f]{40})$")
+        self.assertRegex(entry, r"(?m)^docs_url: https://github.com/capthvnsen/alans-way-agents/tree/(0{40}|[0-9a-f]{40})/alans-way-computer$")
+        self.assertIn("known_issues:", entry)
+        self.assertRegex(entry, r"(?m)^platforms: \[linux, macos\]$")
+
 
 @NEEDS_HERMES
 class OldHermesTests(unittest.TestCase):
@@ -281,18 +407,19 @@ class ProviderTests(unittest.TestCase):
         home = tmp / "home"
         shutil.copytree(PLUGIN, home / "plugins" / "alans-way-computer", ignore=shutil.ignore_patterns("__pycache__"))
         (tmp / "router.cjs").write_text(FAKE_ROUTER)
-        env = {"FAKE_LOG": str(tmp / "log.jsonl"), "FAKE_CTL": str(tmp / "ctl.json"), "FAKE_STATE": str(tmp / "state.json")}
+        env = {"FAKE_PROBE": str(tmp / "probe.txt"), "FAKE_LOG": str(tmp / "log.jsonl"), "FAKE_CTL": str(tmp / "ctl.json"), "FAKE_STATE": str(tmp / "state.json")}
         (home / "config.yaml").write_text(textwrap.dedent(f"""\
             computer_use:
               backend: alans-way-computer
             mcp_servers:
               workspace_browser:
-                command: node
+                command: {NODE}
                 args:
                   - {tmp / 'router.cjs'}
                   - --bot-id
                   - "4242"
                 env:
+                  FAKE_PROBE: {env['FAKE_PROBE']}
                   FAKE_LOG: {env['FAKE_LOG']}
                   FAKE_CTL: {env['FAKE_CTL']}
                   FAKE_STATE: {env['FAKE_STATE']}
@@ -417,6 +544,51 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(r["after_death_target"])
         self.assertEqual(r["recovered"], 3)
 
+    def test_host_change_resets_state_and_actions_report_host_changed(self):
+        r = self.r
+        self.assertEqual((r["flip_action"]["ok"], r["flip_action"]["code"]), (False, "host_changed"))
+        self.assertIn("vps", r["flip_action"]["message"])
+        self.assertEqual(r["flip_state"], [None, None, None, None])
+        self.assertTrue(r["flip_click_after"]["ok"])
+
+    def test_reads_re_resolve_after_a_host_change(self):
+        r = self.r
+        self.assertEqual(r["flip_read_calls"], ["workspace_computer_apps", "workspace_computer_snapshot"])
+        self.assertIn("list_apps", r["flip_cached_pid"])
+
+    def test_an_action_lost_in_flight_maps_to_host_changed(self):
+        self.assertEqual((self.r["lost"]["ok"], self.r["lost"]["code"]), (False, "host_changed"))
+        self.assertIn("NOT retried", self.r["lost"]["message"])
+        self.assertIsNone(self.r["lost_state"])
+
+    def test_error_codes_come_from_text_or_a_passed_through_code(self):
+        self.assertEqual(self.r["code_nowindow"]["code"], "no_window")
+        self.assertEqual(self.r["code_nocontrol"]["code"], "not_found")
+        self.assertEqual(self.r["code_coded"]["code"], "off_limits")
+
+    def test_vision_fetches_only_the_screenshot_and_reads_run_in_parallel(self):
+        names, elements, png = self.r["vision"]
+        self.assertEqual(names, ["workspace_computer_apps", "workspace_computer_screenshot"])
+        self.assertEqual((elements, png), (0, True))
+        seconds, parallel = self.r["parallel"]
+        self.assertEqual(sorted(parallel), ["workspace_computer_screenshot", "workspace_computer_snapshot"])
+        self.assertLess(seconds, 0.7)
+
+    def test_doctor_accepts_any_host_decision_and_flags_a_missing_one(self):
+        r = self.r
+        self.assertEqual(r["doctor_linux"][0], 0)
+        self.assertIn("reachable", r["doctor_linux"][1])
+        self.assertNotIn("unreachable", r["doctor_linux"][1])
+        self.assertEqual(r["doctor_vps"][0], 0)
+        self.assertIn("unreachable", r["doctor_vps"][1])
+        self.assertEqual(r["doctor_junk"][0], 1)
+
+    def test_command_resolution_matches_hermes_mcp_spawn(self):
+        r = self.r
+        self.assertFalse(r["alias_unpatched"])
+        self.assertTrue(r["alias_patched"])
+        self.assertEqual(r["alias_apps"], 4)
+
     def test_stop_ends_the_router_child(self):
         self.assertTrue(self.r["stopped"])
 
@@ -426,6 +598,39 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101], ["workspace_computer_screenshot", 101]])
         self.assertIn('"ok": true', r["e2e_click"].lower().replace('\\"', '"'))
         self.assertIn("unsupported_action", r["e2e_type"])
+
+
+@NEEDS_HERMES
+class RouterIntegrationTests(unittest.TestCase):
+    """The real workspace router (ALANS_WAY_ROUTER overrides which one) between the provider and fake host and VM backends."""
+
+    def test_a_host_app_dying_under_an_action_is_reported_and_the_session_recovers(self):
+        router = os.environ.get("ALANS_WAY_ROUTER") or str(ROOT / "alans-way/scripts/workspace-router.cjs")
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            home = tmp / "home"
+            shutil.copytree(PLUGIN, home / "plugins" / "alans-way-computer", ignore=shutil.ignore_patterns("__pycache__"))
+            (tmp / "bin").mkdir()
+            (tmp / "bin" / "ssh").write_text(FAKE_SSH)
+            (tmp / "bin" / "ssh").chmod(0o755)
+            (tmp / "stub.cjs").write_text(FAKE_ROUTER)
+            (tmp / "conn.json").write_text(json.dumps({"url": "http://127.0.0.1:9", "token": "t"}))
+            env = {"FAKE_PROBE": str(tmp / "probe"), "FAKE_LOG": str(tmp / "log.jsonl"), "FAKE_CTL": str(tmp / "ctl.json"),
+                   "FAKE_STATE": str(tmp / "state.json"), "MAC_STUB": str(tmp / "stub.cjs")}
+            (home / "config.yaml").write_text(json.dumps({
+                "computer_use": {"backend": "alans-way-computer"},
+                "mcp_servers": {"workspace_browser": {"command": NODE, "args": [
+                    router, "--bot-id", "4242", "--mac-ssh", "fake@host", "--vps-script", str(tmp / "stub.cjs"),
+                    "--vps-connection", str(tmp / "conn.json"), "--mac-state-file", str(tmp / "mac-state.json")],
+                    "env": {**env, "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}"}}}}))
+            proc = subprocess.run([str(HERMES_PY), "-c", INTEGRATION], capture_output=True, text=True, timeout=120,
+                                  env={**os.environ, **env, "PYTHONPATH": str(HERMES_MAIN), "T_HOME": str(home), "HERMES_HOME": str(home)})
+            r = last_result(proc)
+        self.assertEqual(r["first"], [3, "mac"])
+        self.assertEqual((r["lost"]["ok"], r["lost"]["code"]), (False, "host_changed"))
+        self.assertIsNone(r["lost_state"])
+        self.assertEqual(r["again"][0], 3)
+        self.assertTrue(r["click_after"]["ok"], r["click_after"])
 
 
 if __name__ == "__main__":

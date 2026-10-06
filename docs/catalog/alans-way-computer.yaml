@@ -1,5 +1,5 @@
 # Draft for plugin-catalog/alans-way-computer.yaml in NousResearch/hermes-agent. Not submitted.
-# Set sha to the full commit that contains alans-way-computer/ before opening the PR (same repo and pin as alans-way).
+# Set sha, and the sha inside docs_url, to the full commit that contains alans-way-computer/ before opening the PR (same repo and pin as alans-way).
 name: alans-way-computer
 repo: https://github.com/capthvnsen/alans-way-agents
 sha: 0000000000000000000000000000000000000000
@@ -18,11 +18,13 @@ maintainer: capthvnsen
 tier: community
 category: tools
 requires_hermes: ">=0.21.5"
-docs_url: https://github.com/capthvnsen/alans-way-agents/tree/main/alans-way-computer
+docs_url: https://github.com/capthvnsen/alans-way-agents/tree/0000000000000000000000000000000000000000/alans-way-computer
 readme: true
 platforms: [linux, macos]
 known_issues:
   - "Needs a Hermes build with the pluggable computer-use API (merged to main after 0.21.5). On older Hermes the plugin installs and does nothing. Install alans-way first and run its workspace setup, which writes the workspace_browser block this provider reuses."
+  - "Hermes asks for approval on every computer_use action type until it is granted. For an unattended Telegram bot, grant them once with Always in Telegram, or add cua:<action>:background entries to command_allowlist (see the README). Takes effect after a gateway restart."
+  - "Runs only in the plugin host: it cannot load under plugins.isolation: host, because the provider hands Hermes a live router session."
   - "Typing without a target field is not available because the app never takes focus: the agent uses set_value on a field instead."
 capabilities:
   provides_tools: []
