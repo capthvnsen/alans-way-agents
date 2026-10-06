@@ -72,6 +72,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A drag on a slider sets its value from the end point.", self.normalized)
         self.assertIn("A check box or radio name ends in on or off.", self.normalized)
         self.assertIn("A disabled control's name ends in disabled, so do not press it.", self.normalized)
+        self.assertIn("a select name includes the chosen option", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
