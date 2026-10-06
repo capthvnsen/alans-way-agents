@@ -90,16 +90,28 @@ respawn would not. Host selection is the router's decision — there is no
 `host:` value you can pass to steer it, and none is needed. A persistent
 outage is a deployment problem; hand it to the user, not to your shell.
 
-## Work around an offline Mac
+## When the Mac goes away mid-task
 
 Every `cua_alans_way_*` result carries the serving `host` and the Mac's
 last seen state, and tool results add a `[workspace] ...` notice line while
-the Mac is down or when it comes back online. When a task needs Mac-only
-resources — local files, Mac logins, a tab handoff waiting on the Mac — and
-`mac.state` is `offline`, do not improvise on the VPS: mark the kanban card
-`blocked` with a "needs Mac" note, tell the user, and stop. The Mac
+the Mac is down or when it comes back online. If the laptop closes or a Mac
+browser call fails because the Mac is offline, continue the task on the VPS.
+Do not stop, and do not mark the card blocked, only because the Mac left.
+
+Web work — Google Docs, Notion, a CRM, or any other site — continues in the
+VPS browser. Open the same URL with `cua_alans_way_open`, snapshot it, and
+keep acting. The connector is already on that machine. A login wall means
+the VPS browser needs that site's login once; say so and stop only that
+page. Do not retry the Mac until status shows it online.
+
+API, MCP, and connector calls that do not run on the Mac keep going. A
+closed laptop does not stop them.
+
+Stop with a "needs Mac" note only for something that exists only on that
+Mac: a local file, or a Mac app that is not a website. The Mac
 availability watcher turns the next offline→online flip into a context event
-for the lead bot's review, which can unblock the card and resume the task.
+for the lead bot's review. When the Mac is back, start the next web task in
+the in-app Mac browser. Finish the current VPS step first.
 
 ## Shared links
 
@@ -171,6 +183,9 @@ app opens them for the user while the tab stays yours to keep working.
 Control handoff of a Mac tab keeps that same live tab, login and page state on
 the Mac. The VPS agent can drive it through the private connector while the
 Mac is available; the human can take over in Workspace.
+
+A closed laptop is not this handoff. Continue that web task on the VPS
+browser as described above. Do not wait for a human review of the page.
 
 The app supplies local Mac tabs and a single VPS desktop viewer. Cross-host
 handoff controls are not exposed in its UI. Use an installed Companion handoff
