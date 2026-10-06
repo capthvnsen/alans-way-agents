@@ -68,7 +68,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("desktop tree is the same", self.normalized)
         self.assertIn("When it says `unchanged`, do not snapshot again.", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
-        self.assertIn("drag a slider to the end point", self.normalized)
+        self.assertIn("drag a slider or scroll bar to the end point", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
