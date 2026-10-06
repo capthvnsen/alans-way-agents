@@ -615,23 +615,112 @@ class MacWatchScriptTests(MacStateEnvTest):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((state_dir / "mac-state.json").read_text())["state"], "online")
 
-    def test_without_node_it_warns_and_the_ssh_fallback_has_keepalives(self):
+    def test_without_node_the_wrapper_stops_with_a_clear_config_error(self):
         with tempfile.TemporaryDirectory() as directory:
-            bin_dir = Path(directory) / "bin"
-            bin_dir.mkdir()
-            (bin_dir / "ssh").write_text('#!/bin/sh\necho "$@" >> "%s/args"\nexit 0\n' % directory)
-            (bin_dir / "ssh").chmod(0o755)
-            path = str(bin_dir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+            path = "/usr/bin" + os.pathsep + "/bin"
             if shutil.which("node", path=path):
                 self.skipTest("node is on the minimal PATH")
             env = dict(os.environ, PATH=path, HERMES_WORKSPACE_MAC_SSH="test@mac",
                        HERMES_MAC_STATE_FILE=str(Path(directory) / "s" / "mac-state.json"))
             result = subprocess.run(["/bin/sh", str(WATCH), "--once"], env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("probing sshd only", result.stderr)
-            args = (Path(directory) / "args").read_text()
-            self.assertIn("ServerAliveInterval=5", args)
-            self.assertIn("ServerAliveCountMax=2", args)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("node", result.stderr)
+
+    def test_the_loop_runs_inside_the_router_so_every_os_shares_it(self):
+        self.assertNotIn("sleep", WATCH.read_text(encoding="utf-8"))
+        self.assertLess(len(WATCH.read_text(encoding="utf-8").splitlines()), 20)
+
+    def test_a_non_numeric_interval_is_a_config_error(self):
+        env = dict(os.environ, HERMES_WORKSPACE_MAC_SSH="test@mac")
+        result = subprocess.run([SH, str(WATCH), "--once", "--interval", "soon"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("positive integers", result.stderr)
+
+    def test_the_loop_ticks_until_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "ssh").write_text("#!/bin/sh\necho x >> \"%s/ticks\"\nexit 1\n" % directory)
+            (bin_dir / "ssh").chmod(0o755)
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       HERMES_WORKSPACE_MAC_SSH="test@mac",
+                       HERMES_MAC_STATE_FILE=str(Path(directory) / "s" / "mac-state.json"))
+            proc = subprocess.Popen([SH, str(WATCH), "--interval", "1"], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.time() + 15
+                ticks = Path(directory) / "ticks"
+                while time.time() < deadline and (not ticks.exists() or len(ticks.read_text().split()) < 2):
+                    time.sleep(0.2)
+            finally:
+                proc.kill()
+                proc.wait()
+            self.assertGreaterEqual(len(ticks.read_text().split()), 2)
+
+
+@unittest.skipUnless(SH and NODE, "sh and node are required for the Windows guest simulation")
+class WindowsGuestRouterTests(unittest.TestCase):
+    """A native-Windows guest, simulated by presenting process.platform as win32 to the router."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.preload = self.root / "win32.cjs"
+        self.preload.write_text("Object.defineProperty(process, 'platform', {value: 'win32'});\n", encoding="utf-8")
+        self.system_root = self.root / "Windows"
+        self.native_ssh = self.system_root / "System32" / "OpenSSH" / "ssh.exe"
+
+    def js(self, script, **env):
+        proc = subprocess.run([NODE, "-r", str(self.preload), "-e", script, str(ROUTER)],
+                              capture_output=True, text=True,
+                              env=dict(os.environ, HOME=str(self.root), USERPROFILE=str(self.root),
+                                       SystemRoot=str(self.system_root), **env))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_no_control_master_because_win32_openssh_cannot_mux(self):
+        args = json.loads(self.js("process.stdout.write(JSON.stringify(require(process.argv[1]).sshControlArgs))"))
+        self.assertEqual(args, ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"])
+
+    def test_the_native_openssh_is_chosen_over_whatever_ssh_is_on_path(self):
+        self.native_ssh.parent.mkdir(parents=True)
+        self.native_ssh.write_text("", encoding="utf-8")
+        self.assertEqual(self.js("process.stdout.write(require(process.argv[1]).sshBinary)"), str(self.native_ssh))
+
+    def test_without_the_native_openssh_it_falls_back_to_path_ssh(self):
+        self.assertEqual(self.js("process.stdout.write(require(process.argv[1]).sshBinary)"), "ssh")
+
+    def test_other_guests_keep_plain_ssh(self):
+        out = subprocess.run([NODE, "-e", "process.stdout.write(require(process.argv[1]).sshBinary)", str(ROUTER)],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(out, "ssh")
+
+    def test_state_lives_under_the_profile_not_var_lib(self):
+        out = self.js("process.stdout.write(require(process.argv[1]).macStateFile)")
+        self.assertEqual(out, str(self.root / ".local" / "share" / "hermes-alans-way" / "mac-state.json"))
+
+    def test_children_never_pop_a_console_window(self):
+        source = ROUTER.read_text(encoding="utf-8")
+        self.assertEqual(source.count("windowsHide: true"), 3)
+
+    def test_the_watcher_probes_with_the_native_ssh_and_writes_state_under_the_profile(self):
+        self.native_ssh.parent.mkdir(parents=True)
+        log = self.root / "ssh-args"
+        self.native_ssh.write_text("#!/bin/sh\necho \"$@\" >> \"%s\"\nexit 1\n" % log, encoding="utf-8")
+        self.native_ssh.chmod(0o755)
+        proc = subprocess.run([NODE, "-r", str(self.preload), str(ROUTER), "--watch", "--once",
+                               "--mac-ssh", "me@pc.tail1.ts.net", "--host-os", "windows"],
+                              capture_output=True, text=True,
+                              env=dict(os.environ, HOME=str(self.root), USERPROFILE=str(self.root),
+                                       SystemRoot=str(self.system_root)))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        state = json.loads((self.root / ".local" / "share" / "hermes-alans-way" / "mac-state.json").read_text())
+        self.assertEqual(state["state"], "offline")
+        args = log.read_text()
+        self.assertIn("StrictHostKeyChecking=yes", args)
+        self.assertNotIn("ControlMaster", args)
+        self.assertIn("$conn = ", args)
 
 
 @unittest.skipUnless(NODE, "node is required for router tests")

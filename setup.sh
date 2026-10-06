@@ -991,7 +991,7 @@ Type=simple
 User=$MAC_WATCH_USER
 Environment=PATH=$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$WATCH_ENV_DIR/mac-watch.env
-ExecStart=/bin/sh $REPO_DIR/alans-way/scripts/mac-watch.sh --interval 10
+ExecStart=$NODE_BIN $REPO_DIR/alans-way/scripts/workspace-router.cjs --watch --interval 10
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=2
@@ -1028,8 +1028,9 @@ EOF
 	<string>com.alans-way.mac-watch</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/sh</string>
-		<string>$REPO_DIR/alans-way/scripts/mac-watch.sh</string>
+		<string>$(command -v node || echo /usr/local/bin/node)</string>
+		<string>$REPO_DIR/alans-way/scripts/workspace-router.cjs</string>
+		<string>--watch</string>
 		<string>--interval</string>
 		<string>10</string>
 		<string>--state-file</string>

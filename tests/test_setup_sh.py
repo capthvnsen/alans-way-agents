@@ -884,6 +884,10 @@ class BrowserHostServiceTests(unittest.TestCase):
 
 
 class DeployExampleTests(unittest.TestCase):
+    def test_watcher_example_runs_the_router_directly(self):
+        unit = (ROOT / "deploy" / "mac-watch.service").read_text(encoding="utf-8")
+        self.assertRegex(unit, r"ExecStart=/usr/bin/node \S+/workspace-router\.cjs --watch --interval 10")
+
     def test_exec_example_avoids_root_and_snap(self):
         config = json.loads((ROOT / "deploy" / "browser-exec-config.json").read_text(encoding="utf-8"))
         self.assertNotIn("/snap/", config["browserCommand"])
@@ -1069,6 +1073,8 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertIn("--interval 10", watch)
         self.assertNotIn("--interval 30", watch)
         self.assertIn("RestartPreventExitStatus=2", watch)
+        self.assertRegex(watch, r"ExecStart=\S*node \S+/alans-way/scripts/workspace-router\.cjs --watch --interval 10")
+        self.assertNotIn("mac-watch.sh", watch)
         self.assertRegex(watch, r"Environment=PATH=\S*:/usr/bin")
         env = (self.etc / "mac-watch.env").read_text()
         self.assertIn("HERMES_WORKSPACE_MAC_SSH=me@mac.tail1234.ts.net", env)
@@ -1091,6 +1097,8 @@ class WatcherServiceTests(unittest.TestCase):
         plist = (self.root / "Library" / "LaunchAgents" / "com.alans-way.mac-watch.plist").read_text()
         self.assertIn("<string>10</string>", plist)
         self.assertNotIn("<string>30</string>", plist)
+        self.assertRegex(plist, r"<string>[^<]*/alans-way/scripts/workspace-router\.cjs</string>\s*<string>--watch</string>")
+        self.assertNotIn("mac-watch.sh", plist)
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
 
