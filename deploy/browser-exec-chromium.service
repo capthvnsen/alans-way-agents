@@ -10,9 +10,13 @@ Type=simple
 # workspace VPS browser on :9223. DISPLAY must match the Xvfb the desktop
 # stack uses. HERMES_VPS_BROWSER_DATA points at a directory containing a
 # config.json with cdpUrl, browserCommand and browserArgs.
-User=root
+# Run as the account that runs Hermes, not root: Chromium refuses to start as
+# root without --no-sandbox. Use a deb Chrome or Chromium (snap Chromium cannot
+# open a profile outside ~/snap/chromium/common). Change user and the paths
+# in config.json to match your account.
+User=user
 Environment=DISPLAY=:99
-Environment=HERMES_VPS_BROWSER_DATA=/root/.local/share/hermes-alans-way/browser-exec
+Environment=HERMES_VPS_BROWSER_DATA=/home/user/.local/share/hermes-alans-way/browser-exec
 ExecStart=/usr/bin/node /opt/hermes-alans-way/browser/desktop/scripts/vps-chromium-host.cjs
 Restart=on-failure
 RestartSec=5

@@ -59,6 +59,16 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_primary_binding_not_silent(self):
         self.assertIn("do not bind a different bot's route silently", self.normalized)
 
+    def test_restart_comes_last_and_the_agent_answers_first(self):
+        self.assertIn("comes last", self.normalized)
+        self.assertIn("send your final message", self.normalized)
+        self.assertIn("detached", self.normalized)
+
+    def test_linux_hosts_and_validated_key_flags_are_covered(self):
+        self.assertIn("--host-os <mac|windows|linux>", self.normalized)
+        self.assertIn("--mac-key", self.normalized)
+        self.assertIn("--mac-host-key", self.normalized)
+
     def test_gateway_restart_through_owner(self):
         self.assertIn("never kill -9 a gateway", self.normalized)
 

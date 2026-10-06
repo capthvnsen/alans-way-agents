@@ -23,7 +23,7 @@ RULES = (
     )),
 )
 
-IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.]|/\d)")
 TAILNET = ipaddress.ip_network((0x64400000, 10))
 EXAMPLE_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
     (0xC0000200, 24), (0xC6336400, 24), (0xCB007100, 24),
