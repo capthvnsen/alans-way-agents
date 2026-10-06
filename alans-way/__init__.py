@@ -370,7 +370,8 @@ class Runtime:
             lines.append(
                 "Check the real signal now (inbox, thread, board) with real "
                 "tools — connector first, workspace_browser when no connector "
-                "is installed — honoring execution_host. If the dependency resolved, "
+                "is installed — honoring execution_host (web reads are never "
+                "host-blocked). If the dependency resolved, "
                 "finish_task with the outcome and fold quiet mentions into the "
                 "next sweep rather than a standalone message. If it is still "
                 "unanswered past its moment, draft the follow-up and ask before "
@@ -459,6 +460,8 @@ class Runtime:
                         raise ValueError("change policy and preferences in separate verified calls")
                     self.ledger.preferences(preferences)
                 elif changes:
+                    if "resume_at" in changes:
+                        raise ValueError("snooze through pause, not configure")
                     self.store.update_policy(changes)
             elif action == "record_task":
                 self.ledger.record_task(args.get("task"))

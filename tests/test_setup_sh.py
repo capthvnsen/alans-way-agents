@@ -1,5 +1,6 @@
 """setup.sh CLI: verify strictness, bot-id derivation, timezone, and doc flags."""
 from pathlib import Path
+import json
 import os
 import re
 import shutil
@@ -262,6 +263,39 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn("-p sprk1 proactivity bind --session-key agent:sprk1:telegram:dm:1", calls)
             self.assertIn("-p sprk1 proactivity resume", calls)
             self.assertIn("proactivity on", result.stdout)
+
+    def test_non_interactive_bind_discovers_a_state_db_only_route(self):
+        """No sessions.json mirror: --bind must find Telegram DM routes in the
+        profile's state.db gateway_routing table — the same store the runtime
+        bind path treats as authoritative."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            prof = home / "profiles" / "sprk1"
+            prof.mkdir(parents=True)
+            route = "agent:sprk1:telegram:dm:42"
+            entry = {"session_key": route, "session_id": "abc",
+                     "platform": "telegram", "chat_type": "dm", "suspended": False}
+            db = sqlite3.connect(prof / "state.db")
+            db.execute("""CREATE TABLE gateway_routing (
+                scope TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL,
+                entry_json TEXT NOT NULL, updated_at REAL NOT NULL,
+                PRIMARY KEY (scope, session_key))""")
+            db.execute("INSERT INTO gateway_routing VALUES ('', ?, ?, 0)",
+                       (route, json.dumps(entry)))
+            db.commit(); db.close()
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run(
+                "--profile", "sprk1", "--bind", "--proactive", "yes",
+                "--non-interactive", "--skip-browser", "--skip-services",
+                "--hermes-home", str(home),
+                env=env, check=False,
+            )
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("bound primary route: sprk1", result.stdout)
+            self.assertIn("-p sprk1 proactivity bind --session-key agent:sprk1:telegram:dm:42", calls)
 
 
 class DocFlagTests(unittest.TestCase):

@@ -25,7 +25,6 @@ SETTINGS = {
         "event_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 31536000},
         "max_pending": {"type": "integer", "minimum": 1, "maximum": 1024},
         "debounce_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
-        "resume_at": TEXT,
         "preferences": PREFERENCES,
     },
 }

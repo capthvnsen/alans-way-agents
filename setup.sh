@@ -553,19 +553,49 @@ detect_vps_timezone
 # ------------------------------------------------------------- bind proactivity
 step "Primary bot binding"
 ROUTES="$(python3 - "$HERMES_HOME" <<'PY'
-import json, sys, pathlib
+import json, sys, pathlib, sqlite3
 home = pathlib.Path(sys.argv[1])
-for idx in sorted(home.glob("sessions/sessions.json")) + sorted(home.glob("profiles/*/sessions/sessions.json")):
+seen = set()
+
+def emit(file_profile, key, entry):
+    if (isinstance(entry, dict) and key not in seen
+            and entry.get("platform") == "telegram"
+            and entry.get("chat_type") == "dm" and entry.get("suspended") is not True):
+        seen.add(key)
+        agent = key.split(":")[1] if key.count(":") >= 2 else file_profile
+        print(f"{file_profile}\t{agent}\t{key}")
+
+profiles = [home] + (sorted((home / "profiles").glob("*"))
+                     if (home / "profiles").is_dir() else [])
+for prof_dir in profiles:
+    file_profile = "default" if prof_dir == home else prof_dir.name
+    # Authoritative store first — gateway_routing rows are namespaced by the
+    # resolved sessions dir ('' covers pre-scoping rows); the sessions.json
+    # mirror then fills keys the DB lacks, same order Hermes loads them in.
+    db_path = prof_dir / "state.db"
     try:
-        data = json.loads(idx.read_text(encoding="utf-8"))
+        if db_path.is_file() and not db_path.is_symlink():
+            scope = str((prof_dir / "sessions").resolve())
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = db.execute(
+                    "SELECT session_key, entry_json FROM gateway_routing"
+                    " WHERE scope IN (?, '')", (scope,)).fetchall()
+            finally:
+                db.close()
+            for key, entry_json in rows:
+                try:
+                    emit(file_profile, key, json.loads(entry_json))
+                except ValueError:
+                    continue
     except Exception:
-        continue
-    file_profile = idx.parent.parent.name if "/profiles/" in str(idx) else "default"
-    for key, entry in (data.items() if isinstance(data, dict) else []):
-        if (isinstance(entry, dict) and entry.get("platform") == "telegram"
-                and entry.get("chat_type") == "dm" and entry.get("suspended") is not True):
-            agent = key.split(":")[1] if key.count(":") >= 2 else file_profile
-            print(f"{file_profile}\t{agent}\t{key}")
+        pass
+    try:
+        data = json.loads((prof_dir / "sessions" / "sessions.json").read_text(encoding="utf-8"))
+        for key, entry in (data.items() if isinstance(data, dict) else []):
+            emit(file_profile, key, entry)
+    except Exception:
+        pass
 PY
 )"
 if [ -z "$ROUTES" ]; then
