@@ -33,7 +33,7 @@ TASK = {
     "required": ["id", "title", "scope", "next_action", "owner", "status"],
     "properties": {**{name: TEXT for name in ["id", "title", "scope", "next_action", "owner", "native_task_id",
                                              "native_board", "next_review_at", "due_at", "notify_when",
-                                             "artifact", "verification", "consent_reference", "source"]},
+                                             "artifact", "verification", "consent_reference"]},
                    "status": {"type": "string", "enum": ["active", "waiting", "blocked", "done", "cancelled"]},
                    "kind": {"type": "string", "enum": ["watch", "loop", "sweep"]},
                    "cadence_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},

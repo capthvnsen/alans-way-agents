@@ -317,56 +317,129 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "active")
             runtime.close()
 
+    def task(self, runtime, watch_id="rent"):
+        return next(t for t in runtime.ledger.snapshot()["tasks"] if t["id"] == watch_id)
+
     def test_approved_watch_may_only_be_tightened_by_the_model(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:
             runtime = module.Runtime(None, Path(directory))
             self.propose(runtime)
             runtime.watch_command("approve rent")
-            def state():
-                return runtime.ledger.snapshot()["tasks"][0]["status"]
             for change in ({"cadence_seconds": 7200}, {"cadence_seconds": 7200, "title": "Rent check"},
                            {"cadence_seconds": 7200, "status": "waiting"}):
                 self.assertTrue(self.propose(runtime, **change)["ok"])
-                self.assertNotEqual(state(), "proposed", change)
-                self.assertTrue(runtime.ledger.snapshot()["tasks"][0]["approved"])
+                self.assertNotIn("revision", self.task(runtime), change)
+                self.assertTrue(self.task(runtime)["approved"])
             self.assertTrue(json.loads(runtime.tool_control(
                 {"action": "finish_task", "task_id": "rent", "status": "waiting"}))["ok"])
-            # Reactivating a paused watch, a new action or a faster cadence
-            # all need the user again.
-            for change in ({"status": "active"}, {"next_action": "Email the landlord"},
-                           {"status": "active", "cadence_seconds": 600}):
-                runtime.watch_command("resume rent")
-                self.assertNotEqual(state(), "proposed")
-                self.assertTrue(self.propose(runtime, **change)["ok"])
-                self.assertEqual(state(), "proposed", change)
-                self.assertFalse(runtime.ledger.snapshot()["tasks"][0]["approved"])
-                runtime.watch_command("approve rent")
-                runtime.watch_command("pause rent")
             self.assertFalse(self.propose(runtime, scope="Something else")["ok"])
             runtime.close()
 
-    def test_model_may_reactivate_only_a_watch_it_blocked_itself(self):
+    def test_a_wider_edit_waits_as_a_revision_while_the_approved_watch_keeps_running(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:
             runtime = module.Runtime(None, Path(directory))
             self.propose(runtime)
             runtime.watch_command("approve rent")
-            state = lambda: runtime.ledger.snapshot()["tasks"][0]["status"]
-            # The model blocks its own watch (Mac offline) and may bring it back.
+            before = self.task(runtime)
+            for change in ({"next_action": "Email the landlord"}, {"cadence_seconds": 600},
+                           {"next_action": "Email the landlord", "notify_when": "always"}):
+                reply = self.propose(runtime, **change)
+                self.assertRegex(reply["tell_user"], r"/watch approve rent [0-9a-f]{8}\b")
+                task = self.task(runtime)
+                self.assertEqual((task["status"], task["approved"], task["next_action"], task["cadence_seconds"]),
+                                 ("active", True, before["next_action"], before["cadence_seconds"]))
+                self.assertIn("revision", task)
+                self.assertEqual(runtime.review_context()["tasks"][0]["next_action"], before["next_action"])
+                self.assertIn("approve rent", runtime.watch_command("list"))
+            self.propose(runtime, next_action="Email the landlord")
+            reply = runtime.watch_command(self.approve_command(runtime))
+            self.assertIn("Email the landlord", reply)
+            task = self.task(runtime)
+            self.assertEqual((task["status"], task["next_action"]), ("active", "Email the landlord"))
+            self.assertNotIn("revision", task)
+            runtime.close()
+
+    def test_dismissing_or_expiring_a_revision_never_costs_the_approved_watch(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            runtime.watch_command("approve rent")
+            self.propose(runtime, next_action="Email the landlord")
+            self.assertIn("Dismissed", runtime.watch_command("dismiss rent"))
+            task = self.task(runtime)
+            self.assertEqual((task["status"], task["approved"]), ("active", True))
+            self.assertNotIn("revision", task)
+            with runtime.ledger.transaction() as data:
+                self.assertNotIn("watch", data.get("dismissals", {}))
+            self.propose(runtime, next_action="Email the landlord")
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["rent"]["revision"]["proposed_at"] = (
+                    datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+            self.propose(runtime, id="other")
+            task = self.task(runtime)
+            self.assertEqual((task["status"], task["approved"]), ("active", True))
+            self.assertNotIn("revision", task)
+            runtime.close()
+
+    def test_only_the_model_blocking_its_own_watch_lets_it_reactivate_without_approval(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            runtime.watch_command("approve rent")
+            state = lambda: self.task(runtime)["status"]
             runtime.tool_control({"action": "finish_task", "task_id": "rent", "status": "blocked"})
             self.assertTrue(self.propose(runtime, status="active")["ok"])
-            self.assertEqual(state(), "active")
-            # A user-blocked or user-paused watch stays the operator's to resume.
+            self.assertEqual((state(), "revision" in self.task(runtime)), ("active", False))
             for command in ("blocked rent", "pause rent"):
                 runtime.watch_command(command)
                 self.assertTrue(self.propose(runtime, status="active")["ok"])
-                self.assertEqual(state(), "proposed", command)
-                runtime.watch_command("approve rent")
-            # A model pause is not a model block.
-            runtime.tool_control({"action": "finish_task", "task_id": "rent", "status": "waiting"})
+                self.assertEqual(state(), "blocked" if command.startswith("blocked") else "waiting")
+                self.assertIn("revision", self.task(runtime), command)
+                runtime.watch_command(self.approve_command(runtime))
+                self.assertEqual(state(), "active")
+            # Re-sending the same blocked status does not turn the user's block into the model's.
+            runtime.watch_command("blocked rent")
+            self.assertTrue(self.propose(runtime, status="blocked")["ok"])
+            self.assertEqual(self.task(runtime)["status_by"], "user")
             self.propose(runtime, status="active")
-            self.assertEqual(state(), "proposed")
+            self.assertEqual(state(), "blocked")
+            self.assertIn("revision", self.task(runtime))
+            runtime.close()
+
+    def test_watches_approved_over_thirty_days_ago_need_approving_again(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(None, home)
+            env = self.bound(runtime)
+            env.start()
+            self.addCleanup(env.stop)
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            self.propose(runtime, next_review_at=past)
+            runtime.watch_command("approve rent")
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["rent"]["approved_at"] = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+            self.assertEqual(runtime.observe(), 0)
+            self.assertEqual(runtime.review_context()["tasks"], [])
+            self.assertTrue(self.task(runtime)["revision"]["reapproval"])
+            self.assertIn("needs re-approval", runtime.watch_command("list"))
+            self.assertEqual(runtime.observe(), 0)
+            asked = [e["reason"] for e in runtime.ledger.recent_log() if "re-approval" in e["reason"]]
+            self.assertEqual(asked, ["rent: needs re-approval"])
+            runtime.watch_command(self.approve_command(runtime))
+            self.assertNotIn("revision", self.task(runtime))
+            self.assertEqual(runtime.observe(), 1)
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["rent"]["approved_at"] = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+                data["tasks"]["rent"]["revision"] = {"reapproval": True, "proposed_at": "2020-01-01T00:00:00+00:00"}
+            runtime.watch_command("dismiss rent")
+            self.assertEqual(self.task(runtime)["status"], "cancelled")
             runtime.close()
 
     def approve_command(self, runtime, watch_id="rent"):
@@ -401,7 +474,9 @@ class ControlTests(unittest.TestCase):
                                                            "notify_when": "price drops", **change})["ok"], change)
             self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "active")
             self.propose(runtime, native_task_id="native-1", native_board="main", notify_when="always")
-            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "proposed")
+            task = runtime.ledger.snapshot()["tasks"][0]
+            self.assertEqual((task["status"], task["notify_when"], task["revision"]["notify_when"]),
+                             ("active", "price drops", "always"))
             runtime.close()
 
     def test_model_cannot_park_a_proposal_as_waiting(self):
@@ -436,7 +511,8 @@ class ControlTests(unittest.TestCase):
             for index in range(8):
                 self.propose(runtime, id=f"w{index}")
             self.assertTrue(self.propose(runtime, id="old", next_action="Something new")["ok"])
-            self.assertEqual({t["id"]: t["status"] for t in runtime.ledger.snapshot()["tasks"]}["old"], "proposed")
+            old = self.task(runtime, "old")
+            self.assertEqual((old["status"], old["revision"]["next_action"]), ("active", "Something new"))
             self.assertFalse(self.propose(runtime, id="extra")["ok"])
             runtime.close()
 

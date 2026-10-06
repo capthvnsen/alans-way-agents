@@ -8,22 +8,23 @@ create one speculatively to fill the schedule.
 ## Proposing, approving, editing
 
 You may only propose. `record_task` saves the watch as `proposed`; it does not run
-and `approved` is not yours to set. The tool also sends the user
-Approve, Snooze and Dismiss buttons when it can. In your normal reply, say what the
-watch will do and give the exact command it returns, `/watch approve <id> <code>`
-(the code covers the text they read; an edited proposal needs a new one). Do not say
-it is active before they approve. Give each proposal an optional short `source` tag
-such as `inbox`; three dismissals from a source in two weeks stop further proposals
-from it. Proposals expire after seven days.
+and `approved` is not yours to set. The tool also sends the user Approve and Dismiss
+buttons when it can. In your normal reply, say what the watch will do and give the
+exact command it returns, `/watch approve <id> <code>` (the code covers the text they
+read; an edited proposal needs a new one). Do not say it is active before they
+approve. Three dismissals of one kind in two weeks stop further proposals of that kind
+until the user approves one. A proposal expires after seven days.
 
 On an approved watch you may slow it (a longer `cadence_seconds`, a later
 `next_review_at` or `due_at`), retitle it, pause it (`finish_task` with `waiting`),
-finish it or cancel it. A new `next_action`, a different owner, a changed `notify_when`, a faster schedule, or
-reactivating a paused watch sends it back to proposed and needs `/watch approve`
-again. Scope, kind, `execution_host` and any native task binding never change after
-approval; use a new id.
-You may return a watch to active only if you blocked it yourself; a watch the user
-paused or blocked comes back with their `/watch resume <id>`.
+finish it or cancel it. Anything wider (a new `next_action`, a different owner, a
+changed `notify_when`, a faster schedule, reactivating a paused watch) is stored as a
+pending revision: the approved watch keeps running unchanged until the user approves
+the revision with the command the tool returns. Scope, kind, `execution_host` and any
+native task binding never change after approval; use a new id. You may return a watch
+to active without approval only if you blocked it yourself; a watch the user paused or
+blocked comes back with their `/watch resume <id>`. Approvals last 30 days: after
+that the watch stops firing until the user approves it again, and they are asked.
 
 ```python
 proactive_control(action="record_task", task={
@@ -81,7 +82,7 @@ still waiting past `due_at`, draft the follow-up and ask before sending; a loop 
 nudges on its own, and only once per checkpoint. Track a loop only when the user
 asked, or offer it when they clearly sent something awaiting a response.
 
-The user's direct surface is `/watch`: `list`, `show <id>`, `approve <id>`, `snooze <id>`, `dismiss <id>`,
+The user's direct surface is `/watch`: `list`, `show <id>`, `approve <id>`, `dismiss <id>`,
 `add {json}`, `pause <id>`, `resume <id>`, `done <id>`, `cancel <id>` and
 `signal <id> <text>`. A collector (a Hermes `cronjob`, or the woken primary) performs
 the check and writes `report_signal`; the observer wakes only on a real change.

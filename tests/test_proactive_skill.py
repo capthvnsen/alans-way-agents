@@ -142,11 +142,13 @@ class ProactiveSkillTests(unittest.TestCase):
         content = flat(DOCS.read_text(encoding="utf-8"))
         self.assertLess(content.index("## The two knobs"), content.index("## Review and enable"))
         for requirement in ("/proactivity level quiet|normal|eager", "/proactivity quiet 22-8",
-                            "/proactivity snooze 3d", "/proactivity log", "Approve", "Snooze 1d", "Dismiss",
+                            "/proactivity snooze 3d", "/proactivity log", "Approve", "Dismiss", "Approvals last 30 days",
                             "policy boundary, not a sandbox", "operator-only through Hermes's command surfaces"):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, content)
         self.assertNotIn("Approval is yours alone", content)
+        self.assertNotIn("Snooze 1d", content)
+        self.assertNotIn("low-purpose ones", content)
 
     def test_native_startup_hook_is_separate_trusted_optin_not_cli_dispatch(self):
         self.assertTrue(DOCS.is_file())

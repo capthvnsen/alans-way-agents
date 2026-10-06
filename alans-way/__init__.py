@@ -4,7 +4,8 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
-from .proactive_context import SourceSuppressed, StaleProposal, TASK_FIELDS, TASK_KINDS
+from .proactive_context import (SourceSuppressed, StaleProposal, TASK_FIELDS, TASK_KINDS, approval_fresh,
+                                pending_view)
 
 
 # The gateway drops a turn whose whole reply is this marker, so a wake with
@@ -44,7 +45,21 @@ class Runtime:
         except Exception:
             return "uncertain"
 
-    def _send(self, event, message, *, isolate, kind, reason):
+    def _context_block(self, task_id=None):
+        """What an isolated run cannot read for itself: it has no bound session, so
+        the plugin's status tool is stripped there."""
+        snapshot = self.ledger.snapshot()
+        prefs = snapshot["preferences"]
+        lines = ["[Live context from the plugin ledger]",
+                 f"Focus: {', '.join(prefs.get('focus', [])[:8]) or 'none'}. "
+                 f"Ignore: {', '.join(prefs.get('ignore', [])[:8]) or 'none'}. "
+                 f"Max work minutes: {prefs.get('max_work_minutes', 20)}."]
+        task = next((t for t in snapshot["tasks"] if t["id"] == task_id and t.get("approved") is True), None)
+        if task:
+            lines.append(f"Watch {task_id}: scope {task['scope'][:300]} Next action: {task['next_action'][:300]}")
+        return "\n".join(lines) + "\n"
+
+    def _send(self, event, message, *, isolate, kind, reason, task_id=None):
         """Deliver one wake; returns (store status, result status).
 
         Exploratory wakes try an isolated one-shot cron job first and fall
@@ -53,9 +68,9 @@ class Runtime:
         """
         if isolate:
             from .proactive_isolated import launch
-            job_id = launch(self.ctx, event["session_key"], event["id"], message)
+            job_id = launch(self.ctx, event["session_key"], event["id"], self._context_block(task_id) + message)
             if job_id:
-                self.ledger.track_job(job_id)
+                self.ledger.track_job(job_id, event["kind"])
                 self.ledger.log(kind, reason, "queued", job_id=job_id)
                 return "resolved", "isolated"
         status = self._inject(message, event["session_key"])
@@ -112,7 +127,17 @@ class Runtime:
         from .proactive_isolated import reap
         admitted = observe(self)
         reap(self)
+        self._ask_reapproval()
         return admitted
+
+    def _ask_reapproval(self):
+        """Watches approved over 30 days ago stop firing until the user approves them again."""
+        from .proactive_telegram import offer
+        flagged = self.ledger.flag_expired_approvals()
+        for task in (t for t in self.ledger.snapshot()["tasks"] if t["id"] in flagged):
+            view = pending_view(task)
+            self.ledger.log("proposal", f"{task['id']}: needs re-approval", "proposed")
+            offer(self, view, self.ledger.proposal_hash(view), reapproval=True)
 
     def review_context(self):
         from .proactive_observe import collect
@@ -228,7 +253,8 @@ class Runtime:
                    "Caps are not quotas. " + SILENT_LINE + "\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
         status, shown = self._send(event, message, isolate=True, kind="review",
-                                   reason=f"{event['kind']}: {action}" + (f" ({task_id})" if task_id else ""))
+                                   reason=f"{event['kind']}: {action}" + (f" ({task_id})" if task_id else ""),
+                                   task_id=task_id)
         self.store.finish(event_id, status)
         if shown in ("accepted_unverified", "isolated") and hasattr(self.store, "coalesce_pending"):
             # This wake re-reads live context, so any other queued speculative
@@ -255,6 +281,9 @@ class Runtime:
         if oriented:
             # A duplicate admission queued before an earlier wake landed —
             # orientation already happened; retire this one quietly.
+            self.store.finish(event_id, "resolved", refund=True)
+            return {"id": event_id, "status": "stale"}
+        if any(info.get("kind") == "first_run" for info in self.ledger.tracked_jobs().values()):
             self.store.finish(event_id, "resolved", refund=True)
             return {"id": event_id, "status": "stale"}
         live = self.store.load_policy()
@@ -285,7 +314,7 @@ class Runtime:
         ])
         status, shown = self._send(event, message, isolate=True, kind="first-run", reason="orientation")
         self.store.finish(event_id, status)
-        if shown in ("accepted_unverified", "isolated"):
+        if shown == "accepted_unverified":
             try:
                 with self.ledger.transaction() as state:
                     state["observations"]["first_run_done"] = \
@@ -315,7 +344,8 @@ class Runtime:
             None,
         )
         if watch_id is None or epoch is None or watch is None \
-                or watch.get("approved") is not True or watch.get("status") != "active":
+                or watch.get("approved") is not True or watch.get("status") != "active" \
+                or not approval_fresh(watch):
             self.store.finish(event_id, "rejected", refund=True)
             self.ledger.log("watch", f"{watch_id}: no longer active", "rejected")
             return {"id": event_id, "status": "rejected"}
@@ -530,13 +560,13 @@ class Runtime:
         try:
             pending = self.ledger.propose_task(task)
         except SourceSuppressed as exc:
-            return json.dumps({"ok": False, "error": f"The user dismissed three proposals from source {exc.args[0]!r} "
-                               "in the last two weeks. Do not propose more from it unless they ask for one."})
+            return json.dumps({"ok": False, "error": f"The user dismissed three {exc.args[0]} proposals "
+                               "in the last two weeks. Do not propose more of that kind unless they ask for one."})
         except Exception:
             return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
         result = {"ok": True, **self.store.status()}
         if pending:
-            saved = next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"])
+            saved = pending_view(next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"]))
             code = self.ledger.proposal_hash(saved)
             self.ledger.log("proposal", f"{task['id']}: {task.get('title', '')}", "proposed")
             from .proactive_telegram import offer
@@ -806,7 +836,8 @@ class Runtime:
     def decide_watch(self, action, task_id, code=None):
         """The operator's decision on a proposal, shared by /watch and the buttons.
 
-        Returns the reply text, or None when there is no such proposal.
+        Returns (reply text, outcome) with outcome approved, dismissed or
+        stale, or None when there is nothing pending for that id.
         """
         try:
             if action == "approve":
@@ -816,15 +847,12 @@ class Runtime:
                     task = stale.task
                     return (f"Watch {task_id} changed since you read it, so nothing was approved. Now: {task['scope']} "
                             f"Next action: {task['next_action']} To approve this version send "
-                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}")
+                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}"), "stale"
                 return (f"Watch {task_id} is approved and active. Scope: {task['scope']} "
-                        f"Next action: {task['next_action']}")
-            if action == "snooze":
-                self.ledger.snooze_task(task_id)
-                return (f"Watch {task_id} snoozed for a day; it stays proposed and will not run. "
-                        f"Approve it any time with /watch approve {task_id}")
-            source = self.ledger.dismiss_task(task_id)
-            return f"Dismissed {task_id}. Proposals from {source} are paused after three dismissals in two weeks."
+                        f"Next action: {task['next_action']}"), "approved"
+            kind = self.ledger.dismiss_task(task_id)
+            return (f"Dismissed {task_id}. Proposals of kind {kind} pause after three dismissals "
+                    "in two weeks."), "dismissed"
         except ValueError:
             return None
 
@@ -849,7 +877,8 @@ class Runtime:
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
                     kind = t.get("kind") if t.get("kind") in TASK_KINDS else "watch"
                     ask = (f" (approve with /watch approve {t['id']} {self.ledger.proposal_hash(t)})"
-                           if t["status"] == "proposed" else "")
+                           if t["status"] == "proposed" or t.get("revision") else "")
+                    ask = " (needs re-approval)" + ask if (t.get("revision") or {}).get("reapproval") else ask
                     return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}{ask}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
@@ -872,12 +901,12 @@ class Runtime:
                 task_id = rest.split()[0] if rest else ""
                 self.ledger.finish_task(task_id, status)
                 return f"Watch {task_id} is now {status}."
-            if action in ("approve", "snooze", "dismiss"):
+            if action in ("approve", "dismiss"):
                 words = rest.split()
-                reply = self.decide_watch(action, words[0] if words else "", words[1] if len(words) > 1 else None)
-                if reply is None:
+                decision = self.decide_watch(action, words[0] if words else "", words[1] if len(words) > 1 else None)
+                if decision is None:
                     raise ValueError("no proposed watch")
-                return reply
+                return decision[0]
             if action == "resume":
                 task_id = rest.split()[0] if rest else ""
                 task = next((t for t in tasks if t["id"] == task_id), None)
@@ -899,7 +928,7 @@ class Runtime:
                 self.ledger.report_signal(task_id, signal.strip())
                 return f"Signal recorded on {task_id}."
             return ("Use /watch list, /watch show <id>, /watch add {json}, "
-                    "/watch approve <id>, /watch snooze <id>, /watch dismiss <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
+                    "/watch approve <id>, /watch dismiss <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
                     "/watch cancel <id>, or /watch signal <id> <text>.")
         except (ValueError, KeyError, IndexError, TypeError):
             return "Watch command failed — check the id or JSON payload. No change was claimed."

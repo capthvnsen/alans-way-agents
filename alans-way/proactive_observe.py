@@ -8,7 +8,7 @@ import re
 import stat
 import sys
 
-from .proactive_context import TASK_KINDS
+from .proactive_context import TASK_KINDS, approval_fresh
 from .proactive_isolated import NAME_PREFIX
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
@@ -180,7 +180,7 @@ def collect(home: Path, ledger, ctx=None):
         try:
             approved_at = datetime.fromisoformat(task["approved_at"])
             if (task.get("approved") is not True or task.get("status") in {"done", "cancelled"}
-                    or approved_at.tzinfo is None or (now - approved_at).total_seconds() > 2592000):
+                    or approved_at.tzinfo is None or not approval_fresh(task, now)):
                 continue
         except (KeyError, ValueError, TypeError):
             continue
@@ -284,6 +284,7 @@ def _due_instance(nra_ts, cadence, now_ts):
 def _watch_eligible(task):
     return (type(task) is dict
             and task.get("approved") is True
+            and approval_fresh(task)
             and task.get("status") == "active"
             and type(task.get("id")) is str
             and WATCH_ID.fullmatch(task["id"]) is not None)

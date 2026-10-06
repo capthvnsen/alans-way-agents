@@ -132,21 +132,67 @@ class IsolatedWakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             ctx = Ctx()
             runtime = self.runtime(ctx, directory)
-            home = Path(directory)
-            for index, response in enumerate(("[SILENT]", "Rent is overdue.")):
+            for index in range(2):
                 runtime.store.record_event("context_changed", f"{index:064d}", purpose=True)
                 self.assertEqual(runtime.tick()["status"], "isolated")
-                job_id = f"job{index + 1}"
-                out = home / "cron" / "output" / job_id
-                out.mkdir(parents=True)
-                (out / "run.md").write_text(f"# Cron Job\n\n## Prompt\n\nreply [SILENT] if idle\n\n## Response\n\n{response}\n")
-                ctx.jobs[job_id].update(state="completed", last_status="ok")
+                ctx.jobs[f"job{index + 1}"].update(state="completed", last_status="ok")
             runtime.observe()
             self.assertEqual(ctx.jobs, {})
             self.assertEqual(runtime.ledger.tracked_jobs(), {})
-            outcomes = [entry["outcome"] for entry in runtime.ledger.recent_log()]
-            self.assertEqual(outcomes, ["silent", "delivered"])
+            self.assertEqual([entry["outcome"] for entry in runtime.ledger.recent_log()], ["ran", "ran"])
             runtime.close()
+
+    def test_isolated_runs_carry_the_context_they_cannot_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Ctx()
+            runtime = self.runtime(ctx, directory)
+            runtime.ledger.preferences({"focus": ["rent", "taxes"], "ignore": ["newsletters"], "max_work_minutes": 7})
+            runtime.ledger.record_task({"id": "rent", "title": "Rent", "scope": "Check the rent posting",
+                "next_action": "Read the bank feed", "owner": "primary", "status": "active", "approved": True})
+            runtime._appraiser = lambda *_: {"useful": True, "action": "research", "task_id": "rent"}
+            runtime.store.record_event("context_changed", "e" * 64, purpose=True)
+            runtime.tick()
+            prompt = ctx.calls[0][1]["prompt"]
+            for text in ("Focus: rent, taxes", "Ignore: newsletters", "Max work minutes: 7",
+                         "Watch rent: scope Check the rent posting", "Next action: Read the bank feed"):
+                self.assertIn(text, prompt)
+            runtime.close()
+
+    def first_run_done(self, runtime):
+        with runtime.ledger.transaction() as data:
+            return bool(data["observations"].get("first_run_done"))
+
+    def test_first_run_is_done_only_once_its_job_ran_and_a_missed_one_retries_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Ctx()
+            runtime = self.runtime(ctx, directory)
+            runtime._admit_first_run()
+            self.assertEqual(runtime.tick()["status"], "isolated")
+            self.assertFalse(self.first_run_done(runtime))
+            runtime.store.record_event("first_run", "firstrun:dup", purpose=True)
+            self.assertEqual(runtime.tick()["status"], "stale")
+            ctx.jobs["job1"].update(state="completed", last_status="ok")
+            runtime.observe()
+            self.assertTrue(self.first_run_done(runtime))
+            runtime.close()
+        for bad in ("failed", "gone"):
+            with self.subTest(bad), tempfile.TemporaryDirectory() as directory:
+                ctx = Ctx()
+                runtime = self.runtime(ctx, directory)
+                runtime._admit_first_run()
+                runtime.tick()
+                if bad == "failed":
+                    ctx.jobs["job1"].update(state="completed", last_status="error")
+                else:
+                    ctx.jobs.clear()
+                runtime.observe()
+                self.assertFalse(self.first_run_done(runtime))
+                self.assertEqual(runtime.store.status()["counts"].get("pending"), 1)
+                self.assertEqual(runtime.tick()["status"], "isolated")
+                ctx.jobs["job2"].update(state="completed", last_status="error")
+                runtime.observe()
+                self.assertEqual(runtime.store.status()["counts"].get("pending", 0), 0)
+                runtime.close()
 
     def test_failed_stuck_and_listing_failures_are_handled(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -160,7 +206,8 @@ class IsolatedWakeTests(unittest.TestCase):
             runtime.store.record_event("context_changed", "b" * 64, purpose=True)
             runtime.tick()
             with runtime.ledger.transaction() as data:
-                data["observations"]["__cron"]["job2"] = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+                data["observations"]["__cron"]["job2"]["at"] = (
+                    datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
             runtime.observe()
             self.assertNotIn("job2", ctx.jobs)
             self.assertEqual(runtime.ledger.recent_log()[-1]["outcome"], "expired")

@@ -101,51 +101,51 @@ class TelegramButtonTests(unittest.TestCase):
         self.assertIn("Check rent posts", text)
         self.assertIn("Check the feed", text)
 
-    def test_stale_hash_snooze_dismiss_and_garbage(self):
+    def test_stale_hash_dismiss_and_garbage(self):
         self.propose()
         stale = f"aw:a:rent:{self.code()}"
         self.propose(next_action="Something else")
-        _, text = self.tap(stale)
+        answer, text = self.tap(stale)
         self.assertIn("changed since you read it", text)
+        self.assertIn("changed", answer)
         self.assertEqual(self.status(), "proposed")
-        _, text = self.tap(f"aw:s:rent:{self.code()}")
-        self.assertIn("snoozed", text)
-        self.assertTrue(self.runtime.ledger.is_snoozed("rent"))
-        _, text = self.tap(f"aw:d:rent:{self.code()}")
+        self.assertEqual(self.runtime.ledger.recent_log()[-1]["outcome"], "stale")
+        answer, text = self.tap(f"aw:d:rent:{self.code()}")
         self.assertIn("Dismissed", text)
+        self.assertEqual(self.runtime.ledger.recent_log()[-1]["outcome"], "dismissed")
         self.assertEqual(self.status(), "cancelled")
-        for junk in ("aw:x:rent:abcd1234", "aw:a", "aw:a:ghost:abcd1234", "other:a:rent:x"):
+        for junk in ("aw:s:rent:abcd1234", "aw:x:rent:abcd1234", "aw:a", "aw:a:ghost:abcd1234", "other:a:rent:x"):
             answer, text = self.tap(junk)
             self.assertIsNone(text, junk)
             self.assertIn("no longer valid", answer)
 
     def test_slash_fallbacks_match_the_buttons(self):
         self.propose()
-        self.assertIn("snoozed", self.runtime.watch_command(f"snooze rent {self.code()}"))
         self.assertIn("Dismissed", self.runtime.watch_command("dismiss rent"))
         self.assertIn("failed", self.runtime.watch_command("dismiss rent"))
+        self.assertIn("Use /watch", self.runtime.watch_command("snooze rent"))
 
-    def test_three_dismissals_suppress_a_source_until_an_approval(self):
+    def test_three_dismissals_suppress_a_kind_until_an_approval(self):
         for name in "abcd":
-            self.assertTrue(self.propose(id=name, source="inbox")["ok"])
+            self.assertTrue(self.propose(id=name, kind="loop")["ok"])
         for name in "abc":
             self.runtime.watch_command(f"dismiss {name}")
-        refused = self.propose(id="e", source="inbox")
+        refused = self.propose(id="e", kind="loop")
         self.assertFalse(refused["ok"])
         self.assertIn("dismissed", refused["error"])
-        self.assertTrue(self.propose(id="e", source="calendar")["ok"])
+        self.assertTrue(self.propose(id="e", kind="sweep")["ok"])
         self.runtime.watch_command("approve d")
-        self.assertTrue(self.propose(id="f", source="inbox")["ok"])
+        self.assertTrue(self.propose(id="f", kind="loop")["ok"])
 
     def test_dismissals_older_than_two_weeks_do_not_count(self):
         from datetime import datetime, timedelta, timezone
         for name in "abc":
-            self.propose(id=name, source="inbox")
+            self.propose(id=name)
             self.runtime.watch_command(f"dismiss {name}")
         with self.runtime.ledger.transaction() as data:
             old = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
-            data["dismissals"]["inbox"][0] = old
-        self.assertTrue(self.propose(id="d", source="inbox")["ok"])
+            data["dismissals"]["watch"][0] = old
+        self.assertTrue(self.propose(id="d")["ok"])
 
     def test_registration_degrades_without_a_telegram_hook(self):
         ctx = types.SimpleNamespace(register_tool=lambda **k: None, register_command=lambda *a, **k: None,
@@ -181,12 +181,10 @@ class TelegramButtonTests(unittest.TestCase):
         self.assertEqual(message["chat_id"], 123456789)
         self.assertIn("Check rent posts", message["text"])
         buttons = [b for row in message["reply_markup"]["rows"] for b in row]
-        self.assertEqual([b["text"] for b in buttons], ["Approve", "Snooze 1d", "Dismiss"])
+        self.assertEqual([b["text"] for b in buttons], ["Approve", "Dismiss"])
         self.assertTrue(all(len(b["callback_data"].encode()) <= 64 for b in buttons))
-        self.assertEqual([b["callback_data"].split(":")[1] for b in buttons], ["a", "s", "d"])
-        # A snoozed proposal is not re-offered, and an over-long id falls back to the text command.
-        runtime.ledger.snooze_task("rent")
-        json.loads(runtime.tool_control({"action": "record_task", "task": {**PROPOSAL, "title": "Rent again"}}))
+        self.assertEqual([b["callback_data"].split(":")[1] for b in buttons], ["a", "d"])
+        # An over-long id falls back to the text command.
         json.loads(runtime.tool_control({"action": "record_task", "task": {**PROPOSAL, "id": "x" * 60}}))
         threading.Event().wait(0.3)
         self.assertEqual(len(app.sent), 1)

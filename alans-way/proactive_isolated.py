@@ -6,7 +6,6 @@ session so a "yes" reply has context. The plugin creates the job and removes it
 once it has run; Hermes would otherwise keep a finished one-shot for a week.
 """
 from datetime import datetime, timezone
-from pathlib import Path
 import json
 import re
 
@@ -53,22 +52,13 @@ def launch(ctx, session_key, event_id, prompt):
     return job_id if isinstance(job_id, str) and job_id else None
 
 
-def _response(home, job_id):
-    try:
-        newest = max((Path(home) / "cron" / "output" / job_id).glob("*.md"), key=lambda p: p.stat().st_mtime)
-        return newest.read_text(encoding="utf-8").rpartition("## Response")[2].strip()
-    except (OSError, ValueError):
-        return ""
-
-
-def _outcome(home, job):
-    if job.get("last_status") != "ok":
-        return "failed"
-    return "silent" if _response(home, job["job_id"]).upper().startswith("[SILENT]") else "delivered"
-
-
 def reap(runtime):
-    """Log the outcome of finished wake jobs and remove them; stuck ones expire."""
+    """Log the outcome of finished wake jobs and remove them; stuck ones expire.
+
+    The first-run marker is set only once its job actually ran; a job that
+    failed, expired or vanished (a missed one-shot after a restart) gets one
+    fresh orientation wake.
+    """
     tracked = runtime.ledger.tracked_jobs()
     if not tracked:
         return
@@ -77,13 +67,13 @@ def reap(runtime):
         return
     jobs = {job.get("job_id"): job for job in listing.get("jobs", []) if isinstance(job, dict)}
     now = datetime.now(timezone.utc)
-    for job_id, started in tracked.items():
+    for job_id, info in tracked.items():
         job = jobs.get(job_id)
         if job is None:
             outcome = "gone"
         elif job.get("state") in ("completed", "error"):
-            outcome = _outcome(runtime.home, job)
-        elif (now - datetime.fromisoformat(started)).total_seconds() > STUCK_SECONDS:
+            outcome = "ran" if job.get("last_status") == "ok" else "failed"
+        elif (now - datetime.fromisoformat(info["at"])).total_seconds() > STUCK_SECONDS:
             outcome = "expired"
         else:
             continue
@@ -91,3 +81,17 @@ def reap(runtime):
             _call(runtime.ctx, {"action": "remove", "job_id": job_id})
         runtime.ledger.set_outcome(job_id, outcome)
         runtime.ledger.untrack_job(job_id)
+        if info.get("kind") == "first_run":
+            _first_run_result(runtime, outcome)
+
+
+def _first_run_result(runtime, outcome):
+    with runtime.ledger.transaction() as state:
+        seen = state["observations"]
+        if outcome == "ran":
+            seen["first_run_done"] = datetime.now(timezone.utc).isoformat()
+            return
+        retry = not seen.get("first_run_retried")
+        seen["first_run_retried"] = True
+    if retry:
+        runtime._admit_first_run()

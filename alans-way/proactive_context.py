@@ -18,7 +18,7 @@ DEFAULT_PREFERENCES = {
 TASK_FIELDS = {"id", "title", "scope", "next_action", "owner", "status", "approved",
                "kind", "native_task_id", "native_board", "next_review_at", "due_at",
                "notify_when", "cadence_seconds", "artifact", "verification",
-               "consent_reference", "execution_host", "source"}
+               "consent_reference", "execution_host"}
 TASK_KINDS = {"watch", "loop", "sweep"}
 TERMINAL = {"done", "cancelled"}
 TERMINAL_RETENTION_SECONDS = 14 * 86400
@@ -28,15 +28,16 @@ MAX_LOG = 20
 DISMISSAL_LIMIT, DISMISSAL_WINDOW_SECONDS = 3, 14 * 86400
 PROPOSAL_TTL_SECONDS = 7 * 86400
 HASHED_FIELDS = ("title", "scope", "next_action", "owner", "kind", "execution_host", "cadence_seconds",
-                 "next_review_at", "due_at", "notify_when", "native_task_id", "native_board", "source")
+                 "next_review_at", "due_at", "notify_when", "native_task_id", "native_board")
+APPROVAL_TTL_SECONDS = 30 * 86400
 
 # Signal bookkeeping is written only through report_signal; record_task saves
 # must carry it forward or re-arming a watch would erase its last observation.
-SIGNAL_FIELDS = ("signal", "signal_at", "snoozed_until")
+SIGNAL_FIELDS = ("signal", "signal_at")
 
 
 class SourceSuppressed(ValueError):
-    pass
+    """Three recent dismissals of one kind of proposal; args[0] is the kind."""
 
 
 class StaleProposal(ValueError):
@@ -45,9 +46,22 @@ class StaleProposal(ValueError):
         self.task = task
 
 
+def pending_view(task):
+    """The watch as the user would have it once a pending revision is approved."""
+    revision = task.get("revision")
+    return {**task, **{k: v for k, v in revision.items() if k in TASK_FIELDS}} if revision else task
+
+
+def approval_fresh(task, now=None):
+    """Approvals lapse after 30 days; a lapsed watch needs approving again."""
+    approved = _moment(task.get("approved_at"))
+    now = now or datetime.now(timezone.utc)
+    return approved is not None and (now - approved).total_seconds() <= APPROVAL_TTL_SECONDS
+
+
 def proposal_hash(task):
     """Eight hex digits over what the user reads when approving a watch."""
-    body = {k: task.get(k) for k in HASHED_FIELDS}
+    body = {k: pending_view(task).get(k) for k in HASHED_FIELDS}
     body["kind"] = body["kind"] or "watch"
     body["execution_host"] = body["execution_host"] or "cloud"
     return sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
@@ -146,8 +160,6 @@ class Ledger:
                 _text(task[name], 1000)
         if "notify_when" in task:
             _text(task["notify_when"], 300)
-        if "source" in task:
-            _text(task["source"], 40)
         if "cadence_seconds" in task:
             if type(task["cadence_seconds"]) is not int or not 300 <= task["cadence_seconds"] <= 604800:
                 raise ValueError("cadence_seconds must be an integer in [300, 604800]")
@@ -159,9 +171,18 @@ class Ledger:
 
     @staticmethod
     def _prune(data):
-        """Drop terminal watches two weeks after they closed; they never count toward the cap."""
+        """Expire stale proposals and revisions; drop terminal watches two weeks after they closed.
+
+        A pending revision never takes the approved watch down with it, and a
+        re-approval request stays until the user answers it.
+        """
         now = datetime.now(timezone.utc)
         for task_id, task in list(data["tasks"].items()):
+            revision = task.get("revision")
+            if revision and not revision.get("reapproval"):
+                proposed = _moment(revision.get("proposed_at"))
+                if proposed is None or (now - proposed).total_seconds() > PROPOSAL_TTL_SECONDS:
+                    del task["revision"]
             if task.get("status") == "proposed":
                 proposed = _moment(task.get("proposed_at"))
                 if proposed is None:
@@ -197,21 +218,23 @@ class Ledger:
             saved = copy.deepcopy(task)
             saved["kind"] = task.get("kind", old.get("kind", "watch") if old else "watch")
             saved["execution_host"] = task.get("execution_host", old.get("execution_host", "cloud") if old else "cloud")
-            saved["approved_at"] = (old or {}).get("approved_at") or datetime.now(timezone.utc).isoformat()
+            saved["approved_at"] = datetime.now(timezone.utc).isoformat()  # an operator save is a fresh approval
             for key in SIGNAL_FIELDS:
                 if old is not None and key in old:
                     saved[key] = old[key]
             data["tasks"][task["id"]] = saved
-            data.get("dismissals", {}).pop(saved.get("source") or saved["kind"], None)
+            data.get("dismissals", {}).pop(saved["kind"], None)
 
     def propose_task(self, task):
-        """Model path: the bot may only propose. Returns True when the saved watch awaits approval.
+        """Model path: the bot may only propose. Returns True when something awaits approval.
 
-        New or still-proposed watches are saved as ``proposed`` and never fire.
-        An approved watch keeps its approval only for changes that cannot
-        widen it (slower cadence or review, later deadline, pause, retitling);
-        a new next_action, owner, faster schedule or reactivation drops it back
-        to ``proposed``. Scope, kind and host stay immutable once approved.
+        A new or still-proposed watch is saved as ``proposed`` and never fires.
+        An approved watch keeps running as approved. Changes that cannot widen
+        it (slower cadence or review, later deadline, pause, retitling) apply at
+        once; anything wider (a new next_action, owner, report rule, faster
+        schedule or reactivation) is stored as a pending revision that replaces
+        the watch only when approved, and expires on its own. Scope, kind, host
+        and native binding stay immutable once approved.
         """
         if not isinstance(task, dict) or set(task) - TASK_FIELDS:
             raise ValueError("invalid watch")
@@ -230,95 +253,115 @@ class Ledger:
                              or old.get("kind", "watch") != task.get("kind", old.get("kind", "watch"))
                              or old.get("execution_host", "cloud") != task.get("execution_host", old.get("execution_host", "cloud"))):
                 raise ValueError("changed scopes, kinds or hosts need a new watch id")
-            source = task.get("source") or task.get("kind", "watch")
-            if not approved and self._suppressed(data, source):
-                raise SourceSuppressed(source)
+            kind = task.get("kind", old.get("kind", "watch") if old else "watch")
+            if not approved and self._suppressed(data, kind):
+                raise SourceSuppressed(kind)
             if old is None:
                 live = [t for t in data["tasks"].values() if t["status"] not in TERMINAL]
-                fresh = sum(t["status"] == "proposed" and not t.get("reproposed") for t in live)
-                if len(live) >= MAX_WATCHES or fresh >= MAX_PROPOSALS:
+                if len(live) >= MAX_WATCHES or sum(t["status"] == "proposed" for t in live) >= MAX_PROPOSALS:
                     raise ValueError("watch limit reached")
-            keeps = approved and not (
-                task["next_action"] != old["next_action"] or task["owner"] != old["owner"]
-                or task.get("notify_when") != old.get("notify_when")
-                or (task["status"] == "active" and old["status"] != "active"
-                    and not (old["status"] == "blocked" and old.get("status_by") == "model"))
-                or _sooner(task.get("cadence_seconds"), old.get("cadence_seconds"))
-                or _sooner(task.get("next_review_at"), old.get("next_review_at"))
-                or _sooner(task.get("due_at"), old.get("due_at")))
             saved = copy.deepcopy(task)
-            saved["kind"] = task.get("kind", old.get("kind", "watch") if old else "watch")
+            saved["kind"] = kind
             saved["execution_host"] = task.get("execution_host", old.get("execution_host", "cloud") if old else "cloud")
-            if keeps:
-                saved["approved"], saved["approved_at"] = True, old["approved_at"]
-            else:
-                saved["approved"], saved["status"] = False, "proposed"
-                saved["proposed_at"] = datetime.now(timezone.utc).isoformat()
-                if approved or (old or {}).get("reproposed"):
-                    saved["reproposed"] = True
+            if not approved:
+                saved.update(approved=False, status="proposed", proposed_at=datetime.now(timezone.utc).isoformat())
+                data["tasks"][task["id"]] = saved
+                return True
+            wider = (task["next_action"] != old["next_action"] or task["owner"] != old["owner"]
+                     or task.get("notify_when") != old.get("notify_when")
+                     or (task["status"] == "active" and old["status"] != "active"
+                         and not (old["status"] == "blocked" and old.get("status_by") == "model"))
+                     or _sooner(task.get("cadence_seconds"), old.get("cadence_seconds"))
+                     or _sooner(task.get("next_review_at"), old.get("next_review_at"))
+                     or _sooner(task.get("due_at"), old.get("due_at")))
+            if wider:
+                old["revision"] = {**saved, "proposed_at": datetime.now(timezone.utc).isoformat()}
+                return True
+            saved.update(approved=True, approved_at=old["approved_at"])
             if saved["status"] in ("waiting", "blocked"):
-                saved["status_by"] = "model"
+                # Only a status the model actually changed is the model's.
+                saved["status_by"] = old.get("status_by") if old["status"] == saved["status"] else "model"
             for key in SIGNAL_FIELDS:
-                if old is not None and key in old:
+                if key in old:
                     saved[key] = old[key]
             data["tasks"][task["id"]] = saved
-            return not keeps
+            return False
 
     def proposal_hash(self, task):
         return proposal_hash(task)
 
     def approve_task(self, task_id, expected=None):
-        """Operator path: activate a proposed watch; returns it as activated.
+        """Operator path: activate a proposed watch, or swap in its pending revision.
 
-        With ``expected`` (the hash the user was shown) a proposal edited since
-        is refused with StaleProposal instead of approving unseen text.
+        Returns the watch as activated. With ``expected`` (the hash the user was
+        shown) a proposal edited since is refused with StaleProposal instead of
+        approving unseen text.
         """
         with self.transaction() as data:
             task = data["tasks"].get(task_id)
-            if not task or task["status"] != "proposed":
+            if not task or (task["status"] != "proposed" and not task.get("revision")):
                 raise ValueError("no proposed watch")
             if expected and expected != proposal_hash(task):
-                raise StaleProposal(copy.deepcopy(task))
-            task.update(status="active", approved=True,
-                        approved_at=datetime.now(timezone.utc).isoformat())
-            task.pop("reproposed", None)
-            data.get("dismissals", {}).pop(task.get("source") or task.get("kind", "watch"), None)
-            return copy.deepcopy(task)
+                raise StaleProposal(copy.deepcopy(pending_view(task)))
+            now = datetime.now(timezone.utc).isoformat()
+            if task["status"] == "proposed":
+                task.update(status="active", approved=True, approved_at=now)
+                saved = task
+            else:
+                revision = task["revision"]
+                saved = {k: v for k, v in revision.items() if k not in ("proposed_at", "reapproval")}
+                saved.update(approved=True, approved_at=now)
+                for key in SIGNAL_FIELDS:
+                    if key in task:
+                        saved[key] = task[key]
+                if saved["status"] in ("waiting", "blocked"):
+                    saved["status_by"] = task.get("status_by") if task["status"] == saved["status"] else "model"
+                data["tasks"][task_id] = saved
+            data.get("dismissals", {}).pop(saved.get("kind", "watch"), None)
+            return copy.deepcopy(saved)
+
+    def flag_expired_approvals(self):
+        """Ask for re-approval of active watches approved over 30 days ago; returns their ids."""
+        flagged = []
+        with self.transaction() as data:
+            now = datetime.now(timezone.utc)
+            for task_id, task in data["tasks"].items():
+                if (task.get("approved") is True and task["status"] == "active" and not task.get("revision")
+                        and not approval_fresh(task, now)):
+                    keep = {k: v for k, v in task.items() if k in TASK_FIELDS and k != "approved"}
+                    task["revision"] = {**keep, "proposed_at": now.isoformat(), "reapproval": True}
+                    flagged.append(task_id)
+        return flagged
 
     @staticmethod
-    def _recent_dismissals(data, source):
+    def _recent_dismissals(data, kind):
         cutoff = datetime.now(timezone.utc).timestamp() - DISMISSAL_WINDOW_SECONDS
-        return [t for t in data.get("dismissals", {}).get(source, [])
+        return [t for t in data.get("dismissals", {}).get(kind, [])
                 if (_moment(t) or datetime.min.replace(tzinfo=timezone.utc)).timestamp() > cutoff]
 
-    def _suppressed(self, data, source):
-        return len(self._recent_dismissals(data, source)) >= DISMISSAL_LIMIT
+    def _suppressed(self, data, kind):
+        return len(self._recent_dismissals(data, kind)) >= DISMISSAL_LIMIT
 
     def dismiss_task(self, task_id):
-        """Operator path: drop a proposal and count it against its source."""
+        """Operator path: drop a proposal (counted against its kind) or just its pending revision.
+
+        Dismissing a re-approval request retires the lapsed watch. Returns the kind.
+        """
         with self.transaction() as data:
             task = data["tasks"].get(task_id)
-            if not task or task["status"] != "proposed":
+            if not task or (task["status"] != "proposed" and not task.get("revision")):
                 raise ValueError("no proposed watch")
-            source = task.get("source") or task.get("kind", "watch")
-            task.update(status="cancelled", closed_at=datetime.now(timezone.utc).isoformat())
-            recent = self._recent_dismissals(data, source)
-            data.setdefault("dismissals", {})[source] = recent + [datetime.now(timezone.utc).isoformat()]
-            return source
-
-    def snooze_task(self, task_id, seconds=86400):
-        """Operator path: keep a proposal but stop re-offering buttons for it."""
-        with self.transaction() as data:
-            task = data["tasks"].get(task_id)
-            if not task or task["status"] != "proposed":
-                raise ValueError("no proposed watch")
-            task["snoozed_until"] = datetime.fromtimestamp(
-                datetime.now(timezone.utc).timestamp() + seconds, timezone.utc).isoformat()
-
-    def is_snoozed(self, task_id):
-        task = next((t for t in self.snapshot()["tasks"] if t["id"] == task_id), None)
-        until = _moment((task or {}).get("snoozed_until"))
-        return until is not None and until > datetime.now(timezone.utc)
+            kind = task.get("kind", "watch")
+            now = datetime.now(timezone.utc).isoformat()
+            if task["status"] == "proposed":
+                task.update(status="cancelled", closed_at=now)
+                data.setdefault("dismissals", {})[kind] = self._recent_dismissals(data, kind) + [now]
+            elif task["revision"].get("reapproval"):
+                task.pop("revision")
+                task.update(status="cancelled", closed_at=now)
+            else:
+                task.pop("revision")
+            return kind
 
     def log(self, kind, reason, outcome, job_id=None):
         """Append one line to the activity log (newest last, bounded)."""
@@ -329,9 +372,10 @@ class Ledger:
                             **({"job_id": job_id} if job_id else {})})
             del entries[:-MAX_LOG]
 
-    def track_job(self, job_id):
+    def track_job(self, job_id, kind):
         with self.transaction() as data:
-            data["observations"].setdefault("__cron", {})[job_id] = datetime.now(timezone.utc).isoformat()
+            data["observations"].setdefault("__cron", {})[job_id] = {
+                "at": datetime.now(timezone.utc).isoformat(), "kind": kind}
 
     def untrack_job(self, job_id):
         with self.transaction() as data:

@@ -15,7 +15,7 @@ Most people only ever touch two settings, both in Telegram on the bound chat.
 
 **How active the bot is:** `/proactivity level quiet|normal|eager`. `quiet` is at most
 one check-in a day and half as often; `normal` is the default; `eager` is up to six a
-day, twice as often, plus two low-purpose ones. The bot may lower the level on
+day (at most two of them low-purpose) and twice as often. The bot may lower the level on
 request. Only you can raise it. `hermes proactivity level eager` does the same from a
 shell.
 
@@ -26,13 +26,13 @@ timezone; change it with `/proactivity timezone Europe/Berlin` or `hermes proact
 --timezone Europe/Berlin configure`.
 
 `/proactivity status` shows both, and `/proactivity log` lists the last ten wakes: time,
-kind, a one-line reason and the outcome (`queued`, `sent`, `proposed`, `rejected`,
-`silent` or `delivered`). Everything else in this guide is advanced configuration.
+kind, a one-line reason and the outcome (`queued`, `sent`, `ran`, `failed`,
+`proposed`, `approved`, `dismissed` or `rejected`). Everything else in this guide is advanced configuration.
 
-When the bot proposes a watch it also sends a message with **Approve**, **Snooze 1d**
-and **Dismiss** buttons. Your tap is the approval. Three dismissals from one source in
-two weeks pause proposals from it until you approve one. Without the buttons, send
-`/watch approve <id> <code>`, `/watch snooze <id>` or `/watch dismiss <id>`.
+When the bot proposes a watch it also sends a message with **Approve** and **Dismiss**
+buttons. Your tap is the approval. Three dismissals of one kind of proposal (watch,
+loop or sweep) in two weeks pause proposals of that kind until you approve one.
+Without the buttons, send `/watch approve <id> <code>` or `/watch dismiss <id>`.
 
 Open-ended checks (reviews, the first-run orientation, sweeps and loops) run as
 one-shot Hermes cron jobs in a fresh session, so they never grow your main
@@ -229,10 +229,17 @@ the current text is shown. Approving echoes the scope and next action that went
 live. Approval is operator-only through Hermes's command surfaces (the slash command,
 the CLI or your button tap); this is a policy boundary, not a sandbox, because a
 model that has a terminal tool could run the CLI itself. On an approved watch the
-bot may slow it, pause it or finish it; a new action, a changed report rule, a
-faster schedule or reactivation sends it back to proposed. Proposals expire after
-seven days. At most eight wait at once, and finished watches are cleared after 14
-days and never count toward the 64-watch cap.
+bot may slow it, pause it or finish it. Anything wider (a new action, a changed
+report rule, a faster schedule, reactivation) is stored as a pending revision: the
+approved watch keeps running unchanged until you approve the revision, and a revision
+you dismiss or ignore for seven days is discarded without touching the watch. A
+proposal that was never approved expires after seven days. At most eight proposals
+wait at once, and finished watches are cleared after 14 days and never count toward
+the 64-watch cap.
+
+Approvals last 30 days. A watch approved longer ago stops firing and the bot asks
+you to approve it again with an Approve button (or `/watch approve <id> <code>`);
+`/watch resume` also renews it, and dismissing the request retires the watch.
 
 An approved watch can carry a schedule: `next_review_at` fires a `watch_due`
 wake; `cadence_seconds` re-arms on a fixed grid at dispatch, so missed slots
@@ -248,7 +255,7 @@ hours, a separate daily budget (`max_daily_watch_wakes`, default 8) and
 tighter spacing (`min_watch_interval_seconds`, default 300); the pending
 queue reserves headroom so speculative noise cannot starve them. A re-armed
 instance retires as stale; a finished watch's queued wake is rejected.
-`/watch list|show|approve|snooze|dismiss|add {json}|pause|resume|done|cancel|signal` is the
+`/watch list|show|approve|dismiss|add {json}|pause|resume|done|cancel|signal` is the
 operator's direct ledger surface; like mutating `/proactivity` actions and
 `proactive_control`, it answers only on the bound conversation; status stays
 open.

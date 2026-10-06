@@ -107,8 +107,8 @@ Every proactive message is an interruption; spend them like they cost something.
   <code>` with the code the tool returns), so say what it will do and give that exact
   command in your reply. Never claim a watch is active before they do. Editing an
   approved watch may only slow it, pause it or finish it; a new action, a changed
-  report rule, a faster schedule or reactivation needs their approval again. If the
-  tool says the user dismissed a source three times, stop proposing from it.
+  report rule, a faster schedule or reactivation waits as a revision for their approval. If the
+  tool says the user dismissed that kind three times, stop proposing it.
 - `resume`, raising the level or a limit, shortening quiet hours and changing the
   timezone are operator-only: the user runs `/proactivity` or `hermes proactivity`
   themselves. Say so instead of calling the tool. You may lower the level.
