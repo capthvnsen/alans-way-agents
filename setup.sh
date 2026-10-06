@@ -103,13 +103,16 @@ if [ "$VERIFY" = 1 ]; then
   have hermes && hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME" \
     && ok "plugin '$PLUGIN_NAME' installed" || bad "plugin '$PLUGIN_NAME' not in hermes plugins list"
   CFG_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; CFG_HOME="${CFG_HOME:-$HERMES_HOME}"
-  if [ -f "$CFG_HOME/config.yaml" ]; then
-    if awk '/^platform_toolsets:/{p=1;next} p&&/^  telegram:/{t=1;next} p&&/^  [a-z_]+:/{t=0} t&&/^    - proactivity[[:space:]]*$/{f=1} END{exit !f}' "$CFG_HOME/config.yaml"; then
+  if have hermes; then
+    # Hermes resolves presets and flow/block YAML itself; grepping the config
+    # misreads both and matches other sections' telegram lists.
+    TOOLS="$(hermes ${PROFILE:+-p "$PROFILE"} tools list --platform telegram 2>/dev/null || true)"
+    if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+proactivity([[:space:]]|$)"; then
       ok "proactivity toolset enabled for telegram"
     else
       warn "proactivity toolset not enabled for telegram — proactive_control won't be callable in Telegram sessions (run: hermes tools enable proactivity --platform telegram)"
     fi
-    if awk '/^platform_toolsets:/{p=1;next} p&&/^  telegram:/{t=1;next} p&&/^  [a-z_]+:/{t=0} t&&/^    - browser[[:space:]]*$/{f=1} END{exit !f}' "$CFG_HOME/config.yaml"; then
+    if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
       warn "built-in 'browser' toolset still enabled for telegram — the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
     else
       ok "built-in browser toolset disabled for telegram"
