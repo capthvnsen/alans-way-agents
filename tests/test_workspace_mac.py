@@ -615,7 +615,7 @@ class DeadBackendFallbackTests(unittest.TestCase):
             finally:
                 proc.kill()
                 _, err = proc.communicate()
-            self.assertIn('"id":1', line)
+            self.assertIn('"id":1', line, err)
             self.assertIn('"stub":"vps"', line)
             self.assertIn("died before its first response", err)
 
