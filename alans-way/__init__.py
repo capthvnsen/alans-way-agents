@@ -504,14 +504,15 @@ class Runtime:
         if action != "status" and not self._bound_route_only() and not self._cron_bookkeeping(action):
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
         if action == "resume":
-            return json.dumps({"ok": False, "error": "Resume is operator-only — the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
+            return json.dumps({"ok": False, "error": "Resume is operator-only: the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
         if action == "configure" and isinstance(args, dict):
             relaxed = self._loosening(args.get("changes", args.get("settings", {})))
             if relaxed:
-                return json.dumps({"ok": False, "error": f"That change widens {relaxed} — an operator applies it with /proactivity configure or hermes proactivity configure."})
+                return json.dumps({"ok": False, "error": f"That change widens {relaxed}: an operator applies it with /proactivity configure or hermes proactivity configure."})
         if action == "level" and isinstance(args, dict):
             from .proactive_core import LEVELS
-            preset = LEVELS.get(args.get("level"))
+            level = args.get("level")
+            preset = LEVELS.get(level) if isinstance(level, str) else None
             if preset is not None and self._loosening(preset):
                 return json.dumps({"ok": False, "error": "Raising the level is operator-only: the user applies it with /proactivity level or hermes proactivity level."})
         if action == "pause" and isinstance(args, dict) and args.get("resume_at") is not None:
@@ -528,7 +529,7 @@ class Runtime:
                 except (TypeError, ValueError):
                     sooner = True
                 if sooner:
-                    return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only — the operator applies it with /proactivity pause <timestamp>."})
+                    return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only: the operator applies it with /proactivity pause <timestamp>."})
         if action == "record_task" and isinstance(args, dict):
             return self._propose(args.get("task"))
         result = self.control(args, **kwargs)
@@ -813,12 +814,12 @@ class Runtime:
         unresolved = sum(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
         attention = [state.get("observer_error"), state.get("appraisal_error")]
         if state.get("storage_full"):
-            attention.append("event storage full — new wakes refused")
+            attention.append("event storage full, new wakes refused")
         flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
         snoozed = ("" if state["enabled"] or not policy.get("resume_at")
                    else f" until {policy['resume_at']}")
         quiet = ("off" if policy["quiet_start"] == policy["quiet_end"]
-                 else f"{policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00")
+                 else f"{policy['quiet_start']:02}:00-{policy['quiet_end']:02}:00")
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused' + snoozed}\n"
                 f"Level: {policy['level']}\n"
                 f"Quiet hours: {quiet} ({policy['timezone']})\n"
@@ -879,7 +880,7 @@ class Runtime:
                     ask = (f" (approve with /watch approve {t['id']} {self.ledger.proposal_hash(t)})"
                            if t["status"] == "proposed" or t.get("revision") else "")
                     ask = " (needs re-approval)" + ask if (t.get("revision") or {}).get("reapproval") else ask
-                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}{ask}"
+                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} - {t.get('title') or t['scope'][:60]}{ask}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
                 task = next((t for t in tasks if t["id"] == rest), None)
@@ -915,7 +916,7 @@ class Runtime:
                 if task["status"] == "proposed":
                     return f"Watch {task_id} is only proposed. Approve it with /watch approve {task_id}."
                 if task["status"] in {"done", "cancelled"}:
-                    return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
+                    return f"Watch {task_id} is {task['status']}. Terminal watches need a new id."
                 task = dict(task, status="active")
                 task = {k: v for k, v in task.items()
                         if k in TASK_FIELDS and k not in {"signal", "signal_at"}}
@@ -931,7 +932,7 @@ class Runtime:
                     "/watch approve <id>, /watch dismiss <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
                     "/watch cancel <id>, or /watch signal <id> <text>.")
         except (ValueError, KeyError, IndexError, TypeError):
-            return "Watch command failed — check the id or JSON payload. No change was claimed."
+            return "Watch command failed. Check the id or JSON payload. No change was claimed."
 
 
 def _owning_home() -> Path:

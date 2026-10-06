@@ -31,7 +31,7 @@ class ControlTests(unittest.TestCase):
             with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
                 self.assertIn("Proactivity: enabled", runtime.command("resume"))
                 configured = runtime.command('configure {"quiet_start":23}')
-                self.assertIn("23:00–08:00", configured)
+                self.assertIn("23:00-08:00", configured)
                 self.assertNotIn(route, configured)
                 self.assertNotIn('"audit"', configured)
                 self.assertIn("Proactivity: paused", runtime.command("pause"))
@@ -263,6 +263,17 @@ class ControlTests(unittest.TestCase):
                     "changes": {"max_daily_wakes": 3, "quiet_start": 22}}))["ok"])
                 self.assertTrue(runtime.store.load_policy().enabled)
                 self.assertEqual(runtime.store.load_policy().quiet_start, 22)
+            runtime.close()
+
+    def test_an_unhashable_level_is_a_clean_error(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            route = "agent:main:telegram:dm:123456789"
+            runtime.store.update_policy({"session_key": route})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                for level in (["high"], {"x": 1}):
+                    self.assertFalse(json.loads(runtime.tool_control({"action": "level", "level": level}))["ok"])
             runtime.close()
 
     PROPOSAL = {"id": "rent", "title": "Rent", "scope": "Check rent posts",
@@ -612,7 +623,7 @@ class ControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = module.Runtime(None, Path(directory))
             with self.bound(runtime):
-                self.assertIn("Quiet hours: 23:00–07:00", runtime.command("quiet 23-7"))
+                self.assertIn("Quiet hours: 23:00-07:00", runtime.command("quiet 23-7"))
                 policy = runtime.store.load_policy()
                 self.assertEqual((policy.quiet_start, policy.quiet_end), (23, 7))
                 for bad in ("quiet", "quiet 25-8", "quiet 8"):
