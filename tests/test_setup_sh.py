@@ -190,6 +190,62 @@ class TimezoneFallbackTests(unittest.TestCase):
             self.assertIn("using VPS timezone America/Denver", result.stdout)
 
 
+def logging_hermes_bin(directory: Path, log: Path):
+    bin_dir = directory / "bin"
+    bin_dir.mkdir()
+    hermes = bin_dir / "hermes"
+    hermes.write_text(f"""#!/bin/sh
+echo "$*" >> "{log}"
+case "$1" in
+  --version) echo "hermes 0.21.5";;
+  plugins) [ "$2" = list ] && echo "alans-way";;
+esac
+exit 0
+""", encoding="utf-8")
+    hermes.chmod(0o755)
+    return bin_dir
+
+
+class AgentShellTests(unittest.TestCase):
+    def test_runs_to_completion_without_a_controlling_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            home.mkdir()
+            bin_dir = logging_hermes_bin(Path(directory), Path(directory) / "log")
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(
+                [SH, str(SCRIPT), "--bot-id", "111222333", "--skip-browser", "--skip-services",
+                 "--hermes-home", str(home)],
+                capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+            self.assertNotIn("Device not configured", result.stderr)
+            self.assertIn("== Done", result.stdout)
+
+    def test_non_interactive_bind_picks_the_profile_route_from_a_multiplexed_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "profiles" / "sprk1").mkdir(parents=True)
+            (home / "sessions").mkdir()
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"},'
+                ' "agent:sprk1:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}',
+                encoding="utf-8",
+            )
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run(
+                "--profile", "sprk1", "--bind", "--proactive", "yes", "--timezone", "Europe/Berlin",
+                "--non-interactive", "--skip-browser", "--skip-services", "--hermes-home", str(home),
+                env=env, check=False,
+            )
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("bound primary route: sprk1", result.stdout)
+            self.assertIn("-p sprk1 proactivity bind --session-key agent:sprk1:telegram:dm:1", calls)
+            self.assertIn("-p sprk1 proactivity resume", calls)
+            self.assertIn("proactivity on", result.stdout)
+
+
 class DocFlagTests(unittest.TestCase):
     def test_setup_prompt_flags_exist_in_setup_sh(self):
         prompt = (ROOT / "docs" / "setup-prompt.md").read_text(encoding="utf-8")
