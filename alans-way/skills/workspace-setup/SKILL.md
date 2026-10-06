@@ -1,6 +1,6 @@
 ---
 name: workspace-setup
-description: Set up Alan's Way after this plugin is installed — connect the user's computer (Mac, Windows PC or Linux), install the desktop app, wire the workspace browser, and bind proactivity. Use when the user asks to install, connect, onboard, or repair Alan's Way.
+description: Set up Alan's Way after this plugin is installed: connect the user's computer (Mac, Windows PC or Linux), install the desktop app, wire the workspace browser, and bind proactivity. Use when the user asks to install, connect, onboard, or repair Alan's Way.
 ---
 
 # Workspace setup
@@ -19,7 +19,7 @@ and `connect-linux.sh` on Linux; everything else in this skill is the same.
 
 Fetch this page and follow it for Tailscale, the Mac app, and SSH keys. Both
 remotes stay pinned to the commits the catalog submission was reviewed
-against — do not substitute `main` or a newer tip:
+against: do not substitute `main` or a newer tip:
 
 https://raw.githubusercontent.com/capthvnsen/alans-way/0a22055b534b847fab8f3e617a5c80f65af93622/docs/setup-prompt.md
 
@@ -47,7 +47,7 @@ git -C ~/alans-way-agents checkout 756500daf159a9b11ddf03849b5378162f41d179
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
 audit. With `--restart` it restarts the gateway last, detached, about ten
 seconds after it prints its summary. If it asks which Telegram route is the primary, pick the bot matching
-the conversation you're in unless the user said otherwise — do not bind a
+the conversation you're in unless the user said otherwise: do not bind a
 different bot's route silently.
 
 ## Order of work
@@ -58,7 +58,7 @@ different bot's route silently.
    Use the tailnet name for `--mac-ssh`, not a public IP.
 2. **Telegram gateway must exist before the plugin matters.** If the script
    reports no `TELEGRAM_BOT_TOKEN`, tell the user to run
-   `hermes gateway setup` → Telegram → Automatic (QR scan) — that step needs a
+   `hermes gateway setup` → Telegram → Automatic (QR scan): that step needs a
    human holding a phone; don't work around it.
 3. **SSH trust runs both ways, with pinned keys.** This host reaches the
    user's computer for the browser and the computer reaches back for its
@@ -73,14 +73,14 @@ different bot's route silently.
    (with `--mac-ssh`). It checks that each is one plain public key line and
    adds it once; do not append pasted values to `authorized_keys` or
    `known_hosts` yourself. On Windows, computer-use calls run through
-   the app's local API — an SSH session cannot reach the desktop — so the app
+   the app's local API: an SSH session cannot reach the desktop: so the app
    must be running for computer control even when the PC is reachable.
    Follow the steps in the app's `docs/setup-prompt.md`. Never use
    `StrictHostKeyChecking=accept-new` or ask for a password.
 4. **The display stack is guided, never auto-installed.** On a Linux guest
-   that means X11/VNC — if the bootstrap prints display-stack instructions,
+   that means X11/VNC: if the bootstrap prints display-stack instructions,
    relay them verbatim; browser services without a display fail-loop quietly.
-   A macOS guest needs no X11 — `scripts/mac-guest-services.sh` installs
+   A macOS guest needs no X11: `scripts/mac-guest-services.sh` installs
    launchd agents, and the user grants Accessibility and Screen Recording
    once in the VM's System Settings (cannot be scripted; TCC is
    SIP-protected).
@@ -103,6 +103,9 @@ output verbatim in your final message: plugin enabled, workspace browser block,
 browser host state, and any FAIL lines. "Installed" means the verify output
 says so, not that the commands ran without visible errors. After the gateway has
 restarted (the next time the user writes to you), run `setup.sh --verify` for a
-full audit of the running install. Tell the user that setup turned off Hermes'
+full audit of the running install. Remind the user that a proposed watch only runs once they approve it with the
+Telegram button or `/watch approve <id> <code>`, and that desktop control asks
+for approval per action unless they re-run setup with `--allow-desktop-actions`
+(offer that, never add it yourself). Tell the user that setup turned off Hermes'
 built-in browser toolset for Telegram so you use their workspace browser, and
 that `--keep-browser` undoes that.

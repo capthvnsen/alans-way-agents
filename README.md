@@ -79,7 +79,7 @@ name `tailscale status` lists. Install Tailscale on both machines first;
 
 The bootstrap runs every step in order and says what it did:
 
-- **Preflight** — hermes version (0.21.5 or newer, or setup stops), python3, Node 22+, HERMES_HOME
+- **Preflight**: hermes version (0.21.5 or newer, or setup stops), python3, Node 22+, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
 - **Plugin + gateway hook** — installs `alans-way`, arms the startup hook, and
@@ -112,7 +112,14 @@ windows|linux` when the user's computer is not a Mac, `--verify` to audit
 without changing anything, `--non-interactive` for scripted runs,
 `--skip-browser` for proactivity-only installs, and `--mac-key` /
 `--mac-host-key` to add your computer's pasted SSH key and host key after
-checking their format.
+checking their format. When Hermes has the pluggable computer-use API, setup
+also installs the `alans-way-computer` provider for the profile and selects it
+once the workspace browser is configured. Desktop control asks for approval in
+Telegram for each action; `--allow-desktop-actions` adds click, type, key,
+scroll and the like (background only) to `command_allowlist` if you would
+rather not be asked. The proactivity toolset is enabled for Telegram and for
+cron, so isolated wakes can report. A proposed watch never runs on its own:
+approve it with the Telegram button or `/watch approve <id> <code>`.
 
 ### Or let your agent do it
 
