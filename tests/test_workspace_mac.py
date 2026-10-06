@@ -3,15 +3,18 @@ from pathlib import Path
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTER = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
 WATCH = ROOT / "alans-way" / "scripts" / "mac-watch.sh"
+SETUP = ROOT / "setup.sh"
 NODE = shutil.which("node")
 SH = shutil.which("sh")
 
@@ -107,7 +110,10 @@ ROUTER_DRIVER = (
     "  if ('rm' in op) fs.rmSync(process.argv[4], { force: true });"
     "  if ('raw' in op) fs.writeFileSync(process.argv[4], op.raw);"
     "  if ('state' in op) fs.writeFileSync(process.argv[4], JSON.stringify(op.state));"
-    "  if ('line' in op) process.stdout.write(annotate(op.line) + '\\n');"
+    "  if ('line' in op) {"
+    "    const out = annotate(op.line);"
+    "    if (out !== null) process.stdout.write(out + '\\n');"
+    "  }"
     "}"
 )
 
@@ -120,11 +126,11 @@ class RouterNoticeTests(MacStateEnvTest):
              "1" if mac_configured else "0", str(Path(directory) / "mac-state.json")],
             input=json.dumps(ops), capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        return proc.stdout.splitlines()
+        return proc.stdout.splitlines(), proc.stderr.splitlines()
 
     def test_offline_result_carries_state_and_notice(self):
         with tempfile.TemporaryDirectory() as directory:
-            [line] = self.annotate(directory, [
+            [line], _ = self.annotate(directory, [
                 {"state": {"state": "offline", "since": "2026-02-01T10:00:00Z",
                            "lastSeenOnline": "2026-02-01T09:59:00Z"},
                  "line": TOOL_RESULT}])
@@ -141,7 +147,7 @@ class RouterNoticeTests(MacStateEnvTest):
 
     def test_back_online_notice_fires_once_per_flip(self):
         with tempfile.TemporaryDirectory() as directory:
-            lines = self.annotate(directory, [
+            lines, _ = self.annotate(directory, [
                 {"state": {"state": "online", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT},
                 {"line": TOOL_RESULT},
                 {"state": {"state": "offline", "since": "2026-02-01T10:20:00Z"}, "line": TOOL_RESULT},
@@ -156,7 +162,7 @@ class RouterNoticeTests(MacStateEnvTest):
 
     def test_missing_and_malformed_state_files_report_unknown(self):
         with tempfile.TemporaryDirectory() as directory:
-            lines = self.annotate(directory, [
+            lines, _ = self.annotate(directory, [
                 {"line": TOOL_RESULT},
                 {"raw": "not json{"},
                 {"line": TOOL_RESULT},
@@ -168,31 +174,31 @@ class RouterNoticeTests(MacStateEnvTest):
                 self.assertIsNone(msg["result"]["_meta"]["workspace"]["mac"])
                 self.assertEqual(len(msg["result"]["content"]), 1)
 
-    def test_non_result_traffic_passes_through(self):
+    def test_non_json_stdout_is_not_forwarded_to_mcp_stream(self):
         with tempfile.TemporaryDirectory() as directory:
-            lines = self.annotate(directory, [
+            lines, err_lines = self.annotate(directory, [
                 {"state": {"state": "offline", "since": "2026-02-01T10:00:00Z"}},
                 {"line": "browser log noise"},
                 {"line": json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}})},
                 {"line": json.dumps({"jsonrpc": "2.0", "id": 2, "error": {"code": -1, "message": "x"}})},
                 {"line": json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"value": 42}})},
             ])
-            self.assertEqual(lines[0], "browser log noise")
-            self.assertEqual(json.loads(lines[1]), {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}})
-            self.assertEqual(json.loads(lines[2]), {"jsonrpc": "2.0", "id": 2, "error": {"code": -1, "message": "x"}})
-            meta = json.loads(lines[3])["result"]["_meta"]["workspace"]
+            self.assertEqual(lines[0], json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}))
+            self.assertEqual(json.loads(lines[1]), {"jsonrpc": "2.0", "id": 2, "error": {"code": -1, "message": "x"}})
+            meta = json.loads(lines[2])["result"]["_meta"]["workspace"]
             self.assertEqual(meta["host"], "vps")
             self.assertEqual(meta["mac"]["state"], "offline")
+            self.assertIn("browser log noise", err_lines)
 
     def test_mac_host_and_unconfigured_mac_emit_no_notice(self):
         with tempfile.TemporaryDirectory() as directory:
-            [line] = self.annotate(directory, [
+            [line], _ = self.annotate(directory, [
                 {"state": {"state": "offline", "since": "2026-02-01T10:00:00Z"}, "line": TOOL_RESULT}],
                 host="mac")
             msg = json.loads(line)
             self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "mac")
             self.assertEqual(len(msg["result"]["content"]), 1)
-            [line] = self.annotate(directory, [
+            [line], _ = self.annotate(directory, [
                 {"state": {"state": "offline", "since": "2026-02-01T10:00:00Z"}, "line": TOOL_RESULT}],
                 mac_configured=False)
             msg = json.loads(line)
@@ -243,6 +249,112 @@ class MacBackendCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             result, script = self.run_remote(home, node="node")
             self.assertEqual(result.stdout.strip(), f"path-node {script} --bot-id bot-1 --bot-name Alan's bot")
+
+    def test_mac_node_path_with_spaces_is_quoted(self):
+        with tempfile.TemporaryDirectory() as home:
+            bundle = Path(home) / "Apps" / "Open Alan.app"
+            script = bundle / "Contents" / "Resources" / "app" / "scripts" / "browser-mcp.cjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("")
+            node = "/Applications/My Tools/node"
+            command = subprocess.run(
+                [NODE, "-e", "process.stdout.write(require(process.argv[1]).macBackendCommand("
+                             "process.argv[2], process.argv[3], 'bot-1', ''))",
+                 str(ROUTER), str(script), node],
+                capture_output=True, text=True, check=True).stdout
+            self.assertIn("'{}'".format(node.replace("'", "'\\''")), command)
+
+
+@unittest.skipUnless(NODE, "node is required for router rpc tests")
+class RouterRpcTrackingTests(unittest.TestCase):
+    def run_helper(self, script):
+        proc = subprocess.run([NODE, "-e", script, str(ROUTER)],
+                              capture_output=True, text=True, check=True)
+        return json.loads(proc.stdout)
+
+    def test_pending_requests_block_reconvergence(self):
+        data = self.run_helper(
+            "const r = require(process.argv[1]);"
+            "const pending = new Set();"
+            "r.noteClientRpc(JSON.stringify({jsonrpc:'2.0',id:9,method:'tools/call',params:{}}), pending);"
+            "const mac = {state:'online'};"
+            "const idle = r.RECONVERGE_IDLE_MS + 1;"
+            "const inFlight = r.mayReconverge({mac, onlineStreak:2, lastActivity:Date.now()-idle,"
+            " pendingSize:pending.size, idleMs:r.RECONVERGE_IDLE_MS, now:Date.now()});"
+            "r.noteServerRpc(JSON.stringify({jsonrpc:'2.0',id:9,result:{}}), pending);"
+            "const idleReady = r.mayReconverge({mac, onlineStreak:2, lastActivity:Date.now()-idle,"
+            " pendingSize:pending.size, idleMs:r.RECONVERGE_IDLE_MS, now:Date.now()});"
+            "process.stdout.write(JSON.stringify({inFlight, idleReady, pending:pending.size}));"
+        )
+        self.assertFalse(data["inFlight"])
+        self.assertTrue(data["idleReady"])
+        self.assertEqual(data["pending"], 0)
+
+    def test_client_and_server_lines_refresh_activity_tracking(self):
+        data = self.run_helper(
+            "const r = require(process.argv[1]);"
+            "const pending = new Set();"
+            "const req = JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{}});"
+            "r.noteClientRpc(req, pending);"
+            "process.stdout.write(JSON.stringify({client:pending.size}));"
+        )
+        self.assertEqual(data["client"], 1)
+
+
+@unittest.skipUnless(NODE, "node is required for router freshness tests")
+class RouterFreshnessTests(unittest.TestCase):
+    def test_stale_mac_state_does_not_count_for_reconvergence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "mac-state.json"
+            state.write_text(json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}),
+                             encoding="utf-8")
+            old = time.time() - 120
+            os.utime(state, (old, old))
+            proc = subprocess.run(
+                [NODE, "-e",
+                 "const fs=require('fs');"
+                 "const r=require(process.argv[1]);"
+                 "const mac=r.freshMacState(process.argv[2]);"
+                 "process.stdout.write(JSON.stringify(mac));",
+                 str(ROUTER), str(state)],
+                capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(proc.stdout), None)
+
+
+@unittest.skipUnless(NODE, "node is required for router self-probe tests")
+class RouterSelfProbeTests(unittest.TestCase):
+    def test_router_self_probes_despite_fresh_offline_after_interval(self):
+        source = ROUTER.read_text(encoding="utf-8")
+        self.assertIn("SELF_PROBE_INTERVAL_MS", source)
+        self.assertIn("staleSelfProbe", source)
+        self.assertIn("self-probe despite fresh offline", source)
+
+
+@unittest.skipUnless(NODE, "node is required for probe stderr tests")
+class RouterProbeStderrTests(unittest.TestCase):
+    def test_stderr_tail_surfaces_ssh_failure_detail(self):
+        proc = subprocess.run(
+            [NODE, "-e",
+             "const r=require(process.argv[1]);"
+             "process.stdout.write(r.stderrTail('Warning: Permanently added host.\\n"
+             "Permission denied (publickey).\\n'));",
+             str(ROUTER)],
+            capture_output=True, text=True, check=True)
+        self.assertIn("Permission denied", proc.stdout)
+
+
+@unittest.skipUnless(SH, "sh is required for setup unit tests")
+class MacWatchUnitGenerationTests(unittest.TestCase):
+    def test_setup_generates_mac_watch_user_from_hermes_home_owner(self):
+        source = SETUP.read_text(encoding="utf-8")
+        self.assertNotIn("User=root", source.split("mac-watch.service")[1].split("EOF")[0])
+        self.assertIn("MAC_WATCH_USER=", source)
+        self.assertIn("User=$MAC_WATCH_USER", source)
+
+    def test_deploy_template_does_not_hardcode_root(self):
+        unit = (ROOT / "deploy" / "mac-watch.service").read_text(encoding="utf-8")
+        self.assertIsNotNone(re.search(r"^User=", unit, re.MULTILINE))
+        self.assertNotIn("User=root", unit)
 
 
 @unittest.skipUnless(SH, "sh is required for watcher tests")

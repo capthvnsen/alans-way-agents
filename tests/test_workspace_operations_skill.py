@@ -142,7 +142,8 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # the connector and the respawn re-probes, converging on the Mac
         # without any manual process surgery.
         self.assertIn("!macScript && macSsh", self.source)
-        self.assertIn("readMacState(macStateFile)", self.source)
+        self.assertIn("freshMacState(macStateFile)", self.source)
+        self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)
         self.assertIn("onlineStreak >= 2", self.source)
 
