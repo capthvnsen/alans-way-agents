@@ -67,6 +67,35 @@ class ControlTests(unittest.TestCase):
                 self.assertIn("rent", runtime.watch_command("list"))
             runtime.close()
 
+    def test_swallowed_appraisal_errors_are_recorded_for_status(self):
+        """review() returns not-useful on any failure, including plugin LLM
+        trust/provider errors — that must surface in status instead of being
+        indistinguishable from a clean 'nothing useful' verdict."""
+        from types import SimpleNamespace
+        class LLM:
+            def complete_structured(self, **kwargs):
+                raise RuntimeError("plugin llm trust denied")
+        module = plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(SimpleNamespace(llm=LLM()), home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            runtime.ledger.record_task({"id": "watch", "title": "T",
+                "scope": "Review the approved draft", "next_action": "Review",
+                "owner": "primary", "status": "active", "approved": True})
+            runtime.store.record_event("manual_review", "opaque-review", purpose=True)
+            self.assertEqual(runtime.tick()["status"], "no_op")
+            self.assertIsNotNone(runtime.appraisal_error)
+            status = json.loads(runtime.control({"action": "status"}))
+            self.assertEqual(status["appraisal_error"], runtime.appraisal_error)
+            self.assertNotIn("trust denied", json.dumps(status))
+            runtime.close()
+
     def test_interactive_review_returns_now_while_paused_without_queue_or_injection(self):
         from types import SimpleNamespace
         class LLM:

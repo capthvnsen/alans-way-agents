@@ -19,6 +19,12 @@ class Runtime:
         self._tick_lock = threading.Lock()
         self.worker = None
         self.observer_error = None
+        self.appraisal_error = None
+
+    def _record_appraisal_error(self, exc=None):
+        """Status records that appraisal failed, never why — provider details
+        and private context stay out of chat-visible status."""
+        self.appraisal_error = "appraisal_failed; inspect locally before resuming"
 
     def start(self, *, interval=30.0):
         """A deterministic observer thread, not a second agent or scheduler."""
@@ -111,13 +117,16 @@ class Runtime:
             return self._dispatch_watch_due(event)
         context = {"tasks": []}
         try:
+            self.appraisal_error = None
             context = self.review_context()
             if self._appraiser is None:
                 from .proactive_review import review
-                appraisal = review(self.ctx, context, event["kind"])
+                appraisal = review(self.ctx, context, event["kind"],
+                                   record_error=self._record_appraisal_error)
             else:
                 appraisal = self._appraiser(self.ctx, context, event["kind"])
         except Exception:
+            self._record_appraisal_error()
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
             self.store.finish(event_id, "rejected")
@@ -281,7 +290,8 @@ class Runtime:
                 return json.dumps({"ok": True, **self.store.status(), **self.ledger.snapshot(),
                                    "gateway_ready": self.gateway_ready(),
                                    "observer_running": bool(self.worker and self.worker.is_alive()),
-                                   "observer_error": self.observer_error})
+                                   "observer_error": self.observer_error,
+                                   "appraisal_error": self.appraisal_error})
             if action == "configure":
                 changes = args.get("changes", args.get("settings", {}))
                 if (not isinstance(changes, dict) or not changes

@@ -51,7 +51,8 @@ def probe(runtime):
                 and (parsed["useful"] is False or parsed["action"] not in {"continue_approved", "follow_up"}
                      or parsed["task_id"] is not None))
             return result
-    appraisal = review(SimpleNamespace(llm=ObservedFacade()), context, "manual_review")
+    appraisal = review(SimpleNamespace(llm=ObservedFacade()), context, "manual_review",
+                       record_error=runtime._record_appraisal_error)
     return {"ok": counters["structured_result_valid"], **counters, "appraisal": appraisal,
             "injected": False}
 
