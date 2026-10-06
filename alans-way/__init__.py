@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
-from .proactive_context import StaleProposal, TASK_FIELDS, TASK_KINDS
+from .proactive_context import SourceSuppressed, StaleProposal, TASK_FIELDS, TASK_KINDS
 
 
 # The gateway drops a turn whose whole reply is this marker, so a wake with
@@ -27,6 +27,7 @@ class Runtime:
         self.worker = None
         self.observer_error = None
         self.appraisal_error = None
+        self.telegram = None
 
     def _inject(self, message, session_key):
         """One injection attempt → tri-state outcome.
@@ -528,13 +529,18 @@ class Runtime:
         """The model may only propose a watch; the user approves it themselves."""
         try:
             pending = self.ledger.propose_task(task)
+        except SourceSuppressed as exc:
+            return json.dumps({"ok": False, "error": f"The user dismissed three proposals from source {exc.args[0]!r} "
+                               "in the last two weeks. Do not propose more from it unless they ask for one."})
         except Exception:
             return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
         result = {"ok": True, **self.store.status()}
         if pending:
-            self.ledger.log("proposal", f"{task['id']}: {task.get('title', '')}", "proposed")
             saved = next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"])
             code = self.ledger.proposal_hash(saved)
+            self.ledger.log("proposal", f"{task['id']}: {task.get('title', '')}", "proposed")
+            from .proactive_telegram import offer
+            offer(self, saved, code)
             result["awaiting_approval"] = task["id"]
             result["tell_user"] = (f"Watch {task['id']} is only proposed and will not run yet. In your reply, "
                                    f"say what it will do and tell the user to approve it by sending exactly: "
@@ -797,6 +803,31 @@ class Runtime:
                 + flagged + "\n"
                 "Limits are ceilings; nothing useful means silence.")
 
+    def decide_watch(self, action, task_id, code=None):
+        """The operator's decision on a proposal, shared by /watch and the buttons.
+
+        Returns the reply text, or None when there is no such proposal.
+        """
+        try:
+            if action == "approve":
+                try:
+                    task = self.ledger.approve_task(task_id, code)
+                except StaleProposal as stale:
+                    task = stale.task
+                    return (f"Watch {task_id} changed since you read it, so nothing was approved. Now: {task['scope']} "
+                            f"Next action: {task['next_action']} To approve this version send "
+                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}")
+                return (f"Watch {task_id} is approved and active. Scope: {task['scope']} "
+                        f"Next action: {task['next_action']}")
+            if action == "snooze":
+                self.ledger.snooze_task(task_id)
+                return (f"Watch {task_id} snoozed for a day; it stays proposed and will not run. "
+                        f"Approve it any time with /watch approve {task_id}")
+            source = self.ledger.dismiss_task(task_id)
+            return f"Dismissed {task_id}. Proposals from {source} are paused after three dismissals in two weeks."
+        except ValueError:
+            return None
+
     def watch_command(self, raw_args):
         """/watch — the operator's direct surface over standing watches.
 
@@ -841,18 +872,12 @@ class Runtime:
                 task_id = rest.split()[0] if rest else ""
                 self.ledger.finish_task(task_id, status)
                 return f"Watch {task_id} is now {status}."
-            if action == "approve":
+            if action in ("approve", "snooze", "dismiss"):
                 words = rest.split()
-                task_id = words[0] if words else ""
-                try:
-                    task = self.ledger.approve_task(task_id, words[1] if len(words) > 1 else None)
-                except StaleProposal as stale:
-                    task = stale.task
-                    return (f"Watch {task_id} changed since you read it, so nothing was approved. Now: {task['scope']} "
-                            f"Next action: {task['next_action']} To approve this version send "
-                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}")
-                return (f"Watch {task_id} is approved and active. Scope: {task['scope']} "
-                        f"Next action: {task['next_action']}")
+                reply = self.decide_watch(action, words[0] if words else "", words[1] if len(words) > 1 else None)
+                if reply is None:
+                    raise ValueError("no proposed watch")
+                return reply
             if action == "resume":
                 task_id = rest.split()[0] if rest else ""
                 task = next((t for t in tasks if t["id"] == task_id), None)
@@ -874,7 +899,7 @@ class Runtime:
                 self.ledger.report_signal(task_id, signal.strip())
                 return f"Signal recorded on {task_id}."
             return ("Use /watch list, /watch show <id>, /watch add {json}, "
-                    "/watch approve <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
+                    "/watch approve <id>, /watch snooze <id>, /watch dismiss <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
                     "/watch cancel <id>, or /watch signal <id> <text>.")
         except (ValueError, KeyError, IndexError, TypeError):
             return "Watch command failed — check the id or JSON payload. No change was claimed."
@@ -926,6 +951,9 @@ def register(ctx, *, home=None, background=True):
     ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills_dir / "workspace-setup" / "SKILL.md")
     ctx.on_unload(runtime.close)
+    if hasattr(ctx, "register_telegram_handler"):
+        from .proactive_telegram import wire
+        ctx.register_telegram_handler(wire(runtime))
     if hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,
