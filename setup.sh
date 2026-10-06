@@ -10,7 +10,7 @@
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
-#        --skip-browser --skip-plugin --skip-services --keep-browser
+#        --skip-browser --skip-plugin --skip-services --keep-browser --allow-desktop-actions
 #        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
@@ -20,7 +20,7 @@ PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
-SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
+SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 MIN_HERMES="0.21.5"
 
 while [ $# -gt 0 ]; do
@@ -41,6 +41,7 @@ while [ $# -gt 0 ]; do
     --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
     --keep-browser) KEEP_BROWSER=1; shift;;
+    --allow-desktop-actions) ALLOW_DESKTOP=1; shift;;
     --bind) DO_BIND=1; shift;;
     --proactive) PROACTIVE="$2"; shift 2;;
     --timezone) TIMEZONE="$2"; shift 2;;
@@ -49,7 +50,7 @@ while [ $# -gt 0 ]; do
     --verify) VERIFY=1; shift;;
     -h|--help)
       cat <<'EOF'
-setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
+setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
   --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP)
@@ -71,6 +72,8 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
                    for Telegram once the workspace browser is configured)
+  --allow-desktop-actions  stop Telegram approval prompts for desktop control (click, type,
+                   key, scroll...) by adding them to command_allowlist; off unless you ask
   --skip-browser / --skip-services / --non-interactive for constrained runs
 EOF
       exit 0;;
@@ -82,12 +85,27 @@ done
 # Exported so every hermes call below sees the home this script writes to.
 [ -z "${HERMES_HOME_FLAG:-}" ] || HERMES_HOME="$HERMES_HOME_FLAG"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+# Inside a profile's gateway HERMES_HOME is <root>/profiles/<name> (hermes_cli
+# profile_root_for_env_home): the root is two levels up and that profile is the
+# one to configure unless --profile names another.
+case "$HERMES_HOME" in
+  */profiles/*)
+    _env_profile="${HERMES_HOME##*/profiles/}"
+    case "$_env_profile" in
+      ''|*/*) ;;
+      *) HERMES_HOME="${HERMES_HOME%/profiles/*}"; [ -n "$PROFILE" ] || PROFILE="$_env_profile";;
+    esac;;
+esac
 export HERMES_HOME
 [ "$PROFILE" != default ] || PROFILE=""
+case "$PROFILE" in
+  -*|.*|*[!0-9A-Za-z_.-]*) echo "setup: invalid --profile '$PROFILE' (letters, digits, dots, dashes and underscores only)" >&2; exit 2;;
+esac
 # Plugins, their install metadata and the profile's hooks live under the
-# profile's own home once hermes is told which profile to act on.
+# profile's own home once hermes is told which profile to act on. The default
+# profile is named too, so a sticky active_profile can never redirect a call.
 PROFILE_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; PROFILE_HOME="${PROFILE_HOME:-$HERMES_HOME}"
-hermes_p() { hermes ${PROFILE:+-p "$PROFILE"} "$@"; }
+hermes_p() { hermes -p "${PROFILE:-default}" "$@"; }
 
 # Refs drive git fetch/checkout — reject anything that isn't a plain ref.
 for _ref in "$REPO_REF" "$DESKTOP_REF"; do
@@ -115,14 +133,14 @@ has_tty() {
   if (: < /dev/tty) 2>/dev/null; then return 0; fi
   return 1
 }
-ask() { # ask <prompt> <default> — reads /dev/tty so curl|bash still prompts
+ask() { # ask <prompt> <default>: reads /dev/tty so curl|bash still prompts
   if ! has_tty; then printf '%s' "$2"; return; fi
   printf '%s [%s] ' "$1" "$2" > /dev/tty
   read -r reply < /dev/tty || reply=""
   printf '%s' "${reply:-$2}"
 }
 
-confirm() { # confirm <prompt> — empty means no
+confirm() { # confirm <prompt>: empty means no
   reply="$(ask "$1 [y/N]" "n")"
   case "$reply" in y|Y|yes) return 0;; *) return 1;; esac
 }
@@ -141,6 +159,17 @@ write_if_changed() {
   WROTE=1
 }
 
+
+# When the computer-use provider is the selected backend, its own doctor decides.
+check_computer_provider() {
+  have hermes || return 0
+  [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = alans-way-computer ] || return 0
+  if hermes_p computer-use doctor >/dev/null 2>&1; then
+    ok "computer-use provider passes hermes computer-use doctor"
+  else
+    bad "computer-use doctor reports a problem: run hermes${PROFILE:+ -p $PROFILE} computer-use doctor"
+  fi
+}
 
 # True when $1 >= $2, comparing dotted numbers part by part.
 version_ge() {
@@ -177,7 +206,7 @@ fi
 GUEST_OS="$(uname -s 2>/dev/null || echo Linux)"
 case "$GUEST_OS" in
   Darwin|Linux) ;;
-  *) warn "guest OS '$GUEST_OS' untested — assuming Linux paths"; GUEST_OS=Linux;;
+  *) warn "guest OS '$GUEST_OS' untested: assuming Linux paths"; GUEST_OS=Linux;;
 esac
 case "${HOST_OS:-mac}" in
   mac|windows|linux) HOST_OS="${HOST_OS:-mac}";;
@@ -198,7 +227,7 @@ fi
 
 # A pasted public key line becomes a line in authorized_keys or known_hosts. Accept exactly
 # one plain key line, never an option prefix, and refuse anything else untouched.
-KEY_TYPES='(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa)'
+KEY_TYPES='(ssh-ed25519|sk-ssh-ed25519@openssh[.]com|ecdsa-sha2-nistp(256|384|521)|sk-ecdsa-sha2-nistp256@openssh[.]com|ssh-rsa)'
 KEY_BLOB='[A-Za-z0-9+/]{20,}={0,3}'
 is_one_line() { [ "$(printf '%s\n' "$1" | wc -l | tr -d ' ')" = 1 ]; }
 if [ -n "$MAC_KEY" ]; then
@@ -216,7 +245,7 @@ fi
 # ---------------------------------------------------------------- preflight
 step "Preflight"
 if ! have hermes; then
-  bad "hermes not on PATH — install Hermes >= $MIN_HERMES first: https://github.com/NousResearch/hermes-agent"
+  bad "hermes not on PATH: install Hermes >= $MIN_HERMES first: https://github.com/NousResearch/hermes-agent"
 else
   HERMES_V="$(hermes --version 2>/dev/null | grep -o '[0-9][0-9.]*' | head -1 || true)"
   if [ -z "$HERMES_V" ]; then
@@ -236,10 +265,10 @@ if have node; then
   if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
     ok "node $(node --version 2>/dev/null | sed 's/^v//') (>= $MIN_NODE_MAJOR required for browser connector scripts)"
   else
-    bad "node $(node --version 2>/dev/null | sed 's/^v//') is below $MIN_NODE_MAJOR — upgrade Node before running setup (browser host and router scripts need fetch/AbortSignal.timeout)"
+    bad "node $(node --version 2>/dev/null | sed 's/^v//') is below $MIN_NODE_MAJOR: upgrade Node before running setup (browser host and router scripts need fetch/AbortSignal.timeout)"
   fi
 else
-  bad "node not on PATH — Node $MIN_NODE_MAJOR+ required for the browser connector"
+  bad "node not on PATH: Node $MIN_NODE_MAJOR+ required for the browser connector"
 fi
 [ -d "$HERMES_HOME" ] && ok "HERMES_HOME: $HERMES_HOME" || warn "HERMES_HOME $HERMES_HOME does not exist yet (created on first hermes run)"
 
@@ -256,12 +285,12 @@ if [ "$VERIFY" = 1 ]; then
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+proactivity([[:space:]]|$)"; then
       ok "proactivity toolset enabled for telegram"
     else
-      bad "proactivity toolset not enabled for telegram — proactive wakes would fire but proactive_control won't be callable (run: hermes tools enable proactivity --platform telegram)"
+      bad "proactivity toolset not enabled for telegram: proactive wakes would fire but proactive_control won't be callable (run: hermes tools enable proactivity --platform telegram)"
     fi
     if [ "$KEEP_BROWSER" = 1 ]; then
       skip "built-in browser toolset check (--keep-browser)"
     elif printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
-      warn "built-in 'browser' toolset still enabled for telegram — the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
+      warn "built-in 'browser' toolset still enabled for telegram: the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
     else
       ok "built-in browser toolset disabled for telegram"
     fi
@@ -273,12 +302,12 @@ except Exception: s={}
 print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") is True else "paused")' 2>/dev/null)"
     case "$PSTATE" in
       "bound on") ok "proactivity on for the bound primary route";;
-      "bound paused") warn "proactivity bound but paused — the bot never messages first (run: hermes proactivity probe, then hermes proactivity resume)";;
-      *) warn "no primary route bound — proactivity is off (run: setup.sh --bind)";;
+      "bound paused") warn "proactivity bound but paused: the bot never messages first (run: hermes proactivity probe, then hermes proactivity resume)";;
+      *) warn "no primary route bound: proactivity is off (run: setup.sh --bind)";;
     esac
     [ "$(hermes_p config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
       && ok "gateway injection allowed for $PLUGIN_NAME" \
-      || warn "gateway injection not allowed — proactive turns are dropped (run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true)"
+      || warn "gateway injection not allowed: proactive turns are dropped (run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true)"
   fi
   [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
     && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
@@ -286,7 +315,7 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     [ -d "$profile_home" ] || continue
     [ -f "$profile_home/hooks/$PLUGIN_NAME/handler.py" ] \
       && ok "gateway hook present for $(basename "$profile_home")" \
-      || warn "gateway hook missing for profile $(basename "$profile_home") — a profile-scoped startup emit cannot arm the gateway"
+      || warn "gateway hook missing for profile $(basename "$profile_home"): a profile-scoped startup emit cannot arm the gateway"
   done
   case "$(uname -s 2>/dev/null)" in
     Darwin) CONN_DIR="$HOME/Library/Application Support/hermes-alans-way/browser";;
@@ -302,11 +331,12 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     elif [ -f "$cfg" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$cfg"; then
       ok "workspace_browser block in $cfg"
     elif [ -f "$cfg" ] && grep -q '^  workspace_browser:' "$cfg"; then
-      bad "workspace_browser entry in $cfg is unmanaged — re-run setup to install the managed block"
+      bad "workspace_browser entry in $cfg is unmanaged: re-run setup to install the managed block"
     else
       bad "no workspace_browser block in $cfg"
     fi
   done
+  check_computer_provider
   [ "$FAILS" = 0 ] && say "setup: all required checks passed" || say "setup: $FAILS check(s) failed"
   exit "$([ "$FAILS" = 0 ] && echo 0 || echo 1)"
 fi
@@ -361,23 +391,29 @@ if [ -n "$MAC_SSH" ]; then
 fi
 
 # ssh must never read this script's stdin (curl | bash); only the tar stream takes stdin.
-host_ssh() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@" </dev/null; }
-host_ssh_stdin() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@"; }
-host_scp() { scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$@"; }
+# Setup run as root for a Hermes that a normal account owns still reaches the host
+# as that account: its keys and known_hosts are the ones the router and watcher use.
+as_owner() {
+  if [ "$BROWSER_USER" != "$(id -un)" ] && have runuser; then runuser -u "$BROWSER_USER" -- "$@"; else "$@"; fi
+}
+host_ssh() { as_owner ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@" </dev/null; }
+host_ssh_stdin() { as_owner ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@"; }
+host_scp() { as_owner scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$@"; }
 
 # Pinned keys, appended once, and only after the format checks above.
 add_line_once() { # add_line_once <file> <line>
   mkdir -p "$(dirname "$1")" && chmod 700 "$(dirname "$1")"
   [ -f "$1" ] || { : > "$1"; chmod 600 "$1"; }
   grep -qxF "$2" "$1" 2>/dev/null || printf '%s\n' "$2" >> "$1"
+  if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then chown "$BROWSER_USER" "$(dirname "$1")" "$1" 2>/dev/null || true; fi
 }
 if [ -n "$MAC_KEY" ] || [ -n "$MAC_HOST_KEY" ]; then
   step "Trust your computer"
   if [ -n "$MAC_HOST_KEY" ]; then
-    add_line_once "$HOME/.ssh/known_hosts" "$MAC_HOST $MAC_HOST_KEY" && ok "pinned the host key for $MAC_HOST"
+    add_line_once "$BROWSER_HOME/.ssh/known_hosts" "$MAC_HOST $MAC_HOST_KEY" && ok "pinned the host key for $MAC_HOST"
   fi
   if [ -n "$MAC_KEY" ]; then
-    add_line_once "$HOME/.ssh/authorized_keys" "$MAC_KEY" && ok "your computer's key can log in to this machine"
+    add_line_once "$BROWSER_HOME/.ssh/authorized_keys" "$MAC_KEY" && ok "your computer's key can log in to this machine"
   fi
 fi
 
@@ -385,7 +421,7 @@ fi
 # reviewed commit instead of tracking main.
 if [ -z "$REPO_DIR" ]; then
   step "Fetching alans-way-agents"
-  REPO_DIR="$HOME/.local/share/alans-way-agents"
+  REPO_DIR="$BROWSER_HOME/.local/share/alans-way-agents"
   if [ -d "$REPO_DIR/.git" ]; then
     if [ -n "$REPO_REF" ]; then
       # A requested pin that can't be applied is a stop, not a fallback —
@@ -398,7 +434,7 @@ if [ -z "$REPO_DIR" ]; then
         bad "could not pin $REPO_DIR to $REPO_REF"; exit 1
       fi
     else
-      git -C "$REPO_DIR" pull --ff-only -q && ok "updated $REPO_DIR" || warn "could not update $REPO_DIR — using existing checkout"
+      git -C "$REPO_DIR" pull --ff-only -q && ok "updated $REPO_DIR" || warn "could not update $REPO_DIR: using existing checkout"
     fi
   else
     git clone -q "$REPO_URL" "$REPO_DIR" \
@@ -454,6 +490,11 @@ zones = {
 print(zones.get(sys.argv[1].strip(), ""))
 PY
 }
+valid_iana() {
+  case "$1" in UTC|GMT) return 0;; [A-Z]*/??*) ;; *) return 1;; esac
+  case "$1" in *[!A-Za-z0-9_/+-]*|/*|*/|*..*) return 1;; esac
+  return 0
+}
 detect_host_timezone() {
   [ -z "$TIMEZONE" ] && [ -n "$MAC_SSH" ] || return 0
   case "$HOST_OS" in
@@ -462,16 +503,14 @@ detect_host_timezone() {
     windows) _tz="$(iana_from_windows_id "$(host_ssh 'tzutil /g' 2>/dev/null | head -1 | tr -d '\r' || true)")";;
   esac
   _tz="$(printf '%s' "${_tz:-}" | tr -d ' \r\n')"
-  case "$_tz" in
-    ''|*[!A-Za-z0-9_/+-]*|/*|*..*) return 0;;
-  esac
+  valid_iana "$_tz" || return 0
   TIMEZONE="$_tz"
   ok "using timezone $TIMEZONE from your computer ($HOST_OS) for quiet hours"
 }
 ask_timezone() {
   [ -z "$TIMEZONE" ] && has_tty || return 0
   _tz="$(ask "  Your timezone for quiet hours (IANA, e.g. Europe/Berlin; empty to skip)" "")"
-  case "$_tz" in ''|*[!A-Za-z0-9_/+-]*|/*|*..*) return 0;; esac
+  valid_iana "$_tz" || return 0
   TIMEZONE="$_tz"
 }
 
@@ -501,12 +540,12 @@ if [ -f "$ENV_FILE" ] && grep -q '^TELEGRAM_BOT_TOKEN=.\+' "$ENV_FILE" 2>/dev/nu
 elif [ -f "$HERMES_HOME/.env" ] && grep -q '^TELEGRAM_BOT_TOKEN=.\+' "$HERMES_HOME/.env" 2>/dev/null; then
   ok "TELEGRAM_BOT_TOKEN configured in $HERMES_HOME/.env"
 else
-  warn "No TELEGRAM_BOT_TOKEN found — the gateway has no bot to answer yet."
+  warn "No TELEGRAM_BOT_TOKEN found: the gateway has no bot to answer yet."
   say "  Hermes can create one without BotFather: run"
   say "      hermes gateway setup"
   say "  choose Telegram → 'Automatic' → scan the QR code in Telegram."
   if confirm "  Run 'hermes gateway setup' now?"; then
-    hermes gateway setup || warn "gateway setup exited non-zero — re-run setup.sh after configuring"
+    hermes_p gateway setup || warn "gateway setup exited non-zero: re-run setup.sh after configuring"
   else
     say "  Skipping. Re-run setup.sh once Telegram is configured."
   fi
@@ -542,14 +581,14 @@ elif hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
   if plugin_is_catalog_installed; then
     # Never install --force over the catalog pin: the reviewed build stays
     # the only plugin source, updated only through the catalog itself.
-    ok "plugin installed from the Hermes catalog — leaving its pin in place"
+    ok "plugin installed from the Hermes catalog: leaving its pin in place"
     say "  to move it forward: hermes${PROFILE:+ -p $PROFILE} plugins update $PLUGIN_NAME"
   elif diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$PROFILE_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
   else
     hermes_p plugins install --force "file://$REPO_DIR#$PLUGIN_NAME" >/dev/null 2>&1 \
       && ok "plugin updated from $REPO_DIR (restart the gateway to load it)" \
-      || warn "could not update the installed plugin — run: hermes${PROFILE:+ -p $PROFILE} plugins install --force file://$REPO_DIR#$PLUGIN_NAME"
+      || warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} plugins install --force file://$REPO_DIR#$PLUGIN_NAME"
   fi
 else
   hermes_p plugins install "file://$REPO_DIR#$PLUGIN_NAME" && ok "plugin installed from $REPO_DIR" \
@@ -560,15 +599,40 @@ hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
 # inert until a route is bound, and a later manual bind then just works.
 hermes_p config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
   && ok "gateway injection allowed for $PLUGIN_NAME" \
-  || warn "could not allow gateway injection — run: hermes${PROFILE:+ -p $PROFILE} config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true"
+  || warn "could not allow gateway injection: run: hermes${PROFILE:+ -p $PROFILE} config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true"
 # The control tool must be loaded into each messaging session's platform —
 # plugin toolsets are skipped when the platform's saved list predates the
 # plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
-for platform in telegram; do
+# Isolated wakes run as cron jobs, which need report_signal and finish_task too.
+for platform in telegram cron; do
   hermes_p tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
     && ok "proactivity toolset enabled for $platform" \
-    || warn "could not enable the proactivity toolset for $platform — proactive_control will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
+    || warn "could not enable the proactivity toolset for $platform: proactive_control will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
 done
+
+# ------------------------------------------------- computer-use provider (optional)
+# Offered only when this Hermes has the pluggable computer-use API; feature-probed
+# with Hermes' own interpreter, never by version.
+COMPUTER_PLUGIN="alans-way-computer" COMPUTER_READY=0 COMPUTER_SELECTED=0
+if [ -z "${HERMES_PYTHON:-}" ]; then
+  _hbin="$(command -v hermes 2>/dev/null || true)"
+  _shebang="$(head -1 "$_hbin" 2>/dev/null | sed -n 's/^#! *//p' | cut -d' ' -f1)"
+  case "$_shebang" in /usr/bin/env|'') ;; /*) HERMES_PYTHON="$_shebang";; esac
+fi
+if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' >/dev/null 2>&1; then
+  if hermes_p plugins list 2>/dev/null | grep -q "$COMPUTER_PLUGIN"; then
+    ok "computer-use provider already installed; leaving it as it is"
+    COMPUTER_READY=1
+  elif hermes_p plugins install "file://$REPO_DIR#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+    hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
+    ok "computer-use provider installed"
+    COMPUTER_READY=1
+  else
+    warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
+  fi
+else
+  skip "computer-use provider (this Hermes has no pluggable computer-use API yet)"
+fi
 
 # ---------------------------------------------------------------- hook
 step "Gateway hook"
@@ -625,7 +689,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       elif git -C "$DESKTOP_DIR" pull --ff-only -q 2>/dev/null; then
         DESKTOP_SYNCED=1
       else
-        warn "could not update $DESKTOP_DIR (local changes?) — using it as is"
+        warn "could not update $DESKTOP_DIR (local changes?): using it as is"
       fi
       if [ "$DESKTOP_SYNCED" = 1 ]; then
         if [ "$OLD_REV" != "$(git -C "$DESKTOP_DIR" rev-parse HEAD 2>/dev/null || true)" ]; then
@@ -637,7 +701,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
         fi
       fi
     else
-      warn "browser scripts at $DESKTOP_DIR are not a git checkout, so setup can't update them — move it aside and re-run to reinstall"
+      warn "browser scripts at $DESKTOP_DIR are not a git checkout, so setup can't update them: move it aside and re-run to reinstall"
     fi
   else
     mkdir -p "$(dirname "$DESKTOP_DIR")"
@@ -659,11 +723,11 @@ if [ "$SKIP_BROWSER" = 0 ]; then
           && git -C "$DESKTOP_DIR.tmp" checkout -q "$DESKTOP_REF" \
           && mv "$DESKTOP_DIR.tmp" "$DESKTOP_DIR" \
           && ok "cloned companion repo to $DESKTOP_DIR at $DESKTOP_REF" \
-          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo at $DESKTOP_REF — browser host skipped"; }
+          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo at $DESKTOP_REF: browser host skipped"; }
       else
         git clone -q --depth 1 "$DESKTOP_REPO_URL" "$DESKTOP_DIR.tmp" \
           && mv "$DESKTOP_DIR.tmp" "$DESKTOP_DIR" && ok "cloned companion repo to $DESKTOP_DIR" \
-          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo — browser host skipped"; }
+          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo: browser host skipped"; }
       fi
     fi
   fi
@@ -691,8 +755,9 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       fi
     }
     CONN_STAGE="$(mktemp -d)" || CONN_STAGE=""
+    [ -z "$CONN_STAGE" ] || chmod 755 "$CONN_STAGE"
     CONN_OK=0
-    if [ -n "$CONN_STAGE" ] && stage_connector "$CONN_STAGE"; then
+    if [ -n "$CONN_STAGE" ] && stage_connector "$CONN_STAGE" && chmod -R a+rX "$CONN_STAGE"; then
       case "$HOST_OS" in
         windows)
           # Windows sshd defaults to PowerShell (connect-windows.ps1 sets it), which
@@ -703,7 +768,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
               && host_scp -r -- "$CONN_STAGE/connector" "$SCP_TARGET:.alans-way-stage/" \
               && host_ssh 'New-Item -ItemType Directory -Force "$env:APPDATA\Hermes Workspace\connector" | Out-Null; Copy-Item -Recurse -Force "$HOME\.alans-way-stage\connector\*" "$env:APPDATA\Hermes Workspace\connector\"; Remove-Item -Recurse -Force "$HOME\.alans-way-stage"' >/dev/null 2>&1; then
             CONN_OK=1
-            ok "Windows connector updated — computer use runs through the app's local API"
+            ok "Windows connector updated: computer use runs through the app's local API"
           fi;;
         linux)
           if COPYFILE_DISABLE=1 tar -C "$CONN_STAGE" -cf - connector \
@@ -724,12 +789,12 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       esac
     fi
     [ -z "$CONN_STAGE" ] || rm -rf "$CONN_STAGE"
-    [ "$CONN_OK" = 1 ] || warn "could not copy the $HOST_OS connector — the installed app's scripts stay in use"
+    [ "$CONN_OK" = 1 ] || warn "could not copy the $HOST_OS connector: the installed app's scripts stay in use"
   fi
   if [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ ! -d "$DESKTOP_DIR/desktop/node_modules/@modelcontextprotocol" ]; then
     say "  installing connector dependencies (npm ci --omit=dev)"
     (cd "$DESKTOP_DIR/desktop" && npm ci --omit=dev --ignore-scripts >/dev/null 2>&1) \
-      && ok "dependencies installed" || warn "npm ci failed — connector may not start"
+      && ok "dependencies installed" || warn "npm ci failed: connector may not start"
   fi
 
   if [ "$GUEST_OS" = Darwin ]; then
@@ -739,9 +804,9 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       if [ -f "$DESKTOP_DIR/scripts/mac-guest-services.sh" ]; then
         sh "$DESKTOP_DIR/scripts/mac-guest-services.sh" \
           && ok "browser services installed via launchd" \
-          || warn "mac-guest-services.sh failed — see docs/mac-vm-guest.md in the alans-way repo"
+          || warn "mac-guest-services.sh failed: see docs/mac-vm-guest.md in the alans-way repo"
       else
-        warn "$DESKTOP_DIR/scripts/mac-guest-services.sh missing — update the desktop repo checkout"
+        warn "$DESKTOP_DIR/scripts/mac-guest-services.sh missing: update the desktop repo checkout"
       fi
     fi
   else
@@ -828,7 +893,16 @@ EOF
     esac
   fi
 
+  SYSTEMD_USABLE=0 SYSTEMD_WARNED=0
   if [ "$SKIP_SERVICES" = 0 ] && have systemctl; then
+    if [ "$(id -u)" = 0 ] || systemctl --user list-units >/dev/null 2>&1; then
+      SYSTEMD_USABLE=1
+    else
+      SYSTEMD_WARNED=1
+      warn "no systemd user session here (not root, and systemctl --user is unavailable), so the browser services were not installed. Start them yourself after logging in with a full session, or run setup as root. See desktop/docs/vps-browser.md in the alans-way repo"
+    fi
+  fi
+  if [ "$SYSTEMD_USABLE" = 1 ]; then
     NODE_BIN="$(command -v node || echo /usr/bin/node)"
     UNIT_DIR="/etc/systemd/system"; SYSCTL="systemctl"; UNIT_USER="User=$BROWSER_USER"
     if [ "$(id -u)" != 0 ] && systemctl --user list-units >/dev/null 2>&1; then
@@ -869,7 +943,13 @@ EOF
     [ -z "$UNITS_CHANGED" ] || $SYSCTL daemon-reload 2>/dev/null || true
     $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
-      || warn "units written but not started — start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+      || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+    # User units stop at logout unless the account is allowed to linger.
+    if [ "$SYSCTL" != systemctl ] && have loginctl; then
+      loginctl enable-linger "$(id -un)" >/dev/null 2>&1 \
+        && ok "lingering enabled so the browser services survive logout" \
+        || warn "could not enable lingering: the browser services stop when you log out. Run: sudo loginctl enable-linger $(id -un)"
+    fi
     # A unit that changed while its service was running needs a restart to
     # pick up the new paths or user.
     for _unit in $UNITS_UPDATED; do
@@ -881,7 +961,7 @@ EOF
     if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
       $SYSCTL restart hermes-alans-way-browser.service >/dev/null 2>&1 \
         && ok "browser host restarted on the new scripts" \
-        || warn "could not restart hermes-alans-way-browser.service — restart it to load the update"
+        || warn "could not restart hermes-alans-way-browser.service: restart it to load the update"
     fi
     if [ "$CONFIG_CHANGED" = 1 ] && [ "$CFG_EXISTED" = 1 ]; then
       case " $UNITS_UPDATED " in
@@ -923,13 +1003,13 @@ EOF
       [ "$WROTE" = 0 ] || { WATCH_CHANGED=1; ok "wrote $UNIT_DIR/mac-watch.service"; systemctl daemon-reload 2>/dev/null || true; }
       systemctl enable --now mac-watch.service >/dev/null 2>&1 \
         && ok "Mac availability watcher enabled" \
-        || warn "could not start mac-watch.service — the bot won't notice the Mac going on or offline"
+        || warn "could not start mac-watch.service: the bot won't notice the Mac going on or offline"
       [ "$WATCH_CHANGED" = 0 ] || systemctl restart mac-watch.service >/dev/null 2>&1 || true
     elif [ -n "$MAC_SSH" ]; then
-      warn "Mac availability watcher not installed (needs root + systemd) — see README 'mac-watch'"
+      warn "Mac availability watcher not installed (needs root + systemd): see README 'mac-watch'"
     fi
   else
-    warn "systemd unavailable or skipped — see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
+    [ "$SYSTEMD_WARNED" = 1 ] || warn "systemd unavailable or skipped: see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
   fi
   fi
 
@@ -976,7 +1056,7 @@ EOF
       || launchctl load -w "$WATCH_PLIST" 2>/dev/null; then
       ok "host availability watcher installed (launchd)"
     else
-      warn "could not load mac-watch agent — the bot won't notice the host going on or offline"
+      warn "could not load mac-watch agent: the bot won't notice the host going on or offline"
     fi
   fi
 fi
@@ -992,7 +1072,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   elif have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
     ok "an X display stack is present"
   else
-    say "  no Xvfb/x11vnc detected — for the VPS desktop, install a display stack:"
+    say "  no Xvfb/x11vnc detected: for the VPS desktop, install a display stack:"
     say "    apt-get install xvfb x11vnc websockify chromium-browser"
     say "  then start Xvfb on :99, x11vnc, and a noVNC viewer. The browser services above"
     say "  expect DISPLAY=:99. Full guide: desktop/docs/vps-browser.md in the alans-way repo."
@@ -1017,6 +1097,11 @@ if [ -n "$BOT_ID" ]; then
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured"
+    if [ "$COMPUTER_READY" = 1 ]; then
+      hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
+        && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
+        || warn "could not select the computer-use provider: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+    fi
     # The workspace browser replaces Hermes' built-in browser tool: leaving both
     # enabled lets the agent pick a different browser than the user's app.
     if [ "$KEEP_BROWSER" = 1 ]; then
@@ -1033,6 +1118,35 @@ if [ -n "$BOT_ID" ]; then
   fi
 else
   say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
+fi
+
+# Desktop actions ask for approval in Telegram each time. Seeded only when asked.
+if [ "$ALLOW_DESKTOP" = 1 ]; then
+  _current="$(hermes_p config get command_allowlist --json 2>&1 || true)"
+  _merged="$(printf '%s' "$_current" | python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+new = ["cua:%s:background" % a for a in ("click", "double_click", "right_click", "middle_click", "drag",
+                                          "scroll", "type", "key", "set_value", "focus_app")]
+if "not set" in text or text in ("", "null", "None"):
+    current = []
+else:
+    try:
+        current = json.loads(text)
+    except ValueError:
+        current = None
+    if not (isinstance(current, list) and all(isinstance(x, str) for x in current)):
+        sys.exit(1)
+print(json.dumps(current + [x for x in new if x not in current], separators=(",", ":")))' 2>/dev/null)" || _merged=""
+  if [ -z "$_merged" ]; then
+    warn "could not read the existing command_allowlist, so it was left alone"
+  elif hermes_p config set command_allowlist "$_merged" >/dev/null 2>&1; then
+    ok "desktop actions (click, type, key, scroll and similar, background only) no longer ask for approval"
+  else
+    warn "could not write command_allowlist"
+  fi
+elif [ "$COMPUTER_SELECTED" = 1 ]; then
+  say "  Desktop control asks for approval in Telegram for each action. To stop those prompts, re-run setup with --allow-desktop-actions; leave it off to keep approving each one."
 fi
 
 # The gateway CLI derives its restart-wait budget from TimeoutStartSec, and a
@@ -1056,7 +1170,7 @@ if have systemctl; then
           && printf '[Service]\nTimeoutStartSec=180\n' > "$drop_dir/timeout.conf" \
           && systemctl $scope daemon-reload >/dev/null 2>&1 \
           && ok "$GW_SERVICE restart patience widened (TimeoutStartSec=180)" \
-          || warn "could not write $drop_dir/timeout.conf — long restarts may report a timeout"
+          || warn "could not write $drop_dir/timeout.conf: long restarts may report a timeout"
       fi
       break
     fi
@@ -1137,8 +1251,8 @@ for i, line in enumerate(sys.stdin, 1):
     SEL="$(ask "  Bind a primary route? [1..N/N]" "N")"
   fi
   case "$SEL" in
-    ''|n|N|no) say "  skipped binding — proactivity stays silent until you bind a route.";;
-    *[!0-9]*) warn "invalid selection — bind manually with: hermes proactivity bind --session-key <key>";;
+    ''|n|N|no) say "  skipped binding: proactivity stays silent until you bind a route.";;
+    *[!0-9]*) warn "invalid selection: bind manually with: hermes proactivity bind --session-key <key>";;
     *) SEL_KEY="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f3)"
        SEL_PROF="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f1)"
        SEL_AGENT="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f2)"
@@ -1146,34 +1260,43 @@ for i, line in enumerate(sys.stdin, 1):
          # A multiplexed gateway indexes every profile's sessions at the root;
          # the route's agent segment names the profile that owns it.
          [ "$SEL_PROF" != default ] || [ ! -d "$HERMES_HOME/profiles/$SEL_AGENT" ] || SEL_PROF="$SEL_AGENT"
-         if [ "$SEL_PROF" = "default" ]; then BIND_PROF=""; else BIND_PROF="-p $SEL_PROF"; fi
-         if hermes $BIND_PROF proactivity bind --session-key "$SEL_KEY" >/dev/null 2>&1; then
+         BIND_PROF="$SEL_PROF"
+         # The timezone rides on bind; a plugin whose bind has no --timezone gets a second call.
+         BOUND=0 TZ_SET=0
+         if [ -n "$TIMEZONE" ] && hermes -p "$BIND_PROF" proactivity bind --session-key "$SEL_KEY" --timezone "$TIMEZONE" >/dev/null 2>&1; then
+           BOUND=1 TZ_SET=1
+         elif hermes -p "$BIND_PROF" proactivity bind --session-key "$SEL_KEY" >/dev/null 2>&1; then
+           BOUND=1
+         fi
+         if [ "$BOUND" = 1 ]; then
            ok "bound primary route: $SEL_AGENT"
-           if [ -n "$TIMEZONE" ]; then
-             hermes $BIND_PROF proactivity configure --settings "{\"timezone\": \"$TIMEZONE\"}" >/dev/null 2>&1 \
-               && ok "quiet hours use $TIMEZONE" \
-               || warn "could not set timezone $TIMEZONE — quiet hours stay on the default zone"
+           if [ -z "$TIMEZONE" ]; then
+             warn "no timezone known: quiet hours use the default zone (America/Denver). Set it with: hermes -p $BIND_PROF proactivity timezone <IANA zone>"
+           elif [ "$TZ_SET" = 1 ]; then
+             ok "quiet hours use $TIMEZONE"
            else
-             warn "no --timezone given — quiet hours use the default zone (America/Denver)"
+             hermes -p "$BIND_PROF" proactivity configure --settings "{\"timezone\": \"$TIMEZONE\"}" >/dev/null 2>&1 \
+               && ok "quiet hours use $TIMEZONE" \
+               || warn "could not set timezone $TIMEZONE: quiet hours stay on the default zone"
            fi
            # Binding IS the consent to be messaged first; proactivity is on
            # by default once bound. --proactive no keeps it bound but paused.
-           if hermes $BIND_PROF proactivity probe >/dev/null 2>&1; then
+           if hermes -p "$BIND_PROF" proactivity probe >/dev/null 2>&1; then
              case "${PROACTIVE:-yes}" in
                n|N|no)
-                 hermes $BIND_PROF proactivity pause >/dev/null 2>&1 \
-                   && say "  proactivity bound but paused — turn it on later with /proactivity resume" \
-                   || warn "could not pause — it stays on by default";;
-               *) ok "proactivity on by default — pause anytime with /proactivity pause";;
+                 hermes -p "$BIND_PROF" proactivity pause >/dev/null 2>&1 \
+                   && say "  proactivity bound but paused: turn it on later with /proactivity resume" \
+                   || warn "could not pause: it stays on by default";;
+               *) ok "proactivity on by default: pause anytime with /proactivity pause";;
              esac
            else
-             warn "probe failed — the appraisal path needs a model check: hermes $BIND_PROF proactivity probe"
+             warn "probe failed: the appraisal path needs a model check: hermes -p "$BIND_PROF" proactivity probe"
            fi
          else
-           bad "bind failed — run manually: hermes $BIND_PROF proactivity bind --session-key <key>"
+           bad "bind failed: run manually: hermes -p "$BIND_PROF" proactivity bind --session-key <key>"
          fi
        else
-         warn "invalid selection — bind manually with: hermes proactivity bind --session-key <key>"
+         warn "invalid selection: bind manually with: hermes proactivity bind --session-key <key>"
        fi;;
   esac
 fi
@@ -1194,6 +1317,7 @@ else
 fi
 [ -f "$VCONN" ] && ok "browser host running" \
   || warn "browser host not running yet (start the service or desktop session)"
+check_computer_provider
 
 # The restart runs last and detached. It can end the very session that is running
 # this script (an agent driving setup from Telegram lives inside the gateway), so
@@ -1210,31 +1334,52 @@ fi
 
 schedule_gateway_restart() {
   GW_DELAY="${ALANS_WAY_RESTART_DELAY:-10}"
-  GW_LOG="${TMPDIR:-/tmp}/alans-way-gateway-restart.log"
-  export GW_PROFILE="$PROFILE" GW_SERVICE GW_DELAY
-  _detach=""; ! have setsid || _detach=setsid
-  # shellcheck disable=SC2086
-  $_detach nohup sh -c '
-    sleep "$GW_DELAY"
-    if hermes ${GW_PROFILE:+-p "$GW_PROFILE"} gateway restart; then echo "restarted: hermes gateway restart"
-    elif systemctl is-active --quiet "$GW_SERVICE"; then systemctl restart "$GW_SERVICE" && echo "restarted: systemctl restart $GW_SERVICE"
-    elif systemctl --user is-active --quiet "$GW_SERVICE"; then systemctl --user restart "$GW_SERVICE" && echo "restarted: systemctl --user restart $GW_SERVICE"
+  GW_LOG="$(mktemp "${TMPDIR:-/tmp}/alans-way-gateway-restart.XXXXXX" 2>/dev/null)" || GW_LOG=/dev/null
+  GW_HERMES="$(command -v hermes || echo hermes)"
+  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first.
+  _restart='sleep "$4"
+    if "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
+    elif systemctl is-active --quiet "$3"; then systemctl restart "$3" && echo "restarted: systemctl restart $3"
+    elif systemctl --user is-active --quiet "$3"; then systemctl --user restart "$3" && echo "restarted: systemctl --user restart $3"
     elif pgrep -f "gateway run" >/dev/null 2>&1; then echo "a supervisor-managed gateway is running: restart it through its owner (PM/launchd), not here"
     else echo "no live gateway found: start it with hermes gateway run"
-    fi' </dev/null >"$GW_LOG" 2>&1 &
+    fi'
+  # On systemd a transient timer unit keeps the restarter out of the gateway's own
+  # cgroup, so stopping the gateway cannot take it down mid-restart.
+  if [ "$GUEST_OS" = Linux ] && have systemd-run; then
+    _scope="--user"; [ "$(id -u)" != 0 ] || _scope=""
+    # shellcheck disable=SC2086
+    if systemd-run $_scope --collect --quiet --on-active="${GW_DELAY}s" \
+        --setenv=HERMES_HOME="$HERMES_HOME" --setenv=HOME="$HOME" \
+        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 >"$GW_LOG" 2>&1; then
+      return 0
+    fi
+  fi
+  # Elsewhere: a new session (macOS has no setsid command) so closing the caller's
+  # session or killing its process group does not reach the restarter.
+  # The launcher touches a file once it has its own session; waiting for it closes
+  # the gap in which the caller could still kill the restarter along with itself.
+  GW_READY="${TMPDIR:-/tmp}/alans-way-restart-ready.$$"
+  python3 -c 'import os, sys; os.setsid(); open(sys.argv[1], "w").close(); os.execvp(sys.argv[2], sys.argv[2:])' \
+    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" </dev/null >"$GW_LOG" 2>&1 &
+  _tries=0
+  while [ ! -e "$GW_READY" ] && [ "$_tries" -lt 50 ]; do sleep 0.1; _tries=$((_tries + 1)); done
+  rm -f "$GW_READY"
 }
 
 step "Done"
 cat <<EOF
   Next:
-  • On your computer: open Hermes — Alan's Way → Settings → Agent setup → save this
+  • On your computer: open Hermes: Alan's Way → Settings → Agent setup → save this
     machine's SSH address → Test agent path.
-  • In Telegram: message your primary bot — proactivity is on once bound
+  • In Telegram: message your primary bot: proactivity is on once bound
     (/proactivity status shows it; /proactivity pause quiets it).
   • Browser work routes to your ${HOST_OS} computer while it's reachable, else this host.
+  • Proposed watches never run on their own: approve one with the Telegram button on the
+    proposal, or send /watch approve <id> <code>.
 EOF
 if [ "$FAILS" != 0 ]; then
-  say "setup: $FAILS check(s) failed — see above."
+  say "setup: $FAILS check(s) failed: see above."
   [ "$WANT_RESTART" = 0 ] || say "  The gateway restart was skipped because a check failed. Fix it, then restart: hermes${PROFILE:+ -p $PROFILE} gateway restart"
   exit 1
 fi

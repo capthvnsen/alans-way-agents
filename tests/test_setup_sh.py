@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import subprocess
+import signal
 import tempfile
 import time
 import unittest
@@ -17,8 +18,8 @@ SCRIPT = ROOT / "setup.sh"
 SH = shutil.which("sh") or "/bin/sh"
 
 
-def run(*args, env=None, check=True):
-    cmd = [SH, str(SCRIPT)] + list(args)
+def run(*args, env=None, check=True, script=SCRIPT):
+    cmd = [SH, str(script)] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and result.returncode != 0:
         raise AssertionError(f"exit {result.returncode}: {result.stderr}\n{result.stdout}")
@@ -30,6 +31,7 @@ def fake_hermes_bin(directory: Path, *, plugins="", tools="", proactivity_status
     bin_dir.mkdir()
     hermes = bin_dir / "hermes"
     hermes.write_text(f"""#!/bin/sh
+[ "$1" = -p ] && shift 2
 case "$1" in
   --version) echo "hermes 0.21.5"; exit 0;;
   plugins)
@@ -239,11 +241,12 @@ def tooling(directory: Path, log: Path, **kwargs):
     """A bin dir with a profile-aware hermes, a running tailscale and node >= 22."""
     bin_dir = logging_hermes_bin(directory, log, **kwargs)
     fake(bin_dir, "tailscale", TAILSCALE_UP)
+    fake(bin_dir, "systemd-run", "exit 1\n")
     return bin_dir
 
 
 def env_for(directory, bin_dir, home, **extra):
-    return dict(os.environ, HOME=str(directory), HERMES_HOME=str(home),
+    return dict(os.environ, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
                 PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], **extra)
 
 
@@ -510,6 +513,20 @@ class ProfileScopeTests(unittest.TestCase):
             for line in calls:
                 self.assertTrue(line.startswith("-p sprk1 "), line)
 
+    def test_without_a_profile_every_call_pins_the_default_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home), env=env_for(root, bin_dir, home))
+            calls = [line for line in read_log(log).splitlines() if not line.startswith("--version")]
+            self.assertTrue(calls)
+            for line in calls:
+                self.assertTrue(line.startswith("-p default "), line)
+
     def test_catalog_provenance_is_read_from_the_profile_plugins_dir(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -547,8 +564,10 @@ class RestartOrderTests(unittest.TestCase):
                 time.sleep(0.2)
             calls = read_log(log).splitlines()
             self.assertIn("gateway restart", calls[-1])
-            for needed in ("proactivity bind", "proactivity configure", "plugins list"):
+            for needed in ("proactivity bind", "plugins list"):
                 self.assertTrue(any(needed in line for line in calls[:-1]), needed)
+            self.assertTrue(any("proactivity bind --session-key agent:sprk1:telegram:dm:1 --timezone Europe/Berlin" in line
+                                for line in calls), calls)
             self.assertLess(result.stdout.index("== Done"), result.stdout.index("Restarting the gateway"))
             self.assertTrue(result.stdout.rstrip().splitlines()[-1].lstrip().startswith("Restarting"))
 
@@ -605,7 +624,7 @@ class StockBrowserTests(unittest.TestCase):
             home = root / "home"
             home.mkdir()
             bin_dir = tooling(root, root / "log")
-            fake(bin_dir, "hermes", 'case "$1" in --version) echo "hermes 0.21.5";; tools) echo "enabled browser"; echo "enabled proactivity";; esac\n')
+            fake(bin_dir, "hermes", '[ "$1" = -p ] && shift 2\ncase "$1" in --version) echo "hermes 0.21.5";; tools) echo "enabled browser"; echo "enabled proactivity";; esac\n')
             kept = run("--verify", "--keep-browser", env=env_for(root, bin_dir, home), check=False)
             self.assertNotIn("built-in 'browser' toolset still enabled", kept.stdout)
             plain = run("--verify", env=env_for(root, bin_dir, home), check=False)
@@ -982,22 +1001,29 @@ class HostTimezoneTests(unittest.TestCase):
     def test_mac_reads_the_localtime_link(self):
         result = self.attempt("mac", {"readlink /etc/localtime": "/var/db/timezone/zoneinfo/Europe/Berlin"})
         self.assertIn("from your computer", result.stdout)
-        self.assertIn('"timezone": "Europe/Berlin"', self.calls)
+        self.assertIn("--timezone Europe/Berlin", self.calls)
 
     def test_linux_asks_timedatectl(self):
         self.attempt("linux", {"timedatectl show -p Timezone --value": "America/Chicago"})
-        self.assertIn('"timezone": "America/Chicago"', self.calls)
+        self.assertIn('--timezone America/Chicago', self.calls)
 
     def test_windows_zone_ids_are_mapped_to_iana(self):
         self.attempt("windows", {"tzutil /g": "W. Europe Standard Time"})
-        self.assertIn('"timezone": "Europe/Berlin"', self.calls)
+        self.assertIn("--timezone Europe/Berlin", self.calls)
         self.attempt("windows", {"tzutil /g": "Pacific Standard Time"})
-        self.assertIn('"timezone": "America/Los_Angeles"', self.calls)
+        self.assertIn('--timezone America/Los_Angeles', self.calls)
 
     def test_explicit_flag_wins_and_skips_the_ssh_lookup(self):
         self.attempt("mac", {"readlink": "Europe/Berlin"}, "--timezone", "Asia/Tokyo")
-        self.assertIn('"timezone": "Asia/Tokyo"', self.calls)
+        self.assertIn('--timezone Asia/Tokyo', self.calls)
         self.assertNotIn("readlink", read_log(self.ssh_log))
+
+    def test_timedatectl_n_a_and_other_shapeless_answers_are_rejected(self):
+        for reply in ("n/a", "Local", "garbage"):
+            result = self.attempt("linux", {"timedatectl show -p Timezone --value": reply})
+            self.assertNotIn("from your computer", result.stdout, reply)
+        result = self.attempt("linux", {"timedatectl show -p Timezone --value": "UTC"})
+        self.assertIn("from your computer", result.stdout)
 
     def test_unusable_answers_are_ignored(self):
         for reply in ("not a zone!", "../../etc/passwd", "Mars Standard Time"):
@@ -1067,6 +1093,314 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertNotIn("<string>30</string>", plist)
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
+
+
+class ProfileLayoutTests(unittest.TestCase):
+    """An agent inside a profile gateway sees HERMES_HOME=<root>/profiles/<name>."""
+
+    def layout(self, root: Path, name="work"):
+        home = root / "hermes" / "profiles" / name
+        plugins = home / "plugins"
+        (plugins / "alans-way").mkdir(parents=True)
+        (plugins / ".install-metadata.json").write_text(
+            '{"alans-way": {"source": "catalog", "catalog": {"name": "alans-way", "sha": "3a74614"}}}',
+            encoding="utf-8")
+        return home
+
+    def test_a_profile_shaped_home_is_the_profile_not_a_nested_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = self.layout(root)
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            result = run("--skip-browser", "--skip-services", "--non-interactive",
+                         env=env_for(root, bin_dir, home), check=False)
+            self.assertIn("leaving its pin in place", result.stdout)
+            self.assertIn("HERMES_HOME: %s" % (root / "hermes"), result.stdout)
+            calls = [line for line in read_log(log).splitlines() if not line.startswith("--version")]
+            self.assertFalse(any("plugins install" in line for line in calls), calls)
+            for line in calls:
+                self.assertTrue(line.startswith("-p work "), line)
+            self.assertTrue((root / "hermes" / "hooks" / "alans-way" / "handler.py").exists())
+            self.assertFalse((home / "profiles").exists())
+
+    def test_an_explicit_profile_wins_over_a_profile_shaped_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = self.layout(root)
+            (root / "hermes" / "profiles" / "other").mkdir()
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            run("--profile", "other", "--skip-browser", "--skip-services", "--non-interactive",
+                env=env_for(root, bin_dir, home), check=False)
+            calls = [line for line in read_log(log).splitlines() if not line.startswith("--version")]
+            self.assertTrue(calls)
+            for line in calls:
+                self.assertTrue(line.startswith("-p other "), line)
+
+    def test_a_bad_profile_name_is_rejected_up_front(self):
+        for name in ("../x", "a b", "x;y", "-p"):
+            result = run("--profile", name, "--verify", check=False)
+            self.assertEqual(result.returncode, 2, name)
+            self.assertIn("invalid --profile", result.stderr)
+
+
+class RestartSurvivalTests(unittest.TestCase):
+    def setup_run(self, extra_bins=()):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.log = self.root / "log"
+        self.bin_dir = tooling(self.root, self.log)
+        return env_for(self.root, self.bin_dir, self.home, ALANS_WAY_RESTART_DELAY="2")
+
+    def wait_for_restart(self, seconds=15):
+        deadline = time.time() + seconds
+        while "gateway restart" not in read_log(self.log) and time.time() < deadline:
+            time.sleep(0.2)
+        return "gateway restart" in read_log(self.log)
+
+    def test_the_restarter_outlives_the_session_that_ran_setup(self):
+        env = self.setup_run()
+        proc = subprocess.Popen(
+            [SH, str(SCRIPT), "--restart", "--skip-browser", "--skip-services", "--non-interactive",
+             "--hermes-home", str(self.home)],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+        proc.communicate()
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                pass
+        self.assertTrue(self.wait_for_restart(), "the restart died with the session")
+
+    def test_on_a_systemd_guest_the_restart_is_a_transient_unit_outside_the_gateway_cgroup(self):
+        env = self.setup_run()
+        run_log = self.root / "systemd-run.log"
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "systemctl", "exit 0\n")
+        fake(self.bin_dir, "systemd-run", 'printf "%%s\\n" "$*" >> "%s"\nexit 0\n' % run_log)
+        run("--restart", "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(self.home),
+            env=env)
+        text = run_log.read_text()
+        self.assertIn("--collect", text)
+        self.assertIn("--on-active=2s", text)
+        self.assertIn("--user", text)
+        self.assertIn("HERMES_HOME=%s" % self.home, text)
+        time.sleep(1)
+        self.assertNotIn("gateway restart", read_log(self.log), "must not also restart through the fallback")
+
+    def test_the_restart_log_name_is_not_predictable(self):
+        env = self.setup_run()
+        env["TMPDIR"] = str(self.root)
+        run("--restart", "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(self.home),
+            env=env)
+        logs = list(self.root.glob("alans-way-gateway-restart.*"))
+        self.assertEqual(len(logs), 1)
+        self.assertNotEqual(logs[0].name, "alans-way-gateway-restart.log")
+
+
+class UserSystemdTests(unittest.TestCase):
+    def setup_run(self, user_systemd):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        home = self.root / "home"
+        home.mkdir()
+        app = desktop_tree(self.root / "app")
+        bin_dir = tooling(self.root, self.root / "log")
+        self.loginctl = self.root / "loginctl.log"
+        fake(bin_dir, "uname", "echo Linux\n")
+        fake(bin_dir, "google-chrome", "exit 0\n")
+        fake(bin_dir, "loginctl", 'printf "%%s\\n" "$*" >> "%s"\nexit 0\n' % self.loginctl)
+        fake(bin_dir, "systemctl", 'case "$*" in *--user*) exit %d;; esac\nexit 0\n' % (0 if user_systemd else 1))
+        env = env_for(self.root, bin_dir, home, HERMES_VPS_BROWSER_DATA=str(self.root / "data"))
+        return run("--skip-plugin", "--desktop-dir", str(app), "--non-interactive", "--hermes-home", str(home),
+                   env=env, check=False)
+
+    def test_no_user_session_warns_and_finishes_instead_of_dying_silently(self):
+        result = self.setup_run(user_systemd=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("== Done", result.stdout)
+        self.assertRegex(result.stdout, r"warn .*systemd")
+        self.assertTrue((self.root / "data" / "config.json").exists())
+
+    def test_user_units_get_lingering_so_they_survive_logout(self):
+        self.setup_run(user_systemd=True)
+        self.assertIn("enable-linger", self.loginctl.read_text())
+
+
+class RootOwnedSshFilesTests(unittest.TestCase):
+    KEY = HostKeyTests.KEY
+
+    def test_ssh_trust_lands_in_the_hermes_owners_home_and_is_chowned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "root-home"
+            owner_home = root / "alice-home"
+            home.mkdir(); owner_home.mkdir()
+            hermes_home = root / "hermes"
+            hermes_home.mkdir()
+            chown_log = root / "chown.log"
+            bin_dir = tooling(root, root / "log")
+            fake(bin_dir, "id", 'case "$1" in -u) echo 0;; -un) echo root;; *) exec /usr/bin/id "$@";; esac\n')
+            fake(bin_dir, "stat", "echo alice\n")
+            fake(bin_dir, "getent", 'echo "alice:x:1000:1000::%s:/bin/sh"\n' % owner_home)
+            fake(bin_dir, "chown", 'printf "%%s\\n" "$*" >> "%s"\n' % chown_log)
+            fake(bin_dir, "ssh", "exit 0\n")
+            env = dict(env_for(root, bin_dir, hermes_home), HOME=str(home))
+            run("--mac-ssh", "me@mac.tail1234.ts.net", "--mac-key", HostKeyTests.KEY, "--mac-host-key",
+                HostKeyTests.HOST_KEY, "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(hermes_home), env=env, check=False)
+            self.assertEqual((owner_home / ".ssh" / "authorized_keys").read_text().strip(), HostKeyTests.KEY)
+            self.assertTrue((owner_home / ".ssh" / "known_hosts").exists())
+            self.assertFalse((home / ".ssh").exists())
+            chowned = chown_log.read_text()
+            self.assertIn("alice", chowned)
+            self.assertIn(".ssh", chowned)
+
+
+class KeyTypeTests(unittest.TestCase):
+    def test_security_key_types_are_accepted(self):
+        blob = "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGWj8Wb1mYxlC0oS1U3cOQ0f1qVv7xH3m5T1kZ4r0w2L"
+        for kind in ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"):
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
+            home = root / "home"
+            home.mkdir()
+            bin_dir = tooling(root, root / "log")
+            result = run("--mac-key", f"{kind} {blob} me@mac", "--mac-ssh", "me@mac.tail1234.ts.net",
+                         "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home),
+                         env=env_for(root, bin_dir, home), check=False)
+            self.assertNotEqual(result.returncode, 2, result.stderr)
+            self.assertTrue((root / ".ssh" / "authorized_keys").exists(), kind)
+
+
+def repo_with_computer_plugin(root: Path) -> Path:
+    """A throwaway checkout that also carries the (separately developed) provider plugin dir."""
+    repo = root / "repo"
+    shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
+    (repo / "alans-way-computer").mkdir()
+    return repo / "setup.sh"
+
+
+class IntegrationBase:
+    def run_setup(self, *flags, tools_fake=None, python_ok=True, config_get=""):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        home = self.root / "home"
+        home.mkdir()
+        self.home = home
+        self.log = self.root / "log"
+        bin_dir = tooling(self.root, self.log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\n'
+             '  config) [ "$2" = get ] && { echo \'%s\'; };;\nesac\nexit 0\n' % (self.log, config_get))
+        fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
+        self.env = env_for(self.root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        return run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
+                   "--hermes-home", str(home), *flags, env=self.env, check=False,
+                   script=repo_with_computer_plugin(self.root))
+
+
+class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
+    def test_the_proactivity_toolset_is_enabled_for_cron_wakes_too(self):
+        self.run_setup()
+        calls = read_log(self.log)
+        self.assertIn("tools enable proactivity --platform telegram", calls)
+        self.assertIn("tools enable proactivity --platform cron", calls)
+
+    def test_summary_names_the_two_ways_to_approve_a_watch(self):
+        result = self.run_setup()
+        self.assertIn("/watch approve", result.stdout)
+        self.assertIn("button", result.stdout)
+
+    def test_bind_falls_back_to_configure_when_bind_rejects_the_timezone_flag(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        (home / "sessions").mkdir(parents=True)
+        (home / "sessions" / "sessions.json").write_text(
+            '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "plugins list") echo alans-way;;\n'
+             '  "proactivity bind"*"--timezone"*) exit 2;;\nesac\nexit 0\n' % log)
+        run("--bind", "--timezone", "Europe/Berlin", "--skip-browser", "--skip-services", "--non-interactive",
+            "--hermes-home", str(home), env=env_for(root, bin_dir, home), check=False)
+        calls = read_log(log)
+        self.assertIn("proactivity bind --session-key agent:main:telegram:dm:1\n", calls)
+        self.assertIn("proactivity configure", calls)
+
+
+class ComputerProviderTests(IntegrationBase, unittest.TestCase):
+    def test_installed_per_profile_and_selected_when_hermes_has_the_provider_api(self):
+        self.run_setup("--profile", "work", python_ok=True)
+        calls = read_log(self.log)
+        self.assertRegex(calls, r"-p work plugins install file://\S+#alans-way-computer")
+        self.assertIn("-p work plugins enable alans-way-computer", calls)
+        self.assertIn("-p work config set computer_use.backend alans-way-computer", calls)
+        self.assertLess(calls.index("plugins install"), calls.index("computer_use.backend"))
+
+    def test_skipped_without_the_provider_api(self):
+        result = self.run_setup(python_ok=False)
+        calls = read_log(self.log)
+        self.assertNotIn("alans-way-computer", calls)
+        self.assertNotIn("config set computer_use.backend", calls)
+
+    def test_an_installed_provider_is_never_force_reinstalled(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "plugins list") printf "alans-way\\nalans-way-computer\\n";;\nesac\nexit 0\n' % log)
+        fake(bin_dir, "hermes-python", "exit 0\n")
+        run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
+            "--hermes-home", str(home), env=env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python")),
+            check=False, script=repo_with_computer_plugin(root))
+        calls = read_log(log)
+        self.assertNotIn("install --force file://%s" % ROOT, calls.replace("alans-way\n", ""))
+        self.assertNotRegex(calls, r"plugins install[^\n]*alans-way-computer")
+
+    def test_verify_runs_the_provider_doctor_when_selected(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "config get computer_use.backend") echo alans-way-computer;;\n'
+             '  "computer-use doctor") exit 1;;\nesac\nexit 0\n' % log)
+        result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+        self.assertIn("computer-use doctor", read_log(log))
+        self.assertRegex(result.stdout, r"FAIL .*computer")
+
+    def test_the_approval_allowlist_is_only_seeded_on_request(self):
+        result = self.run_setup()
+        self.assertNotIn("command_allowlist", read_log(self.log))
+        self.assertIn("--allow-desktop-actions", result.stdout)
+        self.run_setup("--allow-desktop-actions", config_get="Config key not set: command_allowlist")
+        calls = read_log(self.log)
+        match = re.search(r"config set command_allowlist (\[.*\])", calls)
+        self.assertIsNotNone(match, calls)
+        entries = json.loads(match.group(1))
+        for action in ("click", "double_click", "right_click", "middle_click", "drag", "scroll", "type", "key",
+                       "set_value", "focus_app"):
+            self.assertIn("cua:%s:background" % action, entries)
+        self.assertFalse(any(entry.endswith(":foreground") for entry in entries))
 
 
 if __name__ == "__main__":

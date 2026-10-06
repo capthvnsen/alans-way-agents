@@ -91,7 +91,7 @@ if [ "$VERIFY" = 1 ]; then
         *) bad "router probe returned no decision";;
       esac
     else
-      bad "host ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the host is asleep — this is only a failure if the host should be up)"
+      bad "host ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the host is asleep: this is only a failure if the host should be up)"
     fi
   else
     skip "host check (no --mac-ssh given; VPS-only routing)"
@@ -115,7 +115,7 @@ if [ "$VERIFY" = 1 ]; then
     if [ -f "$CONFIG" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG"; then
       ok "managed workspace_browser block present in $CONFIG"
     elif [ -f "$CONFIG" ] && grep -q '^  workspace_browser:' "$CONFIG"; then
-      ok "workspace_browser entry present in $CONFIG (unmanaged — re-run setup to manage it)"
+      ok "workspace_browser entry present in $CONFIG (unmanaged: re-run setup to manage it)"
     else
       bad "no workspace_browser block in $CONFIG"
     fi
@@ -135,7 +135,7 @@ PY
     if [ -z "$timeout" ]; then
       skip "workspace_browser timeout not set (Hermes default applies; ${TOOL_TIMEOUT}s recommended)"
     elif [ "$timeout" -lt "$TOOL_TIMEOUT" ]; then
-      bad "workspace_browser timeout ${timeout}s is below ${TOOL_TIMEOUT}s — long browser actions get cut off; re-run setup or set timeout: $TOOL_TIMEOUT"
+      bad "workspace_browser timeout ${timeout}s is below ${TOOL_TIMEOUT}s: long browser actions get cut off; re-run setup or set timeout: $TOOL_TIMEOUT"
     else
       ok "workspace_browser timeout ${timeout}s"
     fi
