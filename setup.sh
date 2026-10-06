@@ -47,6 +47,9 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
   --restart        restart the gateway at the end without asking
   --verify         check an existing install without changing anything
+  --config FILE    edit this Hermes config.yaml instead of the profile's
+  --hermes-home D  Hermes home directory (default: ~/.hermes)
+  --desktop-dir D  where the alans-way app checkout lives (cloned if missing)
   --skip-browser / --skip-services / --non-interactive for constrained runs
 EOF
       exit 0;;
@@ -265,9 +268,13 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     fi
   else
     mkdir -p "$(dirname "$DESKTOP_DIR")"
-    if [ -d "$SCRIPT_DIR/../hermes-companion/desktop/scripts" ]; then
+    SIBLING=""
+    for d in "$SCRIPT_DIR/../alans-way" "$SCRIPT_DIR/../hermes-companion"; do
+      [ -d "$d/desktop/scripts" ] && { SIBLING="$d"; break; }
+    done
+    if [ -n "$SIBLING" ]; then
       mkdir -p "$DESKTOP_DIR"
-      cp -R "$SCRIPT_DIR/../hermes-companion/desktop" "$DESKTOP_DIR/" && ok "copied desktop checkout to $DESKTOP_DIR"
+      cp -R "$SIBLING/desktop" "$DESKTOP_DIR/" && ok "copied desktop checkout to $DESKTOP_DIR"
     else
       rm -rf "$DESKTOP_DIR.tmp"
       git clone -q --depth 1 "$DESKTOP_REPO_URL" "$DESKTOP_DIR.tmp" \
@@ -382,7 +389,7 @@ EOF
       warn "Mac availability watcher not installed (needs root + systemd) — see README 'mac-watch'"
     fi
   else
-    warn "systemd unavailable or skipped — see docs/vps-browser.md for manual unit setup"
+    warn "systemd unavailable or skipped — see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
   fi
 fi
 
@@ -395,7 +402,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     say "  no Xvfb/x11vnc detected — for the VPS desktop, install a display stack:"
     say "    apt-get install xvfb x11vnc websockify chromium-browser"
     say "  then start Xvfb on :99, x11vnc, and a noVNC viewer. The browser services above"
-    say "  expect DISPLAY=:99. Full guide: docs/vps-browser.md in the companion repo."
+    say "  expect DISPLAY=:99. Full guide: desktop/docs/vps-browser.md in the alans-way repo."
   fi
 fi
 

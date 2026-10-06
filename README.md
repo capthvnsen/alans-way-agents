@@ -14,7 +14,7 @@ what your agents need to think and act:
   `workspace_browser` block into your Hermes config pointing at
   `scripts/workspace-router.cjs`, which probes your Mac first and falls
   back to the VPS browser when the Mac is asleep.
-- **`skills/`** — the `proactive-primary` and `workspace-operations` skills ship
+- **`alans-way/skills/`** — the `proactive-primary` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
 
 Works with stock Hermes `>= 0.21`. No Hermes source is patched: your existing
@@ -220,6 +220,9 @@ setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 
