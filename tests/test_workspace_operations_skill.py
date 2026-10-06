@@ -60,6 +60,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             self.normalized,
         )
 
+    def test_every_model_uses_refs_before_screenshots(self):
+        self.assertIn("same for every Hermes model", self.normalized)
+        self.assertIn("workspace_computer_snapshot", self.normalized)
+        self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
+        self.assertIn("do not move the human's cursor", self.normalized)
+
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
             "The in-app Mac browser is the only default host.",
