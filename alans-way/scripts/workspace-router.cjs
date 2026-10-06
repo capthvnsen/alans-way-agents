@@ -48,6 +48,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const readline = require('node:readline');
 
 function arg(name) {
@@ -137,9 +138,11 @@ const sshBinary = chooseSsh();
 // destination, so the socket name needs no host-derived parts. The socket
 // lives in a private dir under /tmp, not $TMPDIR: a macOS guest's TMPDIR is
 // ~50 chars, and ssh refuses a ControlPath over 104 chars once it appends its
-// 17-char temp suffix. ServerAlive makes the master (and so every session on
-// it) drop within ~10s when the host vanishes, instead of hanging on a
-// half-open socket.
+// 17-char temp suffix. Each bot gets its own master (an 8-hex hash of its id
+// prefixes %C): the host's sshd allows 10 sessions per connection by default,
+// and every bot on the VM sharing one master overruns it. ServerAlive makes
+// the master (and so every session on it) drop within ~10s when the host
+// vanishes, instead of hanging on a half-open socket.
 function privateSocketDir() {
   if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
   const dir = `/tmp/wsr-${process.getuid()}`;
@@ -151,10 +154,11 @@ function privateSocketDir() {
 }
 const sshKeepaliveArgs = ['-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2'];
 const socketDir = privateSocketDir();
+const botControlPrefix = botId ? `${crypto.createHash('sha1').update(botId).digest('hex').slice(0, 8)}-` : '';
 const sshControlArgs = [
   ...sshKeepaliveArgs,
   ...(socketDir
-    ? ['-o', 'ControlMaster=auto', '-o', 'ControlPersist=600', '-o', `ControlPath=${socketDir}/%C`]
+    ? ['-o', 'ControlMaster=auto', '-o', 'ControlPersist=600', '-o', `ControlPath=${socketDir}/${botControlPrefix}%C`]
     : []),
 ];
 
@@ -162,6 +166,21 @@ const sshControlArgs = [
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 // Same for a remote PowerShell: single-quoted literal, '' escapes '.
 const psQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+
+// ssh's own words when the shared master's session limit (sshd MaxSessions) is
+// hit: it then falls back to a full handshake. One clear line, or null.
+function muxTrouble(text) {
+  return /Session open refused by peer|disabling multiplexing/.test(String(text || ''))
+    ? 'workspace-router: ssh multiplexing is being refused (the host sshd MaxSessions is too low for the shared connection): each call pays a full ssh handshake. Raise MaxSessions in the host sshd_config.'
+    : null;
+}
+let muxTroubleLogged = false;
+function logMuxTrouble(text) {
+  const line = !muxTroubleLogged && muxTrouble(text);
+  if (!line) return;
+  muxTroubleLogged = true;
+  process.stderr.write(`${line}\n`);
+}
 
 const SELF_PROBE_INTERVAL_MS = 600000;
 const RECONVERGE_IDLE_MS = 60000;
@@ -466,6 +485,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
           ? /^\/.*browser-mcp\.cjs$/.test(found)
           : macScripts.includes(found) || found.endsWith(connectorSuffix);
       const script = code === 0 && valid ? found : null;
+      logMuxTrouble(errOutput);
       resolve({ script, stderr: errOutput });
     });
   });
@@ -1338,7 +1358,9 @@ async function main() {
       macCommand,
     ];
     process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
-    bindChild(spawn(sshBinary, sshArgs, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true }), 'mac');
+    const sshChild = spawn(sshBinary, sshArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    sshChild.stderr.on('data', (chunk) => { process.stderr.write(chunk); logMuxTrouble(chunk); });
+    bindChild(sshChild, 'mac');
   } else {
     let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
     if (probeErrTail) reason += ` (${probeErrTail})`;
@@ -1480,6 +1502,7 @@ module.exports = {
   noteServerRpc,
   mayReconverge,
   sshControlArgs,
+  muxTrouble,
   sshBinary,
   macStateFile,
   restoreMirror,

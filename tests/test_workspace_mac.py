@@ -902,6 +902,36 @@ class RouterHelperTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=2", args)
         self.assertEqual(os.stat(os.path.dirname(control)).st_mode & 0o077, 0)
 
+    def control_path(self, *bot):
+        args = json.loads(self.js(
+            "process.stdout.write(JSON.stringify(require(process.argv[1]).sshControlArgs))", *bot))
+        return next(a for a in args if a.startswith("ControlPath="))[len("ControlPath="):]
+
+    def test_each_bot_gets_its_own_control_master(self):
+        a1, a2, b = (self.control_path("--bot-id", "111222333"), self.control_path("--bot-id", "111222333"),
+                     self.control_path("--bot-id", "444555666"))
+        self.assertEqual(a1, a2)
+        self.assertNotEqual(a1, b)
+        self.assertRegex(a1, r"^/tmp/wsr-\d+/[0-9a-f]{8}-%C$")
+        self.assertNotIn("111222333", a1)
+
+    def test_no_bot_id_keeps_the_shared_control_master(self):
+        self.assertRegex(self.control_path(), r"^/tmp/wsr-\d+/%C$")
+
+    def test_a_per_bot_control_path_stays_under_the_unix_socket_limit(self):
+        control = self.control_path("--bot-id", "9" * 200)
+        self.assertLess(len(control.replace("%C", "x" * 40)) + 17, 104)
+        self.assertEqual(os.stat(os.path.dirname(control)).st_mode & 0o077, 0)
+
+    def test_a_refused_mux_session_is_named_in_one_clear_line(self):
+        out = self.js(
+            "const t = require(process.argv[1]).muxTrouble;"
+            "process.stdout.write(JSON.stringify([t('mux_client_request_session: session request failed: Session open refused by peer\\nControlSocket /tmp/x already exists, disabling multiplexing\\n'), t('Connection refused'), t('')]))")
+        line, other, empty = json.loads(out)
+        self.assertRegex(line, r"^workspace-router: ssh multiplexing .*MaxSessions")
+        self.assertNotIn("\n", line)
+        self.assertEqual((other, empty), (None, None))
+
     def test_resume_files_are_scoped_by_bot(self):
         with tempfile.TemporaryDirectory() as directory:
             page = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [
