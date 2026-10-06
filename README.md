@@ -15,12 +15,12 @@ what your agents need to think and act:
 - **Workspace browser wiring** — `setup-workspace.sh` writes a managed
   `workspace_browser` block into your Hermes config pointing at
   `scripts/workspace-router.cjs`, which probes your computer first and falls
-  back to the VPS browser when it is asleep. Pass `--host-os windows` when the
-  user's computer is a PC (default `mac`).
+  back to the VPS browser when it is asleep. Pass `--host-os windows` or `--host-os linux`
+  when the user's computer is not a Mac (default `mac`).
 - **`alans-way/skills/`** — the `proactive-primary` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
 
-Works with stock Hermes `>= 0.21`. No Hermes source is patched: your existing
+Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
 adds tools and an optional review loop inside it, it is not a second gateway.
 
@@ -52,7 +52,7 @@ what's already done and skips it, so re-running is always safe.
 
 ### 1. Hermes on the VPS, with Telegram
 
-You need a stock Hermes `>= 0.21` install whose gateway can answer Telegram.
+You need a stock Hermes `>= 0.21.5` install whose gateway can answer Telegram.
 If your Hermes has never talked to Telegram, that's the first step — and it
 doesn't need BotFather: run `hermes gateway setup` on the VPS, choose
 **Telegram → Automatic**, and scan the QR code with your phone. Hermes creates
@@ -69,12 +69,17 @@ curl -fsSL https://raw.githubusercontent.com/capthvnsen/alans-way-agents/main/se
 ```
 
 or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`.
-Add `--host-os windows` when the user's computer runs Windows — on macOS and
-Linux guests `setup.sh` picks the right service manager itself.
+Add `--host-os windows` or `--host-os linux` when the user's computer runs
+Windows or Linux (the default is `mac`). On macOS and Linux guests `setup.sh`
+picks the right service manager itself.
+
+`--mac-ssh` must be a Tailscale address: a `.ts.net` name, a tailnet IP, or a
+name `tailscale status` lists. Install Tailscale on both machines first;
+`setup.sh` refuses public addresses and stops if Tailscale is not running.
 
 The bootstrap runs every step in order and says what it did:
 
-- **Preflight** — hermes version, python3, Node 18+, HERMES_HOME
+- **Preflight**: hermes version (0.21.5 or newer, or setup stops), python3, Node 22+, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
 - **Plugin + gateway hook** — installs `alans-way`, arms the startup hook, and
@@ -82,23 +87,39 @@ The bootstrap runs every step in order and says what it did:
   `proactive_control` never reaches the bound chat's tool list)
 - **VPS browser host** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
-  systemd units on Linux (user units when you're not root), LaunchAgents on a
-  macOS guest via `mac-guest-services.sh`
+  systemd units on Linux (user units when you're not root; as root they run as
+  the account that owns `HERMES_HOME`, and as root with `--no-sandbox` only when
+  Hermes itself runs as root), LaunchAgents on a macOS guest via
+  `mac-guest-services.sh`. Chrome or Chromium from a deb is preferred over snap
+  Chromium, and an upgrade rewrites units and `config.json` whose content changed
 - **Desktop prerequisites** — on Linux, detects whether an X11/VNC stack
   exists and prints the exact packages to install if not; on a macOS guest it
   prints the one-time TCC grants instead (guided, never auto-installed)
 - **Workspace config** — writes the managed `workspace_browser` block into the
-  right profile's config
-- **Gateway restart** — through the detected supervisor
+  right profile's config, then turns off Hermes' built-in browser toolset for
+  Telegram so the agent uses your workspace browser (setup says so; pass
+  `--keep-browser` to leave it on)
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)
 - **Verify** — prints a pass/fail summary of the whole install
+- **Gateway restart**: last, through the detected supervisor, detached and a
+  few seconds after the summary, so a restart never cuts setup short. If you
+  run setup from a chat on that gateway, the chat pauses briefly
 
-Useful flags: `--profile NAME` for a named Hermes profile, `--host-os windows`
-when the user's computer is a PC, `--verify` to audit
+Useful flags: `--profile NAME` for a named Hermes profile, `--host-os
+windows|linux` when the user's computer is not a Mac, `--verify` to audit
 without changing anything, `--non-interactive` for scripted runs,
-`--skip-browser` for proactivity-only installs.
+`--skip-browser` for proactivity-only installs, and `--mac-key` /
+`--mac-host-key` to add your computer's pasted SSH key and host key after
+checking their format. When Hermes has the pluggable computer-use API, setup
+also installs the `alans-way-computer` provider for the profile and selects it
+once the workspace browser is configured. Desktop control asks for approval in
+Telegram for each action; `--allow-desktop-actions` adds click, type, key,
+scroll and the like (background only) to `command_allowlist` if you would
+rather not be asked. The proactivity toolset is enabled for Telegram and for
+cron, so isolated wakes can report. A proposed watch never runs on its own:
+approve it with the Telegram button or `/watch approve <id> <code>`.
 
 ### Or let your agent do it
 
@@ -229,9 +250,8 @@ VPS browser owns.
 ## Layout
 
 ```
-alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch)
-deploy/               systemd unit for the Mac availability watcher
-hooks/                gateway startup hook (installed by setup.sh)
+alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch + gateway-hook/)
+deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 docs/                 proactivity guide, agent-driven setup prompt
 tests/                unittest suite — python3 -m unittest discover -s tests
 setup.sh              one-command bootstrap (install, wire, restart, bind, verify)

@@ -127,7 +127,7 @@ class ConfigEditTests(unittest.TestCase):
             config = Path(directory) / "config.yaml"
             config.write_text("model:\n  default: gpt-4\n", encoding="utf-8")
             run("--bot-id", "bot123", "--bot-name", 'Scout: "Helper"',
-                "--mac-ssh", "user@mac #comment",
+                "--mac-ssh", "user@mac.local",
                 "--router", "/path/with\\backslash/router.cjs",
                 "--config", str(config))
             text = config.read_text(encoding="utf-8")
@@ -135,7 +135,7 @@ class ConfigEditTests(unittest.TestCase):
             self.assertIn('- "/path/with\\\\backslash/router.cjs"', text)
             self.assertIn('- "bot123"', text)
             self.assertIn('- "Scout: \\"Helper\\""', text)
-            self.assertIn('HERMES_WORKSPACE_MAC_SSH: "user@mac #comment"', text)
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: "user@mac.local"', text)
 
     def test_ignores_commented_or_indented_mcp_servers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -244,9 +244,33 @@ class HostOsFlagTests(unittest.TestCase):
         out = run("--bot-id", "bot_123").stdout
         self.assertIn('HERMES_WORKSPACE_HOST_OS: "mac"', out)
 
+    def test_host_os_accepts_linux(self):
+        out = run("--bot-id", "bot_123", "--host-os", "linux").stdout
+        self.assertIn('HERMES_WORKSPACE_HOST_OS: "linux"', out)
+
     def test_host_os_rejects_other_values(self):
-        result = run("--bot-id", "bot_123", "--host-os", "linux", check=False)
+        result = run("--bot-id", "bot_123", "--host-os", "freebsd", check=False)
         self.assertNotEqual(result.returncode, 0)
+
+
+class HostAddressTests(unittest.TestCase):
+    def test_malformed_mac_ssh_is_rejected(self):
+        for address in ("-oProxyCommand=x", "me@mac host", "me@mac;ls", "@mac", "me@", "me@@mac", "me@-mac"):
+            result = run("--bot-id", "bot_123", "--mac-ssh", address, check=False)
+            self.assertEqual(result.returncode, 2, address)
+            self.assertIn("invalid --mac-ssh", result.stderr)
+
+    def test_verify_ends_ssh_options_before_the_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            log = Path(directory) / "ssh.log"
+            ssh = bin_dir / "ssh"
+            ssh.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' % log)
+            ssh.chmod(0o755)
+            env = dict(os.environ, HOME=directory, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            run("--verify", "--mac-ssh", "me@mac", env=env, check=False)
+            self.assertIn(" -- me@mac", log.read_text())
 
 
 if __name__ == "__main__":
