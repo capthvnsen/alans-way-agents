@@ -362,7 +362,8 @@ class Runtime:
             lines.append(
                 "Run one bounded metadata-first pass over installed, reachable "
                 "read surfaces and open loops — load alans-way:proactive-primary "
-                "and follow its Source Sweeps procedure. Reachable surfaces "
+                "and follow its references/sweeps.md (skill_view with file_path). "
+                "Reachable surfaces "
                 "include the managed browser: workspace_browser serves the Mac "
                 "tab when it is online and its own browser when it is not, and "
                 "a logged-in page counts as a source. Missing connectors are "
@@ -375,6 +376,7 @@ class Runtime:
             )
         elif kind == "loop":
             lines.append(
+                "Follow references/watches.md of alans-way:proactive-primary. "
                 "Check the real signal now (inbox, thread, board) with real "
                 "tools — connector first, workspace_browser when no connector "
                 "is installed — honoring execution_host (web reads are never "
@@ -388,6 +390,7 @@ class Runtime:
             )
         else:
             lines.append(
+                "Follow references/watches.md of alans-way:proactive-primary. "
                 "Run the check now with real tools, honoring execution_host "
                 "(mac means work only the Mac can do — blocked while offline; "
                 "web reads go through workspace_browser, which serves the Mac "
@@ -730,7 +733,7 @@ class Runtime:
                 if task is None:
                     return f"No watch {task_id!r}."
                 if task["status"] == "proposed":
-                    return f"Watch {task_id} is only proposed — approve it with /watch approve {task_id}."
+                    return f"Watch {task_id} is only proposed. Approve it with /watch approve {task_id}."
                 if task["status"] in {"done", "cancelled"}:
                     return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
                 task = dict(task, status="active")
