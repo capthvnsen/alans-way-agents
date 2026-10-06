@@ -1,5 +1,5 @@
 #!/bin/sh
-# setup.sh — one-command Alan's Way bootstrap for the host running your Hermes
+# setup.sh — one-command Alan's Way Plugin bootstrap for the host running your Hermes
 # gateway (usually a VPS). Detects what's missing, installs what it can, and
 # prints exact guidance for what it can't.
 #
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
     --verify) VERIFY=1; shift;;
     -h|--help)
       cat <<'EOF'
-setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
+setup.sh — Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
   --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP)
@@ -582,7 +582,7 @@ EOF
       if [ -f "$_f" ]; then return 0; fi
       cat > "$_f" <<EOF
 [Unit]
-Description=Hermes Alan's Way $1
+Description=Alan's Way Plugin $1
 After=network.target
 
 [Service]
@@ -627,7 +627,7 @@ EOF
         printf 'HERMES_WORKSPACE_MAC_SSH=%s\n' "$MAC_SSH" > /etc/hermes-alans-way/mac-watch.env
         cat > "$UNIT_DIR/mac-watch.service" <<EOF
 [Unit]
-Description=Hermes Alan's Way Mac availability watcher
+Description=Alan's Way Plugin Mac availability watcher
 After=network-online.target
 Wants=network-online.target
 
@@ -919,7 +919,7 @@ fi
 step "Done"
 cat <<EOF
   Next:
-  • On your computer: open Hermes — Alan's Way → Settings → Agent setup → save this
+  • On your computer: open Alan's Way → Settings → Agent setup → save this
     machine's SSH address → Test agent path.
   • In Telegram: message your primary bot — proactivity is on once bound
     (/proactivity status shows it; /proactivity pause quiets it).
