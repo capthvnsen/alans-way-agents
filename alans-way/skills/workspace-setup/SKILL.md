@@ -1,11 +1,11 @@
 ---
 name: workspace-setup
-description: Set up Alan's Way after this plugin is installed — connect the user's computer (Mac or Windows PC), install the desktop app, wire the workspace browser, and bind proactivity. Use when the user asks to install, connect, onboard, or repair Alan's Way.
+description: Set up Alan's Way Plugin after it is installed — connect the user's computer (Mac or Windows PC), install the Alan's Way app, wire the workspace browser, and bind proactivity. Use when the user asks to install, connect, onboard, or repair Alan's Way.
 ---
 
 # Workspace setup
 
-This plugin is the piece that runs inside Hermes. The desktop app and the
+Alan's Way Plugin is the piece that runs inside Hermes. The Alan's Way app and the
 machine-to-machine setup live in a separate repo. Do not copy that app into
 this plugin, and do not replace this plugin with a git checkout.
 

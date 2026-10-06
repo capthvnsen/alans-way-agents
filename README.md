@@ -1,9 +1,9 @@
-# Alan's Way — agent plugin
+# Alan's Way Plugin
 
-**The behavior half of [Hermes — Alan's Way](https://github.com/capthvnsen/alans-way).**
+**The behavior half of the Alan's Way ecosystem (works with Hermes Agent).**
 This repo is what you install *on the machine running your Hermes agents*
-(a Linux VPS, or a macOS VM). The companion repo holds the desktop app for the
-user's computer (macOS or Windows) — this one holds
+(a Linux VPS, or a macOS VM). The companion [Alan's Way app](https://github.com/capthvnsen/alans-way)
+holds the desktop app for the user's computer (macOS or Windows) — this plugin holds
 what your agents need to think and act:
 
 - **`alans-way/`** — a native Hermes plugin: one designated primary bot
@@ -106,7 +106,7 @@ Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/
 to the agent with a terminal on the VPS (your Hermes bot works). It connects
 the VPS and your computer over Tailscale with pinned SSH keys both ways, runs
 the same `setup.sh`, and proves both ends work. The
-`workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
+`workspace-setup` skill (bundled in Alan's Way Plugin) teaches it the same playbook.
 
 ### 3. The desktop app
 
@@ -158,7 +158,7 @@ Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
 color. Multi-bot setups: run `setup-workspace.sh` once per profile, each with
 its own bot id (the script replaces only its own managed block).
 
-Host path requirements: the alans-way-localapp app running on the user's
+Host path requirements: the Alan's Way app running on the user's
 computer, SSH from this host to it (BatchMode/key auth — the probe uses
 `StrictHostKeyChecking`), and the app's bundled `browser-mcp.cjs` (inside the
 installed app, or the copy this repo pushes to the connector directory). On a

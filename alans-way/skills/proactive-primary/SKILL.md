@@ -2,7 +2,7 @@
 name: proactive-primary
 description: "Review work; change proactivity preferences in chat."
 version: 0.3.0
-author: capthvnsen, Hermes Agent
+author: capthvnsen
 license: MIT
 platforms: [linux, macos]
 metadata:
