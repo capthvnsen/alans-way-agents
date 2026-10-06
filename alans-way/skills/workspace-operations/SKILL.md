@@ -114,6 +114,14 @@ connector is already on that machine. A login wall means
 the VPS browser needs that site's login once; say so and stop only that
 page. Do not retry the Mac until status shows it online.
 
+The Mac can also drop in the middle of a call. The connector then moves the
+session to the VPS within about ten seconds, and the `[workspace]` notice
+says so. When it lists restored tabs, those tabs carry the Mac tabs' logins,
+scroll, and drafts: keep working in them by the VPS tab ids it names. An
+action that was in flight when the Mac dropped is never retried for you and
+comes back as an error. It may have happened, so snapshot the VPS tab and
+check before repeating it.
+
 API, MCP, and connector calls that do not run on the Mac keep going. A
 closed laptop does not stop them.
 
