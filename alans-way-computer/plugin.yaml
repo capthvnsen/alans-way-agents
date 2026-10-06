@@ -1,0 +1,10 @@
+name: alans-way-computer
+version: "0.1.0"
+description: "Computer-use provider for Hermes: drives desktop apps on the user's computer through the Alan's Way workspace router, and on the VM desktop when the computer is offline. Needs the alans-way plugin's workspace_browser block."
+author: "capthvnsen, Hermes Agent"
+license: MIT
+homepage: "https://github.com/capthvnsen/alans-way-agents"
+requires_hermes: ">=0.21.5"
+tags:
+  - computer-use
+  - workspace
