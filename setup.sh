@@ -21,6 +21,7 @@ PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
+ONLY_PROFILE=0
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 MIN_HERMES="0.21.5"
 
@@ -32,7 +33,7 @@ while [ $# -gt 0 ]; do
     --mac-key) MAC_KEY="$2"; shift 2;;
     --mac-host-key) MAC_HOST_KEY="$2"; shift 2;;
     --host-os) HOST_OS="$2"; shift 2;;
-    --profile) PROFILE="$2"; shift 2;;
+    --profile) PROFILE="$2"; ONLY_PROFILE=1; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --hermes-home) HERMES_HOME_FLAG="$2"; shift 2;;
     --desktop-dir) DESKTOP_DIR="$2"; shift 2;;
@@ -58,7 +59,8 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --host-os OS     OS of that computer: mac (default), windows or linux
   --mac-key KEY    that computer's public key line (MAC_KEY); added to authorized_keys
   --mac-host-key K that computer's host key (MAC_HOST_KEY, "ssh-ed25519 AAAA..."); pinned in known_hosts
-  --profile NAME   Hermes profile to configure (default: main config)
+  --profile NAME   configure only this Hermes profile (default: the main config and
+                   every profile that has a Telegram bot, each with its own bot ID)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
   --proactive yes|no  keep proactivity on (default) or pause it after binding
@@ -120,6 +122,7 @@ case "$HERMES_HOME" in
     esac;;
 esac
 export HERMES_HOME
+[ -z "$PROFILE" ] && [ -z "$CONFIG" ] || ONLY_PROFILE=1
 [ "$PROFILE" != default ] || PROFILE=""
 case "$PROFILE" in
   -*|.*|*[!0-9A-Za-z_.-]*) echo "setup: invalid --profile '$PROFILE' (letters, digits, dots, dashes and underscores only)" >&2; exit 2;;
@@ -194,6 +197,46 @@ check_computer_provider() {
   else
     bad "computer-use doctor reports a problem: run hermes${PROFILE:+ -p $PROFILE} computer-use doctor"
   fi
+}
+
+# The numeric bot id of the Telegram bot in a profile home (config.yaml
+# platforms.telegram.token|botToken, else .env TELEGRAM_BOT_TOKEN). Prints the
+# digits only, never the token. Prints nothing when the profile has no bot.
+token_bot_id() {
+  python3 - "$(wpath "$1")" <<'PY'
+import os, re, sys
+home = sys.argv[1]
+def clean(value):
+    m = re.match(r"""("([^"]*)"|'([^']*)'|[^\s#]+)""", value.strip())
+    return (m.group(2) or m.group(3) or m.group(1)) if m else ""
+tokens, path = [], []
+try:
+    for line in open(os.path.join(home, "config.yaml"), encoding="utf-8"):
+        m = re.match(r"( *)([A-Za-z_][\w-]*):(.*)$", line.rstrip("\r\n"))
+        if not m:
+            continue
+        depth, rest = len(m.group(1)), m.group(3).strip()
+        while path and path[-1][0] >= depth:
+            path.pop()
+        if not rest or rest.startswith("#"):
+            path.append((depth, m.group(2)))
+        elif [k for _, k in path] == ["platforms", "telegram"] and m.group(2) in ("token", "botToken"):
+            tokens.append(clean(rest))
+except OSError:
+    pass
+try:
+    for line in open(os.path.join(home, ".env"), encoding="utf-8"):
+        if line.startswith("TELEGRAM_BOT_TOKEN="):
+            tokens.append(clean(line.rstrip("\r\n").split("=", 1)[1]))
+            break
+except OSError:
+    pass
+for token in tokens:
+    m = re.match(r"(\d+):", token)
+    if m:
+        print(m.group(1))
+        break
+PY
 }
 
 # True when $1 >= $2, comparing dotted numbers part by part.
@@ -361,6 +404,11 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
+  if [ "$ONLY_PROFILE" = 0 ]; then
+    for _dir in "$HERMES_HOME"/profiles/*/; do
+      if [ -d "$_dir" ] && [ -n "$(token_bot_id "$_dir")" ]; then PROFS="$PROFS ${_dir%/}"; fi
+    done
+  fi
   for home in $PROFS; do
     cfg="$home/config.yaml"
     if [ "$SKIP_BROWSER" = 1 ]; then
@@ -471,6 +519,57 @@ if [ -n "$MAC_KEY" ] || [ -n "$MAC_HOST_KEY" ]; then
   fi
 fi
 
+# The agent's own ssh commands to the computer (not the router's, which already
+# multiplexes) pay a fresh handshake every time. A managed block in the Hermes
+# user's ssh config makes them share one connection. A Host entry the user wrote
+# for that host is theirs and stays as it is.
+write_agent_ssh_config() {
+  [ -n "$MAC_SSH" ] || return 0
+  step "Agent ssh connection reuse"
+  if [ "$GUEST_OS" = Windows ]; then
+    skip "ssh connection reuse (Windows OpenSSH has no ControlMaster)"
+    return 0
+  fi
+  mkdir -p "$BROWSER_HOME/.ssh" && chmod 700 "$BROWSER_HOME/.ssh"
+  _cfg="$BROWSER_HOME/.ssh/config"
+  _state="$(python3 - "$_cfg" "$MAC_HOST" <<'PY'
+import os, sys
+path, host = sys.argv[1], sys.argv[2]
+begin, end = "# >>> alans-way >>>\n", "# <<< alans-way <<<\n"
+block = (begin + f"Host {host}\n  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
+         "  ServerAliveInterval 15\n  ServerAliveCountMax 3\n" + end)
+try:
+    text = open(path, encoding="utf-8", newline="").read()
+except OSError:
+    text = ""
+a = text.find(begin)
+b = text.find(end, a) if a >= 0 else -1
+rest = text[:a] + text[b + len(end):] if b >= 0 else text
+for line in rest.splitlines():
+    words = line.split("#")[0].split()
+    if len(words) > 1 and words[0].lower() == "host" and host.lower() in (w.lower() for w in words[1:]):
+        print("user")
+        sys.exit(0)
+if b >= 0:
+    new = text[:a] + block + text[b + len(end):]
+else:
+    new = text + ("" if not text or text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n") + block
+if new != text:
+    open(path, "w", encoding="utf-8", newline="").write(new)
+print("written" if new != text else "unchanged")
+PY
+)" || _state=""
+  case "$_state" in
+    written|unchanged)
+      chmod 600 "$_cfg"
+      if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then chown "$BROWSER_USER" "$BROWSER_HOME/.ssh" "$_cfg" 2>/dev/null || true; fi
+      [ "$_state" = written ] && ok "ssh connection reuse for $MAC_HOST set in $_cfg" || ok "ssh connection reuse for $MAC_HOST already set";;
+    user) warn "$_cfg already has a Host entry for $MAC_HOST, so it was left as it is. Add ControlMaster auto, ControlPath ~/.ssh/cm-%C and ControlPersist 10m to it so the agent's own ssh commands share one connection";;
+    *) warn "could not update $_cfg";;
+  esac
+}
+write_agent_ssh_config
+
 # The app reaches this machine over ssh too (mirror push, tab restore). On Windows
 # that needs OpenSSH Server running, PowerShell as its shell, and, for an
 # administrator account, the key in administrators_authorized_keys instead of
@@ -565,6 +664,13 @@ derive_bot_id_from_env() {
       return 0;;
   esac
   return 1
+}
+
+derive_bot_id_from_config() {
+  _id="$(token_bot_id "$1")"
+  [ -n "$_id" ] || return 1
+  BOT_ID="$_id"
+  ok "using bot id $BOT_ID from $1 (token not printed)"
 }
 
 # The proactivity timezone is the user's, not the VM's: ask their computer.
@@ -667,11 +773,14 @@ hermes_p config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true 
 # plugin toolsets are skipped when the platform's saved list predates the
 # plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
 # Isolated wakes run as cron jobs, which need report_signal and finish_task too.
-for platform in telegram cron; do
-  hermes_p tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
-    && ok "proactivity toolset enabled for $platform" \
-    || warn "could not enable the proactivity toolset for $platform: proactive_control will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
-done
+enable_proactivity_toolsets() {
+  for platform in telegram cron; do
+    hermes_p tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
+      && ok "proactivity toolset enabled for $platform" \
+      || warn "could not enable the proactivity toolset for $platform: proactive_control will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
+  done
+}
+enable_proactivity_toolsets
 
 # ------------------------------------------------- computer-use provider (optional)
 # Offered only when this Hermes has the pluggable computer-use API; feature-probed
@@ -682,7 +791,12 @@ if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
   _shebang="$(head -1 "$_hbin" 2>/dev/null | sed -n 's/^#! *//p' | cut -d' ' -f1)"
   case "$_shebang" in /usr/bin/env|'') ;; /*) HERMES_PYTHON="$_shebang";; esac
 fi
+COMPUTER_API=0
 if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' >/dev/null 2>&1; then
+  COMPUTER_API=1
+fi
+ensure_computer_provider() {
+  COMPUTER_READY=0
   if plugin_listed "$COMPUTER_PLUGIN"; then
     ok "computer-use provider already installed; leaving it as it is"
     COMPUTER_READY=1
@@ -693,6 +807,9 @@ if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use
   else
     warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
   fi
+}
+if [ "$COMPUTER_API" = 1 ]; then
+  ensure_computer_provider
 elif [ "$GUEST_OS" = Windows ] && [ -z "${HERMES_PYTHON:-}" ]; then
   skip "computer-use provider (set HERMES_PYTHON to Hermes' python.exe to let setup look for the pluggable computer-use API)"
 else
@@ -1254,13 +1371,9 @@ fi
 
 # ------------------------------------------------------------- workspace config
 step "Workspace browser config"
-if [ -z "$BOT_ID" ]; then
-  derive_bot_id_from_env "$ENV_FILE" || derive_bot_id_from_env "$HERMES_HOME/.env" || true
-fi
-if [ -z "$BOT_ID" ] && has_tty; then
-  BOT_ID="$(ask "  Numeric Telegram bot ID for this agent (empty to skip)" "")"
-fi
-if [ -n "$BOT_ID" ]; then
+# One profile: its workspace_browser block under its own bot id, then the
+# per-profile switches that go with it.
+workspace_for_profile() {
   set -- --bot-id "$BOT_ID"
   [ -n "$BOT_NAME" ] && set -- "$@" --bot-name "$BOT_NAME"
   [ -n "$MAC_SSH" ] && set -- "$@" --mac-ssh "$MAC_SSH"
@@ -1269,7 +1382,7 @@ if [ -n "$BOT_ID" ]; then
   elif [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
-    ok "workspace_browser configured"
+    ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     if [ "$COMPUTER_READY" = 1 ]; then
       hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
         && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
@@ -1289,8 +1402,40 @@ if [ -n "$BOT_ID" ]; then
   else
     bad "setup-workspace.sh failed"
   fi
+}
+if [ -z "$BOT_ID" ]; then
+  derive_bot_id_from_config "$PROFILE_HOME" || derive_bot_id_from_env "$ENV_FILE" || derive_bot_id_from_env "$HERMES_HOME/.env" || true
+fi
+if [ -z "$BOT_ID" ] && has_tty; then
+  BOT_ID="$(ask "  Numeric Telegram bot ID for this agent (empty to skip)" "")"
+fi
+if [ -n "$BOT_ID" ]; then
+  workspace_for_profile
 else
   say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
+fi
+
+# Every other profile with a Telegram bot of its own gets the same setup under
+# that bot's id. Proactivity binding stays on the primary profile alone.
+if [ "$ONLY_PROFILE" = 0 ]; then
+  _primary_bot="$BOT_ID" _primary_name="$BOT_NAME" _primary_ready="$COMPUTER_READY"
+  for _dir in "$HERMES_HOME"/profiles/*/; do
+    [ -d "$_dir" ] || continue
+    _name="$(basename "$_dir")"
+    case "$_name" in default|''|-*|.*|*[!0-9A-Za-z_.-]*) continue;; esac
+    BOT_ID="" BOT_NAME=""
+    if ! { derive_bot_id_from_config "${_dir%/}" || derive_bot_id_from_env "${_dir%/}/.env"; }; then
+      say "  profile $_name: no Telegram bot, skipped"
+      continue
+    fi
+    PROFILE="$_name" PROFILE_HOME="${_dir%/}"
+    if plugin_listed "$PLUGIN_NAME"; then enable_proactivity_toolsets
+    else skip "proactivity toolset for profile $_name (plugin $PLUGIN_NAME is not installed there)"; fi
+    COMPUTER_READY=0
+    if [ "$COMPUTER_API" = 1 ]; then ensure_computer_provider; fi
+    workspace_for_profile
+  done
+  BOT_ID="$_primary_bot" BOT_NAME="$_primary_name" PROFILE="" PROFILE_HOME="$HERMES_HOME" COMPUTER_READY="$_primary_ready"
 fi
 
 # Desktop actions ask for approval in Telegram each time. Seeded only when asked.

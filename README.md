@@ -123,7 +123,13 @@ The bootstrap runs every step in order and says what it did:
   few seconds after the summary, so a restart never cuts setup short. If you
   run setup from a chat on that gateway, the chat pauses briefly
 
-Useful flags: `--profile NAME` for a named Hermes profile, `--host-os
+Without `--profile`, setup configures the main profile and every profile with
+its own Telegram bot, each under that bot's id, and removes any older router
+entries from them (the config is backed up first). It also adds a managed block
+to the Hermes user's `~/.ssh/config` so the agent's own ssh commands to your
+computer share one connection.
+
+Useful flags: `--profile NAME` to configure only one Hermes profile, `--host-os
 windows|linux` when the user's computer is not a Mac, `--verify` to audit
 without changing anything, `--non-interactive` for scripted runs,
 `--skip-browser` for proactivity-only installs, and `--mac-key` /

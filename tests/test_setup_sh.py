@@ -1793,6 +1793,142 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         self.assertFalse(any(entry.endswith(":foreground") for entry in entries))
 
 
+class AllProfilesTests(IntegrationBase, unittest.TestCase):
+    TOKEN = "AAFakeSecretTokenForTests"
+
+    def layout(self, home: Path):
+        (home / ".env").write_text("TELEGRAM_BOT_TOKEN=111:%s\n" % self.TOKEN, encoding="utf-8")
+        profiles = home / "profiles"
+        for name in ("familydental", "manda", "botless", "f4f", "quoted"):
+            (profiles / name).mkdir(parents=True)
+        (profiles / "familydental" / "config.yaml").write_text(
+            "model:\n  default: x\nplatforms:\n  telegram:\n    enabled: true\n    token: \"222:%s\"\n" % self.TOKEN, encoding="utf-8")
+        (profiles / "quoted" / "config.yaml").write_text(
+            "platforms:\n  telegram:\n    botToken: '555:%s'  # mine\n" % self.TOKEN, encoding="utf-8")
+        (profiles / "manda" / ".env").write_text("OTHER=1\nTELEGRAM_BOT_TOKEN=333:%s\n" % self.TOKEN, encoding="utf-8")
+        (profiles / "f4f" / ".env").write_text("TELEGRAM_BOT_TOKEN=444:%s\n" % self.TOKEN, encoding="utf-8")
+        (profiles / "f4f" / "config.yaml").write_text(
+            "mcp_servers:\n  cua_alans_way:\n    command: node\n    args:\n      - /x/workspace-router.cjs\n"
+            "  cua_alans_way_vps:\n    command: node\n    args:\n      - /x/browser-mcp.cjs\n", encoding="utf-8")
+        (profiles / "botless" / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
+
+    def ids(self, home, name=None):
+        config = (home / "profiles" / name / "config.yaml") if name else home / "config.yaml"
+        return re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8"))
+
+    def run_all(self, *flags, **kwargs):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        self.layout(home)
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\nesac\nexit 0\n' % log)
+        fake(bin_dir, "hermes-python", "exit 0\n")
+        env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        result = run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
+                     env=env, check=False, script=repo_with_computer_plugin(root))
+        return result, home, read_log(log)
+
+    def test_every_profile_with_a_telegram_bot_gets_its_own_bot_id(self):
+        result, home, calls = self.run_all()
+        self.assertEqual(self.ids(home), ["111"])
+        for name, bot in (("familydental", "222"), ("manda", "333"), ("f4f", "444"), ("quoted", "555")):
+            self.assertEqual(self.ids(home, name), [bot], name)
+        self.assertFalse((home / "profiles" / "botless" / "config.yaml").read_text().count("workspace_browser"))
+        self.assertNotIn(self.TOKEN, result.stdout + result.stderr)
+
+    def test_legacy_router_entries_are_removed_and_reported(self):
+        result, home, calls = self.run_all()
+        config = (home / "profiles" / "f4f" / "config.yaml").read_text()
+        self.assertNotIn("cua_alans_way", config)
+        self.assertEqual(config.count("workspace_browser:"), 1)
+        self.assertIn("removed unmanaged mcp_servers entry cua_alans_way_vps", result.stdout)
+        self.assertEqual(len(list((home / "profiles" / "f4f").glob("config.yaml.bak-*"))), 1)
+
+    def test_each_profile_gets_the_per_profile_work_but_only_the_primary_is_bound(self):
+        result, home, calls = self.run_all()
+        for name in ("default", "familydental", "manda", "f4f", "quoted"):
+            for needed in ("tools enable proactivity --platform telegram", "tools enable proactivity --platform cron",
+                           "tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
+                self.assertIn("-p %s %s" % (name, needed), calls, (name, needed))
+        self.assertNotIn("-p botless tools disable browser", calls)
+        self.assertNotIn("proactivity bind", calls)
+
+    def test_keep_browser_applies_to_every_profile(self):
+        _, _, calls = self.run_all("--keep-browser")
+        self.assertNotIn("tools disable browser", calls)
+
+    def test_a_named_profile_limits_the_run_to_that_profile(self):
+        _, home, calls = self.run_all("--profile", "manda")
+        self.assertEqual(self.ids(home, "manda"), ["333"])
+        self.assertFalse((home / "config.yaml").exists())
+        self.assertNotIn("workspace_browser", (home / "profiles" / "familydental" / "config.yaml").read_text())
+        self.assertNotIn("-p familydental", calls)
+
+    def test_an_explicit_bot_id_is_the_primary_s_only(self):
+        _, home, _ = self.run_all("--bot-id", "999")
+        self.assertEqual(self.ids(home), ["999"])
+        self.assertEqual(self.ids(home, "familydental"), ["222"])
+
+
+class AgentSshReuseTests(unittest.TestCase):
+    HOST = "mac.tail1234.ts.net"
+    BLOCK = ("# >>> alans-way >>>\nHost %s\n  ControlMaster auto\n  ControlPath ~/.ssh/cm-%%C\n"
+             "  ControlPersist 10m\n  ServerAliveInterval 15\n  ServerAliveCountMax 3\n# <<< alans-way <<<\n" % HOST)
+
+    def setup_run(self, existing=None, host=None):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.config = self.root / ".ssh" / "config"
+        if existing is not None:
+            self.config.parent.mkdir(mode=0o700)
+            self.config.write_text(existing, encoding="utf-8")
+        bin_dir = tooling(self.root, self.root / "log")
+        fake(bin_dir, "ssh", 'cat >/dev/null 2>&1 </dev/null; exit 0\n')
+        fake(bin_dir, "scp", "exit 0\n")
+        self.env = env_for(self.root, bin_dir, self.home)
+        return self.again(host)
+
+    def again(self, host=None):
+        return run("--mac-ssh", "me@" + (host or self.HOST), "--skip-browser", "--skip-services", "--non-interactive",
+                   "--hermes-home", str(self.home), env=self.env, check=False)
+
+    def test_writes_one_managed_block_with_connection_reuse_and_is_idempotent(self):
+        self.setup_run()
+        self.assertEqual(self.config.read_text(), self.BLOCK)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.again()
+        self.assertEqual(self.config.read_text(), self.BLOCK)
+
+    def test_other_content_is_kept_and_a_stale_block_is_refreshed(self):
+        stale = "# >>> alans-way >>>\nHost old.ts.net\n  ControlMaster no\n# <<< alans-way <<<\n"
+        self.setup_run(existing="Host work\n  User bob\n\n" + stale + "Host tail\n  Port 2222\n")
+        self.assertEqual(self.config.read_text(), "Host work\n  User bob\n\n" + self.BLOCK + "Host tail\n  Port 2222\n")
+
+    def test_the_users_own_host_entry_is_left_alone_with_a_warning(self):
+        mine = "Host other %s\n  User me\n" % self.HOST
+        result = self.setup_run(existing=mine)
+        self.assertEqual(self.config.read_text(), mine)
+        self.assertRegex(result.stdout, r"warn .*already has a Host entry for %s" % re.escape(self.HOST))
+
+    def test_no_host_means_no_ssh_config(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home),
+            env=env_for(root, tooling(root, root / "log"), home), check=False)
+        self.assertFalse((root / ".ssh" / "config").exists())
+
+
 class GitAttributesTests(unittest.TestCase):
     def test_scripts_setup_runs_are_lf_in_every_checkout(self):
         files = ["setup.sh", "setup-workspace.sh", "alans-way/scripts/mac-watch.sh", "alans-way/scripts/workspace-router.cjs",
