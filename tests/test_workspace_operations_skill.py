@@ -136,6 +136,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Do not screenshot only because the text was cut.", self.normalized)
         self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
         self.assertIn("A link href omits tracking parameters.", self.normalized)
+        self.assertIn("A frame src omits tracking parameters too.", self.normalized)
         self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)

@@ -551,6 +551,9 @@ async function main() {
   function bindChild(c, host) {
     activeChild = c;
     activeHost = host;
+    // A write after the Mac ssh has already exited emits EPIPE asynchronously.
+    // That must not kill the process that is about to answer from the VPS.
+    c.stdin.on('error', () => {});
     annotate = safeAnnotator(host);
     readline
       .createInterface({ input: c.stdout, crlfDelay: Infinity })
@@ -570,21 +573,28 @@ async function main() {
       });
     c.on('error', (e) => {
       process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
-      if (!fellBack && host === 'mac') {
-        fellBack = true;
-        void startVpsBackend();
+      if (host === 'mac' && !provedAlive) {
+        if (!fellBack) {
+          fellBack = true;
+          void startVpsBackend();
+        }
         return;
       }
       process.exit(1);
     });
     c.on('exit', (code, sig) => {
       if (c !== activeChild) return;
-      if (!provedAlive && !fellBack && host === 'mac') {
-        fellBack = true;
-        process.stderr.write(
-          'workspace-router: Mac backend died before its first response — routing to VPS browser host\n',
-        );
-        void startVpsBackend();
+      // A Mac process that never answered must not take the router down.
+      // Spawn can emit error and exit for the same death; the second one
+      // only records the fallback that the first one already started.
+      if (host === 'mac' && !provedAlive) {
+        if (!fellBack) {
+          fellBack = true;
+          process.stderr.write(
+            'workspace-router: Mac backend died before its first response — routing to VPS browser host\n',
+          );
+          void startVpsBackend();
+        }
         return;
       }
       process.exit(code === null ? (sig ? 1 : 0) : code);
@@ -601,7 +611,7 @@ async function main() {
       noteClientRpc(line, pendingRequests);
       if (!provedAlive) bufferedStdin.push(line);
       try {
-        if (activeChild && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
+        if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
       } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
     });
 
