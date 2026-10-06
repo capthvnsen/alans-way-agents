@@ -9,14 +9,14 @@
 #
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --skip-browser --skip-services
-#        --bind --timezone IANA --restart --non-interactive --verify
+#        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
 DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE=""
+BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 HERMES_HOME="" DESKTOP_DIR=""
 SKIP_BROWSER=0 SKIP_SERVICES=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 
@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
     --skip-browser) SKIP_BROWSER=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
     --bind) DO_BIND=1; shift;;
+    --proactive) PROACTIVE="$2"; shift 2;;
     --timezone) TIMEZONE="$2"; shift 2;;
     --restart) DO_RESTART=1; shift;;
     --non-interactive) NON_INTERACTIVE=1; shift;;
@@ -43,7 +44,9 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bot-name NAME  display name on the agent cursor
   --mac-ssh HOST   how this host reaches your Mac over ssh (Tailscale name/IP)
   --profile NAME   Hermes profile to configure (default: main config)
-  --bind           bind proactivity to a Telegram DM route (prompted)
+  --bind           bind proactivity to a Telegram DM route (prompted; with
+                   --non-interactive, binds the --profile's route, default main)
+  --proactive yes|no  answer "turn proactive messages on?" without a prompt
   --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
   --restart        restart the gateway at the end without asking
   --verify         check an existing install without changing anything
@@ -58,16 +61,21 @@ EOF
 done
 
 [ -n "$HERMES_HOME" ] || HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+[ "$PROFILE" != default ] || PROFILE=""
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 ok()   { printf '  ok   %s\n' "$*"; }
 warn() { printf '  warn %s\n' "$*"; }
+skip() { printf '  skip %s\n' "$*"; }
 bad()  { printf '  FAIL %s\n' "$*"; FAILS=$((FAILS + 1)); }
 FAILS=0
 
+# Agent shells often have a readable /dev/tty node but no terminal behind it;
+# only an open that succeeds means a human can answer.
+has_tty() { [ "$NON_INTERACTIVE" = 0 ] && { : < /dev/tty; } 2>/dev/null; }
 ask() { # ask <prompt> <default> — reads /dev/tty so curl|bash still prompts
-  if [ "$NON_INTERACTIVE" = 1 ] || [ ! -r /dev/tty ]; then printf '%s' "$2"; return; fi
+  if ! has_tty; then printf '%s' "$2"; return; fi
   printf '%s [%s] ' "$1" "$2" > /dev/tty
   read -r reply < /dev/tty || reply=""
   printf '%s' "${reply:-$2}"
@@ -97,7 +105,17 @@ else
   ok "hermes ${HERMES_V:-unknown version}"
 fi
 have python3 || bad "python3 required"
-have node || warn "node not on PATH — required for the browser connector"
+MIN_NODE_MAJOR=18
+if have node; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
+    ok "node $(node --version 2>/dev/null | sed 's/^v//') (>= $MIN_NODE_MAJOR required for browser connector scripts)"
+  else
+    bad "node $(node --version 2>/dev/null | sed 's/^v//') is below $MIN_NODE_MAJOR — upgrade Node before running setup (browser host and router scripts need fetch/AbortSignal.timeout)"
+  fi
+else
+  bad "node not on PATH — Node $MIN_NODE_MAJOR+ required for the browser connector"
+fi
 [ -d "$HERMES_HOME" ] && ok "HERMES_HOME: $HERMES_HOME" || warn "HERMES_HOME $HERMES_HOME does not exist yet (created on first hermes run)"
 
 if [ "$VERIFY" = 1 ]; then
@@ -113,7 +131,7 @@ if [ "$VERIFY" = 1 ]; then
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+proactivity([[:space:]]|$)"; then
       ok "proactivity toolset enabled for telegram"
     else
-      warn "proactivity toolset not enabled for telegram — proactive_control won't be callable in Telegram sessions (run: hermes tools enable proactivity --platform telegram)"
+      bad "proactivity toolset not enabled for telegram — proactive wakes would fire but proactive_control won't be callable (run: hermes tools enable proactivity --platform telegram)"
     fi
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
       warn "built-in 'browser' toolset still enabled for telegram — the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
@@ -148,11 +166,15 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     || warn "browser host connection file absent (browser host not started?)"
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
   for home in $PROFS; do
-    if [ -f "$home/config.yaml" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$home/config.yaml" \
-        || grep -q '^  workspace_browser:' "$home/config.yaml"; }; then
-      ok "workspace_browser block in $home/config.yaml"
+    cfg="$home/config.yaml"
+    if [ "$SKIP_BROWSER" = 1 ]; then
+      skip "workspace_browser block in $cfg (--skip-browser)"
+    elif [ -f "$cfg" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$cfg"; then
+      ok "workspace_browser block in $cfg"
+    elif [ -f "$cfg" ] && grep -q '^  workspace_browser:' "$cfg"; then
+      bad "workspace_browser entry in $cfg is unmanaged — re-run setup to install the managed block"
     else
-      warn "no workspace_browser block in $home/config.yaml"
+      bad "no workspace_browser block in $cfg"
     fi
   done
   [ "$FAILS" = 0 ] && say "setup: all required checks passed" || say "setup: $FAILS check(s) failed"
@@ -169,6 +191,37 @@ if [ -z "$REPO_DIR" ]; then
     git clone -q "$REPO_URL" "$REPO_DIR" && ok "cloned to $REPO_DIR" || { bad "git clone failed"; exit 1; }
   fi
 fi
+
+derive_bot_id_from_env() {
+  _env="$1"
+  [ -f "$_env" ] || return 1
+  _token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_env" 2>/dev/null | head -1 | cut -d= -f2-)"
+  _token="${_token#\"}"; _token="${_token%\"}"; _token="${_token#\'}"; _token="${_token%\'}"
+  case "$_token" in
+    [0-9]*:*)
+      BOT_ID="${_token%%:*}"
+      ok "using bot id $BOT_ID from $_env (token not printed)"
+      return 0;;
+  esac
+  return 1
+}
+
+detect_vps_timezone() {
+  [ -n "$TIMEZONE" ] && return
+  has_tty && return
+  _tz=""
+  if have timedatectl; then
+    _tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  elif [ -f /etc/timezone ]; then
+    _tz="$(tr -d ' \n' < /etc/timezone)"
+  elif [ -L /etc/localtime ]; then
+    _tz="$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || true)"
+  fi
+  if [ -n "$_tz" ] && [ "$_tz" != "UTC" ]; then
+    TIMEZONE="$_tz"
+    ok "using VPS timezone $TIMEZONE for quiet hours (non-interactive)"
+  fi
+}
 
 # ---------------------------------------------------------------- telegram
 step "Telegram gateway"
@@ -408,7 +461,10 @@ fi
 
 # ------------------------------------------------------------- workspace config
 step "Workspace browser config"
-if [ -z "$BOT_ID" ] && [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ]; then
+if [ -z "$BOT_ID" ]; then
+  derive_bot_id_from_env "$ENV_FILE" || derive_bot_id_from_env "$HERMES_HOME/.env" || true
+fi
+if [ -z "$BOT_ID" ] && has_tty; then
   BOT_ID="$(ask "  Numeric Telegram bot ID for this agent (empty to skip)" "")"
 fi
 if [ -n "$BOT_ID" ]; then
@@ -426,7 +482,7 @@ fi
 # ------------------------------------------------------------- gateway restart
 step "Gateway restart"
 GW_HINT="A running gateway holds already-imported code — restart it to load the plugin."
-if [ "$DO_RESTART" = 1 ] || { [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ] && confirm "  Restart the Hermes gateway now?"; }; then
+if [ "$DO_RESTART" = 1 ] || { has_tty && confirm "  Restart the Hermes gateway now?"; }; then
   if hermes gateway restart >/dev/null 2>&1; then
     ok "hermes gateway restart"
   elif systemctl is-active --quiet hermes-gateway 2>/dev/null; then
@@ -441,6 +497,8 @@ if [ "$DO_RESTART" = 1 ] || { [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ] && c
 else
   say "  $GW_HINT"
 fi
+
+detect_vps_timezone
 
 # ------------------------------------------------------------- bind proactivity
 step "Primary bot binding"
@@ -469,11 +527,13 @@ else
 for i, line in enumerate(sys.stdin, 1):
     p, a, k = line.rstrip("\n").split("\t", 2)
     print(f"    [{i}] {a}  (home profile: {p})")'
-  if [ "$DO_BIND" = 1 ] && [ "$NON_INTERACTIVE" = 1 ]; then
+  if [ "$DO_BIND" = 1 ] && ! has_tty; then
+    WANT="${PROFILE:-main}"
+    SEL="$(echo "$ROUTES" | awk -F '\t' -v want="$WANT" '$2 == want { print NR }')"
     if [ "$(echo "$ROUTES" | wc -l)" = 1 ]; then
       SEL=1
-    else
-      bad "--bind --non-interactive needs exactly one route; found $(echo "$ROUTES" | wc -l). Bind manually with: hermes proactivity bind --session-key <key>"
+    elif [ "$(printf '%s\n' "$SEL" | grep -c .)" != 1 ]; then
+      bad "--bind found no single Telegram DM route for profile '$WANT'. Message that bot once, or bind manually with: hermes${PROFILE:+ -p $PROFILE} proactivity bind --session-key <key>"
       SEL=""
     fi
   else
@@ -486,6 +546,9 @@ for i, line in enumerate(sys.stdin, 1):
        SEL_PROF="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f1)"
        SEL_AGENT="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f2)"
        if [ -n "$SEL_KEY" ]; then
+         # A multiplexed gateway indexes every profile's sessions at the root;
+         # the route's agent segment names the profile that owns it.
+         [ "$SEL_PROF" != default ] || [ ! -d "$HERMES_HOME/profiles/$SEL_AGENT" ] || SEL_PROF="$SEL_AGENT"
          if [ "$SEL_PROF" = "default" ]; then BIND_PROF=""; else BIND_PROF="-p $SEL_PROF"; fi
          if hermes $BIND_PROF proactivity bind --session-key "$SEL_KEY" >/dev/null 2>&1; then
            ok "bound primary route: $SEL_AGENT"
@@ -498,7 +561,7 @@ for i, line in enumerate(sys.stdin, 1):
            fi
            # Binding always leaves policy paused; turning it on grants the gateway
            # injection permission, so it stays an explicit human choice.
-           ON="$(ask "  Turn proactive messages on now? The bot may then message this chat first. [y/N]" "N")"
+           ON="${PROACTIVE:-$(ask "  Turn proactive messages on now? The bot may then message this chat first. [y/N]" "N")}"
            case "$ON" in
              y|Y|yes)
                if hermes $BIND_PROF config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \

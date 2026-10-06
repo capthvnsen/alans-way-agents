@@ -68,7 +68,7 @@ or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`
 
 The bootstrap runs every step in order and says what it did:
 
-- **Preflight** — hermes version, python3, node, HERMES_HOME
+- **Preflight** — hermes version, python3, Node 18+, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
 - **Plugin + gateway hook** — installs `alans-way`, arms the startup hook, and
@@ -93,20 +93,26 @@ without changing anything, `--non-interactive` for scripted runs,
 
 ### Or let your agent do it
 
-If a Hermes agent already has a terminal on the VPS, paste it the prompt in
-[docs/setup-prompt.md](docs/setup-prompt.md) — it installs Tailscale between
-the machines if needed, runs the same `setup.sh`, and reports back. The
+Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/setup-prompt.md)
+to the agent with a terminal on the VPS (your Hermes bot works). It connects
+the VPS and your Mac over Tailscale with pinned SSH keys both ways, runs the
+same `setup.sh`, and proves both ends work. The
 `workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
 
 ### 3. The Mac app
 
-Download the Mac app zip from the
-[latest release](https://github.com/capthvnsen/alans-way/releases), unzip, move
-the bundle to Applications, right-click → Open (it's unsigned). Sign in to Telegram inside
-the app, then **Settings → Agent setup**: the checklist shows what's already
-done — Telegram sign-in, discovered bots, both SSH addresses, connector
-status. Save the two SSH addresses, use **Copy setup command** (the bootstrap
-above, pre-filled) or **Copy setup prompt**, then **Test agent path**.
+On the Mac:
+
+```sh
+curl -fsSL https://openalan.com/install-mac | sh
+```
+
+That builds and installs the app locally (no release zip or Gatekeeper
+workaround). Sign in to Telegram inside the app, then **Settings → Agent
+setup**: the checklist shows what's already done — Telegram sign-in,
+discovered bots, both SSH addresses, connector status. Save the two SSH
+addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
+**Copy setup prompt**, then **Test agent path**.
 
 ### 4. Verify it end to end
 

@@ -32,8 +32,13 @@ bind a different bot's route silently.
    reports no `TELEGRAM_BOT_TOKEN`, tell the user to run
    `hermes gateway setup` → Telegram → Automatic (QR scan) — that step needs a
    human holding a phone; don't work around it.
-3. **SSH key auth from VPS to Mac is a human step.** If BatchMode ssh fails,
-   report the exact `ssh-copy-id` command rather than improvising credentials.
+3. **SSH trust runs both ways, with pinned keys.** The VPS reaches the Mac
+   for the browser and the Mac reaches the VPS for its preview and path test,
+   all with `BatchMode=yes` and `StrictHostKeyChecking=yes`. Have the human
+   paste `scripts/connect-mac.sh` from the alans-way repo on the Mac with this
+   VPS's address, host key and public key; it prints the Mac's values to pin
+   here. Follow the steps in the app's `docs/setup-prompt.md`. Never use
+   `StrictHostKeyChecking=accept-new` or ask for a password.
 4. **The X11/VNC desktop stack is guided, never auto-installed.** If the
    bootstrap prints display-stack instructions, relay them verbatim. Browser
    services without a display fail-loop quietly.

@@ -1,6 +1,6 @@
 # Contributing
 
-You need Python 3.11+ and Node 20+ (the router and Mac watcher tests run Node). The tests use only the standard library, so no virtual environment or install step is needed.
+You need Python 3.11+ and Node 18+ (the router and VPS browser host scripts use fetch and AbortSignal.timeout; Electron is only for the Mac app). The tests use only the standard library, so no virtual environment or install step is needed.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents && cd alans-way-agents
