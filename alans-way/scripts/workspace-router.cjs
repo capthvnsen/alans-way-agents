@@ -264,6 +264,9 @@ function pageUrlFromMessage(msg) {
   if (!Array.isArray(parts)) return null;
   for (const part of parts) {
     if (!part || part.type !== 'text' || typeof part.text !== 'string') continue;
+    // A tab list names every open page. Remembering the first one would
+    // replace the page the agent was actually working on.
+    if (/"tabs"\s*:/.test(part.text)) continue;
     const match = part.text.match(/"url"\s*:\s*"(https:\/\/[^"\\]{8,500})"/);
     if (!match) continue;
     try {

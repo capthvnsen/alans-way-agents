@@ -161,6 +161,33 @@ class RouterNoticeTests(MacStateEnvTest):
             notice = json.loads(line)["result"]["content"][1]["text"]
             self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
 
+    def test_a_tab_list_does_not_replace_the_page_being_worked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [
+                {"type": "text", "text": json.dumps({"url": "https://docs.example/d/abc", "title": "Notes"})},
+            ]}})
+            listed = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"content": [
+                {"type": "text", "text": json.dumps({"tabs": [
+                    {"url": "https://other.example/inbox"},
+                    {"url": "https://docs.example/d/abc"},
+                ]})},
+            ]}})
+            secret = json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"content": [
+                {"type": "text", "text": json.dumps({"url": "https://user:password@docs.example/private"})},
+            ]}})
+            self.annotate(directory, [
+                {"state": {"state": "online", "since": "2026-02-01T10:00:00Z"}, "line": page},
+                {"line": listed},
+                {"line": secret},
+            ], host="mac")
+            [line], _ = self.annotate(directory, [
+                {"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT},
+            ])
+            notice = json.loads(line)["result"]["content"][1]["text"]
+            self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
+            self.assertNotIn("other.example", notice)
+            self.assertNotIn("password", notice)
+
     def test_back_online_notice_fires_once_per_flip(self):
         with tempfile.TemporaryDirectory() as directory:
             lines, _ = self.annotate(directory, [
