@@ -50,15 +50,34 @@ class PluginTests(unittest.TestCase):
             registered = datetime.now(timezone.utc)
             self.assertTrue(guard.gateway_ready(home, registered))
 
-    def test_stale_marker_from_before_the_grace_window_does_not_arm(self):
+    def test_stale_marker_from_before_process_start_does_not_arm(self):
+        """A marker older than this process belongs to a dead earlier owner —
+        pid reuse must never arm a runtime that never ran gateway:startup."""
         from datetime import datetime, timezone, timedelta
         module = load_plugin()
         guard = sys.modules[module.__name__ + ".gateway_guard"]
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            guard.mark_gateway_ready(home, now=datetime.now(timezone.utc) - timedelta(hours=2))
+            process_start = datetime.now(timezone.utc) - timedelta(minutes=30)
+            guard.mark_gateway_ready(home, now=process_start - timedelta(minutes=5))
+            with patch.object(guard, "_process_started_at", return_value=process_start):
+                self.assertFalse(guard.gateway_ready(home, datetime.now(timezone.utc)))
+
+    def test_reload_long_after_gateway_start_still_arms(self):
+        """A plugin reload re-registers inside the long-running gateway; the
+        marker this process stamped at startup stays valid however old the
+        registration is — freshness is anchored to process start, not to
+        registered_at."""
+        from datetime import datetime, timezone, timedelta
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            process_start = datetime.now(timezone.utc) - timedelta(hours=2)
+            guard.mark_gateway_ready(home, now=process_start + timedelta(seconds=2))
             registered = datetime.now(timezone.utc)
-            self.assertFalse(guard.gateway_ready(home, registered))
+            with patch.object(guard, "_process_started_at", return_value=process_start):
+                self.assertTrue(guard.gateway_ready(home, registered))
 
     def test_gateway_hook_is_passive_for_non_startup_events(self):
         hook = ROOT / "hooks/alans-way/handler.py"
