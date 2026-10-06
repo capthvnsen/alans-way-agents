@@ -7,6 +7,7 @@
 #   ./setup.sh --bot-id 123456789 --mac-ssh me@mymac            # from a clone
 #   ./setup.sh --verify                                       # re-check an install
 #
+# On native Windows run it from Git Bash (the shell Hermes' terminal tool uses); WSL2 counts as Linux.
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
@@ -81,10 +82,30 @@ EOF
   esac
 done
 
+# The guest is the machine setup.sh runs on (Hermes' home); the host is the
+# user's computer reached over --mac-ssh. Git Bash, MSYS2 and Cygwin are a
+# native-Windows guest; WSL reports Linux and is treated as one.
+GUEST_RAW="$(uname -s 2>/dev/null || echo Linux)"
+case "$GUEST_RAW" in
+  Darwin) GUEST_OS=Darwin;;
+  MINGW*|MSYS*|CYGWIN*) GUEST_OS=Windows;;
+  *) GUEST_OS=Linux;;
+esac
+# Native Windows tools (node, hermes, python, git clone URLs) want C:/ paths, not
+# /c/ ones. MSYS must not rewrite the strings handed to ssh and icacls either.
+wpath() { if [ "$GUEST_OS" = Windows ]; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+[ "$GUEST_OS" != Windows ] || export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1
+
 # An exported HERMES_HOME is the operator's choice; --hermes-home overrides it.
 # Exported so every hermes call below sees the home this script writes to.
 [ -z "${HERMES_HOME_FLAG:-}" ] || HERMES_HOME="$HERMES_HOME_FLAG"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+if [ "$GUEST_OS" = Windows ]; then
+  # Hermes' own default is %LOCALAPPDATA%\hermes.
+  [ -z "${HERMES_HOME:-}" ] || HERMES_HOME="$(wpath "$HERMES_HOME")"
+  HERMES_HOME="${HERMES_HOME:-$(wpath "${LOCALAPPDATA:-$HOME/AppData/Local}")/hermes}"
+else
+  HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+fi
 # Inside a profile's gateway HERMES_HOME is <root>/profiles/<name> (hermes_cli
 # profile_root_for_env_home): the root is two levels up and that profile is the
 # one to configure unless --profile names another.
@@ -181,7 +202,10 @@ version_ge() {
 # browser host's connection.json from that account's home. When setup is run as root
 # for a Hermes that a normal account owns, the services drop to that account.
 BROWSER_USER="$(id -un)"; BROWSER_HOME="$HOME"
-if [ "$(id -u)" = 0 ] && [ -d "$HERMES_HOME" ]; then
+if [ "$GUEST_OS" = Windows ]; then
+  BROWSER_USER="${USERNAME:-$BROWSER_USER}"
+  BROWSER_HOME="$(cygpath -u "${USERPROFILE:-$HOME}")"
+elif [ "$(id -u)" = 0 ] && [ -d "$HERMES_HOME" ]; then
   _owner="$(stat -c '%U' "$HERMES_HOME" 2>/dev/null || stat -f '%Su' "$HERMES_HOME" 2>/dev/null || true)"
   case "$_owner" in
     ''|root|*[!A-Za-z0-9._-]*) ;;
@@ -201,12 +225,9 @@ else
   REPO_DIR=""
 fi
 
-# The guest is the machine setup.sh runs on (Hermes' home); the host is the
-# user's computer reached over --mac-ssh.
-GUEST_OS="$(uname -s 2>/dev/null || echo Linux)"
-case "$GUEST_OS" in
-  Darwin|Linux) ;;
-  *) warn "guest OS '$GUEST_OS' untested: assuming Linux paths"; GUEST_OS=Linux;;
+case "$GUEST_RAW" in
+  Darwin|Linux|MINGW*|MSYS*|CYGWIN*) ;;
+  *) warn "guest OS '$GUEST_RAW' untested: assuming Linux paths";;
 esac
 case "${HOST_OS:-mac}" in
   mac|windows|linux) HOST_OS="${HOST_OS:-mac}";;
@@ -257,6 +278,18 @@ else
     say "setup: stopped."
     exit 1
   fi
+fi
+if [ "$GUEST_OS" = Windows ]; then
+  # Windows ships python.exe, and python3 is often a Microsoft Store stub that is
+  # not Python. The first real Python 3 wins; HERMES_PYTHON is the last resort.
+  for _py in python3 python "${HERMES_PYTHON:-}"; do
+    [ -n "$_py" ] || continue
+    "$_py" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1 || continue
+    ALANS_WAY_PYTHON="$(command -v "$_py")"; export ALANS_WAY_PYTHON
+    python3() { "$ALANS_WAY_PYTHON" "$@"; }
+    break
+  done
+  have python3 || bad "python 3 required: install it (winget install Python.Python.3.12) or set HERMES_PYTHON to a python.exe"
 fi
 have python3 || bad "python3 required"
 MIN_NODE_MAJOR=22
@@ -349,15 +382,23 @@ tailnet_refuse() {
   printf '%s\n' "setup: Install Tailscale (https://tailscale.com/download) on this machine and on your computer, sign in to the same account on both, then pass your computer's Tailscale name (it ends in .ts.net) or IP (it starts with 100.) as --mac-ssh." >&2
   exit 1
 }
+TAILSCALE=tailscale
+if [ "$GUEST_OS" = Windows ] && ! have tailscale; then
+  _ts="$(cygpath -u "${PROGRAMFILES:-C:/Program Files}")/Tailscale/tailscale.exe"
+  [ ! -x "$_ts" ] || TAILSCALE="$_ts"
+fi
 check_tailnet() {
-  have tailscale || tailnet_refuse "Tailscale is not installed on this machine."
-  _status="$(tailscale status --json 2>/dev/null || true)"
-  python3 - "$MAC_HOST" "$_status" <<'PY' || _rc=$?
+  have "$TAILSCALE" || tailnet_refuse "Tailscale is not installed on this machine."
+  # Through a file, not argv: a big tailnet's status exceeds a Windows command line.
+  _tsf="$(mktemp)"
+  "$TAILSCALE" status --json >"$_tsf" 2>/dev/null || true
+  python3 - "$MAC_HOST" "$(wpath "$_tsf")" <<'PY' || _rc=$?
 import ipaddress, json, sys
-host, raw = sys.argv[1].lower(), sys.argv[2]
+host = sys.argv[1].lower()
 try:
-    status = json.loads(raw)
-except ValueError:
+    with open(sys.argv[2], encoding="utf-8") as handle:
+        status = json.load(handle)
+except (OSError, ValueError):
     status = {}
 if status.get("BackendState") != "Running":
     sys.exit(3)
@@ -377,9 +418,10 @@ for node in [status.get("Self") or {}] + list((status.get("Peer") or {}).values(
     names.update([dns, dns.split(".")[0]])
 sys.exit(0 if host in names - {""} else 4)
 PY
+  rm -f "$_tsf"
   case "${_rc:-0}" in
     0) return 0;;
-    3) tailnet_refuse "Tailscale is not running on this machine (try: sudo tailscale up).";;
+    3) tailnet_refuse "Tailscale is not running on this machine ($([ "$GUEST_OS" = Linux ] && echo 'try: sudo tailscale up' || echo 'open the Tailscale app and sign in'))." ;;
     *) tailnet_refuse "'$MAC_HOST' is not a Tailscale address, and Alan's Way does not connect over the public internet.";;
   esac
 }
@@ -396,9 +438,17 @@ fi
 as_owner() {
   if [ "$BROWSER_USER" != "$(id -un)" ] && have runuser; then runuser -u "$BROWSER_USER" -- "$@"; else "$@"; fi
 }
-host_ssh() { as_owner ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@" </dev/null; }
-host_ssh_stdin() { as_owner ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@"; }
-host_scp() { as_owner scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$@"; }
+# A Windows guest uses the native OpenSSH client, the one the router runs: it
+# shares the user's keys, agent and known_hosts, and Git's bundled ssh may differ.
+SSH_BIN=ssh SCP_BIN=scp
+if [ "$GUEST_OS" = Windows ]; then
+  _ossh="$(cygpath -u "${SYSTEMROOT:-${WINDIR:-C:/Windows}}")/System32/OpenSSH"
+  [ ! -x "$_ossh/ssh.exe" ] || SSH_BIN="$_ossh/ssh.exe"
+  [ ! -x "$_ossh/scp.exe" ] || SCP_BIN="$_ossh/scp.exe"
+fi
+host_ssh() { as_owner "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@" </dev/null; }
+host_ssh_stdin() { as_owner "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes -- "$MAC_SSH" "$@"; }
+host_scp() { as_owner "$SCP_BIN" -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$@"; }
 
 # Pinned keys, appended once, and only after the format checks above.
 add_line_once() { # add_line_once <file> <line>
@@ -415,6 +465,48 @@ if [ -n "$MAC_KEY" ] || [ -n "$MAC_HOST_KEY" ]; then
   if [ -n "$MAC_KEY" ]; then
     add_line_once "$BROWSER_HOME/.ssh/authorized_keys" "$MAC_KEY" && ok "your computer's key can log in to this machine"
   fi
+fi
+
+# The app reaches this machine over ssh too (mirror push, tab restore). On Windows
+# that needs OpenSSH Server running, PowerShell as its shell, and, for an
+# administrator account, the key in administrators_authorized_keys instead of
+# ~/.ssh/authorized_keys.
+windows_inbound_ssh() {
+  have powershell || { warn "powershell not found: cannot check this machine's OpenSSH Server"; return 0; }
+  _state="$(powershell -NoProfile -NonInteractive -Command - 2>/dev/null <<'PS' | tr -d '\r'
+$svc = Get-Service sshd -ErrorAction SilentlyContinue
+if (-not $svc) { 'missing'; exit 0 }
+$me = [regex]::Escape($env:USERNAME)
+$admin = [bool]((net localgroup Administrators 2>$null) -match "(^|\\)$me$")
+$shell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -ErrorAction SilentlyContinue).DefaultShell
+"$($svc.Status.ToString().ToLower()) $(if ($admin) {'admin'} else {'user'}) $(if ($shell -match 'powershell|pwsh') {'shell-ps'} else {'shell-other'})"
+PS
+)" || _state=""
+  read -r _svc _role _shell <<EOF
+$_state
+EOF
+  case "$_svc" in
+    running) ok "OpenSSH Server (sshd) is running";;
+    missing|'') warn "OpenSSH Server is not installed, so the app cannot reach this machine. In an elevated PowerShell run: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Set-Service sshd -StartupType Automatic; Start-Service sshd";;
+    *) warn "OpenSSH Server is $_svc. In an elevated PowerShell run: Set-Service sshd -StartupType Automatic; Start-Service sshd";;
+  esac
+  if [ "$_shell" = shell-other ]; then
+    warn "sshd's DefaultShell is not PowerShell, which the app's commands need. In an elevated PowerShell run: New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell -Value C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -PropertyType String -Force"
+  fi
+  if [ "$_role" = admin ] && [ -n "$MAC_KEY" ]; then
+    _adm="$(cygpath -u "${PROGRAMDATA:-C:/ProgramData}")/ssh/administrators_authorized_keys"
+    if [ -d "$(dirname "$_adm")" ] && { grep -qxF "$MAC_KEY" "$_adm" 2>/dev/null \
+        || { printf '%s\n' "$MAC_KEY" >> "$_adm" 2>/dev/null \
+             && icacls "$(cygpath -w "$_adm")" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' >/dev/null 2>&1; }; }; then
+      ok "your computer's key can log in to this administrator account"
+    else
+      warn "this account is an administrator, so sshd reads C:\ProgramData\ssh\administrators_authorized_keys, not ~/.ssh/authorized_keys. In an elevated PowerShell run: Add-Content -Path \"\$env:ProgramData\ssh\administrators_authorized_keys\" -Value '$MAC_KEY'; icacls \"\$env:ProgramData\ssh\administrators_authorized_keys\" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'"
+    fi
+  fi
+}
+if [ "$GUEST_OS" = Windows ] && [ "$SKIP_BROWSER" = 0 ]; then
+  step "Inbound ssh (for the app)"
+  windows_inbound_ssh
 fi
 
 # Fetch the repo when running via curl|bash. A --repo-ref pin checks out a
@@ -442,6 +534,14 @@ if [ -z "$REPO_DIR" ]; then
       && ok "cloned to $REPO_DIR${REPO_REF:+ at $REPO_REF}" \
       || { bad "git clone or pin failed"; exit 1; }
   fi
+fi
+
+# hermes plugins install clones this URL: file:///C:/... on Windows.
+REPO_FILE_URL="file://$REPO_DIR"
+if [ "$GUEST_OS" = Windows ]; then
+  _p="$(wpath "$REPO_DIR")"
+  case "$_p" in /*) ;; *) _p="/$_p";; esac
+  REPO_FILE_URL="file://$_p"
 fi
 
 derive_bot_id_from_env() {
@@ -586,12 +686,12 @@ elif hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
   elif diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$PROFILE_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
   else
-    hermes_p plugins install --force "file://$REPO_DIR#$PLUGIN_NAME" >/dev/null 2>&1 \
+    hermes_p plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1 \
       && ok "plugin updated from $REPO_DIR (restart the gateway to load it)" \
-      || warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} plugins install --force file://$REPO_DIR#$PLUGIN_NAME"
+      || warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} plugins install --force $REPO_FILE_URL#$PLUGIN_NAME"
   fi
 else
-  hermes_p plugins install "file://$REPO_DIR#$PLUGIN_NAME" && ok "plugin installed from $REPO_DIR" \
+  hermes_p plugins install "$REPO_FILE_URL#$PLUGIN_NAME" && ok "plugin installed from $REPO_DIR" \
     || { bad "plugin install failed"; exit 1; }
 fi
 hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
@@ -614,7 +714,7 @@ done
 # Offered only when this Hermes has the pluggable computer-use API; feature-probed
 # with Hermes' own interpreter, never by version.
 COMPUTER_PLUGIN="alans-way-computer" COMPUTER_READY=0 COMPUTER_SELECTED=0
-if [ -z "${HERMES_PYTHON:-}" ]; then
+if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
   _hbin="$(command -v hermes 2>/dev/null || true)"
   _shebang="$(head -1 "$_hbin" 2>/dev/null | sed -n 's/^#! *//p' | cut -d' ' -f1)"
   case "$_shebang" in /usr/bin/env|'') ;; /*) HERMES_PYTHON="$_shebang";; esac
@@ -623,13 +723,15 @@ if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use
   if hermes_p plugins list 2>/dev/null | grep -q "$COMPUTER_PLUGIN"; then
     ok "computer-use provider already installed; leaving it as it is"
     COMPUTER_READY=1
-  elif hermes_p plugins install "file://$REPO_DIR#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+  elif hermes_p plugins install "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
     hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
     ok "computer-use provider installed"
     COMPUTER_READY=1
   else
     warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
   fi
+elif [ "$GUEST_OS" = Windows ] && [ -z "${HERMES_PYTHON:-}" ]; then
+  skip "computer-use provider (set HERMES_PYTHON to Hermes' python.exe to let setup look for the pluggable computer-use API)"
 else
   skip "computer-use provider (this Hermes has no pluggable computer-use API yet)"
 fi
@@ -666,10 +768,85 @@ for profile_home in "$HERMES_HOME"/profiles/*/; do
   install_hook "$profile_home/hooks/$PLUGIN_NAME"
 done
 
+# --------------------------------------------- Windows services (Scheduled Tasks)
+# The Windows counterpart of the systemd units: a task per service that starts at
+# logon like Hermes' own gateway task (Chrome needs the signed-in desktop) and
+# restarts on failure every minute. win_task registers the task only when its
+# action changed, then starts it, and prints registered, updated or unchanged.
+# "once" tasks have no trigger and are started immediately (the gateway restart).
+win_task_script() {
+  cat <<'PS'
+$ErrorActionPreference = 'Stop'
+$name = $env:AW_TASK; $exe = $env:AW_EXE; $arg = $env:AW_ARGS
+$me = "$env:USERDOMAIN\$env:USERNAME"
+$old = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+$same = $env:AW_TRIGGER -eq 'logon' -and $old -and $old.Actions.Count -eq 1 -and $old.Actions[0].Execute -eq $exe -and $old.Actions[0].Arguments -eq $arg
+if (-not $same) {
+  $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
+  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+  if ($env:AW_TRIGGER -eq 'logon') {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+    $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+  } else {
+    Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force | Out-Null
+  }
+}
+$running = (Get-ScheduledTask -TaskName $name).State -eq 'Running'
+$restart = $env:AW_RESTART -eq '1'
+if (($restart -or -not $same) -and $running) { Stop-ScheduledTask -TaskName $name }
+if ($restart -or -not $same -or -not $running) { Start-ScheduledTask -TaskName $name }
+if ($same) { 'unchanged' } elseif ($old) { 'updated' } else { 'registered' }
+PS
+}
+psq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+# win_task <name> <powershell command> <logon|once> [restart]
+win_task() {
+  have powershell || { warn "powershell not found: could not schedule $1"; return 1; }
+  WIN_TASK_OUT="$(win_task_script | AW_TASK="$1" AW_EXE=powershell.exe AW_TRIGGER="$3" AW_RESTART="${4:-0}" \
+      AW_ARGS="-NoProfile -WindowStyle Hidden -Command \"$2\"" \
+      powershell -NoProfile -NonInteractive -Command - 2>&1 | tr -d '\r')" || WIN_TASK_OUT=""
+  WIN_TASK_RESULT="$(printf '%s\n' "$WIN_TASK_OUT" | tail -1)"
+  case "$WIN_TASK_RESULT" in
+    registered|updated|unchanged) return 0;;
+    *) warn "could not schedule $1 (group policy may block logon tasks): $(printf '%s' "${WIN_TASK_OUT:-no answer from powershell}" | tr '\n' ' ' | cut -c1-240)"; return 1;;
+  esac
+}
+# win_service <task> <script path> [args...]: node runs the script, its exit code is the task's.
+win_service() {
+  _name="$1"; _script="$(cygpath -w "$2")"; shift 2
+  _cmd="${WIN_DELAY:+Start-Sleep -Seconds $WIN_DELAY; }\$env:HERMES_VPS_BROWSER_DATA=$(psq "$(wpath "$DATA_DIR")"); & $(psq "$WIN_NODE") $(psq "$_script")"
+  for _a in "$@"; do _cmd="$_cmd $_a"; done
+  win_task "$_name" "$_cmd; exit \$LASTEXITCODE" logon "${WIN_RESTART:-0}" || return 0
+  case "$WIN_TASK_RESULT" in
+    registered) ok "scheduled task $_name registered (starts at logon, restarts on failure)";;
+    updated) ok "scheduled task $_name updated and restarted";;
+    *) if [ "${WIN_RESTART:-0}" = 1 ]; then ok "scheduled task $_name restarted on the new scripts"; else ok "scheduled task $_name already current"; fi;;
+  esac
+}
+install_windows_tasks() {
+  WIN_NODE="$(node -p process.execPath 2>/dev/null || command -v node)"
+  win_service AlansWay_Chromium "$DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs"
+  # Chromium keeps running so open tabs and sign-ins survive an update; only the broker restarts.
+  # The broker waits for the Chromium task to bring the browser up: started together, it would
+  # launch a second Chrome of its own that dies with the broker's task.
+  WIN_DELAY=5; WIN_RESTART="${BROWSER_UPDATED:-0}"
+  win_service AlansWay_Browser "$DESKTOP_DIR/desktop/scripts/vps-browser-host.cjs" serve
+  WIN_DELAY=""; WIN_RESTART=0
+  if [ "$CONFIG_CHANGED" = 1 ] && [ "$CFG_EXISTED" = 1 ]; then
+    say "  browser settings changed: restart the AlansWay_Chromium task to apply them (open tabs close)"
+  fi
+  if [ -n "$MAC_SSH" ]; then
+    # The router's default state file on Windows is the one the observer reads.
+    win_service AlansWay_MacWatch "$REPO_DIR/alans-way/scripts/workspace-router.cjs" \
+      --watch --interval 10 --mac-ssh "$(psq "$MAC_SSH")" --host-os "$(psq "$HOST_OS")"
+  fi
+}
+
 # ------------------------------------------------------- browser host (VPS)
 if [ "$SKIP_BROWSER" = 0 ]; then
   step "VPS browser host"
-  [ -n "$DESKTOP_DIR" ] || DESKTOP_DIR="$([ "$(id -u)" = 0 ] && echo /opt/hermes-alans-way/browser || echo "$HOME/.local/share/hermes-alans-way/app")"
+  [ -n "$DESKTOP_DIR" ] || DESKTOP_DIR="$([ "$GUEST_OS" != Windows ] && [ "$(id -u)" = 0 ] && echo /opt/hermes-alans-way/browser || echo "$BROWSER_HOME/.local/share/hermes-alans-way/app")"
   if [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ]; then
     if [ -d "$DESKTOP_DIR/.git" ]; then
       OLD_LOCK="$(cksum < "$DESKTOP_DIR/desktop/package-lock.json" 2>/dev/null || true)"
@@ -765,7 +942,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
           # copy into the app-data folder remotely. The backend command sets NODE_PATH
           # to the installed app's node_modules, so no npm install happens there.
           if host_ssh 'Remove-Item -Recurse -Force "$HOME\.alans-way-stage" -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force "$HOME\.alans-way-stage" | Out-Null' \
-              && host_scp -r -- "$CONN_STAGE/connector" "$SCP_TARGET:.alans-way-stage/" \
+              && host_scp -r -- "$(wpath "$CONN_STAGE")/connector" "$SCP_TARGET:.alans-way-stage/" \
               && host_ssh 'New-Item -ItemType Directory -Force "$env:APPDATA\Hermes Workspace\connector" | Out-Null; Copy-Item -Recurse -Force "$HOME\.alans-way-stage\connector\*" "$env:APPDATA\Hermes Workspace\connector\"; Remove-Item -Recurse -Force "$HOME\.alans-way-stage"' >/dev/null 2>&1; then
             CONN_OK=1
             ok "Windows connector updated: computer use runs through the app's local API"
@@ -821,7 +998,24 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     if [ "$(head -c 2 "$_bp" 2>/dev/null)" = '#!' ] && grep -q snap "$_bp" 2>/dev/null; then return 0; fi
     return 1
   }
+  _want="${CHROMIUM:-}"
   CHROMIUM="" SNAP_CHROMIUM="" CHROMIUM_IS_SNAP=0
+  if [ "$GUEST_OS" = Windows ]; then
+    # Chrome first, then Chromium, then Edge (always installed on Windows 10/11 and
+    # CDP-compatible). The profile is a dedicated directory, never the user's own.
+    _pf="$(cygpath -u "${PROGRAMFILES:-C:/Program Files}")"
+    _la="$(cygpath -u "${LOCALAPPDATA:-$HOME/AppData/Local}")"
+    for _cand in "$_want" \
+        "$_pf/Google/Chrome/Application/chrome.exe" "$_pf (x86)/Google/Chrome/Application/chrome.exe" \
+        "$_la/Google/Chrome/Application/chrome.exe" "$_la/Chromium/Application/chrome.exe" \
+        "$_pf (x86)/Microsoft/Edge/Application/msedge.exe" "$_pf/Microsoft/Edge/Application/msedge.exe"; do
+      if [ -n "$_cand" ] && [ -f "$_cand" ]; then CHROMIUM="$_cand"; break; fi
+    done
+    if [ -z "$CHROMIUM" ]; then
+      CHROMIUM="$_pf/Google/Chrome/Application/chrome.exe"
+      warn "no Chrome or Edge found; install Chrome (winget install Google.Chrome) and re-run setup"
+    fi
+  else
   for _name in google-chrome google-chrome-stable chromium chromium-browser; do
     _found="$(command -v "$_name" 2>/dev/null || true)"
     [ -n "$_found" ] || continue
@@ -843,6 +1037,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     CHROMIUM=/usr/bin/google-chrome
     warn "no Chrome or Chromium found; install one (apt-get install chromium, or google-chrome-stable, or: npx playwright install chromium) and re-run setup"
   fi
+  fi
   PROFILE_DIR="$DATA_DIR/chromium"
   [ "$CHROMIUM_IS_SNAP" = 0 ] || PROFILE_DIR="$BROWSER_HOME/snap/chromium/common/hermes-alans-way-chromium"
   # Chromium refuses to start as root without --no-sandbox. Root is only used when
@@ -855,21 +1050,24 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       warn "Hermes runs as root here, so the browser runs as root with --no-sandbox. Running Hermes under a normal user account avoids that"
     fi
   fi
+  # X11 and /dev/shm flags mean nothing on Windows (the browser opens on the signed-in desktop).
+  LINUX_FLAGS='    "--disable-dev-shm-usage",
+    "--ozone-platform=x11",
+'
+  [ "$GUEST_OS" != Windows ] || LINUX_FLAGS=""
   CFG_EXISTED=0; [ ! -f "$DATA_DIR/config.json" ] || CFG_EXISTED=1
   write_if_changed "$DATA_DIR/config.json" backup <<EOF
 {
   "port": 9465,
   "cdpUrl": "http://127.0.0.1:9223",
-  "browserCommand": "$CHROMIUM",
+  "browserCommand": "$(wpath "$CHROMIUM")",
   "browserArgs": [
-$NO_SANDBOX    "--user-data-dir=$PROFILE_DIR",
+$NO_SANDBOX    "--user-data-dir=$(wpath "$PROFILE_DIR")",
     "--remote-debugging-port=9223",
     "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--start-maximized",
-    "--disable-dev-shm-usage",
-    "--ozone-platform=x11",
-    "about:blank"
+$LINUX_FLAGS    "about:blank"
   ]
 }
 EOF
@@ -893,6 +1091,9 @@ EOF
     esac
   fi
 
+  if [ "$GUEST_OS" = Windows ]; then
+    [ "$SKIP_SERVICES" = 1 ] || install_windows_tasks
+  else
   SYSTEMD_USABLE=0 SYSTEMD_WARNED=0
   if [ "$SKIP_SERVICES" = 0 ] && have systemctl; then
     if [ "$(id -u)" = 0 ] || systemctl --user list-units >/dev/null 2>&1; then
@@ -1012,6 +1213,7 @@ EOF
     [ "$SYSTEMD_WARNED" = 1 ] || warn "systemd unavailable or skipped: see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
   fi
   fi
+  fi
 
   # mac-watch as a per-user LaunchAgent on a macOS guest. The router's darwin
   # default state file matches the --state-file below.
@@ -1070,6 +1272,10 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     say "  Screen Recording for the connector once, then the LaunchAgents run the"
     say "  browser host in the window session. Guide: docs/mac-vm-guest.md in the"
     say "  alans-way repo. Preview: scripts/mac-vm-preview.sh on the host."
+  elif [ "$GUEST_OS" = Windows ]; then
+    say "  Windows guest needs no X11 stack: Chrome opens on the signed-in desktop. Keep this"
+    say "  PC awake and signed in (the browser and watcher start at logon), and turn on"
+    say "  automatic sign-in (run netplwiz) so a reboot brings everything back."
   elif have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
     ok "an X display stack is present"
   else
@@ -1337,6 +1543,15 @@ schedule_gateway_restart() {
   GW_DELAY="${ALANS_WAY_RESTART_DELAY:-10}"
   GW_LOG="$(mktemp "${TMPDIR:-/tmp}/alans-way-gateway-restart.XXXXXX" 2>/dev/null)" || GW_LOG=/dev/null
   GW_HERMES="$(command -v hermes || echo hermes)"
+  if [ "$GUEST_OS" = Windows ]; then
+    # Task Scheduler starts the restarter outside this shell's and the gateway's
+    # process tree (and job object), so stopping the gateway cannot kill it. It
+    # waits, runs hermes gateway restart, then removes itself.
+    case "$GW_HERMES" in *.exe|*.cmd|*.bat) ;; *) [ ! -f "$GW_HERMES.exe" ] || GW_HERMES="$GW_HERMES.exe";; esac
+    win_task AlansWay_GatewayRestart "Start-Sleep -Seconds $GW_DELAY; \$env:HERMES_HOME=$(psq "$HERMES_HOME"); & $(psq "$(cygpath -w "$GW_HERMES")") -p $(psq "${PROFILE:-default}") gateway restart *> $(psq "$(cygpath -w "$GW_LOG")"); Unregister-ScheduledTask -TaskName 'AlansWay_GatewayRestart' -Confirm:\$false" once \
+      || warn "could not schedule the restart: run hermes${PROFILE:+ -p $PROFILE} gateway restart yourself"
+    return 0
+  fi
   # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first.
   _restart='sleep "$4"
     if "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
@@ -1379,6 +1594,7 @@ cat <<EOF
   • Proposed watches never run on their own: approve one with the Telegram button on the
     proposal, or send /watch approve <id> <code>.
 EOF
+[ "$GUEST_OS" != Windows ] || say "  • This PC: keep it awake and signed in; the browser and watcher start at logon. Automatic sign-in (netplwiz) brings them back after a reboot."
 if [ "$FAILS" != 0 ]; then
   say "setup: $FAILS check(s) failed: see above."
   [ "$WANT_RESTART" = 0 ] || say "  The gateway restart was skipped because a check failed. Fix it, then restart: hermes${PROFILE:+ -p $PROFILE} gateway restart"

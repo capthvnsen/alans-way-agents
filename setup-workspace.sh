@@ -61,6 +61,8 @@ case "$(uname -s 2>/dev/null)" in
     _native="$(cygpath -u "${SYSTEMROOT:-${WINDIR:-C:/Windows}}")/System32/OpenSSH/ssh.exe"
     [ ! -x "$_native" ] || SSH="$_native";;
 esac
+# setup.sh hands over the Python it chose: Windows has python.exe, and python3 may be a Store stub.
+if [ -n "${ALANS_WAY_PYTHON:-}" ]; then python3() { "$ALANS_WAY_PYTHON" "$@"; }; fi
 command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in

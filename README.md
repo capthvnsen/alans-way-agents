@@ -2,7 +2,7 @@
 
 **The behavior half of [Hermes — Alan's Way](https://github.com/capthvnsen/alans-way).**
 This repo is what you install *on the machine running your Hermes agents*
-(a Linux VPS, or a macOS VM). The companion repo holds the desktop app for the
+(a Linux VPS, a macOS VM, or a Windows PC you keep on). The companion repo holds the desktop app for the
 user's computer (macOS or Windows) — this one holds
 what your agents need to think and act:
 
@@ -70,8 +70,23 @@ curl -fsSL https://raw.githubusercontent.com/capthvnsen/alans-way-agents/main/se
 
 or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`.
 Add `--host-os windows` or `--host-os linux` when the user's computer runs
-Windows or Linux (the default is `mac`). On macOS and Linux guests `setup.sh`
-picks the right service manager itself.
+Windows or Linux (the default is `mac`). On macOS, Linux and Windows guests
+`setup.sh` picks the right service manager itself.
+
+**A Windows PC as the VM.** Run `setup.sh` from Git Bash (the shell Hermes' own
+terminal tool uses on native Windows), with Hermes installed natively. WSL2 is
+Linux: use the Linux path inside it. The Windows path needs, on the PC: Hermes,
+Git for Windows, Node 22+, Python 3 (`winget install Python.Python.3.12`, or set
+`HERMES_PYTHON` to a `python.exe`), Tailscale, Chrome or Edge, and OpenSSH Server
+if the app should reach the PC (`setup.sh` checks it and prints the exact
+elevated PowerShell lines). Instead of systemd, `setup.sh` registers three
+Scheduled Tasks that start at logon and restart on failure: `AlansWay_Chromium`,
+`AlansWay_Browser` and, with `--mac-ssh`, `AlansWay_MacWatch`. Windows starts them
+at logon, not at boot, so keep the PC awake and turn on automatic sign-in
+(`netplwiz`) for them to come back after a reboot. The router talks to the
+user's computer with the native OpenSSH client (no connection reuse there), and
+state lives under `~/.local/share/hermes-alans-way`. Hermes keeps its own data in
+`%LOCALAPPDATA%\hermes`, which `setup.sh` uses unless `HERMES_HOME` is set.
 
 `--mac-ssh` must be a Tailscale address: a `.ts.net` name, a tailnet IP, or a
 name `tailscale status` lists. Install Tailscale on both machines first;
@@ -90,7 +105,7 @@ The bootstrap runs every step in order and says what it did:
   systemd units on Linux (user units when you're not root; as root they run as
   the account that owns `HERMES_HOME`, and as root with `--no-sandbox` only when
   Hermes itself runs as root), LaunchAgents on a macOS guest via
-  `mac-guest-services.sh`. Chrome or Chromium from a deb is preferred over snap
+  `mac-guest-services.sh`, Scheduled Tasks on a Windows guest. Chrome or Chromium from a deb is preferred over snap
   Chromium, and an upgrade rewrites units and `config.json` whose content changed
 - **Desktop prerequisites** — on Linux, detects whether an X11/VNC stack
   exists and prints the exact packages to install if not; on a macOS guest it
@@ -103,7 +118,8 @@ The bootstrap runs every step in order and says what it did:
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)
 - **Verify** — prints a pass/fail summary of the whole install
-- **Gateway restart**: last, through the detected supervisor, detached and a
+- **Gateway restart**: last, through the detected supervisor (a one-shot
+  Scheduled Task on Windows), detached and a
   few seconds after the summary, so a restart never cuts setup short. If you
   run setup from a chat on that gateway, the chat pauses briefly
 
@@ -191,7 +207,8 @@ missing/unreachable host and serves the local VPS browser host directly.
 
 ## Mac availability watcher
 
-`alans-way/scripts/mac-watch.sh` probes the Mac over ssh on an
+`workspace-router.cjs --watch` (`alans-way/scripts/mac-watch.sh` is a thin wrapper
+around it) probes the Mac over ssh on an
 interval (default 30s) and keeps a JSON state file —
 `{"state","since","lastSeenOnline","lastTransition"}` — that the router and
 the proactive observer read instead of probing themselves. The router adds
@@ -222,11 +239,12 @@ echo 'HERMES_WORKSPACE_MAC_SSH=you@your-mac' | sudo tee /etc/hermes-alans-way/ma
 sudo systemctl enable --now mac-watch.service
 ```
 
-Adjust `ExecStart` to the installed script path and `User=` to the account
+Adjust `ExecStart` to the installed router path and `User=` to the account
 whose ssh keys reach the Mac. Environment variables:
 `HERMES_WORKSPACE_MAC_SSH` (required — the same ssh alias the router probes),
 `HERMES_MAC_STATE_FILE` (default `/var/lib/hermes-alans-way/mac-state.json`;
-the unit's `StateDirectory` creates the parent directory).
+the unit's `StateDirectory` creates the parent directory; on a Windows guest
+`~/.local/share/hermes-alans-way/mac-state.json`).
 
 Hermes's stock `browser_exec` (Browser Use) tool connects to its own
 `browser.cdp_url` (default `http://127.0.0.1:9222`) — nothing shares it.
