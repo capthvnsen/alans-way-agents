@@ -56,6 +56,7 @@ const macScripts = configuredMacScript
       "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
       '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs',
     ];
+const connectorSuffix = 'Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs';
 const siblingScript = path.join(__dirname, 'browser-mcp.cjs');
 const vpsScript =
   arg('--vps-script') ||
@@ -155,9 +156,24 @@ function macBackendCommand(script, node, id, name) {
   const args = tail.join(' ');
   if (node) return `${shQuote(node)} ${args}`;
   const bundle = /^(.*\/([^/]+)\.app)\/Contents\/Resources\//.exec(script);
-  if (!bundle) return `node ${args}`;
-  const exe = shQuote(`${bundle[1]}/Contents/MacOS/${bundle[2]}`);
-  return `if [ -x ${exe} ]; then ELECTRON_RUN_AS_NODE=1 exec ${exe} ${args}; else exec node ${args}; fi`;
+  if (bundle) {
+    const exe = shQuote(`${bundle[1]}/Contents/MacOS/${bundle[2]}`);
+    return `if [ -x ${exe} ]; then ELECTRON_RUN_AS_NODE=1 exec ${exe} ${args}; else exec node ${args}; fi`;
+  }
+  // A connector copied into the home directory is newer than the app bundle.
+  // Run it with the app's own Node and modules so a rebuild is not required.
+  const apps = [
+    '/Applications/alans-way-localapp.app',
+    '/Applications/Open Alan.app',
+    "/Applications/Hermes- Alan's way.app",
+    '/Applications/Hermes Workspace.app',
+  ];
+  const checks = apps.map((app) => {
+    const exe = `${app}/Contents/MacOS/${path.basename(app, '.app')}`;
+    const modules = `${app}/Contents/Resources/app/node_modules`;
+    return `if [ -x ${shQuote(exe)} ]; then NODE_PATH=${shQuote(modules)} ELECTRON_RUN_AS_NODE=1 exec ${shQuote(exe)} ${args}; fi`;
+  }).join(' ');
+  return `${checks} exec node ${args}`;
 }
 
 // Probe finds the newest installed bundle AND proves the app is actually
@@ -171,7 +187,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
       `[ -f "$conn" ] && ` +
       `port=$(sed -n 's/.*"url"[^0-9]*[0-9.]*:\\([0-9]*\\).*/\\1/p' "$conn" | head -1) && ` +
       `curl -s -m 4 -o /dev/null "http://127.0.0.1:\${port:-9464}/status"; }`;
-    const probe = macScripts
+    const probe = `conn_script="$HOME/${connectorSuffix}"; if [ -f "$conn_script" ] && ${alive}; then printf %s "$conn_script"; exit 0; fi; ` + macScripts
       .map(script => `if [ -f ${shQuote(script)} ] && ${alive}; then printf %s ${shQuote(script)}; exit 0; fi`)
       .join('; ') + '; exit 1';
     const child = spawn(
@@ -204,7 +220,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      const script = code === 0 && macScripts.includes(output) ? output : null;
+      const script = code === 0 && (macScripts.includes(output) || output.endsWith(connectorSuffix)) ? output : null;
       resolve({ script, stderr: errOutput });
     });
   });

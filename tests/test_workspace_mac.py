@@ -250,6 +250,18 @@ class MacBackendCommandTests(unittest.TestCase):
             result, script = self.run_remote(home, node="node")
             self.assertEqual(result.stdout.strip(), f"path-node {script} --bot-id bot-1 --bot-name Alan's bot")
 
+    def test_home_connector_runs_with_the_installed_app_node(self):
+        script = "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"
+        command = subprocess.run(
+            [NODE, "-e", "process.stdout.write(require(process.argv[1]).macBackendCommand("
+                         "process.argv[2], '', 'bot-1', ''))",
+             str(ROUTER), script],
+            capture_output=True, text=True, check=True).stdout
+        self.assertIn("NODE_PATH=", command)
+        self.assertIn("ELECTRON_RUN_AS_NODE=1", command)
+        self.assertIn("alans-way-localapp.app", command)
+        self.assertIn(script, command)
+
     def test_mac_node_path_with_spaces_is_quoted(self):
         with tempfile.TemporaryDirectory() as home:
             bundle = Path(home) / "Apps" / "Open Alan.app"

@@ -356,6 +356,28 @@ if [ "$SKIP_BROWSER" = 0 ]; then
         || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo — browser host skipped"; }
     fi
   fi
+  if [ -n "$MAC_SSH" ] && [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ -f "$DESKTOP_DIR/desktop/src/computer.cjs" ]; then
+    # The running app keeps its own copy of the connector. A newer copy in
+    # the home directory is what the router prefers, so computer use reaches
+    # the Mac without waiting for an app rebuild.
+    if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
+        "$DESKTOP_DIR/desktop/scripts/mac-computer.swift" \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/scripts/" \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR/desktop/src/computer.cjs" \
+        "$DESKTOP_DIR/desktop/src/computer-policy.cjs" \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/src/"; then
+      ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'swiftc -O -o "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer" "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer.swift"' >/dev/null 2>&1 \
+        || true
+      ok "Mac connector updated for browser and computer use"
+    else
+      warn "could not copy the Mac connector — the installed app's scripts stay in use"
+    fi
+  fi
   if [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ ! -d "$DESKTOP_DIR/desktop/node_modules/@modelcontextprotocol" ]; then
     say "  installing connector dependencies (npm ci --omit=dev)"
     (cd "$DESKTOP_DIR/desktop" && npm ci --omit=dev --ignore-scripts >/dev/null 2>&1) \
