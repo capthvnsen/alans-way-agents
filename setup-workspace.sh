@@ -14,7 +14,7 @@
 # block (markers below) or inserts one under the selected profile's existing
 # mcp_servers key; everything else is untouched.
 # --verify checks the install instead of writing: router script, node, the
-# Mac ssh hop and app API, the local VPS browser host, and the managed block.
+# host ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
@@ -37,7 +37,18 @@ if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
   echo "setup-workspace: --profile and --config are mutually exclusive" >&2
   exit 2
 fi
-case "${HOST_OS:-mac}" in mac|windows) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac or windows" >&2; exit 2;; esac
+case "${HOST_OS:-mac}" in mac|windows|linux) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac, windows or linux" >&2; exit 2;; esac
+# --mac-ssh reaches ssh as an argument: user@host or host, plain characters, never a leading '-'.
+if [ -n "$MAC_SSH" ]; then
+  _user=""; _host="$MAC_SSH"
+  case "$MAC_SSH" in *@*) _user="${MAC_SSH%%@*}"; _host="${MAC_SSH#*@}";; esac
+  _bad=0
+  case "$MAC_SSH" in *@*@*) _bad=1;; esac
+  case "$MAC_SSH" in *@*) [ -n "$_user" ] || _bad=1;; esac
+  case "$_user" in -*|*[!A-Za-z0-9._-]*) _bad=1;; esac
+  case "$_host" in ''|-*|.*|*[!A-Za-z0-9.:-]*) _bad=1;; esac
+  [ "$_bad" = 0 ] || { echo "setup-workspace: invalid --mac-ssh '$MAC_SSH' (use user@host or host; no spaces, nothing may start with '-')" >&2; exit 2; }
+fi
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
     *[!0-9A-Za-z_.-]*)
@@ -69,13 +80,13 @@ if [ "$VERIFY" = 1 ]; then
     bad "node not on PATH (router is a node script)"
   fi
   if [ -n "$MAC_SSH" ]; then
-    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok 2>/dev/null; then
+    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes -- "$MAC_SSH" echo ok 2>/dev/null; then
       ok "host ssh reachable: $MAC_SSH"
       # Run the router's own probe — the exact code path connections take —
       # so a broken probe fails here at verify time, not mid-session.
       decision=$(HERMES_WORKSPACE_MAC_SSH="$MAC_SSH" HERMES_WORKSPACE_HOST_OS="$HOST_OS" node "$ROUTER" --probe 2>/dev/null || true)
       case "$decision" in
-        "mac: "*|"windows: "*) ok "router probe → $decision";;
+        "mac: "*|"windows: "*|"linux: "*) ok "router probe → $decision";;
         "vps ("*) warn "router probe → $decision (ok only if the host app is asleep/closed right now)";;
         *) bad "router probe returned no decision";;
       esac
