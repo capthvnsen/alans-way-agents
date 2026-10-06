@@ -74,6 +74,8 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A disabled control's name ends in disabled, so do not press it.", self.normalized)
         self.assertIn("a select name includes the chosen option", self.normalized)
         self.assertIn("a section name ends in open or closed", self.normalized)
+        self.assertIn("a selected tab's name ends in selected", self.normalized)
+        self.assertIn("the current link's name ends in current", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
