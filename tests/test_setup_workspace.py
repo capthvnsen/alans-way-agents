@@ -273,5 +273,49 @@ class HostAddressTests(unittest.TestCase):
             self.assertIn(" -- me@mac", log.read_text())
 
 
+class WindowsGuestTests(unittest.TestCase):
+    """Git Bash on native Windows: uname says MINGW and cygpath maps to C:/ paths."""
+
+    def guest(self, prefix="C:"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "uname").write_text("#!/bin/sh\necho MINGW64_NT-10.0-26100\n")
+        (bin_dir / "cygpath").write_text('#!/bin/sh\ncase "$1" in -m) printf "%s%%s" "$2";; *) printf "%%s" "$2";; esac\n' % prefix)
+        for name in ("uname", "cygpath"):
+            (bin_dir / name).chmod(0o755)
+        return dict(os.environ, HOME=str(self.root), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+    def test_the_router_path_reaches_the_config_as_a_windows_path(self):
+        env = self.guest()
+        out = run("--bot-id", "bot_123", env=env).stdout
+        self.assertRegex(out, r'- "C:/\S*/alans-way/scripts/workspace-router\.cjs"')
+        out = run("--bot-id", "bot_123", "--router", "/opt/r/router.cjs", env=env).stdout
+        self.assertIn('- "C:/opt/r/router.cjs"', out)
+
+    def test_other_guests_keep_the_posix_router_path(self):
+        out = run("--bot-id", "bot_123").stdout
+        self.assertNotIn('"C:', out)
+
+    def test_a_profile_lives_under_the_native_default_home(self):
+        env = self.guest(prefix="")
+        env.pop("HERMES_HOME", None)
+        env["LOCALAPPDATA"] = str(self.root / "Local")
+        run("--bot-id", "bot_123", "--profile", "p1", env=env)
+        self.assertTrue((self.root / "Local" / "hermes" / "profiles" / "p1" / "config.yaml").exists())
+
+    def test_verify_reaches_the_host_with_the_native_openssh(self):
+        env = self.guest(prefix="")
+        native = self.root / "Windows" / "System32" / "OpenSSH" / "ssh.exe"
+        native.parent.mkdir(parents=True)
+        native.write_text('#!/bin/sh\necho native >> "%s"\nexit 1\n' % (self.root / "ssh.log"))
+        native.chmod(0o755)
+        env["SYSTEMROOT"] = str(self.root / "Windows")
+        run("--verify", "--mac-ssh", "me@mac", env=env, check=False)
+        self.assertIn("native", (self.root / "ssh.log").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
