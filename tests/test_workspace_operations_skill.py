@@ -134,6 +134,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Do not pass `host`.", self.normalized)
         self.assertIn("A snapshot defaults to 2000 characters of page text.", self.normalized)
         self.assertIn("Do not screenshot only because the text was cut.", self.normalized)
+        self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
+        self.assertIn("A link href omits tracking parameters.", self.normalized)
+        self.assertIn("A frame src omits tracking parameters too.", self.normalized)
         self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
@@ -143,6 +146,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A snapshot, screenshot, or action aimed at the Mac tab is carried onto that VPS tab. Use the tab id in the result.", self.normalized)
         self.assertIn("The continued page may still be loading. Snapshot that tab before acting.", self.normalized)
         self.assertIn("If an action still fails, the error names the VPS tab. Use that tab.", self.normalized)
+        self.assertIn("If that error lists controls, use one of those refs.", self.normalized)
         self.assertIn("The connector opens the last page there when the Mac drops.", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
@@ -219,7 +223,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # exit once mac-watch reports the Mac online — Hermes lazy-respawns
         # the connector and the respawn re-probes, converging on the Mac
         # without any manual process surgery.
-        self.assertIn("!macScript && macSsh", self.source)
+        self.assertIn("activeHost !== 'mac' && macSsh", self.source)
         self.assertIn("freshMacState(macStateFile)", self.source)
         self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)

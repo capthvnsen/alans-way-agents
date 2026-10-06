@@ -52,7 +52,7 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --profile NAME   Hermes profile to configure (default: main config)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
-  --proactive yes|no  answer "turn proactive messages on?" without a prompt
+  --proactive yes|no  keep proactivity on (default) or pause it after binding
   --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
   --restart        restart the gateway at the end without asking
   --verify         check an existing install without changing anything
@@ -342,6 +342,11 @@ else
     || { bad "plugin install failed"; exit 1; }
 fi
 hermes plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
+# The plugin's gateway-injection capability is granted at enable time — it is
+# inert until a route is bound, and a later manual bind then just works.
+hermes ${PROFILE:+-p "$PROFILE"} config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
+  && ok "gateway injection allowed for $PLUGIN_NAME" \
+  || warn "could not allow gateway injection — run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true"
 # The control tool must be loaded into each messaging session's platform —
 # plugin toolsets are skipped when the platform's saved list predates the
 # plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
@@ -457,10 +462,15 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   if [ -n "$MAC_SSH" ] && [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ -f "$DESKTOP_DIR/desktop/src/computer.cjs" ]; then
     # The running app keeps its own copy of the connector. A newer copy in
     # the home directory is what the router prefers, so computer use reaches
-    # the host machine without waiting for an app rebuild.
+    # the host machine without waiting for an app rebuild. The copy must be
+    # self-contained: every src/ module plus installed package deps — a bare
+    # `node` fallback has no NODE_PATH, and a MODULE_NOT_FOUND child stalls
+    # each profile's MCP connect for the full timeout.
     if [ "$HOST_OS" = windows ]; then
       # Windows sshd defaults to PowerShell (connect-windows.ps1 sets it). scp
-      # targets resolve relative to the user profile with forward slashes.
+      # targets resolve relative to the user profile with forward slashes. The
+      # backend command sets NODE_PATH to the installed app's node_modules, so
+      # the copy needs the whole src tree but not its own npm install.
       WCONN='AppData/Roaming/Hermes Workspace/connector'
       if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
           'New-Item -ItemType Directory -Force "$env:APPDATA\Hermes Workspace\connector\scripts", "$env:APPDATA\Hermes Workspace\connector\src" | Out-Null' \
@@ -468,16 +478,31 @@ if [ "$SKIP_BROWSER" = 0 ]; then
           "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
           "$MAC_SSH:$WCONN/scripts/" \
         && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
-          "$DESKTOP_DIR/desktop/src/vps-computer.cjs" \
-          "$DESKTOP_DIR/desktop/src/computer-policy.cjs" \
-          "$DESKTOP_DIR/desktop/src/computer-snapshot.cjs" \
-          "$DESKTOP_DIR/desktop/src/connector-reload.cjs" \
-          "$DESKTOP_DIR/desktop/src/omit-icons.cjs" \
+          "$DESKTOP_DIR"/desktop/src/*.cjs \
           "$MAC_SSH:$WCONN/src/"; then
         ok "Windows connector updated — computer use runs through the app's local API"
       else
         warn "could not copy the Windows connector — the installed app's scripts stay in use"
       fi
+    elif ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
+        "$DESKTOP_DIR/desktop/scripts/mac-computer.swift" \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/scripts/" \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR"/desktop/src/*.cjs \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/src/" \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR/desktop/package.json" \
+        "$DESKTOP_DIR/desktop/package-lock.json" \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/" \
+      && ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'zsh -lc "cd \"$HOME/Library/Application Support/Hermes Workspace/connector\" && npm ci --omit=dev --ignore-scripts"' >/dev/null 2>&1; then
+      ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'swiftc -O -o "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer" "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer.swift"' >/dev/null 2>&1 \
+        || true
+      ok "Mac connector updated for browser and computer use"
     else
       if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
           'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
@@ -715,6 +740,33 @@ else
   say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
 fi
 
+# The gateway CLI derives its restart-wait budget from TimeoutStartSec, and a
+# multi-profile boot (several platform adapters + MCP connects) routinely
+# exceeds the 90s default — the service keeps booting fine while the CLI
+# reports a timeout. Widen it where systemd owns the unit; never clobber an
+# operator-set drop-in.
+if have systemctl; then
+  for scope in "--user" ""; do
+    if systemctl $scope cat hermes-gateway.service >/dev/null 2>&1; then
+      if [ -n "$scope" ]; then
+        drop_dir="$HOME/.config/systemd/user/hermes-gateway.service.d"
+      elif [ "$(id -u)" = 0 ]; then
+        drop_dir="/etc/systemd/system/hermes-gateway.service.d"
+      else
+        break
+      fi
+      if [ ! -f "$drop_dir/timeout.conf" ]; then
+        mkdir -p "$drop_dir" \
+          && printf '[Service]\nTimeoutStartSec=180\n' > "$drop_dir/timeout.conf" \
+          && systemctl $scope daemon-reload >/dev/null 2>&1 \
+          && ok "hermes-gateway restart patience widened (TimeoutStartSec=180)" \
+          || warn "could not write $drop_dir/timeout.conf — long restarts may report a timeout"
+      fi
+      break
+    fi
+  done
+fi
+
 # ------------------------------------------------------------- gateway restart
 step "Gateway restart"
 GW_HINT="A running gateway holds already-imported code — restart it to load the plugin."
@@ -806,7 +858,7 @@ for i, line in enumerate(sys.stdin, 1):
     SEL="$(ask "  Bind a primary route? [1..N/N]" "N")"
   fi
   case "$SEL" in
-    ''|n|N|no) say "  skipped binding — proactivity stays paused.";;
+    ''|n|N|no) say "  skipped binding — proactivity stays silent until you bind a route.";;
     *[!0-9]*) warn "invalid selection — bind manually with: hermes proactivity bind --session-key <key>";;
     *) SEL_KEY="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f3)"
        SEL_PROF="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f1)"
@@ -825,20 +877,19 @@ for i, line in enumerate(sys.stdin, 1):
            else
              warn "no --timezone given — quiet hours use the default zone (America/Denver)"
            fi
-           # Binding always leaves policy paused; turning it on grants the gateway
-           # injection permission, so it stays an explicit human choice.
-           ON="${PROACTIVE:-$(ask "  Turn proactive messages on now? The bot may then message this chat first. [y/N]" "N")}"
-           case "$ON" in
-             y|Y|yes)
-               if hermes $BIND_PROF config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
-                   && hermes $BIND_PROF proactivity probe >/dev/null 2>&1 \
-                   && hermes $BIND_PROF proactivity resume >/dev/null 2>&1; then
-                 ok "proactivity on"
-               else
-                 bad "could not turn proactivity on — run: hermes $BIND_PROF proactivity probe, then hermes $BIND_PROF proactivity resume"
-               fi;;
-             *) say "  proactivity stays paused — turn it on later with /proactivity resume";;
-           esac
+           # Binding IS the consent to be messaged first; proactivity is on
+           # by default once bound. --proactive no keeps it bound but paused.
+           if hermes $BIND_PROF proactivity probe >/dev/null 2>&1; then
+             case "${PROACTIVE:-yes}" in
+               n|N|no)
+                 hermes $BIND_PROF proactivity pause >/dev/null 2>&1 \
+                   && say "  proactivity bound but paused — turn it on later with /proactivity resume" \
+                   || warn "could not pause — it stays on by default";;
+               *) ok "proactivity on by default — pause anytime with /proactivity pause";;
+             esac
+           else
+             warn "probe failed — the appraisal path needs a model check: hermes $BIND_PROF proactivity probe"
+           fi
          else
            bad "bind failed — run manually: hermes $BIND_PROF proactivity bind --session-key <key>"
          fi
@@ -870,8 +921,8 @@ cat <<EOF
   Next:
   • On your computer: open Hermes — Alan's Way → Settings → Agent setup → save this
     machine's SSH address → Test agent path.
-  • In Telegram: message your primary bot — /proactivity status should report
-    'bound' once you've bound a route, and /proactivity resume turns it on.
+  • In Telegram: message your primary bot — proactivity is on once bound
+    (/proactivity status shows it; /proactivity pause quiets it).
   • Browser work routes to your ${HOST_OS} computer while it's reachable, else this host.
 EOF
 [ "$FAILS" = 0 ] && exit 0 || { say "setup: $FAILS check(s) failed — see above."; exit 1; }

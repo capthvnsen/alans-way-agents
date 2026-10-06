@@ -28,7 +28,7 @@ class Policy:
     A nonempty session_key must identify a route validated by the adapter.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     primary_profile: str = "default"
     session_key: str = ""
     timezone: str = "America/Denver"

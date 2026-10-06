@@ -257,9 +257,9 @@ rule, `signal` the last known state.
 
 ## First Run
 
-`[Companion first-run orientation]` arrives once, when the operator first
-enables proactivity on the bound route. It is consent for one orientation
-report, not for enabling work:
+`[Companion first-run orientation]` arrives once — on the operator's first
+successful `bind` of a route (or first `resume`, whichever comes first). It
+is consent for one orientation report, not for enabling work:
 
 1. Inventory reachable surfaces — installed skills, connectors, native
    schedule/tasks, and whether the managed browser can reach a logged-in
@@ -282,6 +282,9 @@ something, because they do.
 - At most five items, ranked; declare done at the end ("that's everything
   worth your attention") rather than trailing off — a bounded list signals
   the work finished.
+- You land in a Telegram DM as an ordinary bot reply: one compact message,
+  plain-text friendly. Lead with the single most useful line; no tables,
+  no headers — they render badly in a chat client.
 - Stale items die quietly: if the moment passed while the wake queued, drop
   it or name the missed window; an 8:30 alert sent at 8:45 is noise.
 - End with at most one concrete offer ("want me to draft the follow-up?").

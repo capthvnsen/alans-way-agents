@@ -65,8 +65,13 @@ def bind(runtime, session_key):
     entry = _routing_entry(runtime.home, session_key)
     if not _entry_is_dm_route(entry, session_key):
         raise ValueError("bind only a verified existing direct Telegram route in this profile")
-    runtime.store.update_policy({"enabled": False, "primary_profile": "default",
+    # Binding IS the consent step: the operator picks the chat that may be
+    # messaged first, so a fresh install stays enabled (its default) and the
+    # orientation wake is admitted here. A deliberately paused install keeps
+    # its pause — re-binding never silently resumes it.
+    runtime.store.update_policy({"primary_profile": "default",
                                  "session_key": session_key, "resume_at": ""})
+    runtime._admit_first_run()
 
 
 def probe(runtime):

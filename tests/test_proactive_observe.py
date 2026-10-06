@@ -19,6 +19,29 @@ def plugin():
 
 
 class ObservationTests(unittest.TestCase):
+    def test_unbound_observation_advances_the_baseline_without_queuing(self):
+        """Enabled-but-unbound has nowhere a wake could land: diffs fold into
+        the baseline silently instead of draining as stale rejects post-bind."""
+        class Host:
+            status = "running"
+            def dispatch_tool(self, name, args):
+                return {"task": {"id": "native-card", "status": self.status}}
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            host = Host()
+            runtime = module.Runtime(host, Path(directory))
+            runtime.ledger.record_task({"id": "watch", "title": "Approved work", "scope": "Review draft",
+                "next_action": "Verify", "owner": "primary", "status": "active", "approved": True,
+                "native_task_id": "native-card"})
+            self.assertEqual(runtime.observe(), 0)
+            host.status = "done"
+            self.assertEqual(runtime.observe(), 0)  # unbound: baseline only
+            self.assertEqual(runtime.store.status()["counts"].get("pending", 0), 0)
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789"})
+            host.status = "blocked"
+            self.assertEqual(runtime.observe(), 1)  # bound: real changes admit
+            runtime.close()
+
     def test_native_changes_wake_once_and_completed_tasks_cannot_continue(self):
         class Host:
             status = "running"

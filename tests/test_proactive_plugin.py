@@ -394,7 +394,7 @@ class PluginTests(unittest.TestCase):
                 status = _json.loads(runtime.tool_control({"action": "status"}))
             self.assertIs(denied["ok"], False)
             self.assertIs(status["ok"], True)
-            self.assertFalse(runtime.store.load_policy().enabled)
+            self.assertTrue(runtime.store.load_policy().enabled)
             # resume is operator-only: even the bound route's model call is
             # refused, while mutations the tool still owns (pause) work there.
             with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:main:telegram:dm:1"}):
