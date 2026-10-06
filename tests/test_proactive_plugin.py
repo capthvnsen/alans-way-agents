@@ -324,6 +324,69 @@ class PluginTests(unittest.TestCase):
             self.assertIs(result["ok"], False)
             runtime.close()
 
+    def test_register_uses_the_plugin_load_scope_home_not_the_launch_environment(self):
+        """Under gateway multiplex one process serves many profiles and
+        os.environ['HERMES_HOME'] keeps the launch profile's home; the plugin
+        load binds the owning profile through the hermes_constants contextvar,
+        so register() must resolve its home there and never from the env."""
+        import types
+        module = load_plugin()
+        class Facade:
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as launch_home, \
+                tempfile.TemporaryDirectory() as owning_home:
+            fake = types.ModuleType("hermes_constants")
+            fake.get_hermes_home = lambda: Path(owning_home)
+            sys.modules["hermes_constants"] = fake
+            try:
+                with patch.dict(os.environ, {"HERMES_HOME": launch_home}):
+                    runtime = module.register(Facade(), background=False)
+            finally:
+                del sys.modules["hermes_constants"]
+            self.assertEqual(runtime.home, Path(owning_home))
+            runtime.close()
+
+    def test_register_without_hermes_falls_back_to_the_environment_home(self):
+        """Hosts without hermes_constants (tests, plain subprocesses) keep the
+        documented HERMES_HOME/default-home resolution."""
+        module = load_plugin()
+        class Facade:
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertNotIn("hermes_constants", sys.modules)
+            with patch.dict(os.environ, {"HERMES_HOME": directory}):
+                runtime = module.register(Facade(), background=False)
+            self.assertEqual(runtime.home, Path(directory))
+            runtime.close()
+
+    def test_observer_starts_only_for_the_primary_profile(self):
+        """A non-primary profile's runtime owns its own store but never
+        observes or dispatches: proactivity belongs to the default primary."""
+        module = load_plugin()
+        class Facade:
+            def __init__(self, profile):
+                self.profile_name = profile
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as directory:
+            secondary = module.register(Facade("coder"), home=Path(directory) / "coder",
+                                        background=True)
+            self.assertIsNone(secondary.worker)
+            secondary.close()
+            primary = module.register(Facade("default"), home=Path(directory) / "default",
+                                      background=True)
+            self.assertIsNotNone(primary.worker)
+            self.assertTrue(primary.worker.is_alive())
+            primary.close()
+
     def test_registration_does_not_start_another_agent_or_cli_injection(self):
         class Facade:
             def __init__(self):

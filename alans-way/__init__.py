@@ -408,8 +408,40 @@ class Runtime:
             return "Watch command failed — check the id or JSON payload. No change was claimed."
 
 
+def _owning_home() -> Path:
+    """The home Hermes bound for this plugin load, never the launch env.
+
+    Under gateway multiplex one process serves every profile and
+    ``os.environ['HERMES_HOME']`` keeps the launch profile's home, so the env
+    would point a secondary runtime at the primary's store. ``register()``
+    runs inside Hermes' plugin-load home scope, which ``get_hermes_home()``
+    reads from a contextvar; the env is only a fallback for hosts without
+    Hermes importable (offline tests, plain subprocesses).
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()).expanduser().absolute()
+    except Exception:
+        return hermes_home()
+
+
+def _primary_profile(ctx) -> bool:
+    """Only the launch (default/custom) profile's runtime may observe.
+
+    A named secondary profile registers the same tools and commands against
+    its own home, but proactivity belongs to the default primary — Policy
+    already refuses any other ``primary_profile``. A ctx without profile
+    information (tests, non-gateway hosts) counts as primary.
+    """
+    try:
+        name = getattr(ctx, "profile_name", None)
+    except Exception:
+        return True
+    return name in (None, "", "default", "custom")
+
+
 def register(ctx, *, home=None, background=True):
-    runtime = Runtime(ctx, Path(home) if home is not None else hermes_home(), background=background)
+    runtime = Runtime(ctx, Path(home) if home is not None else _owning_home(), background=background)
     from .proactive_schema import SCHEMA
     ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
                       handler=runtime.control, check_fn=lambda: True)
@@ -426,6 +458,6 @@ def register(ctx, *, home=None, background=True):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,
                                  lambda args: execute(runtime, args))
-    if background:
+    if background and _primary_profile(ctx):
         runtime.start()
     return runtime
