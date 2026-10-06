@@ -131,6 +131,10 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
+        self.assertIn("Do not pass `host`.", self.normalized)
+        self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
+        self.assertNotIn("explicit `host: vps` open", self.normalized)
 
     def test_human_has_control_asks_before_claim(self):
         self.assertIn('action:"claim"', self.normalized)
