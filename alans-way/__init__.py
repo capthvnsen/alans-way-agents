@@ -19,6 +19,12 @@ class Runtime:
         self._tick_lock = threading.Lock()
         self.worker = None
         self.observer_error = None
+        self.appraisal_error = None
+
+    def _record_appraisal_error(self, exc=None):
+        """Status records that appraisal failed, never why — provider details
+        and private context stay out of chat-visible status."""
+        self.appraisal_error = "appraisal_failed; inspect locally before resuming"
 
     def start(self, *, interval=30.0):
         """A deterministic observer thread, not a second agent or scheduler."""
@@ -90,6 +96,18 @@ class Runtime:
         event = self.store.claim()
         if event is None:
             return None
+        try:
+            return self._dispatch(event)
+        except BaseException:
+            # Any escape between claim and finish must not strand the event in
+            # 'dispatching': it would hold the one-wake gate open forever.
+            try:
+                self.store.finish(event["id"], "uncertain")
+            except Exception:
+                pass
+            raise
+
+    def _dispatch(self, event):
         event_id = event["id"]
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key:
@@ -99,13 +117,16 @@ class Runtime:
             return self._dispatch_watch_due(event)
         context = {"tasks": []}
         try:
+            self.appraisal_error = None
             context = self.review_context()
             if self._appraiser is None:
                 from .proactive_review import review
-                appraisal = review(self.ctx, context, event["kind"])
+                appraisal = review(self.ctx, context, event["kind"],
+                                   record_error=self._record_appraisal_error)
             else:
                 appraisal = self._appraiser(self.ctx, context, event["kind"])
         except Exception:
+            self._record_appraisal_error()
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
             self.store.finish(event_id, "rejected")
@@ -134,7 +155,7 @@ class Runtime:
         message = ("[Companion proactive opportunity review]\n"
                    "This is a bounded internal review, NOT new user authorization.\n"
                    "First call proactive_control status; if paused, stop. Load skill "
-                   "proactive-primary:proactive-primary. Read live preferences and the primary's "
+                   "alans-way:proactive-primary. Read live preferences and the primary's "
                    "own memory, goals, schedule, and authorized task evidence. Take one useful "
                    "read/research/draft or already-approved reversible work step, or ask one "
                    "valuable question. Never expand permissions or execute external/sensitive "
@@ -260,6 +281,18 @@ class Runtime:
         if self.worker and self.worker is not threading.current_thread():
             self.worker.join(timeout=1.0)
 
+    def tool_control(self, args, **kwargs):
+        """Tool entry: mutating actions belong to the bound route.
+
+        The CLI operator and slash commands call ``control`` themselves (the
+        slash path checks the route first), so gating here would lock the
+        operator out of a shell that has no session key.
+        """
+        action = args.get("action", "status") if isinstance(args, dict) else "status"
+        if action != "status" and not self._bound_route_only():
+            return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
+        return self.control(args, **kwargs)
+
     def control(self, args, **kwargs):
         try:
             if not isinstance(args, dict):
@@ -269,7 +302,8 @@ class Runtime:
                 return json.dumps({"ok": True, **self.store.status(), **self.ledger.snapshot(),
                                    "gateway_ready": self.gateway_ready(),
                                    "observer_running": bool(self.worker and self.worker.is_alive()),
-                                   "observer_error": self.observer_error})
+                                   "observer_error": self.observer_error,
+                                   "appraisal_error": self.appraisal_error})
             if action == "configure":
                 changes = args.get("changes", args.get("settings", {}))
                 if (not isinstance(changes, dict) or not changes
@@ -309,9 +343,37 @@ class Runtime:
         except Exception:
             return json.dumps({"ok": False, "error": "Invalid or unsupported proactivity control; no success is claimed"})
 
+    def _caller_session_key(self):
+        """The route Hermes bound around this command handler's session.
+
+        The gateway binds HERMES_SESSION_* as contextvars while dispatching a
+        plugin slash command; ``get_session_env`` reads them with an
+        os.environ fallback for hosts where Hermes is not importable.
+        """
+        try:
+            from gateway.session_context import get_session_env
+            return get_session_env("HERMES_SESSION_KEY") or ""
+        except Exception:
+            import os
+            return os.environ.get("HERMES_SESSION_KEY", "")
+
+    def _bound_route_only(self):
+        """Mutating or disclosing chat controls belong to the bound route.
+
+        Plugin slash commands bypass the gateway's slash access check, so any
+        session that can message the bot could otherwise pause, retune or read
+        private watch scopes. An unbound install stays open so setup works.
+        A multiplexed gateway dispatches slash commands on the launch profile's
+        runtime only; other profiles reach this store through the tool.
+        """
+        bound = self.store.load_policy().session_key
+        return not bound or self._caller_session_key() == bound
+
     def command(self, raw_args):
         parts = raw_args.strip().split(maxsplit=1)
         action = parts[0] if parts else "status"
+        if action != "status" and not self._bound_route_only():
+            return "Proactivity controls are only available on the bound conversation."
         args = {"action": action}
         if action == "configure":
             try:
@@ -333,6 +395,10 @@ class Runtime:
             return "Control was requested, but its effective state could not be verified."
         policy, counts = state["policy"], state["counts"]
         unresolved = sum(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
+        attention = [state.get("observer_error"), state.get("appraisal_error")]
+        if state.get("storage_full"):
+            attention.append("event storage full — new wakes refused")
+        flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused'}\n"
                 f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
                 f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
@@ -340,8 +406,10 @@ class Runtime:
                 f"{policy['min_interval_seconds'] // 60} minutes between automatic reviews\n"
                 f"Telegram route: {'bound' if state['route_bound'] else 'unbound'}\n"
                 f"Gateway: {'ready' if state['gateway_ready'] else 'not armed in this process'}\n"
-                f"Observer: {state.get('observed_at') or 'no pass yet'}\n"
-                f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}\n"
+                f"Observer: {'running' if state.get('observer_running') else 'stopped'}; "
+                f"last pass {state.get('observed_at') or 'none yet'}\n"
+                f"Pending: {counts.get('pending', 0)}; unresolved: {unresolved}"
+                + flagged + "\n"
                 "Limits are ceilings; nothing useful means silence.")
 
     def watch_command(self, raw_args):
@@ -351,6 +419,8 @@ class Runtime:
         bypass nothing: they call the same validated ledger paths the tool
         uses, and mutation output always reads back live state.
         """
+        if not self._bound_route_only():
+            return "Watch controls are only available on the bound conversation."
         parts = raw_args.strip().split(maxsplit=1)
         action, rest = parts[0] if parts else "list", parts[1] if len(parts) > 1 else ""
         try:
@@ -408,11 +478,43 @@ class Runtime:
             return "Watch command failed — check the id or JSON payload. No change was claimed."
 
 
+def _owning_home() -> Path:
+    """The home Hermes bound for this plugin load, never the launch env.
+
+    Under gateway multiplex one process serves every profile and
+    ``os.environ['HERMES_HOME']`` keeps the launch profile's home, so the env
+    would point a secondary runtime at the primary's store. ``register()``
+    runs inside Hermes' plugin-load home scope, which ``get_hermes_home()``
+    reads from a contextvar; the env is only a fallback for hosts without
+    Hermes importable (offline tests, plain subprocesses).
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()).expanduser().absolute()
+    except Exception:
+        return hermes_home()
+
+
+def _primary_profile(ctx) -> bool:
+    """Only the launch (default/custom) profile's runtime may observe.
+
+    A named secondary profile registers the same tools and commands against
+    its own home, but proactivity belongs to the default primary — Policy
+    already refuses any other ``primary_profile``. A ctx without profile
+    information (tests, non-gateway hosts) counts as primary.
+    """
+    try:
+        name = getattr(ctx, "profile_name", None)
+    except Exception:
+        return True
+    return name in (None, "", "default", "custom")
+
+
 def register(ctx, *, home=None, background=True):
-    runtime = Runtime(ctx, Path(home) if home is not None else hermes_home(), background=background)
+    runtime = Runtime(ctx, Path(home) if home is not None else _owning_home(), background=background)
     from .proactive_schema import SCHEMA
     ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
-                      handler=runtime.control, check_fn=lambda: True)
+                      handler=runtime.tool_control, check_fn=lambda: True)
     ctx.register_command("proactivity", runtime.command,
                          description="Status, pause, resume, and configure proactive work")
     ctx.register_command("watch", runtime.watch_command,
@@ -426,6 +528,6 @@ def register(ctx, *, home=None, background=True):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,
                                  lambda args: execute(runtime, args))
-    if background:
+    if background and _primary_profile(ctx):
         runtime.start()
     return runtime

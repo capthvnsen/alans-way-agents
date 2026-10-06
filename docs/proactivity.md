@@ -13,7 +13,7 @@ Target the existing `default` primary profile; do not rename it or create anothe
 owner. The plugin is intended for Linux and macOS. Review the complete plugin
 folder, not only its skill, before importing it. Use Hermes' supported local
 plugin-folder discovery: place the reviewed `alans-way/` folder
-under the active profile's `$HERMES_HOME/alans-way/`.
+under the active profile's `$HERMES_HOME/plugins/alans-way/`.
 
 For a locally discovered plugin, the supported enable command is:
 
@@ -88,8 +88,7 @@ event, injects nothing, claims no delivery. A missing provider/facade or
 malformed result must be diagnosed before activation. Automatic work needs the
 separate reviewed hook and a validated restart of the existing gateway —
 never another gateway, keep the same conversation. With no evidence, an
-explicit review succeeds silently with zero model calls. Chat controls reply
-concisely; the CLI and tool return structured JSON.
+explicit review succeeds silently with zero model calls.
 
 ## Separate native gateway hook
 
@@ -167,14 +166,13 @@ revives a cancelled task or turns a stale event into renewed permission.
   artifacts, verification and next actions; the plugin's own ledger writes are
   not new opportunities to wake.
 
-The observer compares metadata from `kanban_show` only for fresh, explicitly
-approved watches containing an exact `native_task_id`. A changed native status
-or update timestamp can admit one deduplicated event. Missing native tools or
-records block continuation; the ledger never overrides a native terminal
-state. The observer checks every 30 seconds without a model call when nothing
-changes; initial snapshots and the plugin's own bookkeeping do not create
-wakes. A blocked or waiting watch does not fire — re-activation refires
-whatever is overdue.
+The observer compares `kanban_show` metadata only for fresh, approved watches
+with an exact `native_task_id`; a changed native status admits one
+deduplicated event. Missing native records block continuation; the ledger
+never overrides a native terminal state. The observer checks every 30
+seconds without a model call when nothing changes; initial snapshots and
+the plugin's own bookkeeping do not create wakes. A blocked or waiting
+watch does not fire — re-activation refires whatever is overdue.
 
 ## Standing watches
 
@@ -193,7 +191,9 @@ watch spacing (`min_watch_interval_seconds`, default 300) still apply; the
 pending queue also reserves headroom so speculative noise cannot starve them.
 A re-armed instance retires as stale; a finished watch's queued wake is
 rejected. `/watch list|show|add {json}|pause|resume|done|cancel|signal` is the
-operator's direct surface over the ledger.
+operator's direct surface over the ledger; like mutating `/proactivity`
+actions and `proactive_control`, it answers only on the bound
+conversation; status stays open.
 
 Telegram remains the conversation owner. A watch's `execution_host` is `cloud`
 or `mac`; omitting it preserves the existing choice. Explicitly local work

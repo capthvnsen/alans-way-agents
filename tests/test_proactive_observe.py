@@ -182,6 +182,56 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(observe._due_instance(nra, 30, now), nra)
         self.assertEqual(observe._due_instance(nra, "3600", now), nra)
 
+    def test_change_while_a_wake_is_unresolved_still_wakes_after_it_resolves(self):
+        """The observer must not consume the diff baseline while the one-wake
+        gate is busy: record_event never ran for this change, so holding the
+        baseline is the only way the wake survives."""
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "memories").mkdir()
+            memory = home / "memories/MEMORY.md"
+            memory.write_text("first state", encoding="utf-8")
+            runtime = module.Runtime(None, home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            self.assertEqual(runtime.observe(), 0)  # baseline pass
+            runtime.store.record_event("manual_review", "opaque-live", purpose=True)
+            live = runtime.store.claim()
+            runtime.store.finish(live["id"], "accepted_unverified")
+            memory.write_text("second state", encoding="utf-8")
+            self.assertEqual(runtime.observe(), 0)  # gate busy: nothing admitted
+            runtime.store.finish(live["id"], "resolved")
+            self.assertEqual(runtime.observe(), 1)  # the change is still owed
+            self.assertEqual(runtime.observe(), 0)
+            runtime.close()
+
+    def test_change_while_admission_is_refused_waits_for_room(self):
+        """record_event returning False (queue headroom, storage full) must
+        leave the baseline behind, or the change is never woken for."""
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "memories").mkdir()
+            memory = home / "memories/MEMORY.md"
+            memory.write_text("first state", encoding="utf-8")
+            runtime = module.Runtime(None, home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0, "max_pending": 1})
+            self.assertEqual(runtime.observe(), 0)
+            runtime.store.record_event("manual_review", "opaque-fill", purpose=True)
+            memory.write_text("second state", encoding="utf-8")
+            self.assertEqual(runtime.observe(), 0)  # queue full: refused
+            fill = runtime.store.claim()
+            runtime.store.finish(fill["id"], "accepted_unverified")
+            runtime.store.finish(fill["id"], "resolved")
+            self.assertEqual(runtime.observe(), 1)  # room freed: the diff fires
+            runtime.close()
+
     def test_arm_review_validates_target_time_and_watch(self):
         from datetime import datetime, timezone
         module = plugin()

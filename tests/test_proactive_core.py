@@ -203,6 +203,28 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(store.record_event("manual_review", "opaque-wake-2", purpose=True, now=self.now))
         self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-wake-2")
 
+    def test_stranded_dispatching_events_expire_and_free_the_gate(self):
+        """A dispatch that dies between claim() and finish() — not a crash,
+        so the reopen recovery never runs — must not hold the one-wake gate
+        forever; past the unresolved TTL it expires like any dead wake."""
+        store = self.configured(min_interval_seconds=0, unresolved_ttl_seconds=600)
+        store.record_event("manual_review", "opaque-stuck", purpose=True, now=self.now)
+        self.assertIsNotNone(store.claim(now=self.now))
+        self.assertEqual(store.status()["counts"]["dispatching"], 1)
+        store.expire(now=self.now + timedelta(seconds=599))
+        self.assertEqual(store.status()["counts"]["dispatching"], 1)
+        store.expire(now=self.now + timedelta(seconds=601))
+        counts = store.status()["counts"]
+        self.assertIsNone(counts.get("dispatching"))
+        self.assertEqual(counts.get("expired"), 1)
+        # The tombstone remains: the same evidence cannot re-fire, but a
+        # distinct event claims again with the gate free.
+        self.assertFalse(store.record_event("manual_review", "opaque-stuck",
+                                            purpose=True, now=self.now + timedelta(seconds=601)))
+        store.record_event("manual_review", "opaque-again", purpose=True,
+                           now=self.now + timedelta(seconds=601))
+        self.assertIsNotNone(store.claim(now=self.now + timedelta(seconds=601)))
+
     def test_purpose_then_kind_priority_then_fifo_selects_work(self):
         store = self.configured(min_interval_seconds=0)
         for kind, evidence, purpose in [
@@ -409,6 +431,36 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(sum(status["counts"].values()), 4096)
         self.assertLessEqual(len(status["audit"]), 256)
         self.assertFalse(store.record_event("context_changed", "opaque-history-0", now=self.now + timedelta(seconds=8193)))
+
+    def test_terminal_rows_prune_past_retention_so_a_full_table_recovers(self):
+        """Dead terminal rows are only tombstones while their re-fire windows
+        live; past the retention bound they prune so a saturated table admits
+        again instead of refusing every event forever."""
+        store = self.configured()
+        store._MAX_EVENTS = 4
+        for index in range(4):
+            self.assertTrue(store.record_event("context_changed", f"opaque-cap-{index}", now=self.now))
+        self.assertFalse(store.record_event("context_changed", "opaque-blocked", now=self.now))
+        later = self.now + timedelta(days=8)
+        # The four rows expired under event_ttl long ago; all terminal and
+        # older than the retention bound, so this admission prunes them.
+        self.assertTrue(store.record_event("context_changed", "opaque-after-retention", now=later))
+        counts = store.status()["counts"]
+        self.assertEqual(sum(counts.values()), 1)
+        self.assertIs(store.status()["storage_full"], False)
+
+    def test_recent_terminal_rows_never_prune_and_still_dedupe(self):
+        """Inside the retention bound a terminal row is still the dedupe
+        tombstone: replays stay refused and the cap keeps holding."""
+        store = self.configured(event_ttl_seconds=60)
+        store._MAX_EVENTS = 4
+        for index in range(4):
+            self.assertTrue(store.record_event("context_changed", f"opaque-cap-{index}", now=self.now))
+        soon = self.now + timedelta(seconds=61)
+        # All four expired seconds ago — terminal, but far too fresh to prune.
+        self.assertFalse(store.record_event("context_changed", "opaque-still-capped", now=soon))
+        self.assertFalse(store.record_event("context_changed", "opaque-cap-0", now=soon))
+        self.assertIs(store.status()["storage_full"], True)
 
     def test_older_policy_rows_backfill_newer_fields(self):
         """A row written before a policy field existed is schema drift, not

@@ -8,15 +8,66 @@ import tempfile
 
 # gateway:startup can legitimately fire before or after plugin registration
 # inside the same gateway process, so arming must not depend on that order.
-# The pid match already proves this process wrote the marker; the grace window
-# only needs to cover startup ordering, not admit a stale same-pid file left
-# behind by a dead earlier owner.
+# Where process start is unprobeable the env falls back to registration time,
+# and this window only needs to cover startup ordering, not admit a stale
+# same-pid file left behind by a dead earlier owner.
 _GRACE_SECONDS = 600
+# Process start derived from /proc ticks can trail the wall clock by a second
+# or two (whole-second btime plus jiffy rounding); the slack covers that, not
+# a marker a dead earlier owner wrote before this process ever existed.
+_START_TOLERANCE_SECONDS = 30
 
 
 def hermes_home() -> Path:
     """Honor the profile's explicit environment, with Hermes' default home."""
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser().absolute()
+
+
+def _process_started_at() -> datetime | None:
+    """Wall-clock start of this process, or None where unprobeable.
+
+    Freshness must anchor to process start: the marker is stamped once at
+    gateway:startup, so a plugin reload that re-registers inside the same
+    long-running gateway must still arm — comparing against registration
+    time would disarm it silently once registration outlived the window.
+    """
+    try:
+        # Linux: field 22 of /proc/self/stat is starttime in clock ticks since
+        # boot; everything after the comm ')' splits positionally from state.
+        tail = Path("/proc/self/stat").read_bytes().rsplit(b")", 1)[-1]
+        ticks = int(tail.split()[19])
+        for line in Path("/proc/stat").read_bytes().splitlines():
+            if line.startswith(b"btime "):
+                boot = int(line.split()[1])
+                break
+        else:
+            return None
+        return datetime.fromtimestamp(
+            boot + ticks / os.sysconf("SC_CLK_TCK"), timezone.utc)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return datetime.fromtimestamp(os.stat("/proc/self").st_ctime, timezone.utc)
+    except OSError:
+        pass
+    # macOS has no /proc. etime is elapsed clock time ([[dd-]hh:]mm:ss), so
+    # the result is UTC regardless of the machine's zone. BSD ps has no etimes.
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["ps", "-o", "etime=", "-p", str(os.getpid())],
+            text=True, timeout=2, stderr=subprocess.DEVNULL).strip()
+        days, _, clock = out.partition("-")
+        if not clock:
+            clock, days = days, "0"
+        parts = [int(part) for part in clock.split(":")]
+        weights = (1, 60, 3600)
+        if not parts or len(parts) > 3:
+            return None
+        seconds = int(days) * 86400 + sum(part * weights[index] for index, part in enumerate(reversed(parts)))
+        return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def write_private_json(path: Path, value: dict) -> None:
@@ -51,9 +102,17 @@ def gateway_ready(home: Path, registered_at: datetime) -> bool:
             return False
         value = json.loads(path.read_text(encoding="utf-8"))
         stamped = datetime.fromisoformat(value["started_at"])
+        started = _process_started_at()
+        # Anchored to process start a marker this gateway stamped at its own
+        # startup stays valid across later plugin reloads; a marker predating
+        # the process is a dead same-pid owner's. Without a probe the
+        # registration-time window remains the fallback.
+        fresh = (stamped >= started - timedelta(seconds=_START_TOLERANCE_SECONDS)
+                 if started is not None
+                 else stamped >= registered_at - timedelta(seconds=_GRACE_SECONDS))
         return (type(value.get("pid")) is int and value["pid"] == os.getpid()
                 and stamped.tzinfo is not None
                 and stamped <= datetime.now(timezone.utc)
-                and stamped >= registered_at - timedelta(seconds=_GRACE_SECONDS))
+                and fresh)
     except (OSError, ValueError, KeyError, TypeError):
         return False

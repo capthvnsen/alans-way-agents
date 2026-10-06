@@ -197,7 +197,7 @@ def _has_evidence(context: dict, known_tasks: set[str]) -> bool:
     )
 
 
-def review(ctx, context: dict, event_kind: str) -> dict:
+def review(ctx, context: dict, event_kind: str, *, record_error=None) -> dict:
     """Appraise once; failures/no evidence return a fresh canonical silent dict.
 
     ``useful is True`` is required before the caller considers a wake. The
@@ -262,5 +262,10 @@ def review(ctx, context: dict, event_kind: str) -> dict:
         if action in ("continue_approved", "follow_up") and task_id is None:
             return silent
         return {"useful": True, "action": action, "task_id": task_id}
-    except Exception:
+    except Exception as exc:
+        # A silent not-useful must still be distinguishable from a clean
+        # appraisal — host/plugin LLM trust or provider failures otherwise
+        # mute proactivity invisibly. The exception itself never leaves here.
+        if record_error is not None:
+            record_error(exc)
         return silent

@@ -50,15 +50,43 @@ class PluginTests(unittest.TestCase):
             registered = datetime.now(timezone.utc)
             self.assertTrue(guard.gateway_ready(home, registered))
 
-    def test_stale_marker_from_before_the_grace_window_does_not_arm(self):
+    def test_stale_marker_from_before_process_start_does_not_arm(self):
+        """A marker older than this process belongs to a dead earlier owner —
+        pid reuse must never arm a runtime that never ran gateway:startup."""
         from datetime import datetime, timezone, timedelta
         module = load_plugin()
         guard = sys.modules[module.__name__ + ".gateway_guard"]
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            guard.mark_gateway_ready(home, now=datetime.now(timezone.utc) - timedelta(hours=2))
+            process_start = datetime.now(timezone.utc) - timedelta(minutes=30)
+            guard.mark_gateway_ready(home, now=process_start - timedelta(minutes=5))
+            with patch.object(guard, "_process_started_at", return_value=process_start):
+                self.assertFalse(guard.gateway_ready(home, datetime.now(timezone.utc)))
+
+    def test_reload_long_after_gateway_start_still_arms(self):
+        """A plugin reload re-registers inside the long-running gateway; the
+        marker this process stamped at startup stays valid however old the
+        registration is — freshness is anchored to process start, not to
+        registered_at."""
+        from datetime import datetime, timezone, timedelta
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            process_start = datetime.now(timezone.utc) - timedelta(hours=2)
+            guard.mark_gateway_ready(home, now=process_start + timedelta(seconds=2))
             registered = datetime.now(timezone.utc)
-            self.assertFalse(guard.gateway_ready(home, registered))
+            with patch.object(guard, "_process_started_at", return_value=process_start):
+                self.assertTrue(guard.gateway_ready(home, registered))
+
+    def test_process_start_is_probeable_without_proc(self):
+        """macOS has no /proc; the ps fallback must still return a real start."""
+        from datetime import datetime, timezone
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        started = guard._process_started_at()
+        self.assertIsNotNone(started)
+        self.assertLess(abs((datetime.now(timezone.utc) - started).total_seconds()), 86400)
 
     def test_gateway_hook_is_passive_for_non_startup_events(self):
         hook = ROOT / "hooks/alans-way/handler.py"
@@ -123,6 +151,74 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(facade.received[0][1]["session_key"], store.load_policy().session_key)
             self.assertNotIn("a" * 64, facade.received[0][0])
             self.assertIsNone(runtime.tick())
+            runtime.close()
+
+    def test_wake_prompt_names_the_installed_namespaced_skill(self):
+        """Hermes qualifies plugin skills as '<plugin name>:<skill>' — the wake
+        prompt must name alans-way:proactive-primary or skill_view cannot find it."""
+        from types import SimpleNamespace
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        class FakeStore:
+            def __init__(self):
+                self.finished = []
+                self.pending = True
+            def load_policy(self):
+                return SimpleNamespace(enabled=True, primary_profile="default",
+                                       session_key="agent:main:telegram:dm:123456789")
+            def claim(self, now=None):
+                if not self.pending:
+                    return None
+                self.pending = False
+                return {"id": "sample-event", "kind": "manual_review", "evidence": "a" * 64,
+                        "purpose": False, "session_key": self.load_policy().session_key}
+            def finish(self, event_id, status):
+                self.finished.append((event_id, status))
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            facade, store = Facade(), FakeStore()
+            runtime = module.Runtime(facade, Path(directory), store=store,
+                                     appraiser=lambda *_: {"useful": True})
+            guard.mark_gateway_ready(Path(directory))
+            self.assertEqual(runtime.tick()["status"], "accepted_unverified")
+            message = facade.received[0][0]
+            self.assertIn("alans-way:proactive-primary", message)
+            self.assertNotIn("proactive-primary:proactive-primary", message)
+            runtime.close()
+
+    def test_dispatch_error_after_claim_still_releases_the_event(self):
+        """An exception escaping between claim() and finish() must not strand
+        the event in 'dispatching' — it would hold the one-wake gate forever."""
+        from types import SimpleNamespace
+        class FakeStore:
+            def __init__(self):
+                self.finished = []
+                self.policy_calls = 0
+            def load_policy(self):
+                self.policy_calls += 1
+                if self.policy_calls > 1:
+                    raise RuntimeError("state backend went away mid-dispatch")
+                return SimpleNamespace(enabled=True, primary_profile="default",
+                                       session_key="agent:main:telegram:dm:123456789")
+            def claim(self, now=None):
+                return {"id": "e", "kind": "manual_review", "evidence": "a" * 64,
+                        "purpose": False, "session_key": "agent:main:telegram:dm:123456789"}
+            def finish(self, event_id, status):
+                self.finished.append((event_id, status))
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            store = FakeStore()
+            runtime = module.Runtime(SimpleNamespace(), Path(directory), store=store)
+            guard.mark_gateway_ready(Path(directory))
+            with self.assertRaises(RuntimeError):
+                runtime.tick()
+            self.assertEqual(store.finished, [("e", "uncertain")])
             runtime.close()
 
     def test_watch_due_dispatches_without_appraiser_and_re_arms_cadence(self):
@@ -285,6 +381,91 @@ class PluginTests(unittest.TestCase):
                 {"action": "report_signal", "task_id": "ghost", "signal": "x"}))
             self.assertIs(result["ok"], False)
             runtime.close()
+
+    def test_tool_mutations_stay_on_the_bound_route_but_the_operator_does_not(self):
+        import json as _json
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:1"})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:other:telegram:dm:9"}):
+                denied = _json.loads(runtime.tool_control({"action": "resume"}))
+                status = _json.loads(runtime.tool_control({"action": "status"}))
+            self.assertIs(denied["ok"], False)
+            self.assertIs(status["ok"], True)
+            self.assertFalse(runtime.store.load_policy().enabled)
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:main:telegram:dm:1"}):
+                allowed = _json.loads(runtime.tool_control({"action": "resume"}))
+            self.assertIs(allowed["ok"], True)
+            self.assertTrue(runtime.store.load_policy().enabled)
+            os.environ.pop("HERMES_SESSION_KEY", None)
+            operator = _json.loads(runtime.control({"action": "pause"}))
+            self.assertIs(operator["ok"], True)
+            self.assertFalse(runtime.store.load_policy().enabled)
+            runtime.close()
+
+    def test_register_uses_the_plugin_load_scope_home_not_the_launch_environment(self):
+        """Under gateway multiplex one process serves many profiles and
+        os.environ['HERMES_HOME'] keeps the launch profile's home; the plugin
+        load binds the owning profile through the hermes_constants contextvar,
+        so register() must resolve its home there and never from the env."""
+        import types
+        module = load_plugin()
+        class Facade:
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as launch_home, \
+                tempfile.TemporaryDirectory() as owning_home:
+            fake = types.ModuleType("hermes_constants")
+            fake.get_hermes_home = lambda: Path(owning_home)
+            sys.modules["hermes_constants"] = fake
+            try:
+                with patch.dict(os.environ, {"HERMES_HOME": launch_home}):
+                    runtime = module.register(Facade(), background=False)
+            finally:
+                del sys.modules["hermes_constants"]
+            self.assertEqual(runtime.home, Path(owning_home))
+            runtime.close()
+
+    def test_register_without_hermes_falls_back_to_the_environment_home(self):
+        """Hosts without hermes_constants (tests, plain subprocesses) keep the
+        documented HERMES_HOME/default-home resolution."""
+        module = load_plugin()
+        class Facade:
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertNotIn("hermes_constants", sys.modules)
+            with patch.dict(os.environ, {"HERMES_HOME": directory}):
+                runtime = module.register(Facade(), background=False)
+            self.assertEqual(runtime.home, Path(directory))
+            runtime.close()
+
+    def test_observer_starts_only_for_the_primary_profile(self):
+        """A non-primary profile's runtime owns its own store but never
+        observes or dispatches: proactivity belongs to the default primary."""
+        module = load_plugin()
+        class Facade:
+            def __init__(self, profile):
+                self.profile_name = profile
+            def register_tool(self, **kwargs): pass
+            def register_command(self, *args, **kwargs): pass
+            def register_skill(self, *args, **kwargs): pass
+            def on_unload(self, *args): pass
+        with tempfile.TemporaryDirectory() as directory:
+            secondary = module.register(Facade("coder"), home=Path(directory) / "coder",
+                                        background=True)
+            self.assertIsNone(secondary.worker)
+            secondary.close()
+            primary = module.register(Facade("default"), home=Path(directory) / "default",
+                                      background=True)
+            self.assertIsNotNone(primary.worker)
+            self.assertTrue(primary.worker.is_alive())
+            primary.close()
 
     def test_registration_does_not_start_another_agent_or_cli_injection(self):
         class Facade:

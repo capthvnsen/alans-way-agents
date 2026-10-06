@@ -99,16 +99,23 @@ class Store:
     Reopening conservatively marks all unfinished dispatches uncertain,
     including those owned by another still-live Store; late explicit receipts
     may finish them, but cannot requeue them. Rejected/expired/dropped ids are
-    retained too. At 4096 unique admitted events, new admissions stop rather
-    than evicting tombstones and making old uncertain events retryable.
+    retained too. Terminal rows are pruned only past the retention bound —
+    inside it they are the dedupe tombstones every guarantee above relies on —
+    and live or recent rows are never pruned: at 4096 unique admitted events,
+    new admissions stop rather than making old uncertain events retryable.
     Audit history is capped at 256 metadata-only entries.
     """
 
-    # Never evict dedupe/uncertain records: saturation stops new admissions.
     # Headroom kept for scheduled watches so speculative context noise can
     # never crowd a due wake out of the pending queue entirely.
     _WATCH_RESERVE = 8
     _MAX_EVENTS = 4096
+    # A terminal row is a dedupe tombstone for exactly as long as the re-fire
+    # windows it guards can still name the same evidence: the due-review
+    # resurface tags span a week, so seven days is the bound. Past it, watch
+    # dedupe rests on the fired-instance stale check and context digests on
+    # the ledger baselines, so dead rows make room instead of capping forever.
+    _TERMINAL_RETENTION_SECONDS = 7 * 86400
 
     def __init__(self, state_dir: Path):
         self.state_dir = Path(state_dir)
@@ -158,16 +165,27 @@ class Store:
     def _expire(self, db, timestamp: float, policy: Policy, revision: int) -> None:
         expired = db.execute("UPDATE events SET status='expired' WHERE status='pending' AND created_at<=?", (timestamp - policy.event_ttl_seconds,)).rowcount
         self._audit(db, "expired", revision, expired)
-        # Dispatched-but-never-acknowledged events (accepted_unverified, or
-        # uncertain after a crash recovery) would otherwise hold the one-wake
+        # Dispatched-but-never-acknowledged events (accepted_unverified,
+        # uncertain after a crash recovery, or dispatching when the dispatch
+        # died inside this live process) would otherwise hold the one-wake
         # gate forever when the session cannot resolve them — e.g. the control
         # toolset missing from the bound session's platform. Aging them out is
         # not an eviction: dedupe tombstones remain, so nothing replays.
         unresolved = db.execute(
-            "UPDATE events SET status='expired' WHERE status IN ('accepted_unverified','uncertain')"
+            "UPDATE events SET status='expired' WHERE status IN"
+            " ('dispatching','accepted_unverified','uncertain')"
             " AND COALESCE(claimed_at, created_at)<=?",
             (timestamp - policy.unresolved_ttl_seconds,)).rowcount
         self._audit(db, "expired_unresolved", revision, unresolved)
+        # Spacing and budget reads lean on claimed_at history, so retention
+        # never falls below a configured claim interval or a calendar week.
+        retention = max(self._TERMINAL_RETENTION_SECONDS, policy.min_interval_seconds,
+                        policy.min_watch_interval_seconds)
+        pruned = db.execute(
+            "DELETE FROM events WHERE status IN ('resolved','rejected','expired','dropped')"
+            " AND COALESCE(claimed_at, created_at)<=?",
+            (timestamp - retention,)).rowcount
+        self._audit(db, "pruned", revision, pruned)
 
     def expire(self, now: datetime | None = None) -> None:
         """Sweep pending and unresolved TTLs; safe to call before gate checks."""

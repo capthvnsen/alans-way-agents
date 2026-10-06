@@ -73,7 +73,14 @@ FAILS=0
 
 # Agent shells often have a readable /dev/tty node but no terminal behind it;
 # only an open that succeeds means a human can answer.
-has_tty() { [ "$NON_INTERACTIVE" = 0 ] && { : < /dev/tty; } 2>/dev/null; }
+# dash (Ubuntu's /bin/sh) exits the whole script under set -e when a function's
+# last command fails, even if the caller is inside `if`. Keep every check in
+# an if so a missing terminal returns 1 instead of aborting setup.
+has_tty() {
+  if [ "$NON_INTERACTIVE" = 1 ]; then return 1; fi
+  if (: < /dev/tty) 2>/dev/null; then return 0; fi
+  return 1
+}
 ask() { # ask <prompt> <default> — reads /dev/tty so curl|bash still prompts
   if ! has_tty; then printf '%s' "$2"; return; fi
   printf '%s [%s] ' "$1" "$2" > /dev/tty
