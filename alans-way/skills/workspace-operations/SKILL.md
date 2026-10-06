@@ -222,8 +222,8 @@ capability only when it advertises support. Backend checkpoints may contain a
 task note, source/destination IDs, verification and draft counts. Read that
 context, wait for authorized agent control, and verify the destination page
 and login before continuing. `review_required` means the page needs human
-review. Passwords, cookies, uploads and in-memory state stay on the source
-host. Keep Chromium profiles with their running browser.
+review. Cookies for agent tabs carry over to the VM over Tailscale; passwords,
+uploads and in-memory state stay on the source host. Keep Chromium profiles with their running browser.
 
 The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
