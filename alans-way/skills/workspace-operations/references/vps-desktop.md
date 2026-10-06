@@ -1,5 +1,7 @@
 # VPS desktop operations
 
+These tools follow the connector. When the Mac is reachable they are Mac apps. When the Mac is unreachable they are the Linux desktop on the machine where the agent runs.
+
 Managed Chromium tabs use `cua_alans_way_snapshot` and `cua_alans_way_action`.
 
 Other applications use `workspace_computer_apps`, then `workspace_computer_snapshot`, then `workspace_computer_action` with `press` and a ref. That reads the accessibility tree and does not move the pointer. Leave the focused window alone. Password fields are off limits.

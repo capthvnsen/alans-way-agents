@@ -40,10 +40,9 @@ The in-app Mac browser is the only default host. When the Mac is reachable,
 ALL web work goes through the `cua_alans_way_*` tools (Mac host) — never
 `host:"vps"`, never another browser tool (browser_exec, computer-use
 drivers), and never opening a URL in the human's personal browser via
-terminal/`open`. `cua_alans_way_open` already falls back to the VPS host on
-its own when the Mac is unreachable — an explicit `host:"vps"` is only for
-work that must keep running after the Mac sleeps, or when the user names
-the VPS as the host. If a workspace browser call fails, report the failure;
+terminal/`open`. Do not pass `host`. The connector opens on the Mac when the
+Mac is reachable, and on the VPS browser and Linux desktop when the Mac is
+unreachable. If a workspace browser call fails, report the failure;
 do not silently substitute another browser.
 
 ## Choose the execution host
@@ -57,14 +56,13 @@ For a task in a Workspace Mac tab, call the tools by these exact names:
 `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`,
 `cua_alans_way_close`. The Hermes config key is still `workspace_browser`;
 that key is not a tool. Begin with status and your owned tabs. Confirm the
-reported host and tab ownership. For a VPS browser task, use the same
-`cua_alans_way_*` tools. Verify status reports
-`host: vps`, then find a tab you own or open one. The Mac connector can
-also route an explicit `host: vps` open, but the native VPS connector works
-while the Mac app is offline. Desktop apps on that Linux machine use the same
-`workspace_computer_apps`, `workspace_computer_snapshot`, and
-`workspace_computer_action` tools: press a ref from the accessibility tree,
-leave the focused window alone, and do not move the pointer. A connection failure means that
+reported host and tab ownership. Do not pass `host` to switch machines.
+When status shows the Mac, stay in the in-app Mac browser and use
+`workspace_computer_*` for other Mac apps. When status shows the VPS, the
+Mac is unreachable: the same `cua_alans_way_*` tools are that Linux
+machine's browser, and `workspace_computer_*` is its desktop. Press a ref
+from the accessibility tree, leave the focused window alone, and do not
+move the pointer. A connection failure means that
 host is unavailable; report it or continue only work already authorized on
 another host.
 
