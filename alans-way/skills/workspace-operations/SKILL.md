@@ -99,8 +99,10 @@ browser call fails because the Mac is offline, continue the task on the VPS.
 Do not stop, and do not mark the card blocked, only because the Mac left.
 
 Web work — Google Docs, Notion, a CRM, or any other site — continues in the
-VPS browser. Open the same URL with `cua_alans_way_open`, snapshot it, and
-keep acting. If the `[workspace]` line names a page, open that URL. The
+VPS browser. The connector opens the last page there when the Mac drops.
+If the `[workspace]` line says the page was continued, keep working in that
+tab. Open the same URL with `cua_alans_way_open`, snapshot it, and
+keep acting when that line only names a URL. If the `[workspace]` line names a page, open that URL. The
 connector is already on that machine. A login wall means
 the VPS browser needs that site's login once; say so and stop only that
 page. Do not retry the Mac until status shows it online.
