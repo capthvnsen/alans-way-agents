@@ -80,8 +80,9 @@ first call of a session pays a few seconds of warmup while the connector
 probes the Mac and connects; later calls on that connection are fast, so a
 slow first response is warmup, not a failure. If a browser tool call errors
 or the tools seem missing, retry once: a dead connector is respawned fresh
-and re-probes on its own. If it still fails, report the failure in one line
-and stop.
+and re-probes on its own. A connector whose script on disk is newer exits
+after the current call so the next call loads it. That exit is normal. If it
+still fails, report the failure in one line and stop.
 
 Never repair the connector layer yourself: do not kill connector/router
 processes, run `hermes mcp test` loops, read or edit router scripts, ssh to

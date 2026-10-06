@@ -187,6 +187,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)
         self.assertIn("onlineStreak >= 2", self.source)
+        self.assertIn("script replaced — exiting so the next connection loads it", self.source)
 
     def test_probe_mode_exists(self):
         self.assertIn("--probe", self.source)
@@ -219,6 +220,7 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
     def test_retry_once_then_report(self):
         self.assertIn("retry once", self.normalized)
         self.assertIn("report the failure in one line and stop", self.normalized)
+        self.assertIn("exits after the current call", self.normalized)
 
     def test_no_connector_surgery(self):
         self.assertIn("Never repair the connector layer yourself", self.normalized)
