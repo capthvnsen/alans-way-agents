@@ -27,6 +27,7 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --verify) VERIFY=1; shift;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
