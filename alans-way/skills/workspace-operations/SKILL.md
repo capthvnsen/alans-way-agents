@@ -206,8 +206,9 @@ read as text.
 
 Desktop apps, on the Mac and on the Linux machine, use `workspace_computer_apps`,
 then `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
-`ref` from that snapshot. On a Mac, use `click` or `drag` with the snapshot's
-x,y only when the control has no name. On the Linux desktop, press is the
+`ref` from that snapshot. Pass `since=` the previous snapshot's generation
+for a cheap `{unchanged:true}` when that desktop tree is the same. On a Mac,
+use `click` or `drag` with the snapshot's x,y only when the control has no name. On the Linux desktop, press is the
 action. `workspace_computer_screenshot` captures that one window as a small
 jpeg, and only when the snapshot has no named control for what you need. On a
 Mac, scale image pixels by `window.width / imageWidth`. Do not screenshot a
