@@ -50,7 +50,7 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --profile NAME   Hermes profile to configure (default: main config)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
-  --proactive yes|no  answer "turn proactive messages on?" without a prompt
+  --proactive yes|no  keep proactivity on (default) or pause it after binding
   --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
   --restart        restart the gateway at the end without asking
   --verify         check an existing install without changing anything
@@ -325,6 +325,11 @@ else
     || { bad "plugin install failed"; exit 1; }
 fi
 hermes plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
+# The plugin's gateway-injection capability is granted at enable time — it is
+# inert until a route is bound, and a later manual bind then just works.
+hermes ${PROFILE:+-p "$PROFILE"} config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
+  && ok "gateway injection allowed for $PLUGIN_NAME" \
+  || warn "could not allow gateway injection — run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true"
 # The control tool must be loaded into each messaging session's platform —
 # plugin toolsets are skipped when the platform's saved list predates the
 # plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
@@ -701,7 +706,7 @@ for i, line in enumerate(sys.stdin, 1):
     SEL="$(ask "  Bind a primary route? [1..N/N]" "N")"
   fi
   case "$SEL" in
-    ''|n|N|no) say "  skipped binding — proactivity stays paused.";;
+    ''|n|N|no) say "  skipped binding — proactivity stays silent until you bind a route.";;
     *[!0-9]*) warn "invalid selection — bind manually with: hermes proactivity bind --session-key <key>";;
     *) SEL_KEY="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f3)"
        SEL_PROF="$(echo "$ROUTES" | sed -n "${SEL}p" | cut -f1)"
@@ -720,20 +725,19 @@ for i, line in enumerate(sys.stdin, 1):
            else
              warn "no --timezone given — quiet hours use the default zone (America/Denver)"
            fi
-           # Binding always leaves policy paused; turning it on grants the gateway
-           # injection permission, so it stays an explicit human choice.
-           ON="${PROACTIVE:-$(ask "  Turn proactive messages on now? The bot may then message this chat first. [y/N]" "N")}"
-           case "$ON" in
-             y|Y|yes)
-               if hermes $BIND_PROF config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
-                   && hermes $BIND_PROF proactivity probe >/dev/null 2>&1 \
-                   && hermes $BIND_PROF proactivity resume >/dev/null 2>&1; then
-                 ok "proactivity on"
-               else
-                 bad "could not turn proactivity on — run: hermes $BIND_PROF proactivity probe, then hermes $BIND_PROF proactivity resume"
-               fi;;
-             *) say "  proactivity stays paused — turn it on later with /proactivity resume";;
-           esac
+           # Binding IS the consent to be messaged first; proactivity is on
+           # by default once bound. --proactive no keeps it bound but paused.
+           if hermes $BIND_PROF proactivity probe >/dev/null 2>&1; then
+             case "${PROACTIVE:-yes}" in
+               n|N|no)
+                 hermes $BIND_PROF proactivity pause >/dev/null 2>&1 \
+                   && say "  proactivity bound but paused — turn it on later with /proactivity resume" \
+                   || warn "could not pause — it stays on by default";;
+               *) ok "proactivity on by default — pause anytime with /proactivity pause";;
+             esac
+           else
+             warn "probe failed — the appraisal path needs a model check: hermes $BIND_PROF proactivity probe"
+           fi
          else
            bad "bind failed — run manually: hermes $BIND_PROF proactivity bind --session-key <key>"
          fi
@@ -760,8 +764,8 @@ cat <<'EOF'
   Next:
   • On your Mac: open Hermes — Alan's Way → Settings → Agent setup → save this
     Mac's SSH address → Test agent path.
-  • In Telegram: message your primary bot — /proactivity status should report
-    'bound' once you've bound a route, and /proactivity resume turns it on.
+  • In Telegram: message your primary bot — proactivity is on once bound
+    (/proactivity status shows it; /proactivity pause quiets it).
   • Browser work routes to the Mac while it's reachable, else the VPS host.
 EOF
 [ "$FAILS" = 0 ] && exit 0 || { say "setup: $FAILS check(s) failed — see above."; exit 1; }

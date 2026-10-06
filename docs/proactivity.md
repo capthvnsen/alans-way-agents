@@ -4,7 +4,7 @@
 the existing cloud primary — not a new bot or an always-on AI loop. It observes
 relevant changes and lets that primary choose one useful action, question, or
 silent no-op. Ledger entries carry a `kind`: `watch` (a standing check), `loop`
-(an outbound dependency awaiting reply/artifact — the missed-obligation catch),
+(an outbound dependency awaiting reply/artifact),
 and `sweep` (a scheduled consolidated pass over permitted sources and loops).
 Native memory, schedules, tasks, sessions, delegation and approvals remain the
 foundation — not finished Mac/phone canonical handoff or guaranteed delivery.
@@ -65,28 +65,28 @@ hermes proactivity bind --session-key '<existing-private-session-key>'
 
 Binding verifies the profile's existing routing record — the `sessions.json`
 mirror, or `state.db`'s `gateway_routing` when the mirror is absent — and
-supports direct Telegram routes in this alpha. It always leaves policy paused
-and reads metadata only — no session creation or state edits. Never guess a
-key from a bot label or publish a real route. The registered skill is
+supports direct Telegram routes in this alpha, and is itself the consent
+step: policy defaults to on (`pause` or `setup.sh --proactive no` quiets it;
+re-binding never resumes a paused install). It reads metadata only — creates
+nothing. Never guess a key from a bot label or publish a
+real route. The registered skill is
 `alans-way:proactive-primary`; `/proactivity` is its chat control entry point.
 There is no automatic retarget from a recently received message.
 
-Enable the toolset for the existing primary's platform without replacing its
-other toolsets — `setup.sh` runs this step (a `platform_toolsets` list that
-predates the plugin hides `proactive_control` even though the tool is
-registered):
+Enable the toolset for the primary's platform without replacing other
+toolsets — `setup.sh` runs this step (a pre-existing `platform_toolsets`
+list hides `proactive_control`):
 
 ```sh
 hermes tools enable proactivity --platform telegram
 hermes proactivity probe
-hermes proactivity resume
 ```
 
 `probe` is an operator-requested single native-model call reporting whether
 the host returned a validated JSON appraisal; it admits no event, injects
-nothing, claims no delivery. Diagnose failures before activation. Automatic
-work needs the separate reviewed hook and a validated restart of the existing
-gateway. With no evidence, a review succeeds silently with zero model calls.
+nothing, claims no delivery. Diagnose failures before binding. Automatic
+work needs the separate reviewed hook and a validated gateway restart.
+With no evidence, a review succeeds silently with zero model calls.
 
 ## Separate native gateway hook
 
@@ -166,10 +166,10 @@ a cancelled task or renews stale permission.
   opportunities to wake.
 - Queued speculative wakes coalesce into one review — a burst of diffs never
   becomes a burst of turns — and a due `sweep` absorbs them into its report.
-  The first explicit `resume` admits one `first_run` orientation wake:
-  inventory reachable read surfaces, offer up to five concrete
-  watch/loop/sweep proposals, ask when priorities are unclear, create nothing
-  unasked. Later resumes do not re-fire it.
+  A successful `bind` (or first `resume`, whichever comes first) admits one
+  `first_run` orientation wake: inventory reachable read surfaces, offer up
+  to five concrete watch/loop/sweep proposals, ask when priorities are
+  unclear, create nothing unasked. Later binds or resumes never re-fire it.
 
 The observer diffs `kanban_show` metadata only for fresh, approved watches
 with an exact `native_task_id`; a changed native status admits one

@@ -28,10 +28,12 @@ def load_core():
 
 
 class PolicyTests(unittest.TestCase):
-    def test_policy_defaults_are_disabled_and_round_trip(self):
+    def test_policy_defaults_are_enabled_and_round_trip(self):
+        """On by default: the bound-route gate, not the enabled flag, is the
+        consent step — an unbound enabled policy can never dispatch."""
         core = load_core()
         expected = {
-            "enabled": False,
+            "enabled": True,
             "primary_profile": "default",
             "session_key": "",
             "timezone": "America/Denver",
@@ -410,13 +412,13 @@ class StoreTests(unittest.TestCase):
                 try:
                     loaded = store.load_policy()
                 except ValueError as exc:
-                    self.fail(f"Malformed persisted policy must load disabled, not escape: {exc}")
-                self.assertFalse(loaded.enabled)
+                    self.fail(f"Malformed persisted policy must load unbound, not escape: {exc}")
+                self.assertFalse(loaded.session_key)
                 self.assertIsNone(store.claim(now=self.now))
                 self.assertFalse(store.record_event("manual_review", "opaque-after-corruption", now=self.now))
                 restarted = self.store()
                 self.assertIs(restarted.status()["policy_valid"], False)
-                self.assertFalse(restarted.status()["enabled"])
+                self.assertFalse(restarted.status()["route_bound"])
                 with self.assertRaises(ValueError):
                     restarted.update_policy({"enabled": True})
                 with closing(sqlite3.connect(self.state_dir / "proactivity.sqlite3")) as db, db:
@@ -578,7 +580,8 @@ class StoreTests(unittest.TestCase):
 
     def test_policy_updates_are_durable_validated_and_revisioned(self):
         store = self.store()
-        self.assertFalse(store.load_policy().enabled)
+        self.assertTrue(store.load_policy().enabled)
+        self.assertFalse(store.load_policy().session_key)
         self.assertEqual(store.status()["policy_revision"], 0)
         store.update_policy({"enabled": True, "session_key": "gateway:existing-route"})
         restarted = self.store()

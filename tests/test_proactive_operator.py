@@ -21,7 +21,9 @@ class OperatorTests(unittest.TestCase):
             self.assertFalse(result["injected"])
             runtime.close()
 
-    def test_binding_requires_existing_direct_telegram_route_and_leaves_paused(self):
+    def test_binding_requires_existing_dm_route_and_admits_first_run(self):
+        """Binding is the consent step: a fresh install stays enabled (on by
+        default) and the once-ever orientation wake is admitted."""
         module = load_plugin()
         operator = importlib.import_module(module.__name__ + ".proactive_operator")
         route = "agent:main:telegram:dm:123456789"
@@ -34,8 +36,24 @@ class OperatorTests(unittest.TestCase):
             index.write_text(json.dumps({route: {"session_key": route, "platform": "telegram", "chat_type": "dm", "session_id": "sample"}}))
             operator.bind(runtime, route)
             self.assertEqual(runtime.store.load_policy().session_key, route)
-            self.assertFalse(runtime.store.load_policy().enabled)
+            self.assertTrue(runtime.store.load_policy().enabled)
+            self.assertEqual(runtime.store.status()["counts"].get("pending"), 1)
             with self.assertRaises(ValueError): operator.bind(runtime, "invented-route")
+            runtime.close()
+
+    def test_rebinding_a_paused_install_never_resumes_it(self):
+        module = load_plugin()
+        operator = importlib.import_module(module.__name__ + ".proactive_operator")
+        route = "agent:main:telegram:dm:123456789"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "sessions").mkdir()
+            index = home / "sessions/sessions.json"
+            index.write_text(json.dumps({route: {"session_key": route, "platform": "telegram", "chat_type": "dm", "session_id": "sample"}}))
+            runtime = module.Runtime(None, home)
+            runtime.store.update_policy({"enabled": False})
+            operator.bind(runtime, route)
+            self.assertFalse(runtime.store.load_policy().enabled)
             runtime.close()
 
     def test_binding_falls_back_to_state_db_gateway_routing(self):
@@ -65,7 +83,7 @@ class OperatorTests(unittest.TestCase):
             runtime = module.Runtime(None, home)
             operator.bind(runtime, route)
             self.assertEqual(runtime.store.load_policy().session_key, route)
-            self.assertFalse(runtime.store.load_policy().enabled)
+            self.assertTrue(runtime.store.load_policy().enabled)
             with self.assertRaises(ValueError):
                 operator.bind(runtime, "agent:main:telegram:group:5")
             with self.assertRaises(ValueError):

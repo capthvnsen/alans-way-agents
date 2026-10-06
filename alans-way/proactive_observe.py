@@ -276,6 +276,10 @@ def observe(runtime):
     active = any(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
     admitted = 0
     now = datetime.now(timezone.utc)
+    # Unbound there is nowhere a wake could land, so diffs still fold into the
+    # baseline — never into the queue, where they would only drain as stale
+    # rejects after a later bind.
+    bound = bool(runtime.store.load_policy().session_key)
     with runtime.ledger.transaction() as state:
         previous = state["observations"]
         # The baseline may only advance for a change the store actually
@@ -289,8 +293,8 @@ def observe(runtime):
             elif not active:
                 evidence = sha256((source + ":" + digest).encode()).hexdigest()
                 kind = "task_changed" if source.startswith("task:") else "context_changed"
-                if runtime.store.record_event(kind, evidence, purpose=purposeful):
-                    admitted += 1
+                if not bound or runtime.store.record_event(kind, evidence, purpose=purposeful):
+                    admitted += int(bound)
                     previous[source] = digest
         # A reported signal change on an approved watch is an opted-in event:
         # the collector writes state, the observer diffs it, a change wakes.
@@ -306,9 +310,10 @@ def observe(runtime):
                 previous[key] = digest
             elif not active:
                 evidence = sha256((key + ":" + digest).encode()).hexdigest()
-                if runtime.store.record_event("task_changed", evidence, purpose=True):
-                    admitted += 1
+                if not bound or runtime.store.record_event("task_changed", evidence, purpose=True):
+                    admitted += int(bound)
                     previous[key] = digest
-        admitted += _admit_due(runtime, state["tasks"], now, active)
+        if bound:
+            admitted += _admit_due(runtime, state["tasks"], now, active)
         previous["__heartbeat"] = now.isoformat()
     return admitted

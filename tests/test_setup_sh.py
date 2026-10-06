@@ -311,8 +311,9 @@ class AgentShellTests(unittest.TestCase):
             calls = log.read_text(encoding="utf-8")
             self.assertIn("bound primary route: sprk1", result.stdout)
             self.assertIn("-p sprk1 proactivity bind --session-key agent:sprk1:telegram:dm:1", calls)
-            self.assertIn("-p sprk1 proactivity resume", calls)
-            self.assertIn("proactivity on", result.stdout)
+            self.assertIn("-p sprk1 config set plugins.entries.alans-way.allow_gateway_injection true", calls)
+            self.assertIn("-p sprk1 proactivity probe", calls)
+            self.assertIn("proactivity on by default", result.stdout)
 
     def test_non_interactive_bind_discovers_a_state_db_only_route(self):
         """No sessions.json mirror: --bind must find Telegram DM routes in the

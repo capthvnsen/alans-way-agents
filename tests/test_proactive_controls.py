@@ -128,6 +128,7 @@ class ControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             llm = LLM()
             runtime = module.Runtime(SimpleNamespace(llm=llm), Path(directory))
+            runtime.store.update_policy({"enabled": False})
             runtime.ledger.record_task({"id": "watch", "title": "Draft", "scope": "Draft approved test cases",
                 "next_action": "Draft", "owner": "primary", "status": "active", "approved": True})
             result = json.loads(runtime.control({"action": "review"}))
@@ -218,7 +219,7 @@ class ControlTests(unittest.TestCase):
                 refused = json.loads(runtime.tool_control({"action": "resume"}))
                 self.assertFalse(refused["ok"])
                 self.assertIn("operator", refused["error"])
-                self.assertFalse(runtime.store.load_policy().enabled)
+                self.assertTrue(runtime.store.load_policy().enabled)
                 # Set a strict baseline through the operator path so every
                 # loosening direction below is a real loosening.
                 self.assertTrue(json.loads(runtime.control({"action": "configure", "changes": {
@@ -269,13 +270,13 @@ class ControlTests(unittest.TestCase):
             runtime = module.Runtime(None, home)
             result = json.loads(runtime.control({"action": "status"}))
             self.assertTrue(result["ok"])
-            self.assertFalse(result["enabled"])
+            self.assertTrue(result["enabled"])
             self.assertTrue(json.loads(runtime.control({"action": "configure", "changes": {"quiet_start": 23}}))["ok"])
             runtime.close()
             restarted = module.Runtime(None, home)
             status = json.loads(restarted.control({"action": "status"}))
             self.assertEqual(status["policy"]["quiet_start"], 23)
-            self.assertFalse(status["enabled"])
+            self.assertTrue(status["enabled"])
             self.assertFalse(json.loads(restarted.control({"action": "configure", "changes": {"session_key": "foreign"}}))["ok"])
             restarted.close()
 
