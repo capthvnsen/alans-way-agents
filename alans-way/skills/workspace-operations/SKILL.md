@@ -215,7 +215,7 @@ When it includes `elements`, that is the fresh tree. On a Mac,
 use `click` or `drag` with the snapshot's x,y only when the control has no name. A drag on a slider sets its value from the end point. On the Linux desktop, press a ref, click its snapshot x,y, or drag a slider or scroll bar to the end point. `workspace_computer_screenshot` captures that one window as a small
 jpeg, and only when the snapshot has no named control for what you need. On a
 Mac, scale image pixels by `window.width / imageWidth`. Do not screenshot a
-window you can already read as names and refs. These calls do not move the
+window you can already read as names and refs. A check box or radio name ends in on or off. These calls do not move the
 human's cursor. Skip the focused window, Keychain, and password fields. Do not open
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
