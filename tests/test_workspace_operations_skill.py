@@ -118,7 +118,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
 
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
-            "The in-app Mac browser is the only default host.",
+            "The in-app host browser is the only default host.",
             self.normalized,
         )
 

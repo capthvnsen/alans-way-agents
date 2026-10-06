@@ -2,7 +2,8 @@
 
 **The behavior half of [Hermes — Alan's Way](https://github.com/capthvnsen/alans-way).**
 This repo is what you install *on the machine running your Hermes agents*
-(usually a VPS). The companion repo holds the Mac desktop app — this one holds
+(a Linux VPS, or a macOS VM). The companion repo holds the desktop app for the
+user's computer (macOS or Windows) — this one holds
 what your agents need to think and act:
 
 - **`alans-way/`** — a native Hermes plugin: one designated primary bot
@@ -13,8 +14,9 @@ what your agents need to think and act:
   real gateway process. A catalogue install includes this hook.
 - **Workspace browser wiring** — `setup-workspace.sh` writes a managed
   `workspace_browser` block into your Hermes config pointing at
-  `scripts/workspace-router.cjs`, which probes your Mac first and falls
-  back to the VPS browser when the Mac is asleep.
+  `scripts/workspace-router.cjs`, which probes your computer first and falls
+  back to the VPS browser when it is asleep. Pass `--host-os windows` when the
+  user's computer is a PC (default `mac`).
 - **`alans-way/skills/`** — the `proactive-primary` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
 
@@ -25,12 +27,13 @@ adds tools and an optional review loop inside it, it is not a second gateway.
 ## What it does and does not do
 
 - **Two browser hosts, no silent migration.** Bots get per-tab Chromium access
-  on the Mac (through the desktop app's connector) and on the VPS (the managed
-  browser). When the Mac is unreachable, *new* browser work routes to the VPS
-  host automatically. Work already in flight in a Mac tab blocks while the Mac
-  is asleep and resumes when it returns — the live tab is not moved between
-  machines. Watching the VPS desktop from inside the Mac app additionally needs
-  a VNC server and a noVNC viewer that you run on the VPS; see the app repo's
+  on the user's computer (through the desktop app's connector) and on the VPS
+  (the managed browser). When the user's computer is unreachable, *new*
+  browser work routes to the VPS host automatically. Work already in flight
+  in a host tab blocks while the machine is asleep and resumes when it returns
+  — the live tab is not moved between machines. Watching the VPS desktop from
+  inside the app additionally needs a VNC server and a noVNC viewer on the VPS
+  (a macOS guest VM uses `tart --vnc-experimental` instead); see the app repo's
   [deployment guide](https://github.com/capthvnsen/alans-way/blob/main/docs/deployment.md).
 - **Proactivity is read/research/draft by default.** The designated primary may
   read its own state, research, and draft proposals inside bounded budgets and
@@ -62,10 +65,12 @@ On the host that runs your Hermes gateway:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/capthvnsen/alans-way-agents/main/setup.sh | bash -s -- \
-    --bot-id YOUR_NUMERIC_BOT_ID --mac-ssh you@your-mac --restart
+    --bot-id YOUR_NUMERIC_BOT_ID --mac-ssh you@your-computer --restart
 ```
 
-or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`
+or from a clone: `./setup.sh --bot-id ... --mac-ssh ... --restart`.
+Add `--host-os windows` when the user's computer runs Windows — on macOS and
+Linux guests `setup.sh` picks the right service manager itself.
 
 The bootstrap runs every step in order and says what it did:
 
@@ -76,10 +81,12 @@ The bootstrap runs every step in order and says what it did:
   enables the `proactivity` toolset for Telegram sessions (without it,
   `proactive_control` never reaches the bound chat's tool list)
 - **VPS browser host** — fetches the companion repo, installs the connector's
-  dependencies, writes `config.json`, and installs the Chromium/broker systemd
-  units (user units when you're not root)
-- **Desktop prerequisites** — detects whether an X11/VNC stack exists and
-  prints the exact packages to install if not (guided, never auto-installed)
+  dependencies, writes `config.json`, and installs the Chromium/broker services:
+  systemd units on Linux (user units when you're not root), LaunchAgents on a
+  macOS guest via `mac-guest-services.sh`
+- **Desktop prerequisites** — on Linux, detects whether an X11/VNC stack
+  exists and prints the exact packages to install if not; on a macOS guest it
+  prints the one-time TCC grants instead (guided, never auto-installed)
 - **Workspace config** — writes the managed `workspace_browser` block into the
   right profile's config
 - **Gateway restart** — through the detected supervisor
@@ -88,7 +95,8 @@ The bootstrap runs every step in order and says what it did:
   re-run `setup.sh --bind`)
 - **Verify** — prints a pass/fail summary of the whole install
 
-Useful flags: `--profile NAME` for a named Hermes profile, `--verify` to audit
+Useful flags: `--profile NAME` for a named Hermes profile, `--host-os windows`
+when the user's computer is a PC, `--verify` to audit
 without changing anything, `--non-interactive` for scripted runs,
 `--skip-browser` for proactivity-only installs.
 
@@ -96,19 +104,23 @@ without changing anything, `--non-interactive` for scripted runs,
 
 Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/setup-prompt.md)
 to the agent with a terminal on the VPS (your Hermes bot works). It connects
-the VPS and your Mac over Tailscale with pinned SSH keys both ways, runs the
-same `setup.sh`, and proves both ends work. The
+the VPS and your computer over Tailscale with pinned SSH keys both ways, runs
+the same `setup.sh`, and proves both ends work. The
 `workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
 
-### 3. The Mac app
+### 3. The desktop app
 
-On the Mac:
+On the user's Mac:
 
 ```sh
 curl -fsSL https://openalan.com/install-mac | sh
 ```
 
-That builds and installs the app locally (no release zip or Gatekeeper
+On a Windows PC, run `scripts/install-windows.ps1` from the app repo in an
+elevated PowerShell — it builds the app locally with `npm run package:win`
+(no installer or SmartScreen prompt).
+
+Either builds and installs the app locally (no release zip or Gatekeeper
 workaround). Sign in to Telegram inside the app, then **Settings → Agent
 setup**: the checklist shows what's already done — Telegram sign-in,
 discovered bots, both SSH addresses, connector status. Save the two SSH
@@ -117,10 +129,10 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 
 ### 4. Verify it end to end
 
-- Mac app: Test agent path → ✓ VPS reaches this Mac over ssh
+- Desktop app: Test agent path → ✓ this host reaches your computer over ssh
 - Telegram: `/proactivity status` → route bound, gateway armed
-- Browser: ask the bot to open a page — a tab appears in the app (Mac host)
-  while the Mac is awake, on the VPS host when it isn't
+- Browser: ask the bot to open a page — a tab appears in the app (host)
+  while your computer is awake, on the VPS host when it isn't
 
 ### Upgrading
 
@@ -137,7 +149,7 @@ ordinary Telegram reply and one bounded browser action before relying on it.
 | Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
 | `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine: `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_action`, `workspace_computer_screenshot` (one window, only when the snapshot cannot name the control). On Linux, press a ref. The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → the in-flight Mac call fails visibly and the next MCP connection re-routes to a fresh VPS session; live Mac tabs are never migrated. Tool results carry the serving host and mac-watch state |
-| mac-watch | optional systemd watcher (`deploy/`) probes the Mac every 30s and publishes a JSON state file the router and observer read |
+| mac-watch | optional watcher probes the user's computer every 30s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router and observer read |
 
 ## The workspace_browser tools
 
@@ -146,11 +158,15 @@ Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
 color. Multi-bot setups: run `setup-workspace.sh` once per profile, each with
 its own bot id (the script replaces only its own managed block).
 
-Mac path requirements: the alans-way-localapp app running on the Mac, SSH from
-this host to it (BatchMode/key auth — the probe uses `StrictHostKeyChecking`),
-and the app's bundled `browser-mcp.cjs` (inside the installed `.app`).
-VPS-only usage works with no Mac: the router detects the missing/unreachable
-host and serves the local VPS browser host directly.
+Host path requirements: the alans-way-localapp app running on the user's
+computer, SSH from this host to it (BatchMode/key auth — the probe uses
+`StrictHostKeyChecking`), and the app's bundled `browser-mcp.cjs` (inside the
+installed app, or the copy this repo pushes to the connector directory). On a
+Windows host the probe runs through PowerShell (the default sshd shell the
+connect script sets) and computer-use calls reach the desktop through the
+app's local API — an SSH session cannot drive the interactive desktop.
+VPS-only usage works with no host computer: the router detects the
+missing/unreachable host and serves the local VPS browser host directly.
 
 ## Mac availability watcher
 

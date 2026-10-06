@@ -570,5 +570,63 @@ class MacWatchScriptTests(MacStateEnvTest):
             self.assertEqual(json.loads((state_dir / "mac-state.json").read_text())["state"], "online")
 
 
+@unittest.skipUnless(NODE, "node is required for router tests")
+class WindowsRouterTests(unittest.TestCase):
+    """Windows host: PowerShell probe + backend quoting mirror the Mac path."""
+
+    def run_js(self, script, *args):
+        proc = subprocess.run([NODE, "-e", script, str(ROUTER), *args],
+                              capture_output=True, text=True, check=True)
+        return proc.stdout
+
+    def test_probe_reads_connection_and_verifies_app_api(self):
+        command = self.run_js(
+            "process.stdout.write(require(process.argv[1]).windowsProbeCommand());")
+        self.assertIn(r"$env:APPDATA\Hermes Workspace\connection.json", command)
+        self.assertIn("/v1/status", command)
+        # Any HTTP response (401 counts) proves the in-session app is alive.
+        self.assertIn("$_.Exception.Response", command)
+        self.assertIn("browser-mcp.cjs", command)
+
+    def test_backend_prefers_the_installed_app_runtime(self):
+        command = self.run_js(
+            "process.stdout.write(require(process.argv[1]).windowsBackendCommand("
+            "process.argv[2], 'bot-1', 'A bot'));",
+            r"C:\Users\u\AppData\Roaming\Hermes Workspace\connector\scripts\browser-mcp.cjs")
+        self.assertIn("alans-way-localapp.exe", command)
+        self.assertIn("ELECTRON_RUN_AS_NODE", command)
+        self.assertIn("NODE_PATH", command)
+        self.assertIn("--bot-id 'bot-1'", command)
+        self.assertIn("--bot-name 'A bot'", command)
+        # Private Node and PATH Node fallbacks both appear.
+        self.assertIn(r"$env:USERPROFILE\.alans-way\node\node.exe", command)
+        self.assertIn("& node", command)
+
+    def test_powershell_single_quotes_are_doubled(self):
+        command = self.run_js(
+            "process.stdout.write(require(process.argv[1]).windowsBackendCommand("
+            "process.argv[2], 'bot-1', \"o'hara\"));",
+            r"C:\s\browser-mcp.cjs")
+        self.assertIn("--bot-name 'o''hara'", command)
+
+    def test_windows_label_flows_into_notices(self):
+        out = self.run_js(
+            "const r = require(process.argv[1]);"
+            "const notice = r.workspaceNotice('vps',"
+            " {state:'offline', since:'2026-02-01T10:00:00Z'}, null, null, 'Windows host');"
+            "process.stdout.write(notice);")
+        self.assertIn("[workspace] Windows host unreachable since 2026-02-01T10:00:00Z", out)
+        self.assertIn("do not run on the Windows host keep going", out)
+        self.assertIn("Windows host-local files are unavailable", out)
+
+    def test_mac_label_is_unchanged(self):
+        out = self.run_js(
+            "const r = require(process.argv[1]);"
+            "const notice = r.workspaceNotice('vps',"
+            " {state:'online', since:'t'}, null, null, 'Mac');"
+            "process.stdout.write(notice);")
+        self.assertIn("Mac is back online as of t", out)
+
+
 if __name__ == "__main__":
     unittest.main()

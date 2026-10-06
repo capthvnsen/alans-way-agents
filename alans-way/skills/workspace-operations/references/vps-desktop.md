@@ -1,6 +1,6 @@
 # VPS desktop operations
 
-These tools follow the connector. When the Mac is reachable they are Mac apps. When the Mac is unreachable they are the Linux desktop on the machine where the agent runs.
+These tools follow the connector. When the user's computer (a Mac, or a Windows PC configured with `--host-os windows`) is reachable they are that machine's apps; on Windows the calls reach the desktop through the app's local API, so the app must be running. When the user's computer is unreachable they are the desktop on the machine where the agent runs (Linux or a macOS VM).
 
 Managed Chromium tabs use `cua_alans_way_snapshot` and `cua_alans_way_action`.
 
