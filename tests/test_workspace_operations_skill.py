@@ -64,6 +64,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("same for every Hermes model", self.normalized)
         self.assertIn("workspace_computer_snapshot", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
+        self.assertIn("On the Linux desktop, press is the action.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
         self.assertIn("do not move the human's cursor", self.normalized)
@@ -91,7 +92,10 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                 self.assertNotIn(stale, self.text)
         desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
         self.assertIn("cua_alans_way_snapshot", desktop)
+        self.assertIn("workspace_computer_action", desktop)
+        self.assertIn("does not move the pointer", desktop)
         self.assertNotIn("workspace_vps_browser", desktop)
+        self.assertNotIn("Cua Driver", desktop)
 
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
