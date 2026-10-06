@@ -63,6 +63,7 @@ say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 ok()   { printf '  ok   %s\n' "$*"; }
 warn() { printf '  warn %s\n' "$*"; }
+skip() { printf '  skip %s\n' "$*"; }
 bad()  { printf '  FAIL %s\n' "$*"; FAILS=$((FAILS + 1)); }
 FAILS=0
 
@@ -113,7 +114,7 @@ if [ "$VERIFY" = 1 ]; then
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+proactivity([[:space:]]|$)"; then
       ok "proactivity toolset enabled for telegram"
     else
-      warn "proactivity toolset not enabled for telegram — proactive_control won't be callable in Telegram sessions (run: hermes tools enable proactivity --platform telegram)"
+      bad "proactivity toolset not enabled for telegram — proactive wakes would fire but proactive_control won't be callable (run: hermes tools enable proactivity --platform telegram)"
     fi
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
       warn "built-in 'browser' toolset still enabled for telegram — the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
@@ -148,11 +149,15 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     || warn "browser host connection file absent (browser host not started?)"
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
   for home in $PROFS; do
-    if [ -f "$home/config.yaml" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$home/config.yaml" \
-        || grep -q '^  workspace_browser:' "$home/config.yaml"; }; then
-      ok "workspace_browser block in $home/config.yaml"
+    cfg="$home/config.yaml"
+    if [ "$SKIP_BROWSER" = 1 ]; then
+      skip "workspace_browser block in $cfg (--skip-browser)"
+    elif [ -f "$cfg" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$cfg"; then
+      ok "workspace_browser block in $cfg"
+    elif [ -f "$cfg" ] && grep -q '^  workspace_browser:' "$cfg"; then
+      bad "workspace_browser entry in $cfg is unmanaged — re-run setup to install the managed block"
     else
-      warn "no workspace_browser block in $home/config.yaml"
+      bad "no workspace_browser block in $cfg"
     fi
   done
   [ "$FAILS" = 0 ] && say "setup: all required checks passed" || say "setup: $FAILS check(s) failed"
