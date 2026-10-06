@@ -4,12 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import copy
 from hashlib import sha256
-import fcntl
 import json
 import os
 import re
 
-from .gateway_guard import write_private_json
+from .gateway_guard import SAFE_OPEN, lock_file, unlock_file, write_private_json
 
 DEFAULT_PREFERENCES = {
     "focus": [], "ignore": [], "max_work_minutes": 20,
@@ -103,9 +102,9 @@ class Ledger:
     def transaction(self):
         if self.root.is_symlink() or self.path.is_symlink():
             raise ValueError("symlinked state is unsupported")
-        fd = os.open(self.root / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = os.open(self.root / "ledger.lock", os.O_RDWR | os.O_CREAT | SAFE_OPEN, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            lock_file(fd)
             if self.path.exists():
                 if self.path.stat().st_size > 1048576:
                     raise ValueError("ledger exceeds bound")
@@ -119,7 +118,7 @@ class Ledger:
             if data != before:
                 write_private_json(self.path, data)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_file(fd)
             os.close(fd)
 
     def snapshot(self):

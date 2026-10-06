@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 
+from .gateway_guard import SAFE_OPEN
 from .proactive_context import TASK_KINDS, approval_fresh
 from .proactive_isolated import NAME_PREFIX
 
@@ -16,6 +17,8 @@ DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
 MAC_STATE_FILE = (
     os.path.expanduser("~/Library/Application Support/hermes-alans-way/mac-state.json")
     if sys.platform == "darwin"
+    else os.path.expanduser("~/.local/share/hermes-alans-way/mac-state.json")
+    if sys.platform == "win32"
     else "/var/lib/hermes-alans-way/mac-state.json"
 )
 HEARTBEAT_SECONDS = 600
@@ -48,7 +51,7 @@ def read_source(home: Path, relative: str):
         if path.parent.is_symlink() or path.is_symlink():
             return None
         path.resolve(strict=True).relative_to(home.resolve(strict=True))
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | SAFE_OPEN)
         try:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode) or before.st_size > 65536 or before.st_nlink != 1:

@@ -155,9 +155,10 @@ class Store:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._db_path = self.state_dir / "proactivity.sqlite3"
-        descriptor = os.open(self._db_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        descriptor = os.open(self._db_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            os.fchmod(descriptor, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
         with self._transaction() as db:

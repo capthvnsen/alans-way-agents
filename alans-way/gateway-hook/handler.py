@@ -2,13 +2,20 @@
 from pathlib import Path
 import importlib.util
 import os
+import sys
+
+
+def _default_home():
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
 
 
 def handle(event_type, context, *, home=None):
     if event_type != "gateway:startup":
         return
     source_home = Path(__file__).resolve().parents[2]
-    actual_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser().resolve()
+    actual_home = Path(os.environ.get("HERMES_HOME") or _default_home()).expanduser().resolve()
     # Under gateway.multiplex_profiles the one gateway:startup emit can land in
     # any served profile's hooks scope. A copy under <launch home>/profiles/<name>/hooks/
     # must still arm the launch home's plugin runtime, so it stamps both homes.

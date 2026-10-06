@@ -1208,7 +1208,7 @@ for prof_dir in profiles:
     try:
         if db_path.is_file() and not db_path.is_symlink():
             scope = str((prof_dir / "sessions").resolve())
-            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            db = sqlite3.connect(f"{db_path.absolute().as_uri()}?mode=ro", uri=True, timeout=5)
             try:
                 rows = db.execute(
                     "SELECT session_key, entry_json FROM gateway_routing"

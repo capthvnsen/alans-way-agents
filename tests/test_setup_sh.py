@@ -7,8 +7,10 @@ import shutil
 import stat
 import subprocess
 import signal
+import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 import importlib.util
@@ -922,6 +924,102 @@ class GatewayGuardPortabilityTests(unittest.TestCase):
                 self.assertEqual(json.loads(target.read_text()), {"ok": True})
         finally:
             os.fchmod = saved
+
+
+class WindowsGuestPluginTests(unittest.TestCase):
+    """Native Windows has no fcntl, O_NOFOLLOW, fchmod, /proc or ps, and its default home is %LOCALAPPDATA%\\hermes."""
+
+    def load(self, name):
+        path = ROOT / "alans-way"
+        spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        self.addCleanup(lambda: [sys.modules.pop(k) for k in [k for k in sys.modules if k == name or k.startswith(name + ".")]])
+        spec.loader.exec_module(module)
+        return module
+
+    def test_state_and_observation_work_without_the_posix_only_apis(self):
+        calls = []
+        fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=lambda fd, mode, size: calls.append(mode))
+        saved = {name: getattr(os, name) for name in ("fchmod", "O_NOFOLLOW")}
+        for name in saved:
+            delattr(os, name)
+        try:
+            with patch.dict(sys.modules, {"fcntl": None, "msvcrt": fake_msvcrt}):
+                plugin = self.load("windows_guest_plugin_test")
+                context, core, observe = (importlib.import_module(plugin.__name__ + "." + name)
+                                          for name in ("proactive_context", "proactive_core", "proactive_observe"))
+                with tempfile.TemporaryDirectory() as directory:
+                    home = Path(directory)
+                    with context.Ledger(home / "ledger").transaction() as data:
+                        data["tasks"]["a"] = {"id": "a"}
+                    core.Store(home / "store")
+                    (home / "SOUL.md").write_text("be kind\r\n", encoding="utf-8")
+                    seen = observe.read_source(home, "SOUL.md")
+                    self.assertEqual(seen["text"], "be kind\r\n")
+        finally:
+            for name, value in saved.items():
+                setattr(os, name, value)
+        self.assertEqual(calls, [1, 0])
+
+    def test_sqlite_is_opened_by_file_uri_not_a_pasted_path(self):
+        for name in ("proactive_operator.py", "proactive_board.py"):
+            source = (ROOT / "alans-way" / name).read_text(encoding="utf-8")
+            self.assertNotIn('f"file:{', source, name)
+            self.assertIn(".as_uri()", source, name)
+
+    def test_the_default_home_is_localappdata_on_native_windows(self):
+        spec = importlib.util.spec_from_file_location("guard_on_windows", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        with tempfile.TemporaryDirectory() as directory:
+            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+            env["LOCALAPPDATA"] = directory
+            with patch.dict(os.environ, env, clear=True), patch.object(guard.sys, "platform", "win32"):
+                self.assertEqual(guard.hermes_home(), (Path(directory) / "hermes").absolute())
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(guard.hermes_home(), (Path.home() / ".hermes").absolute())
+
+    def test_the_startup_hook_arms_the_windows_default_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory).resolve()
+            home = local / "hermes"
+            hook = home / "hooks" / "alans-way"
+            hook.mkdir(parents=True)
+            shutil.copy(ROOT / "alans-way" / "gateway-hook" / "handler.py", hook / "handler.py")
+            (home / "plugins" / "alans-way").mkdir(parents=True)
+            shutil.copy(ROOT / "alans-way" / "gateway_guard.py", home / "plugins" / "alans-way" / "gateway_guard.py")
+            spec = importlib.util.spec_from_file_location("hook_on_windows", hook / "handler.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+            env["LOCALAPPDATA"] = str(local)
+            with patch.dict(os.environ, env, clear=True), patch.object(module.sys, "platform", "win32"):
+                module.handle("gateway:startup", {})
+            self.assertTrue((home / "companion" / "proactivity" / "gateway-owner.json").exists())
+
+    def test_process_start_comes_from_psutil_where_there_is_no_proc_or_ps(self):
+        spec = importlib.util.spec_from_file_location("guard_psutil", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        begun = time.time() - 300
+        fake_psutil = types.SimpleNamespace(Process=lambda pid=None: types.SimpleNamespace(create_time=lambda: begun))
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            started = guard._process_started_at()
+        self.assertAlmostEqual(started.timestamp(), begun, delta=1)
+
+    def test_a_host_with_no_psutil_and_no_ps_degrades_to_the_registration_window(self):
+        spec = importlib.util.spec_from_file_location("guard_blind", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        with patch.dict(sys.modules, {"psutil": None}), patch("subprocess.check_output", side_effect=FileNotFoundError("ps")):
+            started = guard._process_started_at()
+        self.assertTrue(started is None or started.tzinfo is not None)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            guard.mark_gateway_ready(home)
+            with patch.object(guard, "_process_started_at", return_value=None):
+                self.assertTrue(guard.gateway_ready(home, guard.datetime.now(guard.timezone.utc)))
 
 
 class GatewayHookProfileTests(unittest.TestCase):

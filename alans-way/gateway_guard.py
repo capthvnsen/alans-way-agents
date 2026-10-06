@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import os
+import sys
 import tempfile
 
 
@@ -18,9 +19,40 @@ _GRACE_SECONDS = 600
 _START_TOLERANCE_SECONDS = 30
 
 
+# Reads of state files refuse symlinks where the OS can, and stay byte-exact on
+# Windows, where an fd opened without O_BINARY translates CRLF and stops at ^Z.
+SAFE_OPEN = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+try:
+    import fcntl
+
+    def lock_file(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def unlock_file(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+except ImportError:  # native Windows: lock the first byte instead
+    import msvcrt
+
+    def lock_file(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+
+    def unlock_file(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+def default_hermes_home() -> Path:
+    """Hermes' own default: %LOCALAPPDATA%\\hermes on native Windows, else ~/.hermes."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
+
+
 def hermes_home() -> Path:
     """Honor the profile's explicit environment, with Hermes' default home."""
-    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser().absolute()
+    return Path(os.environ.get("HERMES_HOME") or default_hermes_home()).expanduser().absolute()
 
 
 def _process_started_at() -> datetime | None:
@@ -31,6 +63,12 @@ def _process_started_at() -> datetime | None:
     long-running gateway must still arm — comparing against registration
     time would disarm it silently once registration outlived the window.
     """
+    # Hermes ships psutil on every OS; /proc and ps below are for hosts without it.
+    try:
+        import psutil
+        return datetime.fromtimestamp(psutil.Process(os.getpid()).create_time(), timezone.utc)
+    except Exception:
+        pass
     try:
         # Linux: field 22 of /proc/self/stat is starttime in clock ticks since
         # boot; everything after the comm ')' splits positionally from state.
