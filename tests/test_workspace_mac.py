@@ -144,6 +144,22 @@ class RouterNoticeTests(MacStateEnvTest):
             notice = msg["result"]["content"][1]["text"]
             self.assertIn("[workspace] Mac unreachable since 2026-02-01T10:00:00Z", notice)
             self.assertIn("VPS browser", notice)
+            self.assertIn("Reopen the same URL and continue.", notice)
+            self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", notice)
+
+    def test_last_mac_page_is_named_after_the_mac_drops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [
+                {"type": "text", "text": json.dumps({"url": "https://docs.example/d/abc", "title": "Notes"})},
+            ]}})
+            self.annotate(directory, [
+                {"state": {"state": "online", "since": "2026-02-01T10:00:00Z"}, "line": page},
+            ], host="mac")
+            [line], _ = self.annotate(directory, [
+                {"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT},
+            ])
+            notice = json.loads(line)["result"]["content"][1]["text"]
+            self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
 
     def test_back_online_notice_fires_once_per_flip(self):
         with tempfile.TemporaryDirectory() as directory:
