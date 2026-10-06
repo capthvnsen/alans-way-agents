@@ -486,7 +486,7 @@ $_state
 EOF
   case "$_svc" in
     running) ok "OpenSSH Server (sshd) is running";;
-    missing|'') warn "OpenSSH Server is not installed, so the app cannot reach this machine. In an elevated PowerShell run: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Set-Service sshd -StartupType Automatic; Start-Service sshd";;
+    missing|'') warn "OpenSSH Server is not installed, so the app cannot reach this machine. In an elevated PowerShell run: Add-WindowsCapability -Online -Name (Get-WindowsCapability -Online -Name 'OpenSSH.Server*').Name; Set-Service sshd -StartupType Automatic; Start-Service sshd";;
     *) warn "OpenSSH Server is $_svc. In an elevated PowerShell run: Set-Service sshd -StartupType Automatic; Start-Service sshd";;
   esac
   if [ "$_shell" = shell-other ]; then
