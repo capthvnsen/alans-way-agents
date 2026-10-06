@@ -212,7 +212,7 @@ keystrokes. Pass `since=` the previous snapshot's generation
 for a cheap `{unchanged:true}` when that desktop tree is the same. The action
 result includes `generation`. When it says `unchanged`, do not snapshot again.
 When it includes `elements`, that is the fresh tree. On a Mac,
-use `click` or `drag` with the snapshot's x,y only when the control has no name. On the Linux desktop, press a ref, click its snapshot x,y, or drag a slider or scroll bar to the end point. `workspace_computer_screenshot` captures that one window as a small
+use `click` or `drag` with the snapshot's x,y only when the control has no name. A drag on a slider sets its value from the end point. On the Linux desktop, press a ref, click its snapshot x,y, or drag a slider or scroll bar to the end point. `workspace_computer_screenshot` captures that one window as a small
 jpeg, and only when the snapshot has no named control for what you need. On a
 Mac, scale image pixels by `window.width / imageWidth`. Do not screenshot a
 window you can already read as names and refs. These calls do not move the
