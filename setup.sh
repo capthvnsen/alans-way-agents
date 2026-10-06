@@ -476,8 +476,7 @@ windows_inbound_ssh() {
   _state="$(powershell -NoProfile -NonInteractive -Command - 2>/dev/null <<'PS' | tr -d '\r'
 $svc = Get-Service sshd -ErrorAction SilentlyContinue
 if (-not $svc) { 'missing'; exit 0 }
-$me = [regex]::Escape($env:USERNAME)
-$admin = [bool]((net localgroup Administrators 2>$null) -match "(^|\\)$me$")
+$admin = [Security.Principal.WindowsIdentity]::GetCurrent().Groups.Value -contains 'S-1-5-32-544'
 $shell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -ErrorAction SilentlyContinue).DefaultShell
 "$($svc.Status.ToString().ToLower()) $(if ($admin) {'admin'} else {'user'}) $(if ($shell -match 'powershell|pwsh') {'shell-ps'} else {'shell-other'})"
 PS
