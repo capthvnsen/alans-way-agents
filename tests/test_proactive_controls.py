@@ -203,6 +203,65 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["execution_host"], "mac")
             runtime.close()
 
+    def test_model_tool_never_resumes_or_loosens_the_operator_envelope(self):
+        """The model surface tightens only: resume and every raise of a cap,
+        drop of an interval, shrink of the quiet window, or raise of
+        max_work_minutes is refused with an operator pointer. The operator's
+        own control() path keeps all of them."""
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            route = "agent:main:telegram:dm:123456789"
+            runtime.store.update_policy({"session_key": route})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                # resume is refused on the tool even from the bound route.
+                refused = json.loads(runtime.tool_control({"action": "resume"}))
+                self.assertFalse(refused["ok"])
+                self.assertIn("operator", refused["error"])
+                self.assertFalse(runtime.store.load_policy().enabled)
+                # Set a strict baseline through the operator path so every
+                # loosening direction below is a real loosening.
+                self.assertTrue(json.loads(runtime.control({"action": "configure", "changes": {
+                    "max_daily_wakes": 1, "max_daily_watch_wakes": 4,
+                    "max_low_purpose_wakes": 0, "min_interval_seconds": 3600,
+                    "debounce_seconds": 60, "event_ttl_seconds": 86400,
+                    "max_pending": 16}}))["ok"])
+                self.assertTrue(json.loads(runtime.control({"action": "configure",
+                    "changes": {"preferences": {"max_work_minutes": 10}}}))["ok"])
+                for changes in ({"max_daily_wakes": 2},
+                                {"max_daily_watch_wakes": 5},
+                                {"max_low_purpose_wakes": 1},
+                                {"min_interval_seconds": 1800},
+                                {"debounce_seconds": 30},
+                                {"quiet_start": 23},  # 23–8 shrinks 22–8
+                                {"event_ttl_seconds": 172800},
+                                {"max_pending": 32},
+                                {"preferences": {"max_work_minutes": 15}}):
+                    result = json.loads(runtime.tool_control({"action": "configure", "changes": changes}))
+                    self.assertFalse(result["ok"], changes)
+                    self.assertIn("operator", result["error"], changes)
+                # The baseline is untouched by any refused call.
+                self.assertEqual(runtime.store.load_policy().max_daily_wakes, 1)
+                # Tightening directions still work through the tool.
+                for changes in ({"max_daily_wakes": 0},
+                                {"min_interval_seconds": 7200},
+                                {"quiet_start": 20},  # 20–8 grows 22–8
+                                {"event_ttl_seconds": 3600},
+                                {"max_pending": 8},
+                                {"preferences": {"max_work_minutes": 5}}):
+                    self.assertTrue(json.loads(runtime.tool_control({"action": "configure", "changes": changes}))["ok"], changes)
+                self.assertEqual(runtime.store.load_policy().max_daily_wakes, 0)
+                self.assertEqual(runtime.store.load_policy().quiet_start, 20)
+                # pause stays on the tool.
+                self.assertTrue(json.loads(runtime.tool_control({"action": "pause"}))["ok"])
+                # The operator path is ungated: resume and loosening work.
+                self.assertTrue(json.loads(runtime.control({"action": "resume"}))["ok"])
+                self.assertTrue(json.loads(runtime.control({"action": "configure",
+                    "changes": {"max_daily_wakes": 3, "quiet_start": 22}}))["ok"])
+                self.assertTrue(runtime.store.load_policy().enabled)
+                self.assertEqual(runtime.store.load_policy().quiet_start, 22)
+            runtime.close()
+
     def test_effective_chat_preferences_persist_across_runtime_restart(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:

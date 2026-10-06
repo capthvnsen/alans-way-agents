@@ -19,13 +19,13 @@ class ProactiveSkillTests(unittest.TestCase):
     def test_chat_adjustments_use_durable_explicit_controls_with_readback(self):
         content = self.skill()
         calls = re.findall(r'proactive_control\(action="([a-z_]+)"', content)
-        self.assertTrue({"status", "pause", "resume", "configure", "review"}.issubset(calls))
+        self.assertTrue({"status", "pause", "configure", "review"}.issubset(calls))
         for requirement in (
             "quiet_start", "quiet_end", "max_daily_wakes", "min_interval_seconds",
             "$HERMES_HOME/companion/proactivity", "ordinary chat", "priorities",
             "schema", "read back", "survives restart", "general memory",
             "Never automatically resume", "unsupported", "/proactivity",
-            "alans-way:proactive-primary",
+            "alans-way:proactive-primary", "operator-only",
         ):
             with self.subTest(requirement=requirement):
                 self.assertTrue(requirement in " ".join(content.split()), f"Missing contract: {requirement}")

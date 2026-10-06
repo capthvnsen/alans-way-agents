@@ -32,6 +32,23 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("docs/setup-prompt.md", self.text)
         self.assertIn("do not replace this plugin", self.normalized)
 
+    def test_remotes_are_pinned_to_reviewed_commits(self):
+        self.assertRegex(
+            self.text,
+            r"raw\.githubusercontent\.com/capthvnsen/alans-way/[0-9a-f]{40}/docs/setup-prompt\.md",
+            "setup-prompt.md must be fetched at a pinned commit, not main",
+        )
+        self.assertRegex(
+            self.text,
+            r"git -C ~/alans-way-agents checkout [0-9a-f]{40}",
+            "the agents repo clone must be checked out to a pinned commit",
+        )
+        self.assertRegex(
+            self.text,
+            r"--desktop-ref [0-9a-f]{40}",
+            "setup.sh must be passed the pinned desktop ref",
+        )
+
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)

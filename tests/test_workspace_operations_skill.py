@@ -131,9 +131,13 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
 
-    def test_human_has_control_claim_not_wait(self):
+    def test_human_has_control_asks_before_claim(self):
         self.assertIn('action:"claim"', self.normalized)
-        self.assertIn("do not wait, ask, or describe a handoff", self.normalized)
+        self.assertIn("ask the user before", self.normalized)
+        # A human-controlled tab is never claimed silently — not for reach
+        # and not to reuse a login that only exists there.
+        self.assertNotIn("do not wait, ask, or describe a handoff", self.normalized)
+        self.assertNotIn("only exists there", self.normalized)
 
     def test_bounded_snapshot_and_screenshot_params_documented(self):
         # Snapshots must stay cheap: bound the payload, re-check by
