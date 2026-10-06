@@ -125,7 +125,7 @@ app opens them for the user while the tab stays yours to keep working.
    accepts `maxChars`, `maxElements`, and `since` — keep the bounds small
    enough that the payload stays readable, and pass `since=` the previous
    snapshot's generation for a cheap `{unchanged:true}` re-check instead of
-   a re-sent tree. Request a screenshot only when the DOM view cannot answer
+   a re-sent tree. A check box or radio name ends in on or off, a select name includes the chosen option, and a disabled control's name ends in disabled. Request a screenshot only when the DOM view cannot answer
    the question; `cua_alans_way_screenshot` accepts `format`
    (`jpeg`|`png`|`webp`), `quality`, and `maxWidth` — jpeg around 70 quality
    at 1280px is the fast default. Use the snapshot's refs and current
