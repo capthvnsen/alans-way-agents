@@ -82,6 +82,8 @@ EOF
   esac
 done
 
+case "$PROACTIVE" in ""|yes|no) ;; *) echo "setup: --proactive must be yes or no" >&2; exit 2;; esac
+
 # The guest is the machine setup.sh runs on (Hermes' home); the host is the
 # user's computer reached over --mac-ssh. Git Bash, MSYS2 and Cygwin are a
 # native-Windows guest; WSL reports Linux and is treated as one.
@@ -1486,15 +1488,15 @@ for i, line in enumerate(sys.stdin, 1):
                || warn "could not set timezone $TIMEZONE: quiet hours stay on the default zone"
            fi
            # Binding IS the consent to be messaged first; proactivity is on
-           # by default once bound. --proactive no keeps it bound but paused.
+           # by default once bound. --proactive no keeps it bound but paused,
+           # and pauses first so the probe's model call never races a first message.
+           if [ "${PROACTIVE:-yes}" = no ]; then
+             hermes -p "$BIND_PROF" proactivity pause >/dev/null 2>&1 \
+               && say "  proactivity bound but paused: turn it on later with /proactivity resume" \
+               || warn "could not pause: it stays on by default"
+           fi
            if hermes -p "$BIND_PROF" proactivity probe >/dev/null 2>&1; then
-             case "${PROACTIVE:-yes}" in
-               n|N|no)
-                 hermes -p "$BIND_PROF" proactivity pause >/dev/null 2>&1 \
-                   && say "  proactivity bound but paused: turn it on later with /proactivity resume" \
-                   || warn "could not pause: it stays on by default";;
-               *) ok "proactivity on by default: pause anytime with /proactivity pause";;
-             esac
+             [ "${PROACTIVE:-yes}" = no ] || ok "proactivity on by default: pause anytime with /proactivity pause"
            else
              warn "probe failed: the appraisal path needs a model check: hermes -p "$BIND_PROF" proactivity probe"
            fi

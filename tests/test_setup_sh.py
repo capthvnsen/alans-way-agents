@@ -360,6 +360,26 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn("-p sprk1 proactivity probe", calls)
             self.assertIn("proactivity on by default", result.stdout)
 
+    def test_proactive_no_pauses_before_the_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            run("--bind", "--proactive", "no", "--non-interactive", "--skip-browser", "--skip-services",
+                "--hermes-home", str(home), env=env, check=False)
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("proactivity pause", calls)
+            self.assertLess(calls.index("proactivity pause"), calls.index("proactivity probe"))
+
+    def test_proactive_must_be_yes_or_no(self):
+        result = run("--proactive", "maybe", "--verify", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--proactive", result.stderr)
+
     def test_non_interactive_bind_discovers_a_state_db_only_route(self):
         """No sessions.json mirror: --bind must find Telegram DM routes in the
         profile's state.db gateway_routing table — the same store the runtime
