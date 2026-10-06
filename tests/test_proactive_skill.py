@@ -153,6 +153,11 @@ class ProactiveSkillTests(unittest.TestCase):
         self.assertTrue("Stop immediately if paused, cancelled, or awaiting approval" in content)
         self.assertTrue("without creating a task" in content)
 
+    def test_offline_mac_keeps_web_and_api_work_moving(self):
+        content = " ".join(self.skill().split())
+        self.assertIn("Web work already in progress continues on the VPS browser", content)
+        self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going", content)
+
     def test_frontmatter_is_a_portable_human_credited_skill_contract(self):
         content = self.skill()
         self.assertTrue(content.startswith("---\n"))

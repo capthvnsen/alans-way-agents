@@ -390,9 +390,12 @@ reachability). They are oversight signals, not assignments.
   complete, or edit another agent's card, and do not create a ledger watch over
   someone else's work. No changed card means silence — an unchanged board is not
   evidence.
-- `workspace_mac` offline → do not invent Mac work. `workspace_mac` back online
+- `workspace_mac` offline → do not invent Mac work. Web work already in
+  progress continues on the VPS browser, and API, MCP, and connector calls
+  that do not run on the Mac keep going. `workspace_mac` back online
   → check watches you recorded as blocked for Mac unavailability and, only after
-  re-verifying consent and the live tool result, return them to active.
+  re-verifying consent and the live tool result, return them to active. New
+  web work returns to the in-app Mac browser.
 - If `workspace_browser` lists other agents' tabs (overseer role), use it to
   answer "who is working where" and to release a runaway tab's control back to
   the human — then say so. Never take over, read, or act inside another agent's
