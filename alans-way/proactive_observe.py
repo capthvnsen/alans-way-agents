@@ -18,6 +18,7 @@ MAC_STATE_FILE = (
     else "/var/lib/hermes-alans-way/mac-state.json"
 )
 HEARTBEAT_SECONDS = 600
+DIGEST_VERSION = 2
 WATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 
 
@@ -87,7 +88,8 @@ def capabilities(home: Path):
 
 # Bookkeeping a scheduler or the agent rewrites on every run says nothing about
 # what the user's schedule or memory means, so it must not count as a change.
-_RUN_BOOKKEEPING = re.compile(r"(?:^(?:last|next)_|_at$|^(?:state|status|repeat|runs?|run_count)$)")
+_RUN_BOOKKEEPING = re.compile(
+    r"(?:^(?:last|next)_|_at$|^(?:state|status|runs?|run_count|failure_streak|monitor_state)$)")
 APPRAISAL_TASK_BYTES = 6000
 
 
@@ -95,7 +97,8 @@ def _jobs_digest(document):
     jobs = document.get("jobs", []) if isinstance(document, dict) else document
     if not isinstance(jobs, list):
         return None
-    stable = [{k: v for k, v in job.items() if not _RUN_BOOKKEEPING.search(k)}
+    stable = [{k: ({n: c for n, c in v.items() if n != "completed"} if k == "repeat" and isinstance(v, dict) else v)
+               for k, v in job.items() if not _RUN_BOOKKEEPING.search(k)}
               if isinstance(job, dict) else job for job in jobs]
     return sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -168,7 +171,7 @@ def collect(home: Path, ledger, ctx=None):
         try:
             approved_at = datetime.fromisoformat(task["approved_at"])
             if (task.get("approved") is not True or task.get("status") in {"done", "cancelled"}
-                    or approved_at.tzinfo is None):
+                    or approved_at.tzinfo is None or (now - approved_at).total_seconds() > 2592000):
                 continue
         except (KeyError, ValueError, TypeError):
             continue
@@ -325,6 +328,13 @@ def observe(runtime):
     bound = bool(runtime.store.load_policy().session_key)
     with runtime.ledger.transaction() as state:
         previous = state["observations"]
+        if previous.get("__digest_v") != DIGEST_VERSION:
+            # Digests of memory and schedule changed shape: re-baseline them in
+            # place rather than reading every stored hash as a change.
+            for source in ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json"):
+                if source in previous and source in signatures:
+                    previous[source] = signatures[source]
+            previous["__digest_v"] = DIGEST_VERSION
         # The baseline may only advance for a change the store actually
         # admitted: a diff consumed while the gate is busy or admission was
         # refused (headroom, storage_full, dedupe) is a change never woken

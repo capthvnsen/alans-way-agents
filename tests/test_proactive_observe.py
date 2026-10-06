@@ -153,7 +153,8 @@ class ObservationTests(unittest.TestCase):
                               "schedule": {"kind": "cron", "expr": "0 8 * * *"},
                               "next_run_at": "2026-10-07T08:00:00-06:00",
                               "last_run_at": "2026-10-06T08:00:00-06:00",
-                              "last_status": "ok", "state": "scheduled", "repeat": {"completed": 4}}]}
+                              "last_status": "ok", "state": "scheduled", "failure_streak": 0,
+                              "monitor_state": {"hash": "a"}, "repeat": {"times": 5, "completed": 4}}]}
             def digests():
                 (home / "cron" / "jobs.json").write_text(json.dumps(jobs))
                 (home / "memories" / "MEMORY.md").write_text(memory)
@@ -165,16 +166,42 @@ class ObservationTests(unittest.TestCase):
             first = digests()
             job = jobs["jobs"][0]
             job.update(next_run_at="2026-10-08T08:00:00-06:00", last_run_at="2026-10-07T08:00:00-06:00",
-                       last_status="error", state="error", repeat={"completed": 5})
+                       last_status="error", state="error", failure_streak=3,
+                       monitor_state={"hash": "b"}, repeat={"times": 5, "completed": 5})
             memory = "Beta note\n§\nAlpha note\n\n"
             again = digests()
             self.assertEqual(first["cron/jobs.json"], again["cron/jobs.json"])
             self.assertEqual(first["memories/MEMORY.md"], again["memories/MEMORY.md"])
+            job["repeat"]["times"] = 9
+            changed_repeat = digests()
+            self.assertNotEqual(first["cron/jobs.json"], changed_repeat["cron/jobs.json"])
             job["enabled"] = False
             memory += "§\nGamma note\n"
             changed = digests()
             self.assertNotEqual(first["cron/jobs.json"], changed["cron/jobs.json"])
             self.assertNotEqual(first["memories/MEMORY.md"], changed["memories/MEMORY.md"])
+
+    def test_old_digest_baselines_migrate_without_a_wake_burst(self):
+        import json
+        from hashlib import sha256
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "cron").mkdir()
+            (home / "memories").mkdir()
+            raw = json.dumps({"jobs": [{"id": "a", "name": "brief", "next_run_at": "x"}]})
+            (home / "cron" / "jobs.json").write_text(raw)
+            (home / "memories" / "MEMORY.md").write_text("Alpha\n")
+            runtime = module.Runtime(None, home)
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789"})
+            with runtime.ledger.transaction() as data:
+                data["observations"]["cron/jobs.json"] = sha256(raw.encode()).hexdigest()
+                data["observations"]["memories/MEMORY.md"] = sha256(b"Alpha\n").hexdigest()
+            self.assertEqual(runtime.observe(), 0)
+            self.assertEqual(runtime.store.status()["counts"].get("pending", 0), 0)
+            (home / "memories" / "MEMORY.md").write_text("Alpha\n§\nBeta\n")
+            self.assertEqual(runtime.observe(), 1)
+            runtime.close()
 
     def test_long_overdue_deadline_stops_re_waking(self):
         module = plugin()
@@ -216,7 +243,8 @@ class ObservationTests(unittest.TestCase):
             with runtime.ledger.transaction() as data:
                 data["tasks"]["w8"]["approved_at"] = (now - timedelta(days=90)).isoformat()
             ids = [task["id"] for task in runtime.review_context()["tasks"]]
-            self.assertEqual(ids, [f"w{index}" for index in range(8, -1, -1)] + ["manual"])
+            # The 30-day approval expiry applies here exactly as it does to native reads.
+            self.assertEqual(ids, [f"w{index}" for index in range(7, -1, -1)] + ["manual"])
             runtime.close()
 
     def test_appraisal_context_is_token_bounded(self):

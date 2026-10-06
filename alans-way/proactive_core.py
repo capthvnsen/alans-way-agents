@@ -169,6 +169,8 @@ class Store:
                 session_key TEXT NOT NULL, created_at REAL NOT NULL,
                 policy_revision INTEGER NOT NULL, status TEXT NOT NULL,
                 claimed_at REAL)""")
+            if "appraised_at" not in {row[1] for row in db.execute("PRAGMA table_info(events)")}:
+                db.execute("ALTER TABLE events ADD COLUMN appraised_at REAL")
             db.execute("""CREATE TABLE IF NOT EXISTS audit (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
                 policy_revision INTEGER NOT NULL, count INTEGER NOT NULL)""")
@@ -381,7 +383,7 @@ class Store:
                 quiet = hour >= policy.quiet_start or hour < policy.quiet_end
             if quiet:
                 return None
-            last_claim = db.execute("SELECT MAX(claimed_at) FROM events").fetchone()[0]
+            last_claim = db.execute("SELECT MAX(COALESCE(claimed_at, appraised_at)) FROM events").fetchone()[0]
             shared_open = last_claim is None or timestamp - last_claim >= policy.min_interval_seconds
             last_watch = db.execute("SELECT MAX(claimed_at) FROM events WHERE kind='watch_due'").fetchone()[0]
             watch_open = last_watch is None or timestamp - last_watch >= policy.min_watch_interval_seconds
@@ -398,7 +400,11 @@ class Store:
             # wakes still share the tighter cap. Either side may be open while
             # the other is spent.
             allow_watch = budget["watches"] < policy.max_daily_watch_wakes
-            allow_other = budget["total"] - budget["watches"] < policy.max_daily_wakes
+            appraised = db.execute("SELECT COUNT(*) FROM events WHERE appraised_at>=? AND appraised_at<?",
+                                   (midnight.timestamp(), next_midnight.timestamp())).fetchone()[0]
+            other = budget["total"] - budget["watches"]
+            allow_other = (other < policy.max_daily_wakes
+                           and other + appraised < 2 * policy.max_daily_wakes)
             if not allow_watch and not allow_other:
                 return None
             allow_low = budget["low"] < policy.max_low_purpose_wakes
@@ -433,11 +439,15 @@ class Store:
             self._audit(db, "coalesced", self._policy(db)[1], dropped)
             return dropped
 
-    def finish(self, event_id: str, status: str, *, refund: bool = False) -> None:
+    def finish(self, event_id: str, status: str, *, refund: bool = False,
+               appraised: bool = False) -> None:
         """Record a caller's explicit outcome, not an injection return value.
 
-        ``refund`` hands back the daily-budget and spacing reservation of a
-        claim that never injected a turn (rejected appraisal, stale wake).
+        ``refund`` hands back the reservation of a claim that never injected a
+        turn, and only while the claim is still ``dispatching``: a wake that was
+        accepted is spent. ``appraised`` says the claim cost an LLM appraisal,
+        which keeps its spacing and counts against a separate daily appraisal
+        cap, so rejected noise cannot turn into unlimited model calls.
 
         Only the adapter can inspect injection acceptance (it must be ``is True``).
         An accepted queue request is never proof that the review completed.
@@ -455,8 +465,9 @@ class Store:
             if old not in {"dispatching", "uncertain"} and not (old == "accepted_unverified" and status == "resolved"):
                 raise ValueError("invalid dispatch status transition")
             db.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
-            if refund and status in {"rejected", "resolved"}:
-                db.execute("UPDATE events SET claimed_at=NULL WHERE id=?", (event_id,))
+            if refund and old == "dispatching" and status in {"rejected", "resolved"}:
+                db.execute("UPDATE events SET appraised_at=CASE WHEN ? THEN claimed_at END, claimed_at=NULL"
+                           " WHERE id=?", (appraised, event_id))
             self._audit(db, status, self._policy(db)[1])
 
     def status(self) -> dict:

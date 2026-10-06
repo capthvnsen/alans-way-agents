@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
-from .proactive_context import TASK_FIELDS, TASK_KINDS
+from .proactive_context import StaleProposal, TASK_FIELDS, TASK_KINDS
 
 
 # The gateway drops a turn whose whole reply is this marker, so a wake with
@@ -161,11 +161,11 @@ class Runtime:
             self._record_appraisal_error()
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
-            self.store.finish(event_id, "rejected", refund=True)
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "no_op"}
         action, task_id = appraisal.get("action", "ask"), appraisal.get("task_id")
         if action not in {"research", "draft", "continue_approved", "ask", "follow_up"}:
-            self.store.finish(event_id, "rejected", refund=True)
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "rejected"}
         if task_id is not None:
             original = next((t for t in context["tasks"] if t["id"] == task_id), None)
@@ -173,14 +173,14 @@ class Runtime:
             if (not original or not current or current.get("approved") is not True
                     or current.get("status") != "active"
                     or any(original.get(k) != current.get(k) for k in ("scope", "owner", "execution_host"))):
-                self.store.finish(event_id, "rejected", refund=True)
+                self.store.finish(event_id, "rejected", refund=True, appraised=True)
                 return {"id": event_id, "status": "rejected"}
         elif action in {"continue_approved", "follow_up"}:
-            self.store.finish(event_id, "rejected", refund=True)
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "rejected"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key or not self.gateway_ready():
-            self.store.finish(event_id, "rejected", refund=True)
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "rejected"}
         metadata = {"id": event_id, "kind": event["kind"], "purpose": event["purpose"] is True,
                     "recommended_action": action, "task_id": task_id}
@@ -492,9 +492,12 @@ class Runtime:
             return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
         result = {"ok": True, **self.store.status()}
         if pending:
+            saved = next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"])
+            code = self.ledger.proposal_hash(saved)
             result["awaiting_approval"] = task["id"]
-            result["tell_user"] = (f"Watch {task['id']} is only proposed and will not run yet. "
-                                   f"In your reply, tell the user to approve it by sending exactly: /watch approve {task['id']}")
+            result["tell_user"] = (f"Watch {task['id']} is only proposed and will not run yet. In your reply, "
+                                   f"say what it will do and tell the user to approve it by sending exactly: "
+                                   f"/watch approve {task['id']} {code}")
         return json.dumps(result)
 
     def _loosening(self, changes):
@@ -569,8 +572,6 @@ class Runtime:
             elif action == "level":
                 from .proactive_core import LEVELS
                 self.store.update_policy({**LEVELS[args["level"]], "level": args["level"]})
-            elif action == "record_task":
-                self.ledger.record_task(args.get("task"))
             elif action == "report_signal":
                 self.ledger.report_signal(args.get("task_id", ""), args.get("signal", ""))
             elif action == "finish_task":
@@ -775,7 +776,8 @@ class Runtime:
                     fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
                     kind = t.get("kind") if t.get("kind") in TASK_KINDS else "watch"
-                    ask = f" (approve with /watch approve {t['id']})" if t["status"] == "proposed" else ""
+                    ask = (f" (approve with /watch approve {t['id']} {self.ledger.proposal_hash(t)})"
+                           if t["status"] == "proposed" else "")
                     return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}{ask}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
@@ -799,9 +801,17 @@ class Runtime:
                 self.ledger.finish_task(task_id, status)
                 return f"Watch {task_id} is now {status}."
             if action == "approve":
-                task_id = rest.split()[0] if rest else ""
-                self.ledger.approve_task(task_id)
-                return f"Watch {task_id} is approved and active."
+                words = rest.split()
+                task_id = words[0] if words else ""
+                try:
+                    task = self.ledger.approve_task(task_id, words[1] if len(words) > 1 else None)
+                except StaleProposal as stale:
+                    task = stale.task
+                    return (f"Watch {task_id} changed since you read it, so nothing was approved. Now: {task['scope']} "
+                            f"Next action: {task['next_action']} To approve this version send "
+                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}")
+                return (f"Watch {task_id} is approved and active. Scope: {task['scope']} "
+                        f"Next action: {task['next_action']}")
             if action == "resume":
                 task_id = rest.split()[0] if rest else ""
                 task = next((t for t in tasks if t["id"] == task_id), None)

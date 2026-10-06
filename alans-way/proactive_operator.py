@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import json
 import sqlite3
 
+from .proactive_context import StaleProposal
+
 
 def _entry_is_dm_route(entry, session_key):
     return (type(entry) is dict and entry.get("session_key") == session_key
@@ -116,6 +118,7 @@ def setup(parser):
                         "snooze: 3d|until <time>|off; timezone: IANA name")
     parser.add_argument("--session-key", help="Exact existing private route; bind only, never echoed")
     parser.add_argument("--watch-id", help="Proposed watch to approve; approve only")
+    parser.add_argument("--hash", help="Proposal code shown with the watch; refuses an edited proposal")
     parser.add_argument("--timezone", help="IANA timezone for quiet hours, such as America/Chicago")
     parser.add_argument("--settings", help="JSON policy/preferences object for configure")
 
@@ -129,7 +132,13 @@ def execute(runtime, args):
                 runtime.operate("timezone", tz)
             result = json.loads(runtime.control({"action": "status"}))
         elif args.action == "approve":
-            runtime.ledger.approve_task(args.watch_id)
+            try:
+                runtime.ledger.approve_task(args.watch_id, getattr(args, "hash", None))
+            except StaleProposal as stale:
+                print(json.dumps({"ok": False, "error": "The proposal changed since you read it; nothing was approved.",
+                                  "scope": stale.task["scope"], "next_action": stale.task["next_action"],
+                                  "hash": runtime.ledger.proposal_hash(stale.task)}))
+                return 1
             result = json.loads(runtime.control({"action": "status"}))
         elif args.action == "probe":
             result = probe(runtime)

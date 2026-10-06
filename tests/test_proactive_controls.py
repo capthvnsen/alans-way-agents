@@ -147,7 +147,8 @@ class ControlTests(unittest.TestCase):
             runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789"})
             task = {"id": "companion-build", "title": "Companion", "scope": "Review approved handoff research",
                     "next_action": "Draft the next acceptance tests", "owner": "primary", "status": "active", "approved": True}
-            self.assertTrue(json.loads(runtime.control({"action": "record_task", "task": task}))["ok"])
+            runtime.ledger.record_task(task)
+            self.assertFalse(json.loads(runtime.control({"action": "record_task", "task": task}))["ok"])
             self.assertTrue(json.loads(runtime.control({"action": "configure", "changes": {"preferences": {"focus": ["approved projects"]}}}))["ok"])
             self.assertEqual(runtime.store.status()["counts"], {})
             runtime.close()
@@ -156,7 +157,8 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(status["tasks"][0]["id"], "companion-build")
             self.assertEqual(status["preferences"]["focus"], ["approved projects"])
             self.assertTrue(json.loads(restarted.control({"action": "finish_task", "task_id": "companion-build", "status": "cancelled"}))["ok"])
-            self.assertFalse(json.loads(restarted.control({"action": "record_task", "task": task}))["ok"])
+            with self.assertRaises(ValueError):
+                restarted.ledger.record_task(task)
             self.assertFalse(json.loads(restarted.control({"action": "configure", "changes": {"preferences": {"autonomy": "unrestricted"}}}))["ok"])
             restarted.close()
 
@@ -278,7 +280,7 @@ class ControlTests(unittest.TestCase):
             result = self.propose(runtime, approved=True, consent_reference="user said yes",
                                   next_review_at="2020-01-01T00:00:00+00:00")
             self.assertTrue(result["ok"])
-            self.assertIn("/watch approve rent", result["tell_user"])
+            self.assertRegex(result["tell_user"], r"/watch approve rent [0-9a-f]{8}\b")
             task = runtime.ledger.snapshot()["tasks"][0]
             self.assertEqual((task["status"], task["approved"]), ("proposed", False))
             self.assertNotIn("approved_at", task)
@@ -365,6 +367,77 @@ class ControlTests(unittest.TestCase):
             runtime.tool_control({"action": "finish_task", "task_id": "rent", "status": "waiting"})
             self.propose(runtime, status="active")
             self.assertEqual(state(), "proposed")
+            runtime.close()
+
+    def approve_command(self, runtime, watch_id="rent"):
+        task = next(t for t in runtime.ledger.snapshot()["tasks"] if t["id"] == watch_id)
+        return f"approve {watch_id} {runtime.ledger.proposal_hash(task)}"
+
+    def test_approval_is_bound_to_the_text_the_user_read(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            stale = self.approve_command(runtime)
+            self.propose(runtime, next_action="Wire the money to the new account")
+            reply = runtime.watch_command(stale)
+            self.assertIn("changed since you read it", reply)
+            self.assertIn("Wire the money", reply)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "proposed")
+            reply = runtime.watch_command(self.approve_command(runtime))
+            self.assertIn("Check rent posts", reply)
+            self.assertIn("Wire the money", reply)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "active")
+            runtime.close()
+
+    def test_approved_watch_freezes_native_binding_and_reports_rule_changes_need_approval(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime, native_task_id="native-1", native_board="main", notify_when="price drops")
+            runtime.watch_command(self.approve_command(runtime))
+            for change in ({"native_task_id": "native-2"}, {"native_board": "other"}, {"native_task_id": None}):
+                self.assertFalse(self.propose(runtime, **{"native_task_id": "native-1", "native_board": "main",
+                                                           "notify_when": "price drops", **change})["ok"], change)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "active")
+            self.propose(runtime, native_task_id="native-1", native_board="main", notify_when="always")
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "proposed")
+            runtime.close()
+
+    def test_model_cannot_park_a_proposal_as_waiting(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            for status in ("waiting", "blocked"):
+                self.assertFalse(json.loads(runtime.tool_control(
+                    {"action": "finish_task", "task_id": "rent", "status": status}))["ok"])
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "proposed")
+            self.assertTrue(json.loads(runtime.tool_control(
+                {"action": "finish_task", "task_id": "rent", "status": "cancelled"}))["ok"])
+            runtime.close()
+
+    def test_proposals_expire_and_downgrades_do_not_take_proposal_slots(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            for index in range(8):
+                self.propose(runtime, id=f"w{index}")
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["w0"]["proposed_at"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+            self.assertTrue(self.propose(runtime, id="w8")["ok"])
+            self.assertNotIn("w0", {t["id"] for t in runtime.ledger.snapshot()["tasks"]})
+            runtime.close()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime, id="old")
+            runtime.watch_command(self.approve_command(runtime, "old"))
+            for index in range(8):
+                self.propose(runtime, id=f"w{index}")
+            self.assertTrue(self.propose(runtime, id="old", next_action="Something new")["ok"])
+            self.assertEqual({t["id"]: t["status"] for t in runtime.ledger.snapshot()["tasks"]}["old"], "proposed")
+            self.assertFalse(self.propose(runtime, id="extra")["ok"])
             runtime.close()
 
     def test_proposals_are_bounded_and_do_not_squat_the_watch_cap(self):

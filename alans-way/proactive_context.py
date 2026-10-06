@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import copy
+from hashlib import sha256
 import fcntl
 import json
 import os
@@ -25,6 +26,9 @@ MAX_WATCHES = 64
 MAX_PROPOSALS = 8
 MAX_LOG = 20
 DISMISSAL_LIMIT, DISMISSAL_WINDOW_SECONDS = 3, 14 * 86400
+PROPOSAL_TTL_SECONDS = 7 * 86400
+HASHED_FIELDS = ("title", "scope", "next_action", "owner", "kind", "execution_host", "cadence_seconds",
+                 "next_review_at", "due_at", "notify_when", "native_task_id", "native_board", "source")
 
 # Signal bookkeeping is written only through report_signal; record_task saves
 # must carry it forward or re-arming a watch would erase its last observation.
@@ -33,6 +37,20 @@ SIGNAL_FIELDS = ("signal", "signal_at", "snoozed_until")
 
 class SourceSuppressed(ValueError):
     pass
+
+
+class StaleProposal(ValueError):
+    def __init__(self, task):
+        super().__init__("proposal changed")
+        self.task = task
+
+
+def proposal_hash(task):
+    """Eight hex digits over what the user reads when approving a watch."""
+    body = {k: task.get(k) for k in HASHED_FIELDS}
+    body["kind"] = body["kind"] or "watch"
+    body["execution_host"] = body["execution_host"] or "cloud"
+    return sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
 
 
 def _moment(value):
@@ -144,6 +162,13 @@ class Ledger:
         """Drop terminal watches two weeks after they closed; they never count toward the cap."""
         now = datetime.now(timezone.utc)
         for task_id, task in list(data["tasks"].items()):
+            if task.get("status") == "proposed":
+                proposed = _moment(task.get("proposed_at"))
+                if proposed is None:
+                    task["proposed_at"] = now.isoformat()
+                elif (now - proposed).total_seconds() > PROPOSAL_TTL_SECONDS:
+                    del data["tasks"][task_id]
+                continue
             if task.get("status") not in TERMINAL:
                 continue
             closed = _moment(task.get("closed_at"))
@@ -198,6 +223,9 @@ class Ledger:
             approved = bool(old) and old.get("approved") is True and old["status"] != "proposed"
             if old and old["status"] in TERMINAL:
                 raise ValueError("terminal watches need a new watch id")
+            if approved and (old.get("native_task_id") != task.get("native_task_id")
+                             or old.get("native_board") != task.get("native_board")):
+                raise ValueError("native bindings need a new watch id")
             if approved and (old["scope"] != task["scope"]
                              or old.get("kind", "watch") != task.get("kind", old.get("kind", "watch"))
                              or old.get("execution_host", "cloud") != task.get("execution_host", old.get("execution_host", "cloud"))):
@@ -207,10 +235,12 @@ class Ledger:
                 raise SourceSuppressed(source)
             if old is None:
                 live = [t for t in data["tasks"].values() if t["status"] not in TERMINAL]
-                if len(live) >= MAX_WATCHES or sum(t["status"] == "proposed" for t in live) >= MAX_PROPOSALS:
+                fresh = sum(t["status"] == "proposed" and not t.get("reproposed") for t in live)
+                if len(live) >= MAX_WATCHES or fresh >= MAX_PROPOSALS:
                     raise ValueError("watch limit reached")
             keeps = approved and not (
                 task["next_action"] != old["next_action"] or task["owner"] != old["owner"]
+                or task.get("notify_when") != old.get("notify_when")
                 or (task["status"] == "active" and old["status"] != "active"
                     and not (old["status"] == "blocked" and old.get("status_by") == "model"))
                 or _sooner(task.get("cadence_seconds"), old.get("cadence_seconds"))
@@ -223,6 +253,9 @@ class Ledger:
                 saved["approved"], saved["approved_at"] = True, old["approved_at"]
             else:
                 saved["approved"], saved["status"] = False, "proposed"
+                saved["proposed_at"] = datetime.now(timezone.utc).isoformat()
+                if approved or (old or {}).get("reproposed"):
+                    saved["reproposed"] = True
             if saved["status"] in ("waiting", "blocked"):
                 saved["status_by"] = "model"
             for key in SIGNAL_FIELDS:
@@ -231,15 +264,26 @@ class Ledger:
             data["tasks"][task["id"]] = saved
             return not keeps
 
-    def approve_task(self, task_id):
-        """Operator path: activate a proposed watch."""
+    def proposal_hash(self, task):
+        return proposal_hash(task)
+
+    def approve_task(self, task_id, expected=None):
+        """Operator path: activate a proposed watch; returns it as activated.
+
+        With ``expected`` (the hash the user was shown) a proposal edited since
+        is refused with StaleProposal instead of approving unseen text.
+        """
         with self.transaction() as data:
             task = data["tasks"].get(task_id)
             if not task or task["status"] != "proposed":
                 raise ValueError("no proposed watch")
+            if expected and expected != proposal_hash(task):
+                raise StaleProposal(copy.deepcopy(task))
             task.update(status="active", approved=True,
                         approved_at=datetime.now(timezone.utc).isoformat())
+            task.pop("reproposed", None)
             data.get("dismissals", {}).pop(task.get("source") or task.get("kind", "watch"), None)
+            return copy.deepcopy(task)
 
     @staticmethod
     def _recent_dismissals(data, source):
@@ -333,6 +377,8 @@ class Ledger:
             task = data["tasks"].get(task_id)
             if not task or task["status"] in {"done", "cancelled"}:
                 raise ValueError("unknown or terminal watch")
+            if by == "model" and task["status"] == "proposed" and status in {"waiting", "blocked"}:
+                raise ValueError("a proposal can only be finished or cancelled")
             for name, value in (("artifact", artifact), ("verification", verification)):
                 if value is not None:
                     task[name] = _text(value, 1000)

@@ -753,18 +753,21 @@ class PluginTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIn("reply with exactly [SILENT]", prompt)
 
-    def test_rejected_appraisal_refunds_the_daily_budget_and_spacing(self):
+    def test_rejected_appraisals_stay_capped_even_though_the_wake_budget_is_refunded(self):
         module = load_plugin()
         guard = sys.modules[module.__name__ + ".gateway_guard"]
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            runtime = module.Runtime(None, home, appraiser=lambda *_: {"useful": False})
+            calls = []
+            runtime = module.Runtime(None, home, appraiser=lambda *a: calls.append(1) or {"useful": False})
             runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789",
-                "debounce_seconds": 0, "quiet_start": 0, "quiet_end": 0, "max_daily_wakes": 1})
+                "debounce_seconds": 0, "quiet_start": 0, "quiet_end": 0,
+                "max_daily_wakes": 1, "min_interval_seconds": 0})
             guard.mark_gateway_ready(home)
-            for index in range(3):
+            for index in range(20):
                 runtime.store.record_event("context_changed", f"{index:064d}", purpose=True)
-                self.assertEqual(runtime.tick()["status"], "no_op")
+                runtime.tick()
+            self.assertEqual(len(calls), 2)
             self.assertEqual(runtime.store.status()["reservation_count"], 0)
             runtime.close()
 
