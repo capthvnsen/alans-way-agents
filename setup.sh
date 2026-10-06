@@ -199,43 +199,67 @@ check_computer_provider() {
   fi
 }
 
-# The numeric bot id of the Telegram bot in a profile home (config.yaml
-# platforms.telegram.token|botToken, else .env TELEGRAM_BOT_TOKEN). Prints the
-# digits only, never the token. Prints nothing when the profile has no bot.
+# The numeric bot id of a profile's Telegram bot, read the way Hermes does: the
+# profile's .env TELEGRAM_BOT_TOKEN wins over config.yaml platforms.telegram.token
+# (or botToken). `token_bot_id home DIR` reads both, `token_bot_id env FILE` one
+# .env file. Prints one line, never a token:
+#   ok ID [OTHER]   OTHER is the config.yaml bot when it differs from the .env one
+#   none            no bot here
+#   unreadable FILE the file is not valid UTF-8 text
 token_bot_id() {
-  python3 - "$(wpath "$1")" <<'PY'
+  python3 - "$1" "$(wpath "$2")" <<'PY'
 import os, re, sys
-home = sys.argv[1]
+mode, path = sys.argv[1], sys.argv[2]
 def clean(value):
     m = re.match(r"""("([^"]*)"|'([^']*)'|[^\s#]+)""", value.strip())
     return (m.group(2) or m.group(3) or m.group(1)) if m else ""
-tokens, path = [], []
-try:
-    for line in open(os.path.join(home, "config.yaml"), encoding="utf-8"):
-        m = re.match(r"( *)([A-Za-z_][\w-]*):(.*)$", line.rstrip("\r\n"))
+def bot(token):
+    m = re.match(r"(\d+):", token)
+    return m.group(1) if m else None
+def lines(file):
+    try:
+        with open(file, encoding="utf-8-sig") as handle:
+            return handle.read().splitlines()
+    except FileNotFoundError:
+        return []
+    except (UnicodeDecodeError, OSError):
+        print("unreadable " + os.path.basename(file))
+        sys.exit(0)
+def env_id(file):
+    found = None
+    for line in lines(file):
+        m = re.match(r"\s*(?:export\s+)?TELEGRAM_BOT_TOKEN\s*=\s*(.*)$", line)
+        if m:
+            found = bot(clean(m.group(1))) or found
+    return found
+def config_id(file):
+    path_keys = []
+    for line in lines(file):
+        m = re.match(r"( *)([A-Za-z_][\w-]*):(.*)$", line)
         if not m:
             continue
-        depth, rest = len(m.group(1)), m.group(3).strip()
-        while path and path[-1][0] >= depth:
-            path.pop()
+        depth, key, rest = len(m.group(1)), m.group(2), m.group(3).strip()
+        while path_keys and path_keys[-1][0] >= depth:
+            path_keys.pop()
+        names = [k for _, k in path_keys]
         if not rest or rest.startswith("#"):
-            path.append((depth, m.group(2)))
-        elif [k for _, k in path] == ["platforms", "telegram"] and m.group(2) in ("token", "botToken"):
-            tokens.append(clean(rest))
-except OSError:
-    pass
-try:
-    for line in open(os.path.join(home, ".env"), encoding="utf-8"):
-        if line.startswith("TELEGRAM_BOT_TOKEN="):
-            tokens.append(clean(line.rstrip("\r\n").split("=", 1)[1]))
-            break
-except OSError:
-    pass
-for token in tokens:
-    m = re.match(r"(\d+):", token)
-    if m:
-        print(m.group(1))
-        break
+            path_keys.append((depth, key))
+        elif names == ["platforms", "telegram"] and key in ("token", "botToken"):
+            if bot(clean(rest)):
+                return bot(clean(rest))
+        elif names == ["platforms"] and key == "telegram" and rest.startswith("{"):
+            for t in re.findall(r"\b(?:token|botToken)\s*:\s*(\"[^\"]*\"|'[^']*'|[^\s,}]+)", rest):
+                if bot(clean(t)):
+                    return bot(clean(t))
+    return None
+if mode == "env":
+    found, other = env_id(path), None
+else:
+    found, other = env_id(os.path.join(path, ".env")), config_id(os.path.join(path, "config.yaml"))
+if not (found or other):
+    print("none")
+else:
+    print("ok %s%s" % (found or other, " " + other if found and other and other != found else ""))
 PY
 }
 
@@ -404,9 +428,18 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
+  OTHER_PROFILES=""
   if [ "$ONLY_PROFILE" = 0 ]; then
     for _dir in "$HERMES_HOME"/profiles/*/; do
-      if [ -d "$_dir" ] && [ -n "$(token_bot_id "$_dir")" ]; then PROFS="$PROFS ${_dir%/}"; fi
+      [ -d "$_dir" ] || continue
+      _name="$(basename "$_dir")"
+      case "$_name" in default|''|-*|.*|*[!0-9A-Za-z_.-]*) continue;; esac
+      _r="$(token_bot_id home "${_dir%/}")"
+      case "$_r" in
+        ok*) PROFS="$PROFS ${_dir%/}"; OTHER_PROFILES="$OTHER_PROFILES $_name";;
+        unreadable*) warn "profile $_name was not checked: ${_r#* } is not valid UTF-8 text";;
+        *) skip "profile $_name has no Telegram bot of its own";;
+      esac
     done
   fi
   for home in $PROFS; do
@@ -422,6 +455,20 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     fi
   done
   check_computer_provider
+  for _name in $OTHER_PROFILES; do
+    PROFILE="$_name"
+    if have hermes; then
+      if [ "$KEEP_BROWSER" = 1 ]; then
+        skip "built-in browser toolset check for profile $_name (--keep-browser)"
+      elif hermes_p tools list --platform telegram 2>/dev/null | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
+        warn "built-in 'browser' toolset still enabled for telegram in profile $_name: its agent may bypass the workspace browser (run: hermes -p $_name tools disable browser --platform telegram)"
+      else
+        ok "built-in browser toolset disabled for telegram in profile $_name"
+      fi
+    fi
+    check_computer_provider
+  done
+  PROFILE=""
   [ "$FAILS" = 0 ] && say "setup: all required checks passed" || say "setup: $FAILS check(s) failed"
   exit "$([ "$FAILS" = 0 ] && echo 0 || echo 1)"
 fi
@@ -652,26 +699,23 @@ if [ "$GUEST_OS" = Windows ]; then
   REPO_FILE_URL="file://$_p"
 fi
 
-derive_bot_id_from_env() {
-  _env="$1"
-  [ -f "$_env" ] || return 1
-  _token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_env" 2>/dev/null | head -1 | cut -d= -f2-)"
-  _token="${_token#\"}"; _token="${_token%\"}"; _token="${_token#\'}"; _token="${_token%\'}"
-  case "$_token" in
-    [0-9]*:*)
-      BOT_ID="${_token%%:*}"
-      ok "using bot id $BOT_ID from $_env (token not printed)"
+# Both set BOT_ID and return 0 when the profile has a bot, 1 when it has none and
+# 2 (after saying why) when a file cannot be read.
+derive_bot_id_from() {
+  _r="$(token_bot_id "$1" "$2")"
+  _rest="${_r#* }"
+  case "$_r" in
+    ok*)
+      BOT_ID="${_rest%% *}"
+      ok "using bot id $BOT_ID from $2 (token not printed)"
+      case "$_rest" in *" "*) warn "$2: .env and config.yaml name different bots (bot id $BOT_ID in .env, ${_rest#* } in config.yaml). Hermes uses the .env one, so setup does too";; esac
       return 0;;
+    unreadable*) warn "$2: $_rest is not valid UTF-8 text, so this profile was skipped"; return 2;;
   esac
   return 1
 }
-
-derive_bot_id_from_config() {
-  _id="$(token_bot_id "$1")"
-  [ -n "$_id" ] || return 1
-  BOT_ID="$_id"
-  ok "using bot id $BOT_ID from $1 (token not printed)"
-}
+derive_bot_id() { derive_bot_id_from home "$1"; }
+derive_bot_id_from_env() { derive_bot_id_from env "$1"; }
 
 # The proactivity timezone is the user's, not the VM's: ask their computer.
 valid_iana() {
@@ -1404,7 +1448,9 @@ workspace_for_profile() {
   fi
 }
 if [ -z "$BOT_ID" ]; then
-  derive_bot_id_from_config "$PROFILE_HOME" || derive_bot_id_from_env "$ENV_FILE" || derive_bot_id_from_env "$HERMES_HOME/.env" || true
+  _rc=0
+  derive_bot_id "$PROFILE_HOME" || _rc=$?
+  [ "$_rc" != 1 ] || derive_bot_id_from_env "$HERMES_HOME/.env" || true
 fi
 if [ -z "$BOT_ID" ] && has_tty; then
   BOT_ID="$(ask "  Numeric Telegram bot ID for this agent (empty to skip)" "")"
@@ -1415,22 +1461,36 @@ else
   say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
 fi
 
-# Every other profile with a Telegram bot of its own gets the same setup under
-# that bot's id. Proactivity binding stays on the primary profile alone.
+# Every other profile with a Telegram bot of its own gets the plugin (for the
+# workspace skills; proactivity is the primary's alone) and the same workspace
+# setup under that bot's id.
+install_plugin_for_bot_profile() {
+  if plugin_listed "$PLUGIN_NAME" || plugin_is_catalog_installed; then
+    ok "plugin already installed in profile $PROFILE; leaving it as it is"
+    say "  to move it forward: hermes -p $PROFILE plugins update $PLUGIN_NAME"
+  elif [ "$SKIP_PLUGIN" = 1 ]; then
+    warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE plugins install $PLUGIN_NAME"
+  elif hermes_p plugins install "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1; then
+    hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
+    ok "plugin installed in profile $PROFILE"
+  else
+    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE plugins install $REPO_FILE_URL#$PLUGIN_NAME"
+  fi
+}
 if [ "$ONLY_PROFILE" = 0 ]; then
   _primary_bot="$BOT_ID" _primary_name="$BOT_NAME" _primary_ready="$COMPUTER_READY"
   for _dir in "$HERMES_HOME"/profiles/*/; do
     [ -d "$_dir" ] || continue
     _name="$(basename "$_dir")"
     case "$_name" in default|''|-*|.*|*[!0-9A-Za-z_.-]*) continue;; esac
-    BOT_ID="" BOT_NAME=""
-    if ! { derive_bot_id_from_config "${_dir%/}" || derive_bot_id_from_env "${_dir%/}/.env"; }; then
-      say "  profile $_name: no Telegram bot, skipped"
+    BOT_ID="" BOT_NAME="" _rc=0
+    derive_bot_id "${_dir%/}" || _rc=$?
+    if [ "$_rc" != 0 ]; then
+      [ "$_rc" = 2 ] || say "  profile $_name: no Telegram bot of its own, skipped"
       continue
     fi
     PROFILE="$_name" PROFILE_HOME="${_dir%/}"
-    if plugin_listed "$PLUGIN_NAME"; then enable_proactivity_toolsets
-    else skip "proactivity toolset for profile $_name (plugin $PLUGIN_NAME is not installed there)"; fi
+    install_plugin_for_bot_profile
     COMPUTER_READY=0
     if [ "$COMPUTER_API" = 1 ]; then ensure_computer_provider; fi
     workspace_for_profile

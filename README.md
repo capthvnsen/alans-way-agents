@@ -124,8 +124,12 @@ The bootstrap runs every step in order and says what it did:
   run setup from a chat on that gateway, the chat pauses briefly
 
 Without `--profile`, setup configures the main profile and every profile with
-its own Telegram bot, each under that bot's id, and removes any older router
-entries from them (the config is backed up first). It also adds a managed block
+its own Telegram bot, each under that bot's id (a profile's `.env`
+`TELEGRAM_BOT_TOKEN` wins over `config.yaml`, as in Hermes), installs this plugin
+in each so every bot has the workspace skills (an existing or catalog install is
+left as it is), and removes any older router entries from them (the config is
+backed up first). Only the main profile gets the proactive tool, `/proactivity`,
+`/watch` and the proactive skill. It also adds a managed block
 to the Hermes user's `~/.ssh/config` so the agent's own ssh commands to your
 computer share one connection.
 

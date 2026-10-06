@@ -1793,7 +1793,7 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         self.assertFalse(any(entry.endswith(":foreground") for entry in entries))
 
 
-class AllProfilesTests(IntegrationBase, unittest.TestCase):
+class AllProfilesHarness(IntegrationBase):
     TOKEN = "AAFakeSecretTokenForTests"
 
     def layout(self, home: Path):
@@ -1816,23 +1816,27 @@ class AllProfilesTests(IntegrationBase, unittest.TestCase):
         config = (home / "profiles" / name / "config.yaml") if name else home / "config.yaml"
         return re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8"))
 
-    def run_all(self, *flags, **kwargs):
+    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra=""):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         home = root / "home"
         home.mkdir()
-        self.layout(home)
+        (layout or self.layout)(home)
         log = root / "log"
         bin_dir = tooling(root, log)
-        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
-             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\nesac\nexit 0\n' % log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\nP=default; [ "$1" = -p ] && { P="$2"; shift 2; }\ncase "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
         fake(bin_dir, "hermes-python", "exit 0\n")
         env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        self.env, self.root = env, root
+        self.script = repo_with_computer_plugin(root)
         result = run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
-                     env=env, check=False, script=repo_with_computer_plugin(root))
+                     env=env, check=False, script=self.script)
         return result, home, read_log(log)
 
+
+class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
     def test_every_profile_with_a_telegram_bot_gets_its_own_bot_id(self):
         result, home, calls = self.run_all()
         self.assertEqual(self.ids(home), ["111"])
@@ -1852,11 +1856,38 @@ class AllProfilesTests(IntegrationBase, unittest.TestCase):
     def test_each_profile_gets_the_per_profile_work_but_only_the_primary_is_bound(self):
         result, home, calls = self.run_all()
         for name in ("default", "familydental", "manda", "f4f", "quoted"):
-            for needed in ("tools enable proactivity --platform telegram", "tools enable proactivity --platform cron",
-                           "tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
+            for needed in ("tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
                 self.assertIn("-p %s %s" % (name, needed), calls, (name, needed))
+        self.assertIn("-p default tools enable proactivity --platform cron", calls)
+        self.assertNotIn("proactivity --platform", calls.replace("-p default tools enable proactivity", ""))
         self.assertNotIn("-p botless tools disable browser", calls)
         self.assertNotIn("proactivity bind", calls)
+
+    def test_the_plugin_is_installed_into_every_bot_profile_without_force(self):
+        result, home, calls = self.run_all(listed='[ "$P" = default ] && echo alans-way')
+        for name in ("familydental", "manda", "f4f", "quoted"):
+            self.assertRegex(calls, r"-p %s plugins install file://\S+#alans-way\n" % name)
+            self.assertIn("-p %s plugins enable alans-way\n" % name, calls)
+        self.assertNotRegex(calls, r"-p botless plugins install \S+#alans-way\n")
+        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
+        self.assertNotIn("allow_gateway_injection", calls.split("-p familydental", 1)[1].split("\n")[0])
+
+    def test_an_installed_plugin_in_a_bot_profile_is_left_alone_with_the_update_command(self):
+        result, home, calls = self.run_all(listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
+        self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
+        self.assertIn("hermes -p manda plugins update alans-way", result.stdout)
+        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
+
+    def test_a_catalog_install_in_a_bot_profile_is_never_replaced(self):
+        def layout(home):
+            self.layout(home)
+            plugins = home / "profiles" / "manda" / "plugins"
+            (plugins / "alans-way").mkdir(parents=True)
+            (plugins / ".install-metadata.json").write_text(
+                '{"alans-way": {"catalog": {"name": "alans-way", "sha": "3a74614"}}}', encoding="utf-8")
+        result, home, calls = self.run_all(layout=layout, listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
+        self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
+        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
 
     def test_keep_browser_applies_to_every_profile(self):
         _, _, calls = self.run_all("--keep-browser")
@@ -1873,6 +1904,97 @@ class AllProfilesTests(IntegrationBase, unittest.TestCase):
         _, home, _ = self.run_all("--bot-id", "999")
         self.assertEqual(self.ids(home), ["999"])
         self.assertEqual(self.ids(home, "familydental"), ["222"])
+
+
+class BotTokenSourceTests(AllProfilesHarness, unittest.TestCase):
+    """The reviewer's token fixtures: every shape of config.yaml and .env Hermes accepts."""
+    CASES = {
+        "plain": ({"config.yaml": "platforms:\n  telegram:\n    token: 111:AAA\n"}, "111"),
+        "dq": ({"config.yaml": 'platforms:\n  telegram:\n    token: "222:BBB"  # c\n'}, "222"),
+        "sq": ({"config.yaml": "platforms:\n  telegram:\n    botToken: '333:CCC'\n"}, "333"),
+        "crlf": ({"config.yaml": "platforms:\r\n  telegram:\r\n    token: 444:DDD\r\n"}, "444"),
+        "envonly": ({".env": 'TELEGRAM_BOT_TOKEN="888:HHH"\n'}, "888"),
+        "envcrlf": ({".env": "TELEGRAM_BOT_TOKEN=1111:KKK\r\n"}, "1111"),
+        "export": ({".env": "export TELEGRAM_BOT_TOKEN=999:III\n"}, "999"),
+        "spaced": ({".env": "TELEGRAM_BOT_TOKEN = 1010:JJJ\n"}, "1010"),
+        "sp_in_val": ({"config.yaml": 'platforms:\n  telegram:\n    token:   "2222:VVV"\n'}, "2222"),
+        "ind4": ({"config.yaml": "platforms:\n    telegram:\n        token: 1717:QQQ\n"}, "1717"),
+        "listbetween": ({"config.yaml": "platforms:\n  telegram:\n    allowed:\n      - 1\n    token: 2121:UUU\n"}, "2121"),
+        "flow": ({"config.yaml": 'platforms:\n  telegram: {token: "1212:LLL"}\n'}, "1212"),
+        "bom": ({"config.yaml": "\ufeffplatforms:\n  telegram:\n    token: 1818:RRR\n"}, "1818"),
+        "envlate": ({"config.yaml": "platforms:\n  telegram:\n    token: 1919:SSS\n"}, "1919"),
+        "envref": ({"config.yaml": "platforms:\n  telegram:\n    token: ${TELEGRAM_BOT_TOKEN}\n",
+                    ".env": "TELEGRAM_BOT_TOKEN=777:GGG\n"}, "777"),
+        "cfgbad_envgood": ({"config.yaml": "platforms:\n  telegram:\n    token: junk\n",
+                            ".env": "TELEGRAM_BOT_TOKEN=1313:MMM\n"}, "1313"),
+        "both": ({"config.yaml": "platforms:\n  telegram:\n    token: 1414:NNN\n",
+                  ".env": "TELEGRAM_BOT_TOKEN=1515:OOO\n"}, "1515"),
+        "empty": ({"config.yaml": 'platforms:\n  telegram:\n    token: ""\n', ".env": "TELEGRAM_BOT_TOKEN=\n"}, None),
+        "invalid": ({"config.yaml": "platforms:\n  telegram:\n    token: notatoken\n"}, None),
+        "none": ({"config.yaml": "model:\n  x: 1\n"}, None),
+        "nested": ({"config.yaml": "platforms:\n  telegram:\n    extra:\n      token: 555:EEE\n"}, None),
+        "otherplat": ({"config.yaml": "platforms:\n  discord:\n    token: 666:FFF\n  telegram:\n    enabled: true\n"}, None),
+        "commentline": ({"config.yaml": "platforms:\n  telegram:\n    # token: 2020:TTT\n    enabled: true\n"}, None),
+        "telegram_top": ({"config.yaml": "telegram:\n  token: 1616:PPP\n"}, None),
+    }
+
+    def layout(self, home: Path):
+        (home / ".env").write_text("TELEGRAM_BOT_TOKEN=100:AAHprimary\n", encoding="utf-8")
+        for name, (files, _) in self.CASES.items():
+            (home / "profiles" / name).mkdir(parents=True)
+            for file, text in files.items():
+                (home / "profiles" / name / file).write_bytes(text.encode("utf-8"))
+        bad = home / "profiles" / "aaa-bad"
+        bad.mkdir()
+        (bad / ".env").write_text("TELEGRAM_BOT_TOKEN=999:ZZZ\n", encoding="utf-8")
+        (bad / "config.yaml").write_bytes(b"model: \xff\xfe\n")
+
+    def test_each_shape_gives_the_bot_hermes_would_run_and_none_leaks_a_token(self):
+        result, home, calls = self.run_all()
+        for name, (_, expected) in self.CASES.items():
+            config = home / "profiles" / name / "config.yaml"
+            found = re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8")) if config.exists() else []
+            self.assertEqual(found, [expected] if expected else [], name)
+        out = result.stdout + result.stderr + calls
+        for secret in ("AAA", "BBB", "KKK", "OOO", "NNN", "GGG", "AAHprimary", "ZZZ"):
+            self.assertNotIn(":" + secret, out)
+            self.assertNotIn("=" + secret, out)
+
+    def test_env_wins_over_config_and_the_disagreement_is_reported_by_id(self):
+        result, _, _ = self.run_all()
+        self.assertIn("bot id 1515 in .env, 1414 in config.yaml", result.stdout)
+
+    def test_a_profile_with_an_undecodable_file_is_skipped_and_the_rest_continue(self):
+        result, home, _ = self.run_all()
+        self.assertIn("config.yaml is not valid UTF-8 text, so this profile was skipped", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((home / "profiles" / "aaa-bad" / "config.yaml").read_bytes(), b"model: \xff\xfe\n")
+        self.assertEqual(self.ids(home, "plain"), ["111"])
+
+
+class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
+    EXTRA = ('  tools) [ "$2" = list ] && { [ "$P" = manda ] && echo "enabled browser"; echo "enabled proactivity"; };;\n'
+             '  config) [ "$2" = get ] && echo alans-way-computer;;\n'
+             '  computer-use) [ "$P" = familydental ] && exit 1;;')
+
+    def test_verify_covers_the_other_profiles_and_lists_the_skipped(self):
+        def layout(home):
+            self.layout(home)
+            bad = home / "profiles" / "aaa-bad"
+            bad.mkdir()
+            (bad / "config.yaml").write_bytes(b"\xff\xfe")
+        self.run_all(layout=layout, hermes_extra=self.EXTRA)
+        result = run("--verify", "--hermes-home", str(self.root / "home"), env=self.env, check=False, script=self.script)
+        out = result.stdout
+        for name in ("familydental", "manda", "f4f", "quoted"):
+            self.assertRegex(out, r"ok   workspace_browser block in \S*profiles/%s/config.yaml" % name)
+        self.assertIn("profile botless has no Telegram bot of its own", out)
+        self.assertIn("profile aaa-bad was not checked: config.yaml is not valid UTF-8 text", out)
+        self.assertIn("browser' toolset still enabled for telegram in profile manda", out)
+        self.assertRegex(out, r"FAIL .*hermes -p familydental computer-use doctor")
+        self.assertNotRegex(out, r"FAIL .*-p manda computer-use")
+        keep = run("--verify", "--keep-browser", "--hermes-home", str(self.root / "home"), env=self.env, check=False, script=self.script)
+        self.assertNotIn("still enabled for telegram in profile", keep.stdout)
 
 
 class AgentSshReuseTests(unittest.TestCase):
