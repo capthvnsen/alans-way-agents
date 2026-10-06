@@ -71,8 +71,8 @@ different bot's route silently.
    shell). It prints `MAC_KEY` and `MAC_HOST_KEY` to pin here: pass them to
    `setup.sh` as `--mac-key "<MAC_KEY>"` and `--mac-host-key "<MAC_HOST_KEY>"`
    (with `--mac-ssh`). It checks that each is one plain public key line and
-   adds it once; do not append pasted values to `authorized_keys` or
-   `known_hosts` yourself. On Windows, computer-use calls run through
+   adds it once; do not append pasted values to the SSH key list or
+   the known-hosts list yourself. On Windows, computer-use calls run through
    the app's local API: an SSH session cannot reach the desktop: so the app
    must be running for computer control even when the PC is reachable.
    Follow the steps in the app's `docs/setup-prompt.md`. Never use

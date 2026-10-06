@@ -633,5 +633,25 @@ class RouterIntegrationTests(unittest.TestCase):
         self.assertTrue(r["click_after"]["ok"], r["click_after"])
 
 
+VALIDATE = """
+import sys, json
+from pathlib import Path
+from hermes_cli.plugin_validate import validate_plugin_dir
+r = validate_plugin_dir(Path(sys.argv[1]), None)
+print(json.dumps([[n, ok, d] for n, ok, d in r.checks]))
+"""
+
+
+@NEEDS_HERMES
+class CatalogValidateTests(unittest.TestCase):
+    def test_security_scan_is_not_dangerous(self):
+        for plugin in (ROOT / "alans-way", PLUGIN):
+            proc = subprocess.run([str(HERMES_PY), "-c", VALIDATE, str(plugin)], capture_output=True, text=True, timeout=120,
+                                  env={**os.environ, "PYTHONPATH": str(HERMES_MAIN)})
+            checks = json.loads(proc.stdout.strip().splitlines()[-1])
+            scan = next(c for c in checks if c[0] == "security scan")
+            self.assertFalse(scan[2].startswith("dangerous"), f"{plugin.name}: {scan[2]}")
+
+
 if __name__ == "__main__":
     unittest.main()
