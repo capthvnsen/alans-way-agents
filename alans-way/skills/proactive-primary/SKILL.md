@@ -151,6 +151,12 @@ A watch is a `record_task` task with schedule fields:
   `report_signal(task_id, signal)`. A changed signal wakes the watch; an
   identical signal dedupes durably, so routine "nothing changed" findings stay
   silent without burning wakes.
+- `execution_host` — `mac` means work only the Mac can do (local files, its
+  screen, computer use); it blocks while the Mac is offline and is never
+  silently substituted. Anything a browser can do stays `cloud`:
+  `workspace_browser` serves the Mac's logged-in tab online and its own
+  browser offline, so web work is never host-blocked. The field is immutable
+  after creation — host changes need a new watch id.
 
 When a `[Companion scheduled watch]` message arrives, treat it as the standing
 contract firing — it skips the opportunity appraiser because the user already
@@ -200,17 +206,24 @@ across separate wakes. When it arrives:
    connector), plus native schedule/tasks. Use only surfaces that already
    exist and are authorized; a missing connector is a fact to report, never a
    thing to provision silently or pretend to have read.
-3. Read metadata-first: subjects, senders, times, due states, sync status —
-   bounded to a handful of tool calls total. Open full content only for the
-   few candidates that earn it. If a source skill documents a brief procedure
-   (for example a daily-brief reference covering schedule, conflicts, meeting
-   prep and urgent mail), follow it within its own bounds.
-4. Evaluate open `loop` entries alongside the sources: resolved, still
+3. The managed browser is itself a read surface, so missing connectors rarely
+   wall a source off: `workspace_browser` serves the Mac's logged-in tab when
+   the Mac is online and falls back to its own browser when it is not — a
+   reachable logged-in page (mail, calendar, notes, board) counts as a source.
+   When a high-value source has neither a connector nor a reachable login,
+   name the gap and offer the connector once; note the offer in the sweep's
+   `report_signal` digest so later sweeps do not re-offer it.
+4. Read metadata-first: subjects, senders, times, due states, sync status,
+   page lists — bounded to a handful of tool calls total. Open full content
+   only for the few candidates that earn it. If a source skill documents a
+   brief procedure (for example a daily-brief reference covering schedule,
+   conflicts, meeting prep and urgent mail), follow it within its own bounds.
+5. Evaluate open `loop` entries alongside the sources: resolved, still
    waiting, or past its follow-up moment.
-5. Compose at most five items ranked by consequence and time, each with its
+6. Compose at most five items ranked by consequence and time, each with its
    evidence and why it matters now — never a feed. Nothing actionable is a
    successful silent sweep.
-6. Write `report_signal` with a short digest ("sweep: 2 actionable" or
+7. Write `report_signal` with a short digest ("sweep: 2 actionable" or
    "sweep: quiet"), then `resolve` the event. The cadence re-arms on its own;
    an identical digest dedupes against the next pass.
 
@@ -230,7 +243,8 @@ rule, `signal` the last known state.
   they clearly sent something awaiting response ("I emailed the bank Monday —
   want me to track it?"). The offer itself is cheap; the loop is consent.
 - On a `[Companion open loop check]` wake: check the real signal (inbox,
-  thread, board). Resolved → `finish_task` with the outcome, mention it inside
+  thread, board) — connector first, `workspace_browser` when no connector is
+  installed. Resolved → `finish_task` with the outcome, mention it inside
   the next sweep rather than its own message unless it unblocks the user now.
   Still waiting past `due_at` → draft the follow-up and ask before sending —
   a loop never sends a nudge on its own.
@@ -244,10 +258,13 @@ enables proactivity on the bound route. It is consent for one orientation
 report, not for enabling work:
 
 1. Inventory reachable surfaces — installed skills, connectors, native
-   schedule/tasks — with a few bounded metadata reads only.
+   schedule/tasks, and whether the managed browser can reach a logged-in
+   page — with a few bounded metadata reads only.
 2. Report one consolidated message: the handful of things you could take off
    the user's plate, each as a concrete offer (a named watch, loop, or sweep
    with its cadence). Ask one clarifying question if priorities are unclear.
+   A high-value source with no connector and no reachable login may be
+   offered once as a connector suggestion, plainly labelled.
 3. Create nothing unasked. If no source is reachable, say so and suggest the
    smallest useful starting point. Resolve the event when done.
 

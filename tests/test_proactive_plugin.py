@@ -405,6 +405,29 @@ class PluginTests(unittest.TestCase):
             self.assertFalse(runtime.store.load_policy().enabled)
             runtime.close()
 
+    def test_tool_status_redacts_scopes_and_preferences_for_foreign_sessions(self):
+        """Status stays open for health answers, but watch scopes and focus
+        lists are private — a foreign session gets the disclosure-free view."""
+        import json as _json
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            route = "agent:main:telegram:dm:1"
+            runtime.store.update_policy({"session_key": route})
+            runtime.ledger.record_task({"id": "rent", "title": "T",
+                "scope": "a private scope", "next_action": "n",
+                "owner": "primary", "status": "active", "approved": True})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:other:telegram:dm:9"}):
+                foreign = _json.loads(runtime.tool_control({"action": "status"}))
+            self.assertIs(foreign["ok"], True)
+            self.assertNotIn("tasks", foreign)
+            self.assertNotIn("preferences", foreign)
+            self.assertNotIn("private scope", _json.dumps(foreign))
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                bound = _json.loads(runtime.tool_control({"action": "status"}))
+            self.assertIn("tasks", bound)
+            runtime.close()
+
     def test_register_uses_the_plugin_load_scope_home_not_the_launch_environment(self):
         """Under gateway multiplex one process serves many profiles and
         os.environ['HERMES_HOME'] keeps the launch profile's home; the plugin

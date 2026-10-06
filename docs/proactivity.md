@@ -200,11 +200,11 @@ operator's direct ledger surface; like mutating `/proactivity` actions and
 open.
 
 Telegram remains the conversation owner. A watch's `execution_host` is `cloud`
-or `mac`; omitting it preserves the existing choice. Local work uses existing
-Mac tools; an offline Mac blocks that local watch while the VPS continues
-cloud work — host targeting and durable bookkeeping, not automatic migration
-of a running process or browser session. Logins, open pages and checkpoints
-need a separate handoff integration.
+or `mac`; omitting it preserves the existing choice. `mac` means Mac-only
+work (files, screen); it blocks while offline, never silently substituted.
+Web reads are never host-blocked: `workspace_browser` serves the Mac's
+logged-in tab online and its own browser offline, a reachable login is a
+source, and a high-value gap earns one connector offer — never provisioned.
 
 Ask before external messages/posts, purchases, credentials/permissions,
 production changes, destructive actions, or new scope. Native broad tools are

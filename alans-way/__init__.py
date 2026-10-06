@@ -187,8 +187,10 @@ class Runtime:
                    "valuable question. Never expand permissions or execute external/sensitive "
                    "actions without approval. If task_id is provided, use only that exact "
                    "approved watch's current scope; the enum recommendation is not permission. "
-                   "Respect its execution_host: unavailable Mac work is blocked, never moved "
-                   "to the cloud. Observe the live work-time cap (at most 20 minutes). "
+                   "Respect its execution_host: Mac-only work blocks while the Mac is "
+                   "offline, but web reads use workspace_browser, which self-routes "
+                   "between the Mac tab and its own browser and is never host-blocked. "
+                   "Observe the live work-time cap (at most 20 minutes). "
                    "Do not duplicate delegated work or invent tasks. "
                    "Record verified results and acknowledge this event with proactive_control "
                    "resolve. If that tool is not available in this session, take no further "
@@ -237,14 +239,16 @@ class Runtime:
             "proactive_control status; if paused, stop. Load skill",
             "alans-way:proactive-primary.",
             "Inventory only installed and reachable read surfaces (skills,",
-            "connectors, schedules, approved watches) with a few bounded",
-            "metadata reads — no bulk content. Then send ONE consolidated",
-            "reply: at most five concrete watch/loop/sweep offers with",
-            "cadences, or one clarifying question if priorities are unclear.",
-            "Create nothing without an explicit yes. If no useful source is",
-            "reachable, say so plainly and suggest the smallest start.",
-            "Resolve this event with proactive_control resolve when done; do",
-            "not generate a second orientation wake.",
+            "connectors, managed-browser reachability, schedules, approved",
+            "watches) with a few bounded metadata reads — no bulk content.",
+            "Then send ONE consolidated reply: at most five concrete",
+            "watch/loop/sweep offers with cadences, or one clarifying",
+            "question if priorities are unclear. High-value sources with no",
+            "connector or reachable login may be offered once as connector",
+            "suggestions. Create nothing without an explicit yes. If no",
+            "useful source is reachable, say so plainly and suggest the",
+            "smallest start. Resolve this event with proactive_control",
+            "resolve when done; do not generate a second orientation wake.",
             "Event metadata: " + json.dumps(metadata, sort_keys=True),
         ])
         status = self._inject(message, event["session_key"])
@@ -351,17 +355,22 @@ class Runtime:
             lines.append(
                 "Run one bounded metadata-first pass over installed, reachable "
                 "read surfaces and open loops — load alans-way:proactive-primary "
-                "and follow its Source Sweeps procedure. At most five ranked "
-                "items with evidence and why they matter now; nothing actionable "
-                "means a quiet, successful sweep — silence, not filler. Draft, "
-                "never send, anything external without approval. Write "
-                "report_signal with a short digest, then resolve this event via "
-                "proactive_control resolve."
+                "and follow its Source Sweeps procedure. Reachable surfaces "
+                "include the managed browser: workspace_browser serves the Mac "
+                "tab when it is online and its own browser when it is not, and "
+                "a logged-in page counts as a source. Missing connectors are "
+                "reported and offered once, never provisioned silently or "
+                "faked. At most five ranked items with evidence and why they "
+                "matter now; nothing actionable means a quiet, successful "
+                "sweep — silence, not filler. Draft, never send, anything "
+                "external without approval. Write report_signal with a short "
+                "digest, then resolve this event via proactive_control resolve."
             )
         elif kind == "loop":
             lines.append(
                 "Check the real signal now (inbox, thread, board) with real "
-                "tools, honoring execution_host. If the dependency resolved, "
+                "tools — connector first, workspace_browser when no connector "
+                "is installed — honoring execution_host. If the dependency resolved, "
                 "finish_task with the outcome and fold quiet mentions into the "
                 "next sweep rather than a standalone message. If it is still "
                 "unanswered past its moment, draft the follow-up and ask before "
@@ -372,8 +381,10 @@ class Runtime:
         else:
             lines.append(
                 "Run the check now with real tools, honoring execution_host "
-                "(mac work stays on the Mac; unreachable means finish_task "
-                "blocked plus a report of the failure, never a cloud fallback). "
+                "(mac means work only the Mac can do — blocked while offline; "
+                "web reads go through workspace_browser, which serves the Mac "
+                "tab online or its own browser when the Mac is unreachable, "
+                "so web work is never host-blocked). "
                 "Write what you observed via proactive_control report_signal so "
                 "unchanged findings dedupe durably. Re-arm with record_task "
                 "(new next_review_at) unless cadence_seconds already advances "
@@ -407,12 +418,23 @@ class Runtime:
 
         The CLI operator and slash commands call ``control`` themselves (the
         slash path checks the route first), so gating here would lock the
-        operator out of a shell that has no session key.
+        operator out of a shell that has no session key. Status stays open —
+        it answers health for any session — but a foreign caller gets the
+        disclosure-free view: watch scopes and preferences stay bound.
         """
         action = args.get("action", "status") if isinstance(args, dict) else "status"
         if action != "status" and not self._bound_route_only():
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
-        return self.control(args, **kwargs)
+        result = self.control(args, **kwargs)
+        if action == "status" and not self._bound_route_only():
+            try:
+                state = json.loads(result)
+                for private in ("tasks", "preferences", "audit"):
+                    state.pop(private, None)
+                return json.dumps(state)
+            except (ValueError, TypeError):
+                pass
+        return result
 
     def control(self, args, **kwargs):
         try:
