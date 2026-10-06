@@ -61,13 +61,16 @@ reported host and tab ownership. For a VPS browser task, use the same
 `cua_alans_way_*` tools. Verify status reports
 `host: vps`, then find a tab you own or open one. The Mac connector can
 also route an explicit `host: vps` open, but the native VPS connector works
-while the Mac app is offline. Use configured VPS computer tools for desktop
-applications outside the managed browser. A connection failure means that
+while the Mac app is offline. Desktop apps on that Linux machine use the same
+`workspace_computer_apps`, `workspace_computer_snapshot`, and
+`workspace_computer_action` tools: press a ref from the accessibility tree,
+leave the focused window alone, and do not move the pointer. A connection failure means that
 host is unavailable; report it or continue only work already authorized on
 another host.
 
-For VPS window input, incomplete accessibility trees, or screenshots returned
-as `MEDIA:` paths, read [VPS desktop operations](references/vps-desktop.md).
+For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
+is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
+for that boundary. Do not use an external computer-use driver.
 
 ## The connector layer self-heals — never operate on it
 
@@ -201,16 +204,17 @@ in one call. A screenshot is only for a canvas, a chart, or a page the
 snapshot says it could not read. Never screenshot a page you can already
 read as text.
 
-Native Mac apps use `workspace_computer_apps`, then
-`workspace_computer_snapshot`, then `workspace_computer_action`. Press a
-`ref` from that snapshot. Use `click` or `drag` with the snapshot's x,y only
-when the control has no name. `workspace_computer_screenshot` captures that
-one window as a small jpeg, and only when the snapshot has no named control
-for what you need. Scale image pixels by `window.width / imageWidth`. Do not
-screenshot a window you can already read as names and refs. These calls drive
-a background app and do not move the human's cursor. Skip the frontmost app,
-Keychain, and password fields. Do not open a browser tab to do a native app's
-job, and do not drive a native app to do a website's job.
+Desktop apps, on the Mac and on the Linux machine, use `workspace_computer_apps`,
+then `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
+`ref` from that snapshot. On a Mac, use `click` or `drag` with the snapshot's
+x,y only when the control has no name. On the Linux desktop, press is the
+action. `workspace_computer_screenshot` captures that one window as a small
+jpeg, and only when the snapshot has no named control for what you need. On a
+Mac, scale image pixels by `window.width / imageWidth`. Do not screenshot a
+window you can already read as names and refs. These calls do not move the
+human's cursor. Skip the focused window, Keychain, and password fields. Do not open
+a browser tab to do a native app's job, and do not drive a native app to do
+a website's job.
 
 ## Preserve vanilla Hermes
 
