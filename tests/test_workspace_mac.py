@@ -107,7 +107,7 @@ ROUTER_DRIVER = (
     "const fs = require('fs');"
     "const path = require('path');"
     "const router = require(process.argv[1]);"
-    "const annotate = router.makeAnnotator(process.argv[2], process.argv[3] === '1', process.argv[4]);"
+    "const annotate = router.makeAnnotator(process.argv[2], process.argv[3] === '1', process.argv[4], 'Mac', { botId: process.argv[5] || '' });"
     "for (const op of JSON.parse(fs.readFileSync(0, 'utf8'))) {"
     "  if ('rm' in op) fs.rmSync(process.argv[4], { force: true });"
     "  if ('raw' in op) fs.writeFileSync(process.argv[4], op.raw);"
@@ -123,10 +123,10 @@ ROUTER_DRIVER = (
 
 @unittest.skipUnless(NODE, "node is required for router tests")
 class RouterNoticeTests(MacStateEnvTest):
-    def annotate(self, directory, ops, host="vps", mac_configured=True):
+    def annotate(self, directory, ops, host="vps", mac_configured=True, bot=""):
         proc = subprocess.run(
             [NODE, "-e", ROUTER_DRIVER, str(ROUTER), host,
-             "1" if mac_configured else "0", str(Path(directory) / "mac-state.json")],
+             "1" if mac_configured else "0", str(Path(directory) / "mac-state.json"), bot],
             input=json.dumps(ops), capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout.splitlines(), proc.stderr.splitlines()
@@ -525,18 +525,21 @@ class MacWatchUnitGenerationTests(unittest.TestCase):
         self.assertNotIn("User=root", unit)
 
 
-@unittest.skipUnless(SH, "sh is required for watcher tests")
+@unittest.skipUnless(SH and NODE, "sh and node are required for watcher tests")
 class MacWatchScriptTests(MacStateEnvTest):
     def run_once(self, home, online, *args):
         bin_dir = Path(home) / "bin"
         bin_dir.mkdir(exist_ok=True)
         stub = bin_dir / "ssh"
-        stub.write_text("#!/bin/sh\nexit %d\n" % (0 if online else 1))
+        reply = ('printf %s "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"\n'
+                 if online else "")
+        stub.write_text("#!/bin/sh\n%sexit %d\n" % (reply, 0 if online else 1))
         stub.chmod(0o755)
         env = dict(os.environ)
         env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
         env["HERMES_WORKSPACE_MAC_SSH"] = "test@mac"
         env["HERMES_MAC_STATE_FILE"] = str(Path(home) / "state" / "mac-state.json")
+        env.pop("HERMES_WORKSPACE_HOST_OS", None)
         return subprocess.run([SH, str(WATCH), "--once", *args],
                               env=env, capture_output=True, text=True)
 
@@ -544,22 +547,64 @@ class MacWatchScriptTests(MacStateEnvTest):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state" / "mac-state.json"
             events = Path(directory) / "state" / "mac-events.log"
-            result = self.run_once(directory, online=True)
+            result = self.run_once(directory, True, "--hysteresis", "1")
             self.assertEqual(result.returncode, 0, result.stderr)
             first = json.loads(state.read_text(encoding="utf-8"))
             self.assertEqual(first["state"], "online")
             self.assertEqual(first["since"], first["lastTransition"])
             self.assertEqual(first["lastSeenOnline"], first["since"])
             self.assertEqual(events.read_text().count("unknown -> online"), 1)
-            result = self.run_once(directory, online=False)
+            result = self.run_once(directory, False, "--hysteresis", "1")
             self.assertEqual(result.returncode, 0, result.stderr)
             second = json.loads(state.read_text(encoding="utf-8"))
             self.assertEqual(second["state"], "offline")
             self.assertEqual(second["lastSeenOnline"], first["lastSeenOnline"])
             self.assertEqual(events.read_text().count("online -> offline"), 1)
-            result = self.run_once(directory, online=False)
+            result = self.run_once(directory, False, "--hysteresis", "1")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(events.read_text().splitlines()), 2)
+
+    def test_a_flip_needs_two_consecutive_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state" / "mac-state.json"
+            read = lambda: json.loads(state.read_text(encoding="utf-8"))
+            self.run_once(directory, online=True)
+            self.assertEqual(read()["state"], "online")
+            self.run_once(directory, online=False)
+            self.assertEqual((read()["state"], read()["pending"], read()["pendingCount"]), ("online", "offline", 1))
+            self.run_once(directory, online=True)
+            self.assertNotIn("pending", read())
+            self.run_once(directory, online=False)
+            self.run_once(directory, online=False)
+            self.assertEqual(read()["state"], "offline")
+            self.assertNotIn("pending", read())
+            self.run_once(directory, online=True)
+            self.assertEqual(read()["state"], "offline")
+            self.run_once(directory, online=True)
+            self.assertEqual(read()["state"], "online")
+
+    def test_online_means_the_app_answered_not_just_sshd(self):
+        # sshd answers (exit 0) but no connector path comes back: the app is
+        # down, so the host is offline.
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "ssh").write_text("#!/bin/sh\nexit 0\n")
+            (bin_dir / "ssh").chmod(0o755)
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       HERMES_WORKSPACE_MAC_SSH="test@mac",
+                       HERMES_MAC_STATE_FILE=str(Path(directory) / "s" / "mac-state.json"))
+            probe = subprocess.run([SH, str(WATCH), "--once"], env=env, capture_output=True, text=True)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            self.assertEqual(json.loads((Path(directory) / "s" / "mac-state.json").read_text())["state"], "offline")
+
+    def test_missing_ssh_target_is_a_clear_config_error(self):
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_WORKSPACE_MAC_SSH"}
+        result = subprocess.run([SH, str(WATCH), "--once"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("HERMES_WORKSPACE_MAC_SSH is not set", result.stderr)
+        unit = (ROOT / "deploy" / "mac-watch.service").read_text(encoding="utf-8")
+        self.assertIn("RestartPreventExitStatus=2", unit)
 
     def test_once_tolerates_a_corrupt_state_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -724,6 +769,533 @@ class DeadBackendFallbackTests(unittest.TestCase):
             self.assertIn('"id":1', line)
             self.assertIn('"stub":"vps"', line)
             self.assertIn("silent 400ms after initialize", err)
+
+
+@unittest.skipUnless(NODE, "node is required for router tests")
+class RouterHelperTests(unittest.TestCase):
+    def js(self, script, *args):
+        proc = subprocess.run([NODE, "-e", script, str(ROUTER), *args],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_control_path_stays_under_the_unix_socket_limit_with_a_long_tmpdir(self):
+        env = dict(os.environ, TMPDIR="/var/folders/zz/" + "x" * 40 + "/T/")
+        proc = subprocess.run(
+            [NODE, "-e", "process.stdout.write(JSON.stringify(require(process.argv[1]).sshControlArgs))", str(ROUTER)],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        args = json.loads(proc.stdout)
+        control = next(a for a in args if a.startswith("ControlPath="))[len("ControlPath="):]
+        # %C expands to a 40-char hash; ssh appends a 17-char temp suffix.
+        self.assertLess(len(control.replace("%C", "x" * 40)) + 17, 104)
+        self.assertTrue(control.startswith("/tmp/wsr-"))
+        self.assertIn("ControlPersist=600", args)
+        self.assertIn("ServerAliveInterval=5", args)
+        self.assertIn("ServerAliveCountMax=2", args)
+        self.assertEqual(os.stat(os.path.dirname(control)).st_mode & 0o077, 0)
+
+    def test_resume_files_are_scoped_by_bot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [
+                {"type": "text", "text": json.dumps({"url": "https://docs.example/d/abc"})}]}})
+            self.annotator = RouterNoticeTests("annotate")
+            RouterNoticeTests.annotate(self.annotator, directory, [{"line": page}], host="mac", bot="bot-a")
+            self.assertTrue((Path(directory) / "resume-url-bot-a.json").exists())
+            self.assertFalse((Path(directory) / "resume-url.json").exists())
+            self.assertEqual([p.name for p in Path(directory).glob("*.tmp")], [])
+            [line], _ = RouterNoticeTests.annotate(
+                self.annotator, directory,
+                [{"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT}], bot="bot-b")
+            self.assertIn("Reopen the same URL and continue.", json.loads(line)["result"]["content"][1]["text"])
+            [line], _ = RouterNoticeTests.annotate(
+                self.annotator, directory,
+                [{"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT}], bot="bot-a")
+            self.assertIn("Reopen https://docs.example/d/abc and continue.", json.loads(line)["result"]["content"][1]["text"])
+
+    def test_a_large_result_is_annotated_without_parsing_it(self):
+        out = self.js(r"""
+const router = require(process.argv[1]);
+const pending = new Map([[7, { method: 'tools/call' }]]);
+const big = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'image', data: 'A'.repeat(3000000), mimeType: 'image/png' }] } });
+const realParse = JSON.parse;
+JSON.parse = (text, ...rest) => { if (String(text).length > 100000) throw new Error('parsed a screenshot'); return realParse(text, ...rest); };
+const fs = require('fs'), os = require('os'), path = require('path');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsr-'));
+const state = path.join(dir, 'mac-state.json');
+fs.writeFileSync(state, JSON.stringify({ state: 'offline', since: 'T0' }));
+router.noteServerRpc(big, pending);
+const out = router.makeAnnotator('vps', true, state)(big);
+JSON.parse = realParse;
+const msg = JSON.parse(out);
+process.stdout.write(JSON.stringify({ pending: pending.size, parts: msg.result.content.map((p) => p.type), meta: msg.result._meta, same: msg.result.content[0].data.length }));
+""")
+        data = json.loads(out)
+        self.assertEqual(data["pending"], 0)
+        self.assertEqual(data["parts"], ["image", "text"])
+        self.assertEqual(data["meta"]["workspace"]["host"], "vps")
+        self.assertEqual(data["meta"]["workspace"]["mac"]["state"], "offline")
+        self.assertEqual(data["same"], 3000000)
+
+    def test_restore_mirror_posts_the_bot_and_returns_only_valid_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = Path(directory) / "connection.json"
+            connection.write_text(json.dumps({"url": "http://127.0.0.1:9", "token": "tok"}))
+            out = self.js(r"""
+const router = require(process.argv[1]);
+(async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url: String(url), method: opts.method, body: opts.body, headers: opts.headers });
+    return { ok: true, json: async () => ({ map: { 'tab-1': 'vps-1', 'bad id': 'x', 'tab-2': '../etc' } }) };
+  };
+  const map = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1', botName: 'Al', fetchImpl });
+  const refused = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1',
+    fetchImpl: async () => ({ ok: false, json: async () => ({}) }) });
+  const empty = await router.restoreMirror({ connectionFile: process.argv[2], botId: 'bot-1',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ map: {} }) }) });
+  const none = await router.restoreMirror({ connectionFile: '/nonexistent', botId: 'bot-1', fetchImpl });
+  process.stdout.write(JSON.stringify({ map, refused, empty, none, call: calls[0] }));
+})();
+""", str(connection))
+            data = json.loads(out)
+            self.assertEqual(data["map"], {"tab-1": "vps-1"})
+            self.assertIsNone(data["refused"])
+            self.assertIsNone(data["empty"])
+            self.assertIsNone(data["none"])
+            self.assertEqual(data["call"]["url"], "http://127.0.0.1:9/v1/restore")
+            self.assertEqual(data["call"]["method"], "POST")
+            self.assertEqual(json.loads(data["call"]["body"]), {"bot": "bot-1"})
+            self.assertEqual(data["call"]["headers"]["Authorization"], "Bearer tok")
+            self.assertEqual(data["call"]["headers"]["X-Hermes-Bot"], "bot-1")
+
+    def test_failover_notice_names_restored_tabs_and_logins(self):
+        out = self.js(r"""
+const r = require(process.argv[1]);
+process.stdout.write(JSON.stringify([
+  r.continuationNotice({ map: { 'h-1': 'v-1', 'h-2': 'v-2' } }),
+  r.continuationNotice({ continued: { url: 'https://docs.example/d/abc', tabId: 'v-9' } }),
+  r.continuationNotice({}, 'Windows host'),
+]));
+""")
+        mirrored, continued, bare = json.loads(out)
+        self.assertIn("Restored 2 tabs with their logins carried over", mirrored)
+        self.assertIn("h-1 -> v-1, h-2 -> v-2", mirrored)
+        self.assertIn("Continued https://docs.example/d/abc as VPS tab v-9", continued)
+        self.assertIn("Logins did not carry over", continued)
+        self.assertIn("Windows host connection lost", bare)
+        for text in (mirrored, continued, bare):
+            self.assertNotIn("—", text)
+
+    def test_only_the_connector_unavailable_error_counts_toward_failover(self):
+        out = self.js(r"""
+const r = require(process.argv[1]);
+const err = (text) => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text }] } });
+process.stdout.write(JSON.stringify([
+  r.hostUnavailableLine(err('Configured browser unavailable or timed out. Inspect existing task state before retrying an action.')),
+  r.hostUnavailableLine(err('Timed out waiting for selector #x')),
+  r.hostUnavailableLine(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Configured browser unavailable' }] } })),
+]));
+""")
+        self.assertEqual(json.loads(out), [True, False, False])
+
+
+def _posix_env(home, bin_dir, **extra):
+    env = {k: v for k, v in os.environ.items() if k not in ("XDG_CONFIG_HOME", "HERMES_WORKSPACE_HOST_OS")}
+    env.update(HOME=str(home), PATH=str(bin_dir) + os.pathsep + env["PATH"], **extra)
+    return env
+
+
+@unittest.skipUnless(NODE and SH, "node and sh are required for host command tests")
+class HostCommandShellTests(unittest.TestCase):
+    """Run the generated probe and probe-and-exec commands under sh with a stub curl."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.bin = Path(self.tmp.name) / "bin"
+        self.bin.mkdir()
+        curl = self.bin / "curl"
+        curl.write_text("#!/bin/sh\ngrep -q 'Bearer good' || exit 22\nexit 0\n")
+        curl.chmod(0o755)
+        node = self.home / "fake-node"
+        node.write_text("#!/bin/sh\necho \"$@\"\n")
+        node.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def install(self, conn_dir, token="good"):
+        conn_dir.mkdir(parents=True)
+        (conn_dir / "connection.json").write_text(
+            json.dumps({"url": "http://127.0.0.1:9464", "token": token, "protocol": 1}, indent=2))
+        script = conn_dir / "connector" / "scripts" / "browser-mcp.cjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        return script
+
+    def command(self, fn, host_os, *args):
+        proc = subprocess.run(
+            [NODE, "-e", "process.stdout.write(require(process.argv[1])." + fn + "(" + ", ".join(args) + "))",
+             str(ROUTER), "--host-os", host_os, "--mac-node", str(self.home / "fake-node")],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def run_sh(self, command, **extra):
+        return subprocess.run([SH, "-c", command], capture_output=True, text=True,
+                              env=_posix_env(self.home, self.bin, **extra))
+
+    def test_mac_probe_needs_the_token_to_be_accepted(self):
+        conn = self.home / "Library" / "Application Support" / "Hermes Workspace"
+        script = self.install(conn)
+        found = self.run_sh(self.command("posixProbeCommand", "mac"))
+        self.assertEqual((found.returncode, found.stdout), (0, str(script)), found.stderr)
+        (conn / "connection.json").write_text(json.dumps({"url": "http://127.0.0.1:9464", "token": "stale"}))
+        dead = self.run_sh(self.command("posixProbeCommand", "mac"))
+        self.assertEqual((dead.returncode, dead.stdout), (1, ""))
+
+    def test_linux_probe_follows_xdg_config_home(self):
+        script = self.install(self.home / ".config" / "Hermes Workspace")
+        found = self.run_sh(self.command("posixProbeCommand", "linux"))
+        self.assertEqual((found.returncode, found.stdout), (0, str(script)), found.stderr)
+        moved = self.install(Path(self.tmp.name) / "xdg" / "Hermes Workspace")
+        found = self.run_sh(self.command("posixProbeCommand", "linux"), XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"))
+        self.assertEqual((found.returncode, found.stdout), (0, str(moved)), found.stderr)
+
+    def test_probe_and_exec_runs_the_backend_or_exits_97(self):
+        for host_os, conn in (("mac", "Library/Application Support/Hermes Workspace"), ("linux", ".config/Hermes Workspace")):
+            with self.subTest(host_os=host_os):
+                conn_dir = self.home / conn
+                script = self.install(conn_dir)
+                ran = self.run_sh(self.command("posixAutoBackendCommand", host_os, "process.argv[5]", "'bot-1'", "''"))
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertIn(str(script), ran.stdout)
+                self.assertIn("--bot-id bot-1", ran.stdout)
+                (conn_dir / "connection.json").write_text(json.dumps({"url": "http://127.0.0.1:9464", "token": "stale"}))
+                dead = self.run_sh(self.command("posixAutoBackendCommand", host_os, "process.argv[5]", "'bot-1'", "''"))
+                self.assertEqual((dead.returncode, dead.stdout), (97, ""))
+
+    def test_linux_backend_runs_electron_as_node_with_the_linux_connection_file(self):
+        out = subprocess.run(
+            [NODE, "-e",
+             "process.stdout.write(require(process.argv[1]).linuxBackendCommand('/x/browser-mcp.cjs', '', 'bot-1', \"o'hara\"))",
+             str(ROUTER)], capture_output=True, text=True, check=True).stdout
+        self.assertIn("ELECTRON_RUN_AS_NODE=1", out)
+        self.assertIn("'/opt/alans-way-localapp'/alans-way-localapp", out)
+        self.assertIn("XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json", out)
+        self.assertIn("--bot-name 'o'\\''hara'", out)
+        self.assertEqual(subprocess.run([SH, "-n", "-c", out]).returncode, 0)
+
+
+@unittest.skipUnless(NODE and SH, "node and sh are required for router process tests")
+class HostOsTests(unittest.TestCase):
+    def probe(self, host_os, ssh_reply):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            ssh = bin_dir / "ssh"
+            ssh.write_text("#!/bin/sh\nprintf %%s '%s'\n" % ssh_reply)
+            ssh.chmod(0o755)
+            proc = subprocess.run(
+                [NODE, str(ROUTER), "--probe", "--mac-ssh", "u@h", "--host-os", host_os],
+                capture_output=True, text=True, env=_posix_env(directory, bin_dir))
+            return proc.stdout.strip()
+
+    def test_linux_is_a_host_os(self):
+        self.assertEqual(self.probe("linux", "/home/u/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs"),
+                         "linux: /home/u/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs")
+        self.assertTrue(self.probe("linux", "").startswith("vps (linux unreachable"))
+
+    def test_an_unknown_host_os_still_means_mac(self):
+        path = "/Users/u/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"
+        self.assertEqual(self.probe("freebsd", path), "mac: " + path)
+
+
+class FakeVmHost:
+    """The VPS browser host's loopback API: only POST /v1/restore is served."""
+
+    def __init__(self, mapping=None, delay=0.0):
+        import http.server
+        import threading
+        self.requests = []
+        self.mapping = mapping
+        self.delay = delay
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+                outer.requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
+                                       "bot": self.headers.get("X-Hermes-Bot"), "body": body})
+                time.sleep(outer.delay)
+                if self.path == "/v1/restore" and outer.mapping is not None:
+                    payload = json.dumps({"map": outer.mapping}).encode()
+                    self.send_response(200)
+                else:
+                    payload = b"{}"
+                    self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+MAC_STUB = r"""
+const mode = process.env.MAC_MODE || 'ok';
+let calls = 0;
+const reply = (id, text, isError) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
+  result: { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) } }) + '\n');
+require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
+  const m = JSON.parse(line);
+  if (m.id === undefined) return;
+  if (m.method === 'tools/call') {
+    calls += 1;
+    if (calls >= 2 && mode === 'hang') return;
+    if (calls >= 2 && mode === 'die-on-call') process.exit(1);
+    if (calls >= 2 && mode === 'unavailable') return reply(m.id, 'Configured browser unavailable or timed out. Inspect existing task state before retrying an action.', true);
+  }
+  if (m.method === 'tools/list' && mode === 'die-on-list') process.exit(1);
+  reply(m.id, 'mac');
+});
+"""
+
+VPS_STUB = r"""
+const fs = require('fs');
+fs.appendFileSync(process.env.VPS_LOG, 'ARGV ' + JSON.stringify(process.argv.slice(2)) + '\n');
+require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
+  fs.appendFileSync(process.env.VPS_LOG, 'LINE ' + line + '\n');
+  const m = JSON.parse(line);
+  if (m.id === undefined) return;
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'vps' }] } }) + '\n');
+});
+"""
+
+FAKE_SSH = """#!/bin/sh
+echo call >> "$SSH_LOG"
+for last in "$@"; do :; done
+case "$last" in
+  *"exit 97"*) [ -n "$MAC_DEAD" ] && exit 97; exec node "$MAC_STUB" ;;
+  *conn_script*) printf %s "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"; exit 0 ;;
+  *) exec node "$MAC_STUB" ;;
+esac
+"""
+
+
+@unittest.skipUnless(NODE and SH, "node and sh are required for router process tests")
+class HostFailoverTests(unittest.TestCase):
+    """Drive the real router against a fake ssh, a fake host backend and a fake VPS backend."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "bin").mkdir()
+        ssh = self.dir / "bin" / "ssh"
+        ssh.write_text(FAKE_SSH)
+        ssh.chmod(0o755)
+        (self.dir / "mac-stub.cjs").write_text(MAC_STUB)
+        (self.dir / "vps-stub.cjs").write_text(VPS_STUB)
+        self.state = self.dir / "mac-state.json"
+        self.vm = None
+        self.proc = None
+        self.next_id = 1
+
+    def tearDown(self):
+        if self.proc:
+            self.proc.kill()
+            self.proc.communicate()
+        if self.vm:
+            self.vm.close()
+        self.tmp.cleanup()
+
+    def start(self, mode="ok", vm=None, **env):
+        self.vm = vm
+        connection = self.dir / "conn.json"
+        if vm:
+            connection.write_text(json.dumps({"url": vm.url, "token": "tok"}))
+        environment = dict(os.environ, PATH=str(self.dir / "bin") + os.pathsep + os.environ["PATH"],
+                           MAC_STUB=str(self.dir / "mac-stub.cjs"), VPS_LOG=str(self.dir / "vps.log"),
+                           SSH_LOG=str(self.dir / "ssh.log"), MAC_MODE=mode,
+                           HERMES_ROUTER_CALL_DEADLINE_MS="700", **env)
+        self.proc = subprocess.Popen(
+            [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "bot1",
+             "--vps-script", str(self.dir / "vps-stub.cjs"), "--vps-connection", str(connection),
+             "--mac-state-file", str(self.state)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+
+    def send(self, method, **params):
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        if method != "notifications/initialized":
+            msg["id"] = self.next_id
+            self.next_id += 1
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+        return msg.get("id")
+
+    def recv(self, timeout=15):
+        if not select.select([self.proc.stdout], [], [], timeout)[0]:
+            self.fail("no response within %ss" % timeout)
+        return json.loads(self.proc.stdout.readline())
+
+    def text(self, msg):
+        return " ".join(part["text"] for part in msg["result"]["content"])
+
+    def served_by(self, msg):
+        return msg["result"]["content"][0]["text"]
+
+    def handshake(self):
+        self.send("initialize")
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        self.send("notifications/initialized")
+
+    def call(self):
+        return self.send("tools/call", name="cua_alans_way_action", arguments={"action": "click"})
+
+    def vps_log(self):
+        path = self.dir / "vps.log"
+        return path.read_text() if path.exists() else ""
+
+    def vps_spawns(self):
+        return [json.loads(line[5:]) for line in self.vps_log().splitlines() if line.startswith("ARGV ")]
+
+    def test_a_hung_call_fails_over_and_the_action_is_not_replayed(self):
+        vm = FakeVmHost({"h1": "v1"})
+        self.start("hang", vm)
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        stuck = self.call()
+        started = time.time()
+        lost = self.recv()
+        self.assertLess(time.time() - started, 10)
+        self.assertEqual(lost["id"], stuck)
+        self.assertTrue(lost["result"]["isError"])
+        text = self.text(lost)
+        self.assertIn("NOT retried", text)
+        self.assertIn("Restored 1 tab with their logins carried over", text)
+        self.assertIn("h1 -> v1", text)
+        self.assertEqual(lost["result"]["_meta"]["workspace"]["host"], "vps")
+        after = self.call()
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served_by(answered)), (after, "vps"))
+        self.assertEqual(json.dumps(vm.requests[0]["body"]), json.dumps('{"bot":"bot1"}'))
+        self.assertEqual((vm.requests[0]["path"], vm.requests[0]["auth"], vm.requests[0]["bot"]),
+                         ("/v1/restore", "Bearer tok", "bot1"))
+        spawns = self.vps_spawns()
+        self.assertEqual(spawns[-1][spawns[-1].index("--tab-map") + 1], '{"h1":"v1"}')
+        log = self.vps_log()
+        self.assertIsNone(re.search(r'"id": ?%d[,}]' % stuck, log))
+        self.assertIsNotNone(re.search(r'"id": ?%d[,}]' % after, log))
+        self.assertIn("wsr-init-", log)
+
+    def test_the_host_process_dying_replays_reads_but_not_actions(self):
+        self.start("die-on-list")
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        listing = self.send("tools/list")
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served_by(answered)), (listing, "vps"))
+
+    def test_an_action_in_flight_when_the_host_dies_gets_a_clear_error(self):
+        self.start("die-on-call")
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        lost_id = self.call()
+        lost = self.recv()
+        self.assertEqual(lost["id"], lost_id)
+        self.assertTrue(lost["result"]["isError"])
+        self.assertIn("NOT retried", self.text(lost))
+        self.assertIn("No tabs were mirrored", self.text(lost))
+        self.assertNotIn('"tools/call"', self.vps_log())
+
+    def test_two_unavailable_errors_in_a_row_fail_over(self):
+        self.start("unavailable")
+        self.handshake()
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+        first = self.recv_after_call()
+        self.assertIn("Configured browser unavailable", self.text(first))
+        self.assertNotIn("NOT retried", self.text(first))
+        second = self.recv_after_call()
+        self.assertIn("NOT retried", self.text(second))
+        third = self.recv_after_call()
+        self.assertEqual(third["result"]["content"][0]["text"], "vps")
+
+    def recv_after_call(self):
+        self.call()
+        return self.recv()
+
+    def test_a_fresh_offline_verdict_newer_than_the_backend_fails_over(self):
+        self.start("ok")
+        self.handshake()
+        self.state.write_text(json.dumps({"state": "offline",
+                                          "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+        time.sleep(2.5)
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "vps")
+
+    def test_a_stale_offline_verdict_does_not_move_a_backend_that_just_answered(self):
+        self.state.write_text(json.dumps({"state": "offline", "since": "2020-01-01T00:00:00Z"}))
+        self.start("ok")
+        self.handshake()
+        time.sleep(2.5)
+        self.call()
+        self.assertEqual(self.served_by(self.recv()), "mac")
+
+    def test_a_fresh_online_verdict_starts_the_backend_without_a_separate_probe(self):
+        self.state.write_text(json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}))
+        self.start("ok")
+        self.handshake()
+        self.assertEqual(len((self.dir / "ssh.log").read_text().splitlines()), 1)
+
+    def test_a_fresh_online_verdict_that_is_wrong_still_reaches_the_vps(self):
+        self.state.write_text(json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}))
+        self.start("ok", MAC_DEAD="1")
+        self.send("initialize")
+        self.assertEqual(self.served_by(self.recv()), "vps")
+
+    def test_initialize_does_not_wait_for_a_slow_restore(self):
+        self.state.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z"}))
+        (self.dir / "router-last-self-probe").write_text(str(int(time.time() * 1000)))
+        vm = FakeVmHost({"h1": "v1"}, delay=2.0)
+        self.start("ok", vm)
+        started = time.time()
+        self.send("initialize")
+        self.assertEqual(self.served_by(self.recv()), "vps")
+        self.assertLess(time.time() - started, 1.5)
+        self.send("notifications/initialized")
+        call_id = self.call()
+        answered = self.recv()
+        self.assertEqual(answered["id"], call_id)
+        self.assertGreaterEqual(time.time() - started, 1.9)
+        self.assertIn("Mac unreachable since", self.text(answered))
+        self.assertIn("Restored 1 tab with their logins carried over", self.text(answered))
+        self.assertNotIn("Reopen the same URL", self.text(answered))
+        spawns = self.vps_spawns()
+        self.assertEqual(len(spawns), 2)
+        self.assertIn("--tab-map", spawns[1])
 
 
 if __name__ == "__main__":

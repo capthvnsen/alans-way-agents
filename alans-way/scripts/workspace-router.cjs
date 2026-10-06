@@ -8,20 +8,21 @@
 //
 // Why a launcher (not a proxy): both hosts serve identical tools through the
 // same `browser-mcp.cjs` script. Deciding the backend at connection time and
-// forwarding stdio transparently is the smallest correct mechanism. Hermes
-// re-spawns a lazy MCP server when its child exits, so if the Mac dies
-// mid-session the ssh child exits and the next connection re-runs this probe
-// and routes to the VPS.
+// forwarding stdio transparently is the smallest correct mechanism. If the
+// host drops mid-session (ssh keepalive, a stuck call, a fresh mac-watch
+// offline verdict, the app quitting) the router moves the session to the VPS
+// backend in-process, restoring the host's mirrored tabs there; once the host
+// is back and the session is idle it exits so Hermes respawns it onto the host.
 //
 // Configuration (all optional unless noted):
 //   --bot-id ID                required: this bot's tab-owner identity
 //   --bot-name NAME            optional display name for the agent cursor
 //   --mac-ssh USER@HOST        ssh alias/host for the user's computer
-//   --host-os mac|windows      OS of the user's computer (default: mac)
+//   --host-os mac|windows|linux  OS of the user's computer (default: mac)
 //   --mac-node PATH            node binary on the user's computer
-//                              (default: the app's own runtime; mac only)
+//                              (default: the app's own runtime; mac and linux)
 //   --mac-script PATH          browser-mcp.cjs path on the user's computer
-//                              (default: the installed app's bundled copy; mac only)
+//                              (default: the installed app's bundled copy; mac and linux)
 //   --vps-script PATH          browser-mcp.cjs path on this host
 //                              (default: sibling copy, then the deployed copy)
 //   --vps-connection PATH      local browser host connection.json
@@ -51,14 +52,19 @@ const botId = arg('--bot-id') || process.env.HERMES_WORKSPACE_BOT_ID || '';
 const botName = arg('--bot-name') || process.env.HERMES_BOT_NAME || '';
 const macSsh = arg('--mac-ssh') || process.env.HERMES_WORKSPACE_MAC_SSH || '';
 const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || '';
-// The user's machine runs either macOS or Windows; everything else would
-// silently probe POSIX shell on a Windows sshd and never converge.
-const hostOs = (arg('--host-os') || process.env.HERMES_WORKSPACE_HOST_OS || 'mac') === 'windows' ? 'windows' : 'mac';
-const hostName = hostOs === 'windows' ? 'Windows host' : 'Mac';
+// Anything that is not windows or linux would silently probe a POSIX shell
+// with the Mac layout on a host where it never converges, so it means mac.
+const hostOsArg = arg('--host-os') || process.env.HERMES_WORKSPACE_HOST_OS || 'mac';
+const hostOs = hostOsArg === 'windows' || hostOsArg === 'linux' ? hostOsArg : 'mac';
+const hostName = { windows: 'Windows host', linux: 'Linux host', mac: 'Mac' }[hostOs];
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
+const linuxScripts = [
+  '/opt/alans-way-localapp/resources/app/scripts/browser-mcp.cjs',
+  '$HOME/.local/share/alans-way-localapp/resources/app/scripts/browser-mcp.cjs',
+];
 const macScripts = configuredMacScript
   ? [configuredMacScript]
-  : hostOs === 'windows'
+  : hostOs !== 'mac'
     ? []
     : [
         '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
@@ -98,15 +104,28 @@ const macStateFile =
 // Reuse one ssh connection between the probe and the backend spawn: the
 // probe's handshake becomes the spawn's (~5ms vs a full handshake), and
 // later respawns ride it for ControlPersist seconds. %C hashes the
-// destination, so the socket name needs no host-derived parts.
-const sshControlPath = path.join(process.env.TMPDIR || '/tmp', 'wsr-%C');
+// destination, so the socket name needs no host-derived parts. The socket
+// lives in a private dir under /tmp, not $TMPDIR: a macOS guest's TMPDIR is
+// ~50 chars, and ssh refuses a ControlPath over 104 chars once it appends its
+// 17-char temp suffix. ServerAlive makes the master (and so every session on
+// it) drop within ~10s when the host vanishes, instead of hanging on a
+// half-open socket.
+function privateSocketDir() {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return null;
+  const dir = `/tmp/wsr-${process.getuid()}`;
+  try {
+    try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') return null; }
+    const st = fs.lstatSync(dir);
+    return st.isDirectory() && st.uid === process.getuid() && (st.mode & 0o077) === 0 ? dir : null;
+  } catch { return null; }
+}
+const sshKeepaliveArgs = ['-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2'];
+const socketDir = privateSocketDir();
 const sshControlArgs = [
-  '-o',
-  'ControlMaster=auto',
-  '-o',
-  'ControlPersist=120',
-  '-o',
-  `ControlPath=${sshControlPath}`,
+  ...sshKeepaliveArgs,
+  ...(socketDir
+    ? ['-o', 'ControlMaster=auto', '-o', 'ControlPersist=600', '-o', `ControlPath=${socketDir}/%C`]
+    : []),
 ];
 
 // Quote a value for the remote command line ssh builds from argv.
@@ -144,23 +163,47 @@ function selfProbeStampFile(stateFile) {
   return path.join(path.dirname(stateFile), 'router-last-self-probe');
 }
 
+// `pending` is a Set of request ids or, in the router, a Map id -> request
+// (method, raw line, start time) so a failover knows what was in flight.
+// Returns the request's method (or null) so the caller need not parse again.
 function noteClientRpc(line, pending) {
   try {
     const msg = JSON.parse(line);
-    if (msg && typeof msg === 'object' && msg.id != null && typeof msg.method === 'string') {
-      pending.add(msg.id);
+    if (!msg || typeof msg !== 'object' || typeof msg.method !== 'string') return null;
+    if (msg.id != null) {
+      if (pending instanceof Map) {
+        const args = msg.params && msg.params.arguments;
+        pending.set(msg.id, { method: msg.method, line, at: Date.now(), batch: Boolean(args && args.action === 'batch') });
+      } else pending.add(msg.id);
     }
-  } catch {}
+    return msg.method;
+  } catch { return null; }
 }
 
+// A screenshot result is megabytes of base64: find its id from the prefix
+// instead of parsing it. Large lines are results, never requests.
+const BIG_LINE = 100000;
 function noteServerRpc(line, pending) {
   try {
+    if (line.length > BIG_LINE) {
+      const m = /^\{\s*"jsonrpc"\s*:\s*"2\.0"\s*,\s*"id"\s*:\s*(\d+|"[^"\\]*")/.exec(line);
+      if (m) pending.delete(JSON.parse(m[1]));
+      return;
+    }
     const msg = JSON.parse(line);
     if (msg && typeof msg === 'object' && msg.id != null
         && (msg.result !== undefined || msg.error !== undefined)) {
       pending.delete(msg.id);
     }
   } catch {}
+}
+
+// The host app is gone but ssh is alive: browser-mcp answers every call with
+// this exact message. Not "timed out" alone: a page wait that times out is an
+// ordinary result. A short line only, so a screenshot is never scanned.
+function hostUnavailableLine(line) {
+  return line.length < 4000 && /"isError"\s*:\s*true/.test(line)
+    && /Configured browser unavailable/.test(line);
 }
 
 function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
@@ -174,11 +217,11 @@ function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, n
 // usually missing on the Mac. The app bundle already ships a Node runtime:
 // its own Electron binary with ELECTRON_RUN_AS_NODE. PATH node is only the
 // fallback for bundles without one; an explicit --mac-node always wins.
-function macBackendCommand(script, node, id, name) {
-  const tail = [shQuote(script), '--bot-id', shQuote(id)];
+function macBackendCommand(script, node, id, name, scriptWord = shQuote(script)) {
+  const tail = [scriptWord, '--bot-id', shQuote(id)];
   if (name) tail.push('--bot-name', shQuote(name));
   const args = tail.join(' ');
-  if (node) return `${shQuote(node)} ${args}`;
+  if (node) return `exec ${shQuote(node)} ${args}`;
   const bundle = /^(.*\/([^/]+)\.app)\/Contents\/Resources\//.exec(script);
   if (bundle) {
     const exe = shQuote(`${bundle[1]}/Contents/MacOS/${bundle[2]}`);
@@ -202,6 +245,72 @@ function macBackendCommand(script, node, id, name) {
   return `${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
 }
 
+// Linux host: same Electron-as-Node idea. The app is an electron-packager
+// build, so the executable sits next to resources/app; /opt and the user's
+// ~/.local/share are the install locations probed. The connector reads its
+// connection file from the macOS path by default, so point it at the Linux
+// userData dir ($XDG_CONFIG_HOME or ~/.config, then "Hermes Workspace").
+function linuxBackendCommand(script, node, id, name, scriptWord = shQuote(script)) {
+  const tail = [scriptWord, '--bot-id', shQuote(id)];
+  if (name) tail.push('--bot-name', shQuote(name));
+  const args = tail.join(' ');
+  const env = 'HERMES_WORKSPACE_CONNECTION="${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json"; export HERMES_WORKSPACE_CONNECTION; ';
+  if (node) return `${env}exec ${shQuote(node)} ${args}`;
+  const roots = ["'/opt/alans-way-localapp'", '"$HOME/.local/share/alans-way-localapp"'];
+  const checks = roots.map((root) =>
+    `if [ -x ${root}/alans-way-localapp ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/alans-way-localapp ${args}; fi;`,
+  ).join(' ');
+  return `${env}${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
+}
+
+// Shell text shared by the mac and linux hosts: set the connector path and
+// connection file, then define wsr_alive. A closed app still has its script
+// on disk, so file existence alone would route to a dead host. wsr_alive
+// proves the app is serving AND accepts this machine's token (a stale
+// connection.json fails it); the token goes to curl on stdin, not argv.
+function posixPrelude() {
+  const dir = hostOs === 'linux'
+    ? '${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace'
+    : '$HOME/Library/Application Support/Hermes Workspace';
+  return (
+    `conn_dir="${dir}"; conn_script="$conn_dir/connector/scripts/browser-mcp.cjs"; conn="$conn_dir/connection.json"; ` +
+    'wsr_alive() { [ -f "$conn" ] && ' +
+    `port=$(sed -n 's/.*"url"[^0-9]*[0-9.]*:\\([0-9]*\\).*/\\1/p' "$conn" | head -1) && ` +
+    `tok=$(sed -n 's/.*"token"[^"]*"\\([^"]*\\)".*/\\1/p' "$conn" | head -1) && [ -n "$tok" ] && ` +
+    `printf 'header = "Authorization: Bearer %s"\\n' "$tok" | ` +
+    'curl -sf -m 4 -o /dev/null -K - "http://127.0.0.1:${port:-9464}/v1/status"; }; '
+  );
+}
+
+// Each candidate is a shell word for a connector script plus the literal path
+// when it is one (the home connector is expanded on the host, not here).
+function posixCandidates() {
+  const configured = configuredMacScript ? [{ word: shQuote(configuredMacScript), script: configuredMacScript }] : null;
+  if (hostOs === 'linux') {
+    return configured || [
+      { word: '"$conn_script"', script: '' },
+      ...linuxScripts.map((s) => ({ word: s.startsWith('$HOME') ? `"${s}"` : shQuote(s), script: s })),
+    ];
+  }
+  return [{ word: '"$conn_script"', script: '' }, ...macScripts.map((s) => ({ word: shQuote(s), script: s }))];
+}
+
+function posixProbeCommand() {
+  return posixPrelude() + posixCandidates()
+    .map(({ word }) => `if [ -f ${word} ] && wsr_alive; then printf %s ${word}; exit 0; fi`)
+    .join('; ') + '; exit 1';
+}
+
+// Probe and exec in one ssh session: used when mac-watch says the host is
+// online, so the backend starts without a separate probe round trip. Exit 97
+// with no output means "not alive": the dead-on-arrival fallback takes over.
+function posixAutoBackendCommand(node, id, name) {
+  const build = hostOs === 'linux' ? linuxBackendCommand : macBackendCommand;
+  return posixPrelude() + posixCandidates()
+    .map(({ word, script }) => `if [ -f ${word} ] && wsr_alive; then ${build(script, node, id, name, word)}; fi`)
+    .join('; ') + '; exit 97';
+}
+
 // Windows backend: same idea over PowerShell — run the connector with the
 // app's own Electron-as-Node runtime, falling back to the installer's private
 // Node then PATH. The spawned process sits in Session 0, which is fine here:
@@ -217,11 +326,8 @@ function windowsBackendCommand(script, id, name) {
   return `$env:NODE_PATH = ${modules}; if (Test-Path ${exe}) { $env:ELECTRON_RUN_AS_NODE = '1'; & ${exe} ${args} } elseif (Test-Path ${node}) { & ${node} ${args} } else { & node ${args} }`;
 }
 
-// Probe finds the newest installed bundle AND proves the app is actually
-// serving — a closed app still has the script on disk, so file-existence
-// alone would route to a dead host. The API answers 401 without auth, which
-// still proves liveness; a refused connection means the app is not running.
-// Same probe over PowerShell: connection.json proves the app is serving
+// The posix probe (above) finds the newest installed bundle AND proves the
+// app is serving and accepts our token. Same probe over PowerShell: connection.json proves the app is serving
 // (any HTTP response, even 401, means the API is up), then emit the newest
 // connector script path — the pushed home copy wins over the install.
 function windowsProbeCommand() {
@@ -247,15 +353,7 @@ function windowsProbeCommand() {
 
 function probeMac(timeoutMs, connectTimeout = 6) {
   return new Promise((resolve) => {
-    const alive =
-      `{ conn="$HOME/Library/Application Support/Hermes Workspace/connection.json"; ` +
-      `[ -f "$conn" ] && ` +
-      `port=$(sed -n 's/.*"url"[^0-9]*[0-9.]*:\\([0-9]*\\).*/\\1/p' "$conn" | head -1) && ` +
-      `curl -s -m 4 -o /dev/null "http://127.0.0.1:\${port:-9464}/status"; }`;
-    const probe = hostOs === 'windows' ? windowsProbeCommand()
-      : `conn_script="$HOME/${connectorSuffix}"; if [ -f "$conn_script" ] && ${alive}; then printf %s "$conn_script"; exit 0; fi; ` + macScripts
-        .map(script => `if [ -f ${shQuote(script)} ] && ${alive}; then printf %s ${shQuote(script)}; exit 0; fi`)
-        .join('; ') + '; exit 1';
+    const probe = hostOs === 'windows' ? windowsProbeCommand() : posixProbeCommand();
     const child = spawn(
       'ssh',
       [
@@ -289,7 +387,9 @@ function probeMac(timeoutMs, connectTimeout = 6) {
       const found = output.trim();
       const valid = hostOs === 'windows'
         ? /^[A-Za-z]:[\\/].*browser-mcp\.cjs$/i.test(found)
-        : macScripts.includes(found) || found.endsWith(connectorSuffix);
+        : hostOs === 'linux'
+          ? /^\/.*browser-mcp\.cjs$/.test(found)
+          : macScripts.includes(found) || found.endsWith(connectorSuffix);
       const script = code === 0 && valid ? found : null;
       resolve({ script, stderr: errOutput });
     });
@@ -325,8 +425,11 @@ function freshMacState(file, maxAgeMs = 45000) {
 // Only meaningful when this connection fell back to the VPS host.
 const RESUME_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
-function resumePath(stateFile) {
-  return path.join(path.dirname(stateFile), 'resume-url.json');
+// One file per bot: two bots sharing a state dir must not continue each
+// other's pages.
+function resumePath(stateFile, bot = '') {
+  const id = String(bot || '').replace(/[^\w-]/g, '_').slice(0, 64);
+  return path.join(path.dirname(stateFile), id ? `resume-url-${id}.json` : 'resume-url.json');
 }
 
 function pageUrlFromMessage(msg) {
@@ -350,13 +453,45 @@ function pageUrlFromMessage(msg) {
   return null;
 }
 
-function writeResume(file, url) {
+function writeResumeNow(file, record) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ url, at: Date.now() }));
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(record));
     fs.renameSync(tmp, file);
   } catch { /* remembering a page must not break the tool result */ }
+}
+
+// Debounced: a busy Mac session returns a page url on most results, and a
+// sync mkdir+write+rename per result sits on the hot path. The latest page
+// is flushed within 1s and again synchronously at exit.
+const resumeQueue = new Map();
+let resumeExitHooked = false;
+function flushResumes() {
+  for (const [file, queued] of resumeQueue) {
+    clearTimeout(queued.timer);
+    writeResumeNow(file, queued.record);
+  }
+  resumeQueue.clear();
+}
+
+function writeResume(file, url) {
+  const queued = resumeQueue.get(file);
+  if (queued) {
+    queued.record = { url, at: Date.now() };
+    return;
+  }
+  if (!resumeExitHooked) {
+    resumeExitHooked = true;
+    process.on('exit', flushResumes);
+  }
+  const timer = setTimeout(() => {
+    const entry = resumeQueue.get(file);
+    resumeQueue.delete(file);
+    if (entry) writeResumeNow(file, entry.record);
+  }, 1000);
+  timer.unref();
+  resumeQueue.set(file, { record: { url, at: Date.now() }, timer });
 }
 
 function safeResumeUrl(value) {
@@ -393,7 +528,7 @@ function markResumeOpened(file, record, tabId, now = Date.now()) {
   if (!url || typeof record.at !== 'number' || !/^[\w-]{1,100}$/.test(String(tabId || ''))) return;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp`;
+    const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ url, at: record.at, openedAt: now, tabId }));
     fs.renameSync(tmp, file);
   } catch { /* the next spawn can open the page again */ }
@@ -413,6 +548,46 @@ function continuedArgs(continued) {
   return ['--continued-tab', tabId, '--continued-url', url];
 }
 
+// Auth headers and base URL for the browser host on this machine, or null
+// when its connection file is missing or not a loopback http endpoint.
+function loopbackClient({ connectionFile, botId, botName }) {
+  let connection;
+  try { connection = JSON.parse(fs.readFileSync(connectionFile, 'utf8')); } catch { return null; }
+  let base;
+  try { base = new URL(connection.url); } catch { return null; }
+  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || !connection.token || !botId) return null;
+  return {
+    base,
+    headers: {
+      Authorization: `Bearer ${connection.token}`,
+      'X-Hermes-Bot': botId,
+      ...(botName ? { 'X-Hermes-Bot-Name': encodeURIComponent(String(botName).slice(0, 80)) } : {}),
+    },
+  };
+}
+
+// Ask the VPS browser host to rebuild this bot's mirrored host tabs (cookies,
+// url, scroll, drafts). Returns {hostTabId: vpsTabId} or null when there is no
+// mirror or the host cannot answer. The call is idempotent on the host side.
+async function restoreMirror({ connectionFile, botId, botName, fetchImpl, timeoutMs = 20000 }) {
+  const client = loopbackClient({ connectionFile, botId, botName });
+  if (!client) return null;
+  const fetch = fetchImpl || globalThis.fetch;
+  try {
+    const response = await fetch(new URL('/v1/restore', client.base), {
+      method: 'POST',
+      headers: { ...client.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bot: botId }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
+    const entries = Object.entries((body && body.map) || {}).filter(([a, b]) => idOk(a) && idOk(b)).slice(0, 50);
+    return entries.length ? Object.fromEntries(entries) : null;
+  } catch { return null; }
+}
+
 // Open the last Mac https page in the local VPS browser. Cookies do not copy.
 // A tab that already has the URL is reused. A missing browser host returns
 // null so the notice can still tell the model to open the page itself.
@@ -420,17 +595,10 @@ async function continueRememberedPage({ connectionFile, record, botId, botName, 
   const safe = record && safeResumeUrl(record.url);
   if (!safe || typeof record.at !== 'number' || now - record.at > RESUME_MAX_AGE_MS) return null;
   if (record.openedAt >= record.at && record.tabId) return { url: safe, tabId: record.tabId, already: true };
-  let connection;
-  try { connection = JSON.parse(fs.readFileSync(connectionFile, 'utf8')); } catch { return null; }
-  let base;
-  try { base = new URL(connection.url); } catch { return null; }
-  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || !connection.token || !botId) return null;
+  const client = loopbackClient({ connectionFile, botId, botName });
+  if (!client) return null;
+  const { base, headers } = client;
   const fetch = fetchImpl || globalThis.fetch;
-  const headers = {
-    Authorization: `Bearer ${connection.token}`,
-    'X-Hermes-Bot': botId,
-    ...(botName ? { 'X-Hermes-Bot-Name': encodeURIComponent(String(botName).slice(0, 80)) } : {}),
-  };
   try {
     const listed = await fetch(new URL('/v1/tabs', base), { headers, signal: AbortSignal.timeout(4000) });
     if (!listed.ok) return null;
@@ -451,21 +619,50 @@ async function continueRememberedPage({ connectionFile, record, botId, botName, 
   } catch { return null; }
 }
 
-function workspaceNotice(host, mac, resumeUrl, continued, label = 'Mac') {
+function workspaceNotice(host, mac, resumeUrl, continued, label = 'Mac', pageNote = '') {
   if (!mac || host !== 'vps') return null;
   if (mac.state === 'online') {
     return (
-      `[workspace] ${label} is back online as of ${mac.since || 'unknown'} — ` +
+      `[workspace] ${label} is back online as of ${mac.since || 'unknown'}: ` +
       `tasks waiting on ${label}-local resources can resume. New web work goes to the in-app host browser.`
     );
   }
-  const page = continued && continued.url && continued.tabId
+  const page = pageNote ? ` ${pageNote}` : continued && continued.url && continued.tabId
     ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, say so and stop only that page.`
     : resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
   return (
-    `[workspace] ${label} unreachable since ${mac.since || 'unknown'} — ` +
+    `[workspace] ${label} unreachable since ${mac.since || 'unknown'}: ` +
     `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the ${label} keep going. ${label}-local files are unavailable.`
   );
+}
+
+// What the agent is told once the router moves a live session to the VPS
+// browser. `restored` is the {hostTabId: vpsTabId} map from the mirror
+// restore; without a mirror it falls back to the single continued page.
+function continuationDetail(c, label = 'Mac') {
+  const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
+  const tabs = Object.entries((c && c.map) || {}).filter(([a, b]) => idOk(a) && idOk(b)).slice(0, 20);
+  if (tabs.length) {
+    return (
+      `Restored ${tabs.length} tab${tabs.length === 1 ? '' : 's'} with their logins carried over ` +
+      `(${label} tab to VPS tab): ${tabs.map(([a, b]) => `${a} -> ${b}`).join(', ')}. ` +
+      'Work in the VPS tabs from now on. A restored tab may still be loading, so snapshot it before acting.'
+    );
+  }
+  const page = c && c.continued && safeResumeUrl(c.continued.url);
+  if (page && idOk(c.continued.tabId)) {
+    return (
+      `Continued ${page} as VPS tab ${c.continued.tabId}. Keep working in that tab. ` +
+      'Logins did not carry over; if the page asks you to sign in, say so and stop only that page.'
+    );
+  }
+  return null;
+}
+
+function continuationNotice(c, label = 'Mac') {
+  const detail = continuationDetail(c, label)
+    || 'No tabs were mirrored, so reopen the page you were on in the VPS browser and snapshot it before acting.';
+  return `[workspace] ${label} connection lost; work moved to the VPS browser. ${detail}`;
 }
 
 // Additive decoration of one outbound JSON-RPC message: structured host state
@@ -480,40 +677,61 @@ function annotateResult(msg, host, mac, notice) {
   return msg;
 }
 
+// A screenshot result is one huge content array and nothing else: append the
+// metadata to its text instead of parsing and re-serializing megabytes of
+// base64. Returns null when the line is not that exact shape.
+const PLAIN_RESULT = /^\{"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*"),"result":\{"content":\[/;
+function appendResultMeta(line, host, mac, notice) {
+  if (line.length < BIG_LINE || !line.endsWith(']}}') || !PLAIN_RESULT.test(line)) return null;
+  const extra = notice ? `,${JSON.stringify({ type: 'text', text: notice })}` : '';
+  return `${line.slice(0, -3)}${extra}],"_meta":${JSON.stringify({ workspace: { host, mac } })}}}`;
+}
+
 // Per-connection line annotator for the backend's stdout. The state file is
 // re-read per message so a mid-session flip is seen; the "back online" notice
 // fires once per online transition while the offline one rides every tool
 // result, since either may be the agent's only signal that host changed.
-function makeAnnotator(host, macConfigured, stateFile, label = 'Mac') {
+// ctx.botId scopes the resume file; ctx.takeMoveNotice() yields the one-shot
+// failover notice; ctx.restoredNote says which tabs the VPS browser restored.
+function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) {
   let onlineAnnounced = false;
-  const remembered = resumePath(stateFile);
+  const remembered = resumePath(stateFile, ctx.botId);
   return function annotateLine(line) {
+    const big = line.length > BIG_LINE;
     let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      process.stderr.write(`${line}\n`);
-      return null;
-    }
-    if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return line;
-    if (host === 'mac') {
-      const seen = pageUrlFromMessage(msg);
-      if (seen) writeResume(remembered, seen);
+    if (!big) {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        process.stderr.write(`${line}\n`);
+        return null;
+      }
+      if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return line;
+      if (host === 'mac') {
+        const seen = pageUrlFromMessage(msg);
+        if (seen) writeResume(remembered, seen);
+      }
     }
     const mac = macConfigured ? readMacState(stateFile) : null;
     const record = host === 'vps' ? readResumeRecord(remembered) : null;
     const resume = record ? record.url : null;
     const continued = continuedPage(record);
     let notice = null;
-    if (mac && Array.isArray(msg.result.content)) {
+    const hasContent = big || Array.isArray(msg.result.content);
+    const moved = hasContent && host === 'vps' && ctx.takeMoveNotice ? ctx.takeMoveNotice() : null;
+    if (moved) notice = moved;
+    else if (mac && hasContent) {
       if (mac.state === 'online') {
-        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume, continued, label);
+        // A session that failed over keeps the VPS until the router steps
+        // aside on its own; "back online" would mislead before then.
+        if (!onlineAnnounced && !ctx.failedOver) notice = workspaceNotice(host, mac, resume, continued, label, ctx.restoredNote);
         onlineAnnounced = true;
       } else {
         onlineAnnounced = false;
-        notice = workspaceNotice(host, mac, resume, continued, label);
+        notice = workspaceNotice(host, mac, resume, continued, label, ctx.restoredNote);
       }
     }
+    if (big) return appendResultMeta(line, host, mac, notice) || line;
     return JSON.stringify(annotateResult(msg, host, mac, notice));
   };
 }
@@ -541,35 +759,58 @@ async function main() {
   }
   // A fresh mac-watch "offline" verdict skips the probe entirely: the
   // watcher already paid the ssh timeout, so paying it again on every lazy
-  // respawn just adds seconds while the Mac is down. A fresh "online" still
-  // probes — the liveness check stays the authority — but on a shorter
-  // connect timeout since the file may have just gone stale-positive. A
-  // missing or stale file probes as before.
+  // respawn just adds seconds while the Mac is down. A fresh "online" on a
+  // posix host skips it too: the backend command probes and execs in one ssh
+  // session, and a host that turns out dead exits 97 into the dead-on-arrival
+  // fallback below. A missing or stale file (or a Windows host) probes first.
   const macSeen = macSsh ? freshMacState(macStateFile) : null;
   const probeStampFile = selfProbeStampFile(macStateFile);
   const staleSelfProbe = Date.now() - readSelfProbeAt(probeStampFile) > SELF_PROBE_INTERVAL_MS;
-  const shouldProbe = !macSeen || macSeen.state === 'online' || staleSelfProbe;
+  const autoStart = Boolean(macSeen && macSeen.state === 'online' && hostOs !== 'windows');
+  const shouldProbe = !autoStart && (!macSeen || macSeen.state === 'online' || staleSelfProbe);
   const probeResult = macSsh && shouldProbe
     ? await probeMac(8000, macSeen && macSeen.state === 'online' ? 4 : 6)
     : { script: null, stderr: '' };
   const macScript = probeResult.script;
   if (macSsh && shouldProbe) writeSelfProbeAt(probeStampFile);
   const probeErrTail = stderrTail(probeResult.stderr);
+  const macCommand = macScript
+    ? hostOs === 'windows'
+      ? windowsBackendCommand(macScript, botId, botName)
+      : hostOs === 'linux'
+        ? linuxBackendCommand(macScript, macNode, botId, botName)
+        : macBackendCommand(macScript, macNode, botId, botName)
+    : autoStart
+      ? posixAutoBackendCommand(macNode, botId, botName)
+      : null;
 
-  const pendingRequests = new Set();
+  // Request id -> {method, line, at}: what is in flight, so a failover knows
+  // what it may replay (reads) and what it must not (actions).
+  const pendingRequests = new Map();
+  const annotCtx = {
+    botId,
+    failedOver: false,
+    restoredNote: null,
+    moveNotice: null,
+    takeMoveNotice() {
+      const notice = this.moveNotice;
+      this.moveNotice = null;
+      return notice;
+    },
+  };
 
   // Annotation is decoration — a failure here must never take down the
   // transport (that is how a one-line ReferenceError dropped the whole
   // browser surface). Degrade to passthrough instead.
   const safeAnnotator = (host) => {
     try {
-      return makeAnnotator(host, Boolean(macSsh), macStateFile, hostName);
+      return makeAnnotator(host, Boolean(macSsh), macStateFile, hostName, annotCtx);
     } catch (e) {
       process.stderr.write(`workspace-router: annotator disabled: ${e.message}\n`);
       return (line) => line;
     }
   };
-  let annotate = safeAnnotator(macScript ? 'mac' : 'vps');
+  let annotate = safeAnnotator(macCommand ? 'mac' : 'vps');
 
   // A backend that dies before answering anything is dead on arrival — for a
   // Mac spawn that means the remote script crashed (missing module, killed
@@ -577,73 +818,193 @@ async function main() {
   // child until its own connect timeout. Falling back to the VPS host in
   // that window costs ~a second instead. Client lines written to the dead
   // child are buffered and replayed; nothing it could have acted on ever
-  // produced a response, so no request executes twice. A backend that proved
-  // itself with a first response still exits the router on death — Hermes
-  // respawns it.
+  // produced a response, so no request executes twice.
+  //
+  // A backend that already answered and then drops (host asleep, network
+  // gone, app quit, a call stuck past its deadline) fails over in-process
+  // instead of waiting for Hermes to respawn the router: reads in flight are
+  // replayed on the VPS backend, actions in flight are NOT (they may have
+  // happened) and answer with an error naming where to continue.
   let activeChild = null;
   let activeHost = null;
   let provedAlive = false;
   let fellBack = false;
+  let shuttingDown = false;
   let watchdog = null;
+  let hostStartedAt = 0;
+  let unavailableStreak = 0;
+  let holdCalls = false;
+  const heldCalls = [];
   const bufferedStdin = [];
+  const handshake = { initialize: null, initialized: null };
+  const swallowIds = new Set();
   const superseded = new Set();
+
+  const MAC_WATCHDOG_MS = Number(process.env.HERMES_ROUTER_MAC_WATCHDOG_MS) || 8000;
+  // Hermes gives a tool call 120s. A call that outlives these on the host is
+  // a half-open connection or a wedged app; the rest of the budget must be
+  // left for the VPS to redo the work.
+  const CALL_DEADLINE_MS = Number(process.env.HERMES_ROUTER_CALL_DEADLINE_MS) || 45000;
+  const BATCH_DEADLINE_MS = Number(process.env.HERMES_ROUTER_BATCH_DEADLINE_MS) || 100000;
+  const UNAVAILABLE_LIMIT = Number(process.env.HERMES_ROUTER_UNAVAILABLE_LIMIT) || 2;
 
   // A wedged remote that never exits is the worst boot stall: without this,
   // the client waits out its full connect_timeout on dead air. Once the
   // client is actually talking to us, a silent Mac backend gets MAC_WATCHDOG_MS
   // to answer before we route around it. Healthy cold starts answer in ~2s;
   // the client sends initialize immediately after spawn.
-  const MAC_WATCHDOG_MS = Number(process.env.HERMES_ROUTER_MAC_WATCHDOG_MS) || 8000;
   function armWatchdog() {
     if (watchdog || provedAlive || fellBack || activeHost !== 'mac') return;
     watchdog = setTimeout(() => {
       watchdog = null;
-      if (provedAlive || fellBack || activeHost !== 'mac' || !activeChild) return;
-      const stuck = activeChild;
-      superseded.add(stuck);
-      fellBack = true;
-      process.stderr.write(
-        `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize — routing to VPS browser host\n`,
-      );
-      void startVpsBackend();
-      try { stuck.kill('SIGKILL'); } catch { /* already gone */ }
+      failOver(`${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize`);
     }, MAC_WATCHDOG_MS);
     watchdog.unref();
   }
 
-  async function startVpsBackend() {
+  function failOver(reason) {
+    if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
+    fellBack = true;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    process.stderr.write(`workspace-router: ${reason} — routing to VPS browser host\n`);
+    const old = activeChild;
+    superseded.add(old);
+    try { old.kill('SIGKILL'); } catch { /* already gone */ }
+    if (!provedAlive) {
+      startVpsBackend();
+      return;
+    }
+    annotCtx.failedOver = true;
+    flushResumes();
+    const lost = [];
+    const replay = [];
+    for (const [id, req] of pendingRequests) {
+      if (req.method === 'tools/call') lost.push(id);
+      else replay.push(req);
+    }
+    for (const id of lost) pendingRequests.delete(id);
+    startVpsBackend({ replay, lost });
+  }
+
+  function spawnVps(extraArgs) {
     const vpsArgs = [vpsScript, '--bot-id', botId];
     if (botName) vpsArgs.push('--bot-name', botName);
-    vpsArgs.push('--connection', vpsConnection);
-    if (macSsh) {
-      const resumeFile = resumePath(macStateFile);
-      const record = readResumeRecord(resumeFile);
-      let continuedTab = continuedPage(record);
-      if (record && !continuedTab) {
-        const continued = await continueRememberedPage({
-          connectionFile: vpsConnection,
-          record,
-          botId,
-          botName,
-        });
-        if (continued) {
-          markResumeOpened(resumeFile, record, continued.tabId);
-          continuedTab = { url: continued.url, tabId: continued.tabId };
-          process.stderr.write(
-            `workspace-router: continued ${continued.url} in the VPS browser as tab ${continued.tabId}\n`,
-          );
-        }
-      }
-      vpsArgs.push(...continuedArgs(continuedTab));
-    }
+    vpsArgs.push('--connection', vpsConnection, ...extraArgs);
     const c = spawn(process.execPath, vpsArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
     bindChild(c, 'vps');
-    for (const line of bufferedStdin) c.stdin.write(`${line}\n`);
+    return c;
+  }
+
+  // A fresh backend has not seen the client's handshake. The client already
+  // has its initialize answer, so the replayed one is swallowed — unless the
+  // original is still unanswered, in which case this child answers it.
+  function replayHandshake(c, replay) {
+    if (handshake.initialize) {
+      const pendingInit = replay.find((req) => req.method === 'initialize');
+      if (pendingInit) {
+        c.stdin.write(`${pendingInit.line}\n`);
+      } else {
+        try {
+          const msg = JSON.parse(handshake.initialize);
+          msg.id = `wsr-init-${swallowIds.size}`;
+          swallowIds.add(msg.id);
+          c.stdin.write(`${JSON.stringify(msg)}\n`);
+        } catch { /* a handshake that will not parse cannot be replayed */ }
+      }
+    }
+    if (handshake.initialized) c.stdin.write(`${handshake.initialized}\n`);
+    for (const req of replay) if (req.method !== 'initialize') c.stdin.write(`${req.line}\n`);
+  }
+
+  // What to put on the VPS backend before the agent's first action: the
+  // host's mirrored tabs when a mirror exists (cookies, scroll, drafts), else
+  // the single remembered page. Slow when there are many tabs, so it runs
+  // while the backend already answers initialize and tools/list, and the
+  // first tools/call waits for it.
+  async function prepareContinuation() {
+    const map = await restoreMirror({ connectionFile: vpsConnection, botId, botName });
+    if (map) return { map, args: ['--tab-map', JSON.stringify(map)] };
+    const resumeFile = resumePath(macStateFile, botId);
+    const record = readResumeRecord(resumeFile);
+    let continuedTab = continuedPage(record);
+    if (record && !continuedTab) {
+      const continued = await continueRememberedPage({
+        connectionFile: vpsConnection,
+        record,
+        botId,
+        botName,
+      });
+      if (continued) {
+        markResumeOpened(resumeFile, record, continued.tabId);
+        continuedTab = { url: continued.url, tabId: continued.tabId };
+        process.stderr.write(
+          `workspace-router: continued ${continued.url} in the VPS browser as tab ${continued.tabId}\n`,
+        );
+      }
+    }
+    return { continued: continuedTab, args: continuedArgs(continuedTab) };
+  }
+
+  function sendLostCallErrors(ids, notice) {
+    const mac = readMacState(macStateFile);
+    for (const id of ids) {
+      const text =
+        `This action was in flight when the ${hostName} connection dropped. It may or may not have happened and was NOT retried. ` +
+        `${notice} Check the page in the VPS tab before repeating it.`;
+      const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
+      process.stdout.write(`${JSON.stringify(annotateResult(msg, 'vps', mac, null))}\n`);
+    }
+  }
+
+  function beginContinuation(lost = []) {
+    holdCalls = true;
+    let settled = false;
+    const settle = (continuation) => {
+      if (settled) return;
+      settled = true;
+      if (continuation.args.length && activeHost === 'vps' && !shuttingDown) {
+        const old = activeChild;
+        superseded.add(old);
+        try { old.kill('SIGKILL'); } catch { /* already gone */ }
+        const pending = [...pendingRequests.values()].filter((req) => req.method !== 'tools/call');
+        replayHandshake(spawnVps(continuation.args), pending);
+      }
+      annotCtx.restoredNote = continuationDetail(continuation, hostName);
+      if (annotCtx.failedOver) {
+        const notice = continuationNotice(continuation, hostName);
+        if (lost.length) sendLostCallErrors(lost, notice);
+        else annotCtx.moveNotice = notice;
+      }
+      holdCalls = false;
+      for (const line of heldCalls.splice(0)) writeToChild(line);
+    };
+    // The restore bounds itself; this caps the whole continuation so a held
+    // call always leaves most of Hermes's tool budget for the call itself.
+    const cap = setTimeout(() => settle({ args: [] }), 25000);
+    cap.unref();
+    prepareContinuation().then(
+      (continuation) => { clearTimeout(cap); settle(continuation); },
+      () => { clearTimeout(cap); settle({ args: [] }); },
+    );
+  }
+
+  function startVpsBackend({ replay = null, lost = [] } = {}) {
+    const c = spawnVps([]);
+    if (replay) replayHandshake(c, replay);
+    else for (const line of bufferedStdin) c.stdin.write(`${line}\n`);
+    if (macSsh) beginContinuation(lost);
+  }
+
+  function writeToChild(line) {
+    try {
+      if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
+    } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
   }
 
   function bindChild(c, host) {
     activeChild = c;
     activeHost = host;
+    if (host === 'mac') hostStartedAt = Date.now();
     // A write after the Mac ssh has already exited emits EPIPE asynchronously.
     // That must not kill the process that is about to answer from the VPS.
     c.stdin.on('error', () => {});
@@ -651,7 +1012,23 @@ async function main() {
     readline
       .createInterface({ input: c.stdout, crlfDelay: Infinity })
       .on('line', (line) => {
+        if (c !== activeChild) return;
         touchActivity();
+        if (swallowIds.size && line.length < 4000 && line.includes('"id":"wsr-init-')) return;
+        if (host === 'mac') {
+          // ssh is up but the app behind it is gone: the backend answers
+          // every call with "browser unavailable". The first such error is the
+          // agent's to see; a second in a row means the host is not coming back.
+          if (hostUnavailableLine(line)) {
+            unavailableStreak += 1;
+            if (unavailableStreak >= UNAVAILABLE_LIMIT) {
+              failOver(`${hostName} browser unavailable ${unavailableStreak} calls in a row`);
+              return;
+            }
+          } else if (line.length > BIG_LINE || line.includes('"result"')) {
+            unavailableStreak = 0;
+          }
+        }
         noteServerRpc(line, pendingRequests);
         provedAlive = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
@@ -669,10 +1046,7 @@ async function main() {
       if (superseded.has(c)) return;
       process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
       if (host === 'mac' && !provedAlive) {
-        if (!fellBack) {
-          fellBack = true;
-          void startVpsBackend();
-        }
+        failOver(`${hostName} backend failed to spawn`);
         return;
       }
       process.exit(1);
@@ -680,17 +1054,12 @@ async function main() {
     c.on('exit', (code, sig) => {
       if (superseded.has(c)) return;
       if (c !== activeChild) return;
-      // A Mac process that never answered must not take the router down.
-      // Spawn can emit error and exit for the same death; the second one
-      // only records the fallback that the first one already started.
-      if (host === 'mac' && !provedAlive) {
-        if (!fellBack) {
-          fellBack = true;
-          process.stderr.write(
-            `workspace-router: ${hostName} backend died before its first response — routing to VPS browser host\n`,
-          );
-          void startVpsBackend();
-        }
+      if (host === 'mac' && !shuttingDown) {
+        // Spawn can emit error and exit for the same death; failOver only
+        // acts once.
+        failOver(provedAlive
+          ? `${hostName} backend exited (${code === null ? sig : code})`
+          : `${hostName} backend died before its first response`);
         return;
       }
       process.exit(code === null ? (sig ? 1 : 0) : code);
@@ -704,27 +1073,31 @@ async function main() {
     .createInterface({ input: process.stdin, crlfDelay: Infinity })
     .on('line', (line) => {
       touchActivity();
-      noteClientRpc(line, pendingRequests);
+      const method = noteClientRpc(line, pendingRequests);
+      if (method === 'initialize') handshake.initialize = line;
+      else if (method === 'notifications/initialized') handshake.initialized = line;
       if (!provedAlive) bufferedStdin.push(line);
-      try {
-        if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
-      } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
+      if (holdCalls && method === 'tools/call') {
+        heldCalls.push(line);
+        return;
+      }
+      writeToChild(line);
       armWatchdog();
     });
 
-  if (macScript) {
+  if (macCommand) {
     // Run browser-mcp.cjs on the user's machine over the same ssh session the probe used.
     const sshArgs = [
       '-T',
       '-o',
       'BatchMode=yes',
       '-o',
+      'ConnectTimeout=6',
+      '-o',
       'StrictHostKeyChecking=yes',
       ...sshControlArgs,
       macSsh,
-      hostOs === 'windows'
-        ? windowsBackendCommand(macScript, botId, botName)
-        : macBackendCommand(macScript, macNode, botId, botName),
+      macCommand,
     ];
     process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
     bindChild(spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'inherit'] }), 'mac');
@@ -741,8 +1114,33 @@ async function main() {
         'workspace-router: self-probe despite fresh offline verdict — watcher may be misconfigured\n',
       );
     }
-    await startVpsBackend();
+    startVpsBackend();
   }
+
+  // While on the host: watch for it going away faster than Hermes would
+  // notice. ssh keepalives kill a half-open connection in ~10s; this also
+  // reacts to a fresh mac-watch offline verdict (only one newer than this
+  // backend, so a stale "offline" from before the probe never counts) and to
+  // a call that has outlived its deadline.
+  if (macSsh) {
+    const monitor = setInterval(() => {
+      if (activeHost !== 'mac' || fellBack || shuttingDown) return;
+      const now = Date.now();
+      for (const req of pendingRequests.values()) {
+        const limit = req.batch ? BATCH_DEADLINE_MS : CALL_DEADLINE_MS;
+        if (req.method === 'tools/call' && now - req.at > limit) {
+          failOver(`${hostName} call exceeded ${limit}ms`);
+          return;
+        }
+      }
+      const mac = freshMacState(macStateFile);
+      if (mac && mac.state === 'offline' && Date.parse(mac.since) >= hostStartedAt - (hostStartedAt % 1000)) {
+        failOver(`mac-watch reports ${hostName} offline since ${mac.since}`);
+      }
+    }, 1000);
+    monitor.unref();
+  }
+
   let routerMtime = 0;
   try { routerMtime = fs.statSync(__filename).mtimeMs; } catch { /* a missing script has nothing newer to load */ }
   const reloadTimer = setInterval(() => {
@@ -751,48 +1149,54 @@ async function main() {
     try { mtime = fs.statSync(__filename).mtimeMs; } catch { return; }
     if (mtime <= routerMtime) return;
     process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
+    shuttingDown = true;
     try { if (activeChild) activeChild.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
     process.exit(0);
   }, 5000);
   reloadTimer.unref();
   for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(s, () => {
+      shuttingDown = true;
       try {
         if (activeChild) activeChild.kill(s);
       } catch {}
     });
   }
 
-  // Self-correct host drift. A connection that landed on the VPS during a
-  // transient probe miss would otherwise pin the session to the wrong host
-  // until someone killed the process by hand. Hermes lazy-respawns a dead
-  // MCP server and the respawn re-probes, so once mac-watch reports the Mac
-  // online again this process steps aside and routing re-converges on its
-  // own — no agent shell surgery, no approvals. Two consecutive online
-  // reads defend against flapping; the idle window keeps an in-flight tool
-  // call alive once no JSON-RPC request is pending.
-  if (activeHost !== 'mac' && macSsh) {
+  // Return to the host. A session that is on the VPS (it started there, or
+  // failed over) would otherwise stay until someone killed it by hand. Hermes
+  // lazy-respawns a dead MCP server and the respawn re-probes, so once
+  // mac-watch (which now proves the app answers, not just sshd) reports the
+  // host online again this process steps aside. Two consecutive online reads
+  // defend against flapping; the idle window plus the pending/held checks keep
+  // an in-flight VPS task alive, since the tabs it works in live on the VPS.
+  if (macSsh) {
     let onlineStreak = 0;
     const timer = setInterval(() => {
+      if (activeHost === 'mac') {
+        onlineStreak = 0;
+        return;
+      }
       const mac = freshMacState(macStateFile);
       onlineStreak = mac && mac.state === 'online' ? onlineStreak + 1 : 0;
       if (mayReconverge({
         mac,
         onlineStreak,
         lastActivity,
-        pendingSize: pendingRequests.size,
+        pendingSize: pendingRequests.size + (holdCalls ? 1 : 0),
         idleMs: RECONVERGE_IDLE_MS,
         now: Date.now(),
       })) {
         process.stderr.write(
           `workspace-router: ${hostName} is online — exiting so the next connection re-probes and routes to it\n`,
         );
+        shuttingDown = true;
         try {
           if (activeChild) activeChild.kill('SIGTERM');
         } catch {}
         process.exit(0);
       }
-    }, 30000);
+    }, 10000);
     timer.unref();
   }
 }
@@ -826,6 +1230,13 @@ module.exports = {
   noteClientRpc,
   noteServerRpc,
   mayReconverge,
+  sshControlArgs,
+  restoreMirror,
+  continuationNotice,
+  hostUnavailableLine,
+  linuxBackendCommand,
+  posixProbeCommand,
+  posixAutoBackendCommand,
   SELF_PROBE_INTERVAL_MS,
   RECONVERGE_IDLE_MS,
 };
