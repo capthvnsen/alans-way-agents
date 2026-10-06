@@ -186,6 +186,25 @@ permission or waiting on a release.
 Separate desktop streams and automatic Mac/VPS login propagation remain
 additional work.
 
+## Spend tokens on structure, not screenshots
+
+This is the cheap path, and it is the same for every Hermes model. Do not
+switch strategy because of which model you are.
+
+Web work uses `workspace_browser_*` only. One `workspace_browser_snapshot`
+returns text and element refs. Act with those refs, and batch up to 25 steps
+in one call. A screenshot is only for a canvas, a chart, or a page the
+snapshot says it could not read. Never screenshot a page you can already
+read as text.
+
+Native Mac apps use `workspace_computer_apps`, then
+`workspace_computer_snapshot`, then `workspace_computer_action`. Press a
+`ref` from that snapshot. Use `click` or `drag` with the snapshot's x,y only
+when the control has no name. These calls drive a background app and do not
+move the human's cursor. Skip the frontmost app, Keychain, and password
+fields. Do not open a browser tab to do a native app's job, and do not drive
+a native app to do a website's job.
+
 ## Preserve vanilla Hermes
 
 Keep integration in supported profile configuration, optional plugins, hooks
