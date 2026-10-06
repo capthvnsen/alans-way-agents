@@ -507,6 +507,43 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(facade.received, [])
             runtime.close()
 
+    def test_first_run_readmits_until_a_wake_is_accepted(self):
+        """A wake lost before dispatch (expiry, rejection) must not consume the
+        once-ever orientation — a later resume admits a fresh one; pending
+        duplicates from rapid resumes retire as stale at dispatch."""
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home,
+                appraiser=lambda *_: self.fail("orientation skips appraisal"))
+            runtime.store.update_policy({
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            runtime.control({"action": "resume"})
+            # The admitted wake expires before any dispatch (gateway down);
+            # a later resume re-admits instead of losing orientation forever.
+            with runtime.store._transaction() as db:
+                db.execute("UPDATE events SET status='expired' "
+                           "WHERE kind='first_run'")
+            runtime.control({"action": "pause"})
+            runtime.control({"action": "resume"})
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion first-run orientation]",
+                          facade.received[0][0])
+            runtime.store.finish(result["id"], "resolved")
+            runtime.close()
+
     def test_snoozed_pause_re_enables_at_resume_at(self):
         """pause with an aware resume_at persists as a snooze; claim() stays
         closed until the moment, then re-enables and clears the field."""
@@ -529,14 +566,17 @@ class PluginTests(unittest.TestCase):
                 "manual_review", "rev:check", purpose=True))
             self.assertIsNone(runtime.store.claim())
             self.assertFalse(runtime.store.load_policy().enabled)
-            # A past resume_at lifts the pause inside claim itself.
+            # A past resume_at lifts the pause through the real dispatch path —
+            # tick() must reach claim(), not short-circuit on enabled=False.
             past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
             runtime.store.update_policy({"enabled": False, "resume_at": past})
-            event = runtime.store.claim()
-            self.assertIsNotNone(event)
+            guard = sys.modules[module.__name__ + ".gateway_guard"]
+            guard.mark_gateway_ready(Path(directory))
+            event = runtime.tick()
             policy = runtime.store.load_policy()
             self.assertTrue(policy.enabled)
             self.assertEqual(policy.resume_at, "")
+            self.assertIsNotNone(event)
             # Invalid or naive resume_at values are rejected outright.
             for bad in ("soon", "2026-10-09 08:00", 1234):
                 result = json.loads(runtime.control(

@@ -34,7 +34,12 @@ class Runtime:
         def run():
             while not self._stop.wait(interval):
                 try:
-                    if not self.gateway_ready() or self.store.load_policy().enabled is not True:
+                    policy = self.store.load_policy()
+                    # A snoozed pause (resume_at set) must still reach claim()
+                    # so the snooze can lift itself — a hard skip here would
+                    # leave it paused forever.
+                    if not self.gateway_ready() or (
+                            policy.enabled is not True and not policy.resume_at):
                         continue
                     self.observe()
                     self.tick()
@@ -82,7 +87,10 @@ class Runtime:
         if not self.gateway_ready():
             return None
         policy = self.store.load_policy()
-        if policy.enabled is not True or not policy.session_key:
+        # While snoozed (enabled off but resume_at set), still fall through
+        # to claim() — it owns the atomic snooze-lift decision.
+        if (policy.enabled is not True and not policy.resume_at) \
+                or not policy.session_key:
             return None
         # Expire stale unresolved dispatches before gating: a wake the session
         # could never acknowledge (e.g. the control toolset missing from its
@@ -189,9 +197,21 @@ class Runtime:
 
         No appraisal: explicit resume plus the never-fired ledger marker are
         the consent gate. The wake inventories reachable read surfaces and
-        reports concrete offers — it creates nothing itself.
+        reports concrete offers — it creates nothing itself. The once-ever
+        marker lands on acceptance, so an event that expired undispatched can
+        still be re-admitted by a later resume.
         """
         event_id = event["id"]
+        try:
+            with self.ledger.transaction() as state:
+                oriented = bool(state["observations"].get("first_run_done"))
+        except Exception:
+            oriented = False
+        if oriented:
+            # A duplicate admission queued before an earlier wake landed —
+            # orientation already happened; retire this one quietly.
+            self.store.finish(event_id, "resolved")
+            return {"id": event_id, "status": "stale"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key \
                 or not self.gateway_ready():
@@ -223,6 +243,13 @@ class Runtime:
         except Exception:
             status = "uncertain"
         self.store.finish(event_id, status)
+        if status == "accepted_unverified":
+            try:
+                with self.ledger.transaction() as state:
+                    state["observations"]["first_run_done"] = \
+                        datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
         return {"id": event_id, "status": status}
 
     def _dispatch_watch_due(self, event):
@@ -442,21 +469,20 @@ class Runtime:
             return json.dumps({"ok": False, "error": "Invalid or unsupported proactivity control; no success is claimed"})
 
     def _admit_first_run(self):
-        """Admit the one-time orientation wake on the operator's first resume.
+        """Admit an orientation wake on each resume until one is accepted.
 
-        The ledger marker makes this once-ever; it is set only on successful
-        admission, so a refused or lost event can still be admitted by a later
-        resume, and a completed one can never fire twice.
+        The ``first_run_done`` marker lands only on dispatch acceptance, so a
+        wake lost to expiry or rejection can be re-admitted; each admission
+        carries a fresh evidence timestamp, and dispatch rejects any wake
+        arriving after the marker — keeping the visible result once-ever.
         """
         try:
             with self.ledger.transaction() as state:
                 if state["observations"].get("first_run_done"):
                     return
-                admitted = self.store.record_event(
-                    "first_run", "firstrun:orientation", purpose=True)
-                if admitted:
-                    state["observations"]["first_run_done"] = \
-                        datetime.now(timezone.utc).isoformat()
+            evidence = "firstrun:" + datetime.now(timezone.utc).strftime(
+                "%Y%m%dT%H%M%S.%f")
+            self.store.record_event("first_run", evidence, purpose=True)
         except Exception:
             pass
 

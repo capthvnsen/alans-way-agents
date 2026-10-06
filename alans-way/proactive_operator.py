@@ -56,7 +56,8 @@ def bind(runtime, session_key):
     entry = _routing_entry(runtime.home, session_key)
     if not _entry_is_dm_route(entry, session_key):
         raise ValueError("bind only a verified existing direct Telegram route in this profile")
-    runtime.store.update_policy({"enabled": False, "primary_profile": "default", "session_key": session_key})
+    runtime.store.update_policy({"enabled": False, "primary_profile": "default",
+                                 "session_key": session_key, "resume_at": ""})
 
 
 def probe(runtime):
