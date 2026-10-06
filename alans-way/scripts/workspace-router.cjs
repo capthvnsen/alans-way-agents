@@ -371,7 +371,7 @@ async function continueRememberedPage({ connectionFile, record, botId, botName, 
     const opened = await fetch(new URL('/v1/tabs', base), {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: safe, background: true }),
+      body: JSON.stringify({ url: safe, background: true, settle: false }),
       signal: AbortSignal.timeout(12000),
     });
     if (!opened.ok) return null;

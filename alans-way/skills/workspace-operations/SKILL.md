@@ -102,7 +102,8 @@ Web work — Google Docs, Notion, a CRM, or any other site — continues in the
 VPS browser. The connector opens the last page there when the Mac drops.
 If the `[workspace]` line says the page was continued, keep working in that
 tab. A snapshot, screenshot, or action aimed at the Mac tab is carried onto that VPS tab.
-Use the tab id in the result. If an action still fails, the error names the
+Use the tab id in the result. The continued page may still be loading. Snapshot
+that tab before acting. If an action still fails, the error names the
 VPS tab. Use that tab. Open the same URL with `cua_alans_way_open`, snapshot it, and
 keep acting when that line only names a URL. If the `[workspace]` line names a page, open that URL. The
 connector is already on that machine. A login wall means
