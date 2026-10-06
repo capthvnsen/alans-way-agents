@@ -79,6 +79,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A menu item, option, tree item, slider, or clickable div is listed by its name, so do not screenshot it to find it.", self.normalized)
         self.assertIn("A control inside an open shadow root is listed the same way; a closed root is not readable.", self.normalized)
         self.assertIn("A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable.", self.normalized)
+        self.assertIn("A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label.", self.normalized)
         self.assertIn("A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text.", self.normalized)
         self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
