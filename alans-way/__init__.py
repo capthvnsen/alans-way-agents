@@ -29,6 +29,7 @@ class Runtime:
         self.observer_error = None
         self.appraisal_error = None
         self.telegram = None
+        self.telegram_handler = False
 
     def _inject(self, message, session_key):
         """One injection attempt → tri-state outcome.
@@ -131,13 +132,36 @@ class Runtime:
         return admitted
 
     def _ask_reapproval(self):
-        """Watches approved over 30 days ago stop firing until the user approves them again."""
+        """Watches approved over 30 days ago stop firing until the user approves them again.
+
+        Every observer pass retries the ask until one channel takes it: buttons
+        once Telegram is connected, or the text command where buttons are impossible."""
         from .proactive_telegram import offer
-        flagged = self.ledger.flag_expired_approvals()
-        for task in (t for t in self.ledger.snapshot()["tasks"] if t["id"] in flagged):
+        for task_id in self.ledger.flag_expired_approvals():
+            self.ledger.log("proposal", f"{task_id}: needs re-approval", "proposed")
+        with self.ledger.transaction() as data:
+            asked = dict(data["observations"].get("__reasked", {}))
+        for task in self.ledger.snapshot()["tasks"]:
+            if not (task.get("revision") or {}).get("reapproval"):
+                continue
             view = pending_view(task)
-            self.ledger.log("proposal", f"{task['id']}: needs re-approval", "proposed")
-            offer(self, view, self.ledger.proposal_hash(view), reapproval=True)
+            code = self.ledger.proposal_hash(view)
+            if asked.get(task["id"]) == code:
+                continue
+            if offer(self, view, code, reapproval=True) or self._text_reapproval(view, code):
+                with self.ledger.transaction() as data:
+                    data["observations"].setdefault("__reasked", {})[task["id"]] = code
+
+    def _text_reapproval(self, view, code):
+        from .proactive_telegram import fits
+        key = self.store.load_policy().session_key
+        if not key or (self.telegram_handler and fits(view, code)):
+            return False  # buttons will work once Telegram is connected
+        message = (f"Tell the user: watch {view['id']} ({view.get('title') or view['scope'][:60]}) was last approved "
+                   f"over 30 days ago and stopped running. Scope: {view['scope'][:300]} Next action: "
+                   f"{view['next_action'][:200]} To keep it, they approve by sending exactly: "
+                   f"/watch approve {view['id']} {code}")
+        return self._inject(message, key) == "accepted_unverified"
 
     def review_context(self):
         from .proactive_observe import collect
@@ -988,6 +1012,7 @@ def register(ctx, *, home=None, background=True):
     if hasattr(ctx, "register_telegram_handler"):
         from .proactive_telegram import wire
         ctx.register_telegram_handler(wire(runtime))
+        runtime.telegram_handler = True
     if hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,

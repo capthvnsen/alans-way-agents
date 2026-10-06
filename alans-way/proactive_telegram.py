@@ -55,13 +55,21 @@ def wire(runtime):
     return factory
 
 
+def _data(task, code):
+    return {key: f"{PREFIX}{key}:{task['id']}:{code}" for key in ACTIONS}
+
+
+def fits(task, code):
+    """Telegram caps callback data at 64 bytes; a longer id can only use the text command."""
+    return all(len(value.encode()) <= 64 for value in _data(task, code).values())
+
+
 def offer(runtime, task, code, reapproval=False):
     """Send the proposal with buttons to the bound chat; False means use the text command."""
     link = runtime.telegram
     chat = telegram_chat(runtime.store.load_policy().session_key)
-    data = {key: f"{PREFIX}{key}:{task['id']}:{code}" for key in ACTIONS}
-    if (not link or not link.get("loop") or chat is None
-            or any(len(value.encode()) > 64 for value in data.values())):
+    data = _data(task, code)
+    if not link or not link.get("loop") or chat is None or not fits(task, code):
         return False
     try:
         import asyncio

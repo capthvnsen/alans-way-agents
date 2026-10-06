@@ -190,6 +190,67 @@ class TelegramButtonTests(unittest.TestCase):
         self.assertEqual(len(app.sent), 1)
         runtime.close()
 
+    def expired(self, runtime, **changes):
+        from datetime import datetime, timedelta, timezone
+        runtime.store.update_policy({"session_key": ROUTE})
+        runtime.ledger.record_task({**PROPOSAL, **changes, "approved": True})
+        with runtime.ledger.transaction() as data:
+            data["tasks"][changes.get("id", "rent")]["approved_at"] = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+
+    def register(self, name, handler, injected):
+        ctx = types.SimpleNamespace(register_tool=lambda **k: None, register_command=lambda *a, **k: None,
+                                    register_skill=lambda *a, **k: None, on_unload=lambda *a: None,
+                                    inject_message=lambda message, **k: injected.append(message) or True)
+        if handler is not None:
+            ctx.register_telegram_handler = handler.append
+        return self.module.register(ctx, home=Path(self.directory.name) / name, background=False)
+
+    def test_reapproval_waits_for_telegram_then_sends_buttons_once(self):
+        registered, injected = [], []
+        runtime = self.register("h3", registered, injected)
+        self.addCleanup(runtime.close)
+        self.expired(runtime)
+        runtime._ask_reapproval()
+        self.assertEqual(injected, [])
+        app, loop = App(), asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (loop.call_soon_threadsafe(loop.stop), thread.join(2), loop.close()))
+        with patch.dict(sys.modules, telegram_stubs()):
+            async def wire():
+                registered[0](app, types.SimpleNamespace())
+            asyncio.run_coroutine_threadsafe(wire(), loop).result(5)
+            runtime._ask_reapproval()
+            runtime._ask_reapproval()
+            threading.Event().wait(0.3)
+        message, = app.sent
+        self.assertIn("approving again", message["text"])
+        self.assertEqual(injected, [])
+
+    def test_reapproval_without_buttons_sends_the_text_command_once(self):
+        injected = []
+        runtime = self.register("h4", None, injected)
+        self.addCleanup(runtime.close)
+        self.expired(runtime)
+        runtime._ask_reapproval()
+        runtime._ask_reapproval()
+        message, = injected
+        self.assertIn(f"/watch approve rent {self.code_for(runtime)}", message)
+
+    def test_reapproval_with_an_over_long_id_uses_text_even_when_connected(self):
+        registered, injected = [], []
+        runtime = self.register("h5", registered, injected)
+        self.addCleanup(runtime.close)
+        runtime.telegram = {"application": App(), "loop": object()}
+        self.expired(runtime, id="x" * 60)
+        runtime._ask_reapproval()
+        message, = injected
+        self.assertIn("/watch approve " + "x" * 60, message)
+
+    def code_for(self, runtime, watch_id="rent"):
+        task = next(t for t in runtime.ledger.snapshot()["tasks"] if t["id"] == watch_id)
+        return runtime.ledger.proposal_hash(task)
+
     def test_button_handler_answers_and_edits_the_message(self):
         self.propose()
         tg = importlib.import_module(self.module.__name__ + ".proactive_telegram")
