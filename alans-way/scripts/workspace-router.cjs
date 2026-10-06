@@ -89,6 +89,62 @@ const sshControlArgs = [
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
+const SELF_PROBE_INTERVAL_MS = 600000;
+const RECONVERGE_IDLE_MS = 60000;
+
+function stderrTail(text, maxLen = 200) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  const tail = s.split(/\r?\n/).filter(Boolean).slice(-3).join('; ');
+  return tail.length > maxLen ? tail.slice(-maxLen) : tail;
+}
+
+function readSelfProbeAt(file) {
+  try {
+    const n = Number(fs.readFileSync(file, 'utf8').trim());
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSelfProbeAt(file) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, String(Date.now()));
+  } catch {}
+}
+
+function selfProbeStampFile(stateFile) {
+  return path.join(path.dirname(stateFile), 'router-last-self-probe');
+}
+
+function noteClientRpc(line, pending) {
+  try {
+    const msg = JSON.parse(line);
+    if (msg && typeof msg === 'object' && msg.id != null && typeof msg.method === 'string') {
+      pending.add(msg.id);
+    }
+  } catch {}
+}
+
+function noteServerRpc(line, pending) {
+  try {
+    const msg = JSON.parse(line);
+    if (msg && typeof msg === 'object' && msg.id != null
+        && (msg.result !== undefined || msg.error !== undefined)) {
+      pending.delete(msg.id);
+    }
+  } catch {}
+}
+
+function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
+  return Boolean(
+    mac && mac.state === 'online' && onlineStreak >= 2 && pendingSize === 0
+      && now - lastActivity > idleMs,
+  );
+}
+
 // Non-interactive ssh never loads Homebrew's PATH, so a bare `node` is
 // usually missing on the Mac. The app bundle already ships a Node runtime:
 // its own Electron binary with ELECTRON_RUN_AS_NODE. PATH node is only the
@@ -97,7 +153,7 @@ function macBackendCommand(script, node, id, name) {
   const tail = [shQuote(script), '--bot-id', shQuote(id)];
   if (name) tail.push('--bot-name', shQuote(name));
   const args = tail.join(' ');
-  if (node) return `${node} ${args}`;
+  if (node) return `${shQuote(node)} ${args}`;
   const bundle = /^(.*\/([^/]+)\.app)\/Contents\/Resources\//.exec(script);
   if (!bundle) return `node ${args}`;
   const exe = shQuote(`${bundle[1]}/Contents/MacOS/${bundle[2]}`);
@@ -132,21 +188,24 @@ function probeMac(timeoutMs, connectTimeout = 6) {
         macSsh,
         probe,
       ],
-      { stdio: ['ignore', 'pipe', 'ignore'] },
+      { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let output = '';
+    let errOutput = '';
     child.stdout.on('data', chunk => { if (output.length < 4096) output += chunk; });
+    child.stderr.on('data', chunk => { if (errOutput.length < 4096) errOutput += chunk; });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      resolve(null);
+      resolve({ script: null, stderr: errOutput });
     }, timeoutMs);
     child.on('error', () => {
       clearTimeout(timer);
-      resolve(null);
+      resolve({ script: null, stderr: errOutput });
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      resolve(code === 0 && macScripts.includes(output) ? output : null);
+      const script = code === 0 && macScripts.includes(output) ? output : null;
+      resolve({ script, stderr: errOutput });
     });
   });
 }
@@ -215,7 +274,8 @@ function makeAnnotator(host, macConfigured, stateFile) {
     try {
       msg = JSON.parse(line);
     } catch {
-      return line;
+      process.stderr.write(`${line}\n`);
+      return null;
     }
     if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return line;
     const mac = macConfigured ? readMacState(stateFile) : null;
@@ -235,9 +295,15 @@ function makeAnnotator(host, macConfigured, stateFile) {
 
 async function main() {
   if (process.argv.includes('--probe')) {
-    const found = macSsh ? await probeMac(12000) : null;
+    const probe = macSsh ? await probeMac(12000) : { script: null, stderr: '' };
+    const tail = stderrTail(probe.stderr);
+    if (probe.script) {
+      process.stdout.write(`mac: ${probe.script}\n`);
+      return;
+    }
+    const detail = tail ? ` (${tail})` : '';
     process.stdout.write(
-      found ? `mac: ${found}\n` : `vps${macSsh ? ' (mac unreachable)' : ' (no mac-ssh)'}\n`,
+      `vps${macSsh ? ` (mac unreachable${detail})` : ' (no mac-ssh)'}\n`,
     );
     return;
   }
@@ -255,10 +321,15 @@ async function main() {
   // connect timeout since the file may have just gone stale-positive. A
   // missing or stale file probes as before.
   const macSeen = macSsh ? freshMacState(macStateFile) : null;
-  const macScript =
-    macSsh && (!macSeen || macSeen.state === 'online')
-      ? await probeMac(8000, macSeen ? 4 : 6)
-      : null;
+  const probeStampFile = selfProbeStampFile(macStateFile);
+  const staleSelfProbe = Date.now() - readSelfProbeAt(probeStampFile) > SELF_PROBE_INTERVAL_MS;
+  const shouldProbe = !macSeen || macSeen.state === 'online' || staleSelfProbe;
+  const probeResult = macSsh && shouldProbe
+    ? await probeMac(8000, macSeen && macSeen.state === 'online' ? 4 : 6)
+    : { script: null, stderr: '' };
+  const macScript = probeResult.script;
+  if (macSsh && shouldProbe) writeSelfProbeAt(probeStampFile);
+  const probeErrTail = stderrTail(probeResult.stderr);
 
   let cmd;
   let args;
@@ -282,15 +353,22 @@ async function main() {
     args = [vpsScript, '--bot-id', botId];
     if (botName) args.push('--bot-name', botName);
     args.push('--connection', vpsConnection);
-    const reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
+    let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
+    if (probeErrTail) reason += ` (${probeErrTail})`;
     process.stderr.write(
       macSsh
         ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
         : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
     );
+    if (staleSelfProbe && macSeen && macSeen.state === 'offline' && !macScript) {
+      process.stderr.write(
+        'workspace-router: self-probe despite fresh offline verdict — watcher may be misconfigured\n',
+      );
+    }
   }
 
-  const child = spawn(cmd, args, { stdio: ['inherit', 'pipe', 'inherit'] });
+  const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'inherit'] });
+  const pendingRequests = new Set();
 
   // Annotation is decoration — a failure here must never take down the
   // transport (that is how a one-line ReferenceError dropped the whole
@@ -304,17 +382,29 @@ async function main() {
   }
 
   let lastActivity = Date.now();
+  const touchActivity = () => { lastActivity = Date.now(); };
+
+  readline
+    .createInterface({ input: process.stdin, crlfDelay: Infinity })
+    .on('line', (line) => {
+      touchActivity();
+      noteClientRpc(line, pendingRequests);
+      child.stdin.write(`${line}\n`);
+    });
+
   readline
     .createInterface({ input: child.stdout, crlfDelay: Infinity })
     .on('line', (line) => {
-      lastActivity = Date.now();
+      touchActivity();
+      noteServerRpc(line, pendingRequests);
       let out;
       try {
         out = annotate(line);
       } catch {
         out = line;
       }
-      process.stdout.write(out + '\n');
+      if (out === null) return;
+      process.stdout.write(`${out}\n`);
     });
   child.on('error', (e) => {
     process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
@@ -338,13 +428,20 @@ async function main() {
   // online again this process steps aside and routing re-converges on its
   // own — no agent shell surgery, no approvals. Two consecutive online
   // reads defend against flapping; the idle window keeps an in-flight tool
-  // call alive.
+  // call alive once no JSON-RPC request is pending.
   if (!macScript && macSsh) {
     let onlineStreak = 0;
     const timer = setInterval(() => {
-      const mac = readMacState(macStateFile);
+      const mac = freshMacState(macStateFile);
       onlineStreak = mac && mac.state === 'online' ? onlineStreak + 1 : 0;
-      if (onlineStreak >= 2 && Date.now() - lastActivity > 60000) {
+      if (mayReconverge({
+        mac,
+        onlineStreak,
+        lastActivity,
+        pendingSize: pendingRequests.size,
+        idleMs: RECONVERGE_IDLE_MS,
+        now: Date.now(),
+      })) {
         process.stderr.write(
           'workspace-router: Mac is online — exiting so the next connection re-probes and routes to it\n',
         );
@@ -362,4 +459,18 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { readMacState, workspaceNotice, annotateResult, makeAnnotator, macBackendCommand };
+module.exports = {
+  readMacState,
+  freshMacState,
+  workspaceNotice,
+  annotateResult,
+  makeAnnotator,
+  macBackendCommand,
+  shQuote,
+  stderrTail,
+  noteClientRpc,
+  noteServerRpc,
+  mayReconverge,
+  SELF_PROBE_INTERVAL_MS,
+  RECONVERGE_IDLE_MS,
+};

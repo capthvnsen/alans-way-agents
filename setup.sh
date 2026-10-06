@@ -419,6 +419,13 @@ EOF
     # /var/lib, which only a root system unit's StateDirectory provides.
     if [ -n "$MAC_SSH" ] && [ "$SYSCTL" = "systemctl" ] && [ "$(id -u)" = 0 ]; then
       if [ ! -f "$UNIT_DIR/mac-watch.service" ]; then
+        MAC_WATCH_USER="$(id -un)"
+        if [ "$(id -u)" = 0 ] && [ -d "$HERMES_HOME" ]; then
+          _owner=$(stat -c '%U' "$HERMES_HOME" 2>/dev/null || stat -f '%Su' "$HERMES_HOME" 2>/dev/null || true)
+          if [ -n "$_owner" ] && [ "$_owner" != root ]; then
+            MAC_WATCH_USER="$_owner"
+          fi
+        fi
         mkdir -p /etc/hermes-alans-way
         printf 'HERMES_WORKSPACE_MAC_SSH=%s\n' "$MAC_SSH" > /etc/hermes-alans-way/mac-watch.env
         cat > "$UNIT_DIR/mac-watch.service" <<EOF
@@ -429,7 +436,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=$MAC_WATCH_USER
 EnvironmentFile=/etc/hermes-alans-way/mac-watch.env
 ExecStart=/bin/sh $REPO_DIR/alans-way/scripts/mac-watch.sh --interval 30
 Restart=always
