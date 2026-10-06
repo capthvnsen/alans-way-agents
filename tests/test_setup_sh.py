@@ -1730,6 +1730,60 @@ class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
         self.assertIn("proactivity configure", calls)
 
 
+class ComputerProbeShimTests(unittest.TestCase):
+    """Hermes 0.21.5 installs `hermes` as a bash shim around its venv, and ImageMagick's `import` hangs."""
+
+    def run_shim(self, shim_dir_exists=True, probe_timeout=None, venv_ok=True):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        self.log, self.probes = root / "log", root / "probes"
+        bin_dir = tooling(root, self.log)
+        (bin_dir / "hermes").rename(bin_dir / "hermes-real")
+        agent = root / "elsewhere" / "hermes-agent"
+        shim = "#!/bin/bash\n"
+        if shim_dir_exists:
+            (agent / "venv" / "bin").mkdir(parents=True)
+            (agent / "venv" / "bin" / "activate").write_text('export PATH="%s:$PATH"\n' % (agent / "venv" / "bin"), encoding="utf-8")
+            fake(agent / "venv" / "bin", "python",
+                 'case "$1" in\n  -c) echo "$0" >> "%s"; %s;;\n  hermes) shift; exec "%s" "$@";;\nesac\n'
+                 % (self.probes, "exit 0" if venv_ok else "sleep 1000", bin_dir / "hermes-real"))
+            shim += 'cd %s && source venv/bin/activate && python hermes "$@"\n' % agent
+        else:
+            shim += 'exec "%s" "$@"\n' % (bin_dir / "hermes-real")
+        (bin_dir / "hermes").write_text(shim, encoding="utf-8")
+        (bin_dir / "hermes").chmod(0o755)
+        fake(bin_dir, "import", 'echo "$0 $*" >> "%s"\nsleep 1000\n' % self.probes)
+        extra = {"ALANS_WAY_PROBE_TIMEOUT": probe_timeout} if probe_timeout else {}
+        started = time.monotonic()
+        result = subprocess.run(
+            [SH, str(repo_with_computer_plugin(root)), "--bot-id", "111222333", "--skip-browser", "--skip-services",
+             "--non-interactive", "--hermes-home", str(home)],
+            capture_output=True, text=True, timeout=60, env=env_for(root, bin_dir, home, **extra))
+        self.elapsed = time.monotonic() - started
+        self.probe_log = read_log(self.probes)
+        return result, agent
+
+    def test_a_bash_shim_is_resolved_to_its_venv_python_and_never_run_as_one(self):
+        result, agent = self.run_shim()
+        self.assertIn(str(agent / "venv" / "bin" / "python"), self.probe_log)
+        self.assertNotIn("import", self.probe_log)
+        self.assertRegex(read_log(self.log), r"plugins install file://\S+#alans-way-computer")
+
+    def test_no_python_to_be_found_skips_the_provider_without_running_the_shell(self):
+        result, _ = self.run_shim(shim_dir_exists=False)
+        self.assertEqual(self.probe_log, "")
+        self.assertIn("skip computer-use provider", result.stdout)
+
+    def test_a_hung_probe_is_killed_and_the_provider_skipped_with_a_warning(self):
+        result, _ = self.run_shim(probe_timeout="2", venv_ok=False)
+        self.assertLess(self.elapsed, 30)
+        self.assertIn("timed out", result.stdout + result.stderr)
+        self.assertNotIn("alans-way-computer", read_log(self.log))
+
+
 class ComputerProviderTests(IntegrationBase, unittest.TestCase):
     def test_installed_per_profile_and_selected_when_hermes_has_the_provider_api(self):
         self.run_setup("--profile", "work", python_ok=True)
@@ -1826,7 +1880,8 @@ class AllProfilesHarness(IntegrationBase):
         log = root / "log"
         bin_dir = tooling(root, log)
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\nP=default; [ "$1" = -p ] && { P="$2"; shift 2; }\ncase "$1" in\n'
-             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
+             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };\n'
+             '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *--force*|*-computer) ;; *) echo BLOCKED community source >&2; exit 1;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
         fake(bin_dir, "hermes-python", "exit 0\n")
         env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         self.env, self.root = env, root
@@ -1863,20 +1918,20 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertNotIn("-p botless tools disable browser", calls)
         self.assertNotIn("proactivity bind", calls)
 
-    def test_the_plugin_is_installed_into_every_bot_profile_without_force(self):
+    def test_the_plugin_is_force_installed_into_bot_profiles_that_have_no_catalog_install(self):
         result, home, calls = self.run_all(listed='[ "$P" = default ] && echo alans-way')
         for name in ("familydental", "manda", "f4f", "quoted"):
-            self.assertRegex(calls, r"-p %s plugins install file://\S+#alans-way\n" % name)
+            self.assertRegex(calls, r"-p %s plugins install --force file://\S+#alans-way\n" % name)
             self.assertIn("-p %s plugins enable alans-way\n" % name, calls)
+            self.assertIn("plugin installed in profile %s" % name, result.stdout)
         self.assertNotRegex(calls, r"-p botless plugins install \S+#alans-way\n")
-        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
         self.assertNotIn("allow_gateway_injection", calls.split("-p familydental", 1)[1].split("\n")[0])
 
     def test_an_installed_plugin_in_a_bot_profile_is_left_alone_with_the_update_command(self):
         result, home, calls = self.run_all(listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
         self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
         self.assertIn("hermes -p manda plugins update alans-way", result.stdout)
-        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
+        self.assertNotRegex(calls, r"-p manda plugins install --force")
 
     def test_a_catalog_install_in_a_bot_profile_is_never_replaced(self):
         def layout(home):
@@ -1887,7 +1942,7 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
                 '{"alans-way": {"catalog": {"name": "alans-way", "sha": "3a74614"}}}', encoding="utf-8")
         result, home, calls = self.run_all(layout=layout, listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
         self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
-        self.assertNotRegex(calls, r"-p (?!default)\S+ plugins install --force")
+        self.assertNotRegex(calls, r"-p manda plugins install --force")
 
     def test_keep_browser_applies_to_every_profile(self):
         _, _, calls = self.run_all("--keep-browser")

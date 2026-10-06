@@ -830,14 +830,41 @@ enable_proactivity_toolsets
 # Offered only when this Hermes has the pluggable computer-use API; feature-probed
 # with Hermes' own interpreter, never by version.
 COMPUTER_PLUGIN="alans-way-computer" COMPUTER_READY=0 COMPUTER_SELECTED=0
-if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
+# Hermes 0.21.5's `hermes` is often a bash shim (cd <dir> && source venv/bin/activate
+# && python hermes), so the shebang is not its python: take a python* shebang as is,
+# else the venv the shim activates, else the standard install location.
+find_hermes_python() {
   _hbin="$(command -v hermes 2>/dev/null || true)"
-  _shebang="$(head -1 "$_hbin" 2>/dev/null | sed -n 's/^#! *//p' | cut -d' ' -f1)"
-  case "$_shebang" in /usr/bin/env|'') ;; /*) HERMES_PYTHON="$_shebang";; esac
+  _line1="$(head -1 "$_hbin" 2>/dev/null | sed -n 's/^#! *//p')"
+  _interp="${_line1%% *}"
+  [ "$_interp" != /usr/bin/env ] || { _interp="$(command -v "$(printf '%s' "$_line1" | cut -d' ' -f2)" 2>/dev/null || true)"; }
+  case "$(basename "${_interp:-x}")" in python*) [ -x "$_interp" ] && { echo "$_interp"; return 0; };; esac
+  _src="$(grep -m1 'source .*activate' "$_hbin" 2>/dev/null || true)"
+  _dir="$(printf '%s' "$_src" | sed -n 's/.*cd  *\([^ ;&]*\).*/\1/p' | tr -d "\"'")"
+  _act="$(printf '%s' "$_src" | sed -n 's/.*source  *\([^ ;&]*activate\).*/\1/p' | tr -d "\"'")"
+  if [ -n "$_act" ]; then
+    case "$_act" in /*) ;; *) _act="${_dir:+$_dir/}$_act";; esac
+    [ -x "$(dirname "$_act")/python" ] && { echo "$(dirname "$_act")/python"; return 0; }
+  fi
+  [ -x "$HERMES_HOME/hermes-agent/venv/bin/python" ] && { echo "$HERMES_HOME/hermes-agent/venv/bin/python"; return 0; }
+  return 1
+}
+if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
+  HERMES_PYTHON="$(find_hermes_python || true)"
 fi
-COMPUTER_API=0
-if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' >/dev/null 2>&1; then
-  COMPUTER_API=1
+# Probed through that interpreter only (never a shell), under a hard limit: python3
+# is already required, and macOS has no `timeout`. Exit 124 means it timed out.
+COMPUTER_API=0 _probe_rc=0
+if [ -n "${HERMES_PYTHON:-}" ]; then
+  python3 -c 'import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "${ALANS_WAY_PROBE_TIMEOUT:-30}" "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' || _probe_rc=$?
+  case "$_probe_rc" in
+    0) COMPUTER_API=1;;
+    124) warn "the computer-use API probe timed out: skipping the computer-use provider";;
+  esac
 fi
 ensure_computer_provider() {
   COMPUTER_READY=0
@@ -1470,11 +1497,11 @@ install_plugin_for_bot_profile() {
     say "  to move it forward: hermes -p $PROFILE plugins update $PLUGIN_NAME"
   elif [ "$SKIP_PLUGIN" = 1 ]; then
     warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE plugins install $PLUGIN_NAME"
-  elif hermes_p plugins install "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1; then
+  elif hermes_p plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1; then
     hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
     ok "plugin installed in profile $PROFILE"
   else
-    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE plugins install $REPO_FILE_URL#$PLUGIN_NAME"
+    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME"
   fi
 }
 if [ "$ONLY_PROFILE" = 0 ]; then
