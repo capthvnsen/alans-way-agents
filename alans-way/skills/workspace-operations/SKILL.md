@@ -145,8 +145,8 @@ app opens them for the user while the tab stays yours to keep working.
    snapshot's generation for a cheap `{unchanged:true}` re-check instead of
    a re-sent tree. A check box or radio name ends in on or off, a select name includes the chosen option, a disabled control's name ends in disabled, a section name ends in open or closed, a selected tab's name ends in selected, and the current link's name ends in current. A menu item, option, tree item, slider, or clickable div is listed by its name, so do not screenshot it to find it. A control inside an open shadow root is listed the same way; a closed root is not readable. A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable. A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label. A pressed toggle's name ends in on or off, so do not screenshot it to see the state. Request a screenshot only when the DOM view cannot answer
    the question; `cua_alans_way_screenshot` accepts `format`
-   (`jpeg`|`png`|`webp`), `quality`, and `maxWidth` — jpeg around 70 quality
-   at 1280px is the fast default. Use the snapshot's refs and current
+   (`jpeg`|`png`|`webp`), `quality`, and `maxWidth` — jpeg quality 50
+   at 960px is the default. Use the snapshot's refs and current
    control epoch for the next action, then inspect the result. A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text. Use those refs. When it says unchanged, the controls you already have are still valid, so do not snapshot again. The browser
    tools target that tab directly in the background and leave the real
    mouse alone. Completion requires observed page state, rather than the
