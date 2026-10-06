@@ -98,7 +98,17 @@ else
   ok "hermes ${HERMES_V:-unknown version}"
 fi
 have python3 || bad "python3 required"
-have node || warn "node not on PATH — required for the browser connector"
+MIN_NODE_MAJOR=18
+if have node; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
+    ok "node $(node --version 2>/dev/null | sed 's/^v//') (>= $MIN_NODE_MAJOR required for browser connector scripts)"
+  else
+    bad "node $(node --version 2>/dev/null | sed 's/^v//') is below $MIN_NODE_MAJOR — upgrade Node before running setup (browser host and router scripts need fetch/AbortSignal.timeout)"
+  fi
+else
+  bad "node not on PATH — Node $MIN_NODE_MAJOR+ required for the browser connector"
+fi
 [ -d "$HERMES_HOME" ] && ok "HERMES_HOME: $HERMES_HOME" || warn "HERMES_HOME $HERMES_HOME does not exist yet (created on first hermes run)"
 
 if [ "$VERIFY" = 1 ]; then
