@@ -25,6 +25,7 @@ SETTINGS = {
         "event_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 31536000},
         "max_pending": {"type": "integer", "minimum": 1, "maximum": 1024},
         "debounce_seconds": {"type": "integer", "minimum": 0, "maximum": 31536000},
+        "resume_at": TEXT,
         "preferences": PREFERENCES,
     },
 }
@@ -35,6 +36,7 @@ TASK = {
                                              "native_board", "next_review_at", "due_at", "notify_when",
                                              "artifact", "verification", "consent_reference"]},
                    "status": {"type": "string", "enum": ["active", "waiting", "blocked", "done", "cancelled"]},
+                   "kind": {"type": "string", "enum": ["watch", "loop", "sweep"]},
                    "approved": {"type": "boolean", "enum": [True]},
                    "cadence_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},
                    "execution_host": {"type": "string", "enum": ["cloud", "mac"]}},
@@ -47,7 +49,7 @@ SCHEMA = {
         "properties": {
             "action": {"type": "string", "enum": ACTIONS}, "settings": SETTINGS, "changes": SETTINGS,
             "task": TASK, "task_id": TEXT, "event_id": TEXT, "artifact": TEXT, "verification": TEXT,
-            "signal": TEXT,
+            "signal": TEXT, "resume_at": TEXT,
             "status": {"type": "string", "enum": ["done", "cancelled", "waiting", "blocked"]},
         },
     },

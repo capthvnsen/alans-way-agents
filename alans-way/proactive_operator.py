@@ -2,6 +2,49 @@
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import sqlite3
+
+
+def _entry_is_dm_route(entry, session_key):
+    return (type(entry) is dict and entry.get("session_key") == session_key
+            and entry.get("platform") == "telegram" and entry.get("chat_type") == "dm"
+            and type(entry.get("session_id")) is str and bool(entry["session_id"])
+            and entry.get("suspended") is not True)
+
+
+def _routing_entry(home: Path, session_key: str):
+    """Resolve a routing record without ever writing to either store.
+
+    ``sessions/sessions.json`` is only a legacy mirror Hermes may stop writing;
+    the authoritative index is state.db's ``gateway_routing`` table. Both are
+    read-only for us: a missing or unreadable source falls through, never
+    fabricates.
+    """
+    index = home / "sessions" / "sessions.json"
+    try:
+        if index.is_file() and not index.is_symlink() and index.stat().st_size <= 16777216:
+            data = json.loads(index.read_text(encoding="utf-8"))
+            if type(data) is dict and type(data.get(session_key)) is dict:
+                return data[session_key]
+    except (OSError, ValueError):
+        pass
+    db_path = home / "state.db"
+    try:
+        if not db_path.is_file() or db_path.is_symlink():
+            return None
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            row = db.execute(
+                "SELECT entry_json FROM gateway_routing WHERE session_key=?",
+                (session_key,)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return None
+        entry = json.loads(row[0])
+        return entry if type(entry) is dict else None
+    except (OSError, ValueError, sqlite3.Error):
+        return None
 
 
 def bind(runtime, session_key):
@@ -10,15 +53,8 @@ def bind(runtime, session_key):
     Policy(session_key=session_key)
     if not session_key:
         raise ValueError("an existing route is required")
-    index = runtime.home / "sessions" / "sessions.json"
-    if not index.is_file() or index.is_symlink() or index.stat().st_size > 16777216:
-        raise ValueError("unsupported routing index")
-    data = json.loads(index.read_text(encoding="utf-8"))
-    entry = data.get(session_key) if type(data) is dict else None
-    if (type(entry) is not dict or entry.get("session_key") != session_key
-            or entry.get("platform") != "telegram" or entry.get("chat_type") != "dm"
-            or type(entry.get("session_id")) is not str or not entry["session_id"]
-            or entry.get("suspended") is True):
+    entry = _routing_entry(runtime.home, session_key)
+    if not _entry_is_dm_route(entry, session_key):
         raise ValueError("bind only a verified existing direct Telegram route in this profile")
     runtime.store.update_policy({"enabled": False, "primary_profile": "default", "session_key": session_key})
 

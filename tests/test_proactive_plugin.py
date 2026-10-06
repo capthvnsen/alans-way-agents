@@ -1,6 +1,7 @@
 """Public plugin facade contracts; no Hermes internals in unit tests."""
 from pathlib import Path
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -466,6 +467,281 @@ class PluginTests(unittest.TestCase):
             self.assertIsNotNone(primary.worker)
             self.assertTrue(primary.worker.is_alive())
             primary.close()
+
+    def test_first_run_orientation_is_admitted_once_on_resume(self):
+        """The first explicit resume queues one orientation wake; it dispatches
+        without an appraiser, and later resumes never re-admit it."""
+        from types import SimpleNamespace
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home,
+                appraiser=lambda *_: self.fail("orientation skips appraisal"))
+            runtime.store.update_policy({
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "min_watch_interval_seconds": 0, "quiet_start": 0,
+                "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            # Not admitted until an explicit resume.
+            self.assertIsNone(runtime.tick())
+            self.assertTrue(json.loads(runtime.control({"action": "resume"}))["ok"])
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion first-run orientation]",
+                          facade.received[0][0])
+            runtime.store.finish(result["id"], "resolved")
+            facade.received.clear()
+            # Pause/resume cycles never re-admit it.
+            runtime.control({"action": "pause"})
+            self.assertTrue(json.loads(runtime.control({"action": "resume"}))["ok"])
+            self.assertIsNone(runtime.tick())
+            self.assertEqual(facade.received, [])
+            runtime.close()
+
+    def test_snoozed_pause_re_enables_at_resume_at(self):
+        """pause with an aware resume_at persists as a snooze; claim() stays
+        closed until the moment, then re-enables and clears the field."""
+        from datetime import datetime, timedelta, timezone
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.store.update_policy({
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            result = json.loads(runtime.control(
+                {"action": "pause", "resume_at": future}))
+            self.assertTrue(result["ok"])
+            policy = runtime.store.load_policy()
+            self.assertFalse(policy.enabled)
+            self.assertEqual(policy.resume_at, future)
+            self.assertTrue(runtime.store.record_event(
+                "manual_review", "rev:check", purpose=True))
+            self.assertIsNone(runtime.store.claim())
+            self.assertFalse(runtime.store.load_policy().enabled)
+            # A past resume_at lifts the pause inside claim itself.
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            runtime.store.update_policy({"enabled": False, "resume_at": past})
+            event = runtime.store.claim()
+            self.assertIsNotNone(event)
+            policy = runtime.store.load_policy()
+            self.assertTrue(policy.enabled)
+            self.assertEqual(policy.resume_at, "")
+            # Invalid or naive resume_at values are rejected outright.
+            for bad in ("soon", "2026-10-09 08:00", 1234):
+                result = json.loads(runtime.control(
+                    {"action": "pause", "resume_at": bad}))
+                self.assertFalse(result["ok"])
+            runtime.close()
+
+    def test_loop_and_sweep_kinds_dispatch_distinct_messages(self):
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home,
+                appraiser=lambda *_: self.fail("scheduled kinds skip appraisal"))
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "min_watch_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            runtime.ledger.record_task({"id": "keith", "kind": "loop",
+                "title": "Keith financials", "scope": "Awaiting financials",
+                "next_action": "Check inbox", "owner": "primary",
+                "status": "active", "approved": True, "due_at": past})
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion open loop check]", facade.received[0][0])
+            runtime.store.finish(result["id"], "resolved")
+            runtime.ledger.finish_task("keith", "done")
+            facade.received.clear()
+            runtime.ledger.record_task({"id": "sweep", "kind": "sweep",
+                "title": "Morning sweep", "scope": "Sweep reachable sources",
+                "next_action": "Run the sweep", "owner": "primary",
+                "status": "active", "approved": True, "next_review_at": past})
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion scheduled sweep]", facade.received[0][0])
+            runtime.store.finish(result["id"], "resolved")
+            runtime.close()
+
+    def test_missing_or_corrupt_kind_falls_back_to_watch_dispatch(self):
+        """Hand-edited or pre-kind ledger entries must never crash dispatch —
+        an unknown kind reads as an ordinary scheduled watch."""
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            facade = Facade()
+            runtime = module.Runtime(facade, home)
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "min_watch_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            runtime.ledger.record_task({"id": "rent", "title": "Rent",
+                "scope": "Check rent posts", "next_action": "Check feed",
+                "owner": "primary", "status": "active", "approved": True,
+                "next_review_at": past})
+            # Simulate a ledger written before kind existed, then corrupt it.
+            with runtime.ledger.transaction() as state:
+                del state["tasks"]["rent"]["kind"]
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion scheduled watch]", facade.received[0][0])
+            runtime.store.finish(result["id"], "resolved")
+            runtime.ledger.arm_review(
+                "rent", (datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
+            with runtime.ledger.transaction() as state:
+                state["tasks"]["rent"]["kind"] = "bogus"
+                state["tasks"]["rent"]["next_review_at"] = (
+                    datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            facade.received.clear()
+            self.assertEqual(runtime.observe(), 1)
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            self.assertIn("[Companion scheduled watch]", facade.received[0][0])
+            runtime.close()
+
+    def test_record_task_validates_kind_and_keeps_it_immutable(self):
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            base = {"id": "w", "title": "T", "scope": "S", "next_action": "N",
+                    "owner": "primary", "status": "active", "approved": True}
+            runtime.ledger.record_task({**base, "kind": "loop"})
+            task = runtime.ledger.snapshot()["tasks"][0]
+            self.assertEqual(task["kind"], "loop")
+            with self.assertRaises(ValueError):
+                runtime.ledger.record_task({**base, "kind": "sweep"})
+            with self.assertRaises(ValueError):
+                runtime.ledger.record_task({**base, "kind": "nag"})
+            # Omitting kind on update preserves the existing one.
+            runtime.ledger.record_task(base)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["kind"], "loop")
+            runtime.close()
+
+    def test_accepted_wake_coalesces_queued_speculative_events(self):
+        """One accepted speculative wake consumes the burst — the leftover
+        pending diffs become dropped, not separate model turns."""
+        from types import SimpleNamespace
+        class Facade:
+            def inject_message(self, message, **kwargs):
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(Facade(), home,
+                                     appraiser=lambda *_: {"useful": True})
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            for evidence in ("ctx:a", "ctx:b", "ctx:c"):
+                self.assertTrue(runtime.store.record_event(
+                    "context_changed", evidence, purpose=True))
+            self.assertEqual(runtime.tick()["status"], "accepted_unverified")
+            counts = runtime.store.status()["counts"]
+            self.assertEqual(counts.get("pending", 0), 0)
+            self.assertEqual(counts.get("dropped", 0), 2)
+            runtime.close()
+
+    def test_accepted_sweep_folds_queued_speculative_events(self):
+        """A scheduled sweep absorbs pending speculative diffs into its own
+        turn; a plain watch_due leaves them queued for their own wake."""
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def inject_message(self, message, **kwargs):
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(Facade(), home,
+                                     appraiser=lambda *_: {"useful": True})
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "min_watch_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            for evidence in ("ctx:a", "ctx:b"):
+                self.assertTrue(runtime.store.record_event(
+                    "context_changed", evidence, purpose=False))
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            runtime.ledger.record_task({"id": "sweep", "kind": "sweep",
+                "title": "Sweep", "scope": "Sweep sources",
+                "next_action": "Run the sweep", "owner": "primary",
+                "status": "active", "approved": True, "next_review_at": past})
+            self.assertEqual(runtime.observe(), 1)
+            # The sweep is purpose=True so it outranks the speculatives.
+            result = runtime.tick()
+            self.assertEqual(result["status"], "accepted_unverified")
+            counts = runtime.store.status()["counts"]
+            self.assertEqual(counts.get("pending", 0), 0)
+            self.assertEqual(counts.get("dropped", 0), 2)
+            runtime.close()
+
+    def test_failed_dispatch_never_coalesces_pending_events(self):
+        """Coalescing after acceptance only: an uncertain injection leaves
+        the speculative queue intact for a later wake."""
+        class Facade:
+            def inject_message(self, message, **kwargs):
+                return "scheduled"
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(Facade(), home,
+                                     appraiser=lambda *_: {"useful": True})
+            runtime.store.update_policy({"enabled": True,
+                "session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "min_interval_seconds": 0,
+                "quiet_start": 0, "quiet_end": 0})
+            guard.mark_gateway_ready(home)
+            for evidence in ("ctx:a", "ctx:b"):
+                self.assertTrue(runtime.store.record_event(
+                    "context_changed", evidence, purpose=True))
+            self.assertEqual(runtime.tick()["status"], "uncertain")
+            counts = runtime.store.status()["counts"]
+            self.assertEqual(counts.get("pending", 0), 1)
+            self.assertEqual(counts.get("dropped", 0), 0)
+            runtime.close()
 
     def test_registration_does_not_start_another_agent_or_cli_injection(self):
         class Facade:

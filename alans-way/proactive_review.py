@@ -146,7 +146,7 @@ def _validate_snapshot(context: dict) -> None:
                 or ("enabled" in job and type(job["enabled"]) is not bool)):
             raise ValueError("schedule is not sanitized metadata")
     required = {"id", "title", "scope", "next_action", "status", "owner", "approved"}
-    optional = {"native_task_id", "next_review_at", "execution_host", "due_at",
+    optional = {"kind", "native_task_id", "next_review_at", "execution_host", "due_at",
                 "notify_when", "cadence_seconds", "signal", "signal_at"}
     seen = set()
     for task in context.get("tasks", []):

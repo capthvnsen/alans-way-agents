@@ -52,6 +52,9 @@ class Policy:
     unresolved_ttl_seconds: int = 3600
     max_pending: int = 64
     debounce_seconds: int = 120
+    # Snooze support: "" or an aware ISO timestamp at which a paused policy
+    # re-enables itself inside claim(). Never settable while enabled.
+    resume_at: str = ""
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -81,6 +84,15 @@ class Policy:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in [{low}, {high}]")
+        if type(self.resume_at) is not str or len(self.resume_at) > 64:
+            raise ValueError("resume_at must be an aware ISO timestamp")
+        if self.resume_at:
+            try:
+                moment = datetime.fromisoformat(self.resume_at)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("resume_at must be an aware ISO timestamp") from exc
+            if moment.tzinfo is None or moment.utcoffset() is None:
+                raise ValueError("resume_at must be an aware ISO timestamp")
 
     @classmethod
     def from_dict(cls, settings: dict) -> Policy:
@@ -225,6 +237,10 @@ class Store:
             old, revision = self._policy(db, strict=True)
             settings = old.to_dict()
             settings.update(changes)
+            if settings.get("enabled") is True:
+                # Any re-enable clears a pending snooze; resume_at is only
+                # meaningful while paused.
+                settings["resume_at"] = ""
             new = Policy.from_dict(settings)
             if new != old:
                 if new.session_key != old.session_key:
@@ -232,7 +248,8 @@ class Store:
                     self._audit(db, "route_dropped", revision + 1, dropped)
                 dropped = db.execute("""UPDATE events SET status='dropped' WHERE sequence IN (
                     SELECT sequence FROM events WHERE status='pending' ORDER BY purpose DESC,
-                    CASE kind WHEN 'manual_review' THEN 0 WHEN 'watch_due' THEN 1
+                    CASE kind WHEN 'manual_review' THEN 0 WHEN 'first_run' THEN 0
+                    WHEN 'watch_due' THEN 1
                     WHEN 'task_changed' THEN 2 WHEN 'worker_update' THEN 3 ELSE 4 END,
                     created_at, sequence LIMIT -1 OFFSET ?)""", (new.max_pending,)).rowcount
                 self._audit(db, "queue_dropped", revision + 1, dropped)
@@ -256,7 +273,7 @@ class Store:
         a non-aware clock is a caller error and raises ValueError.
         """
         timestamp = self._timestamp(now)
-        if (type(kind) is not str or kind not in {"task_changed", "worker_update", "context_changed", "manual_review", "watch_due"}
+        if (type(kind) is not str or kind not in {"task_changed", "worker_update", "context_changed", "manual_review", "watch_due", "first_run"}
                 or type(evidence) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", evidence) is None
                 or type(purpose) is not bool):
             return False
@@ -307,7 +324,27 @@ class Store:
         timestamp = self._timestamp(now)
         with self._transaction() as db:
             policy, revision = self._policy(db)
-            if not policy.enabled or not policy.session_key:
+            if not policy.enabled:
+                # A snoozed pause lifts itself at resume_at — still inside the
+                # same transaction, before any event decision.
+                due = False
+                if policy.resume_at:
+                    try:
+                        moment = datetime.fromisoformat(policy.resume_at)
+                        due = (moment.tzinfo is not None
+                               and moment.timestamp() <= timestamp)
+                    except (ValueError, TypeError, OverflowError):
+                        due = False
+                if not due:
+                    return None
+                settings = policy.to_dict()
+                settings.update({"enabled": True, "resume_at": ""})
+                policy = Policy.from_dict(settings)
+                revision += 1
+                db.execute("UPDATE policy SET settings=?, revision=? WHERE singleton=1",
+                           (json.dumps(policy.to_dict()), revision))
+                self._audit(db, "auto_resumed", revision)
+            if not policy.session_key:
                 return None
             self._expire(db, timestamp, policy, revision)
             hour = datetime.fromtimestamp(timestamp, ZoneInfo(policy.timezone)).hour
@@ -341,8 +378,8 @@ class Store:
             event = db.execute("""SELECT * FROM events WHERE status='pending' AND created_at<=?
                 AND ((kind='watch_due' AND ? AND ?) OR (kind!='watch_due' AND ? AND ? AND (purpose=1 OR ?)))
                 ORDER BY purpose DESC, CASE kind WHEN 'manual_review' THEN 0
-                WHEN 'watch_due' THEN 1 WHEN 'task_changed' THEN 2
-                WHEN 'worker_update' THEN 3 ELSE 4 END,
+                WHEN 'first_run' THEN 0 WHEN 'watch_due' THEN 1
+                WHEN 'task_changed' THEN 2 WHEN 'worker_update' THEN 3 ELSE 4 END,
                 created_at, sequence LIMIT 1""",
                 (timestamp - policy.debounce_seconds, allow_watch, watch_open,
                  allow_other, shared_open, allow_low)).fetchone()
@@ -353,6 +390,23 @@ class Store:
             return {"id": event["id"], "kind": event["kind"], "evidence": event["evidence"],
                     "purpose": bool(event["purpose"]), "session_key": event["session_key"],
                     "policy_revision": revision}
+
+    def coalesce_pending(self) -> int:
+        """Drop speculative pending events a just-accepted wake already covers.
+
+        Every admitted wake re-reads live context, so a burst of queued
+        digests would become a burst of turns carrying one turn's worth of
+        information. The caller folds only after its injection was accepted —
+        a failed dispatch leaves the queue alone rather than losing diffs.
+        Scheduled/manual/first-run events are never folded: user contracts and
+        one-time orientation deserve their own wake.
+        """
+        with self._transaction() as db:
+            dropped = db.execute(
+                "UPDATE events SET status='dropped' WHERE status='pending'"
+                " AND kind IN ('task_changed','worker_update','context_changed')").rowcount
+            self._audit(db, "coalesced", self._policy(db)[1], dropped)
+            return dropped
 
     def finish(self, event_id: str, status: str) -> None:
         """Record a caller's explicit outcome, not an injection return value.

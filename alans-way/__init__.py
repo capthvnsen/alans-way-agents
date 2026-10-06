@@ -115,6 +115,8 @@ class Runtime:
             return {"id": event_id, "status": "rejected"}
         if event["kind"] == "watch_due":
             return self._dispatch_watch_due(event)
+        if event["kind"] == "first_run":
+            return self._dispatch_first_run(event)
         context = {"tasks": []}
         try:
             self.appraisal_error = None
@@ -172,6 +174,52 @@ class Runtime:
         try:
             accepted = self.ctx.inject_message(message, role="user", session_key=event["session_key"])
             status = "accepted_unverified" if accepted is True else "rejected" if accepted is False else "uncertain"
+        except Exception:
+            status = "uncertain"
+        self.store.finish(event_id, status)
+        if status == "accepted_unverified" and hasattr(self.store, "coalesce_pending"):
+            # This wake re-reads live context, so any other queued speculative
+            # diffs would fire the same turn's work as separate wakes. Fold
+            # them now — after acceptance, never before.
+            self.store.coalesce_pending()
+        return {"id": event_id, "status": status}
+
+    def _dispatch_first_run(self, event):
+        """The one-time orientation wake after the operator's first resume.
+
+        No appraisal: explicit resume plus the never-fired ledger marker are
+        the consent gate. The wake inventories reachable read surfaces and
+        reports concrete offers — it creates nothing itself.
+        """
+        event_id = event["id"]
+        live = self.store.load_policy()
+        if live.enabled is not True or event["session_key"] != live.session_key \
+                or not self.gateway_ready():
+            self.store.finish(event_id, "rejected")
+            return {"id": event_id, "status": "rejected"}
+        metadata = {"id": event_id, "kind": "first_run", "purpose": True}
+        message = "\n".join([
+            "[Companion first-run orientation]",
+            "Proactivity was just enabled on this conversation. This is a",
+            "one-time orientation wake, not new authorization: first call",
+            "proactive_control status; if paused, stop. Load skill",
+            "alans-way:proactive-primary.",
+            "Inventory only installed and reachable read surfaces (skills,",
+            "connectors, schedules, approved watches) with a few bounded",
+            "metadata reads — no bulk content. Then send ONE consolidated",
+            "reply: at most five concrete watch/loop/sweep offers with",
+            "cadences, or one clarifying question if priorities are unclear.",
+            "Create nothing without an explicit yes. If no useful source is",
+            "reachable, say so plainly and suggest the smallest start.",
+            "Resolve this event with proactive_control resolve when done; do",
+            "not generate a second orientation wake.",
+            "Event metadata: " + json.dumps(metadata, sort_keys=True),
+        ])
+        try:
+            accepted = self.ctx.inject_message(message, role="user",
+                                               session_key=event["session_key"])
+            status = ("accepted_unverified" if accepted is True
+                      else "rejected" if accepted is False else "uncertain")
         except Exception:
             status = "uncertain"
         self.store.finish(event_id, status)
@@ -233,12 +281,28 @@ class Runtime:
                 or not self.gateway_ready():
             self.store.finish(event_id, "rejected")
             return {"id": event_id, "status": "rejected"}
-        metadata = {"id": event_id, "kind": "watch_due", "purpose": True,
-                    "watch_id": watch_id, "fired_instance": marker,
+        # Missing or hand-corrupted kinds fall back to the plain watch
+        # contract — a bad label must never crash a scheduled wake.
+        kind = watch.get("kind", "watch")
+        if kind not in ("watch", "loop", "sweep"):
+            kind = "watch"
+        metadata = {"id": event_id, "kind": "watch_due", "watch_kind": kind,
+                    "purpose": True, "watch_id": watch_id,
+                    "fired_instance": marker,
                     "execution_host": watch.get("execution_host", "cloud")}
+        heading = {
+            "watch": "[Companion scheduled watch]",
+            "loop": "[Companion open loop check]",
+            "sweep": "[Companion scheduled sweep]",
+        }[kind]
+        contract = {
+            "watch": "a standing watch",
+            "loop": "an open loop reaching its follow-up moment",
+            "sweep": "a consolidated source sweep",
+        }[kind]
         lines = [
-            "[Companion scheduled watch]",
-            "This is a user-approved standing watch firing on schedule — bounded",
+            heading,
+            f"This is a user-approved {contract} firing on schedule — bounded",
             "contracted work, not a new opportunity and not new scope.",
             f'Watch "{watch_id}": {watch.get("title", "")}'.rstrip(),
             f"Scope: {watch.get('scope', '')}",
@@ -250,19 +314,42 @@ class Runtime:
             lines.append(f"Report only when: {watch['notify_when']}")
         if watch.get("signal"):
             lines.append(f"Last reported signal: {watch['signal']}")
-        lines.append(
-            "Run the check now with real tools, honoring execution_host "
-            "(mac work stays on the Mac; unreachable means finish_task "
-            "blocked plus a report of the failure, never a cloud fallback). "
-            "Write what you observed via proactive_control report_signal so "
-            "unchanged findings dedupe durably. Re-arm with record_task "
-            "(new next_review_at) unless cadence_seconds already advances "
-            "it, or finish_task when the watch is satisfied. Report to this "
-            "conversation only when the outcome is meaningful or needs a "
-            "decision — silence is a valid result. Then resolve this event "
-            "via proactive_control resolve. Native approvals still gate "
-            "external or sensitive actions; unverified work is not complete."
-        )
+        if kind == "sweep":
+            lines.append(
+                "Run one bounded metadata-first pass over installed, reachable "
+                "read surfaces and open loops — load alans-way:proactive-primary "
+                "and follow its Source Sweeps procedure. At most five ranked "
+                "items with evidence and why they matter now; nothing actionable "
+                "means a quiet, successful sweep — silence, not filler. Draft, "
+                "never send, anything external without approval. Write "
+                "report_signal with a short digest, then resolve this event via "
+                "proactive_control resolve."
+            )
+        elif kind == "loop":
+            lines.append(
+                "Check the real signal now (inbox, thread, board) with real "
+                "tools, honoring execution_host. If the dependency resolved, "
+                "finish_task with the outcome and fold quiet mentions into the "
+                "next sweep rather than a standalone message. If it is still "
+                "unanswered past its moment, draft the follow-up and ask before "
+                "sending — a loop never nudges on its own, and only once per "
+                "checkpoint. Then resolve this event via proactive_control "
+                "resolve."
+            )
+        else:
+            lines.append(
+                "Run the check now with real tools, honoring execution_host "
+                "(mac work stays on the Mac; unreachable means finish_task "
+                "blocked plus a report of the failure, never a cloud fallback). "
+                "Write what you observed via proactive_control report_signal so "
+                "unchanged findings dedupe durably. Re-arm with record_task "
+                "(new next_review_at) unless cadence_seconds already advances "
+                "it, or finish_task when the watch is satisfied. Report to this "
+                "conversation only when the outcome is meaningful or needs a "
+                "decision — silence is a valid result. Then resolve this event "
+                "via proactive_control resolve. Native approvals still gate "
+                "external or sensitive actions; unverified work is not complete."
+            )
         lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
         try:
             accepted = self.ctx.inject_message("\n".join(lines), role="user",
@@ -272,6 +359,13 @@ class Runtime:
         except Exception:
             status = "uncertain"
         self.store.finish(event_id, status)
+        if status == "accepted_unverified" and kind == "sweep" \
+                and hasattr(self.store, "coalesce_pending"):
+            # The sweep reads live context anyway, so queued speculative diffs
+            # are its input — fold them into this one turn instead of
+            # waking again. Only after acceptance; a failed dispatch loses
+            # nothing.
+            self.store.coalesce_pending()
         return {"id": event_id, "status": status}
 
     def close(self):
@@ -325,11 +419,15 @@ class Runtime:
                 self.ledger.finish_task(args.get("task_id"), args.get("status", "done"),
                                         artifact=args.get("artifact"), verification=args.get("verification"))
             elif action == "pause":
-                self.store.update_policy({"enabled": False})
+                # resume_at turns a pause into a durable snooze; a bare pause
+                # clears any pending snooze rather than inheriting one.
+                self.store.update_policy({"enabled": False,
+                                          "resume_at": args.get("resume_at") or ""})
             elif action == "resume":
                 if not self.store.load_policy().session_key:
                     raise ValueError("bind an existing route first")
                 self.store.update_policy({"enabled": True})
+                self._admit_first_run()
             elif action == "review":
                 # Interactive review is read-only and immediate, including while
                 # automatic work is paused. It never queues a later surprise turn.
@@ -342,6 +440,25 @@ class Runtime:
             return json.dumps({"ok": True, **self.store.status()})
         except Exception:
             return json.dumps({"ok": False, "error": "Invalid or unsupported proactivity control; no success is claimed"})
+
+    def _admit_first_run(self):
+        """Admit the one-time orientation wake on the operator's first resume.
+
+        The ledger marker makes this once-ever; it is set only on successful
+        admission, so a refused or lost event can still be admitted by a later
+        resume, and a completed one can never fire twice.
+        """
+        try:
+            with self.ledger.transaction() as state:
+                if state["observations"].get("first_run_done"):
+                    return
+                admitted = self.store.record_event(
+                    "first_run", "firstrun:orientation", purpose=True)
+                if admitted:
+                    state["observations"]["first_run_done"] = \
+                        datetime.now(timezone.utc).isoformat()
+        except Exception:
+            pass
 
     def _caller_session_key(self):
         """The route Hermes bound around this command handler's session.
@@ -399,7 +516,9 @@ class Runtime:
         if state.get("storage_full"):
             attention.append("event storage full — new wakes refused")
         flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
-        return (f"Proactivity: {'enabled' if state['enabled'] else 'paused'}\n"
+        snoozed = ("" if state["enabled"] or not policy.get("resume_at")
+                   else f" until {policy['resume_at']}")
+        return (f"Proactivity: {'enabled' if state['enabled'] else 'paused' + snoozed}\n"
                 f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
                 f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
                 f"{policy['max_daily_watch_wakes']} scheduled-watch wakes; "
@@ -431,7 +550,8 @@ class Runtime:
                 def line(t):
                     fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
-                    return f"- {t['id']} [{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
+                    kind = t.get("kind") if t.get("kind") in {"watch", "loop", "sweep"} else "watch"
+                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
                 task = next((t for t in tasks if t["id"] == rest), None)

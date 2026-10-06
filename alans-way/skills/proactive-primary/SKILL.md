@@ -59,6 +59,7 @@ own `/watch` command (see below).
 ```python
 proactive_control(action="status")
 proactive_control(action="pause")
+proactive_control(action="pause", resume_at="2026-10-09T08:00:00-06:00")
 proactive_control(action="resume")
 proactive_control(action="configure", settings={"quiet_start": 23, "quiet_end": 8})
 proactive_control(action="configure", settings={"max_daily_wakes": 1})
@@ -68,9 +69,30 @@ proactive_control(action="record_task", task={
     "scope": "Check rent payment posts; remind if missing",
     "next_action": "Check bank feed on the 1st", "status": "active",
     "approved": True, "cadence_seconds": 86400, "due_at": "2026-02-02T00:00:00+00:00"})
+proactive_control(action="record_task", task={
+    "id": "morning_sweep", "kind": "sweep", "title": "Morning sweep",
+    "owner": "primary", "status": "active", "approved": True,
+    "scope": "Sweep reachable sources (calendar next 24h, inbox triage, open loops) for items worth surfacing",
+    "next_action": "Run the Source Sweeps procedure; report only actionable items",
+    "cadence_seconds": 86400, "notify_when": "actionable items exist"})
+proactive_control(action="record_task", task={
+    "id": "loop_keith", "kind": "loop", "title": "Keith financials",
+    "owner": "primary", "status": "active", "approved": True,
+    "scope": "Waiting on Keith for 3 years of financials + 2026 sales (offered Sep 30)",
+    "next_action": "Check inbox for reply; if still silent, draft a follow-up and offer to send it",
+    "due_at": "2026-10-08T00:00:00+00:00", "notify_when": "reply arrives or due passes"})
 proactive_control(action="report_signal", task_id="rent_due",
                   signal="payment posted 2026-02-01")
 ```
+
+Three kinds of ledger entries exist. `watch` (the default) is a standing
+check on a thing — a price, a page, a thread state. `loop` tracks an outbound
+dependency — something sent or requested that awaits a reply, delivery, or
+artifact; its `due_at` is the follow-up moment, its `signal` the last known
+state. `sweep` is a scheduled broad pass over permitted sources and open
+loops, producing one consolidated report or silence. All three share the same
+schedule/signal/deadline machinery; the kind only shapes the wake message and
+the procedure this skill applies.
 
 A user-requested `review` asks for one bounded review; it does not authorize a
 recurring reminder, resuming work, or delivering a message elsewhere.
@@ -83,8 +105,14 @@ consent before any action. It does not queue an automatic wake.
 Translate the user's ordinary chat into an explicit `proactive_control` action:
 
 - "Stop being proactive" → `pause`; "resume proactivity" → `resume` only on clear consent.
+- "Quiet until Thursday" / "take a break for a few days" → `pause` with a concrete
+  aware `resume_at` timestamp you resolved with the user; confirm the exact moment
+  back. A snoozed pause re-enables itself at that time and survives restart.
 - "Quiet from 11pm to 8am" → `configure` the supported quiet-hour fields and timezone.
 - "Less often / at most once a day" → `configure` `max_daily_wakes` or `min_interval_seconds`.
+- "Dial it down / up" → `configure` the caps: down means fewer daily wakes and a
+  longer `min_interval_seconds`; up means more within the documented ceilings.
+  Report the resulting numbers, not just the dial name.
 - "Focus on these priorities" → `configure` priorities if the live schema supports them;
   otherwise explain the unsupported setting. Do not invent fields or claim it was saved.
 - "Review what would help now" → `review`; follow the procedure below once.
@@ -156,6 +184,91 @@ The collector recipe: a Hermes `cronjob` or the woken primary performs the
 check (inbox scan, price fetch, calendar diff) and writes `report_signal` —
 the observer wakes only when the signal actually changes. That is how standing
 source checks plug in without any per-source plumbing.
+
+## Source Sweeps
+
+A `kind: "sweep"` watch fires `[Companion scheduled sweep]` — a standing
+contract the user opted into, for example "give me a morning sweep" or "check
+my inboxes twice a day." One wake covers the whole pass; never split sources
+across separate wakes. When it arrives:
+
+1. Call `proactive_control(action="status")` first; paused or stale event means
+   stop.
+2. Inventory which read surfaces are actually installed and reachable — the
+   `capabilities` list in review context names installed skills (for example a
+   Google Workspace skill's calendar/mail reads, an email CLI, a notes
+   connector), plus native schedule/tasks. Use only surfaces that already
+   exist and are authorized; a missing connector is a fact to report, never a
+   thing to provision silently or pretend to have read.
+3. Read metadata-first: subjects, senders, times, due states, sync status —
+   bounded to a handful of tool calls total. Open full content only for the
+   few candidates that earn it. If a source skill documents a brief procedure
+   (for example a daily-brief reference covering schedule, conflicts, meeting
+   prep and urgent mail), follow it within its own bounds.
+4. Evaluate open `loop` entries alongside the sources: resolved, still
+   waiting, or past its follow-up moment.
+5. Compose at most five items ranked by consequence and time, each with its
+   evidence and why it matters now — never a feed. Nothing actionable is a
+   successful silent sweep.
+6. Write `report_signal` with a short digest ("sweep: 2 actionable" or
+   "sweep: quiet"), then `resolve` the event. The cadence re-arms on its own;
+   an identical digest dedupes against the next pass.
+
+A sweep creates nothing: watches, loops, sends, purchases and file edits all
+wait for user consent. Its whole job is noticing and reporting — or asking
+one question when a real decision is pending and the evidence is ambiguous.
+
+## Open Loops
+
+The highest-value catches are obligations, not notifications: a request sent
+with no reply, a promised document never delivered, a paid invoice with no
+confirmation. Track each as a `kind: "loop"` entry — `scope` names who/what is
+owed, `due_at` the moment following up is due, `notify_when` the user's report
+rule, `signal` the last known state.
+
+- Record a loop only when the user asked for the tracking, or offer it when
+  they clearly sent something awaiting response ("I emailed the bank Monday —
+  want me to track it?"). The offer itself is cheap; the loop is consent.
+- On a `[Companion open loop check]` wake: check the real signal (inbox,
+  thread, board). Resolved → `finish_task` with the outcome, mention it inside
+  the next sweep rather than its own message unless it unblocks the user now.
+  Still waiting past `due_at` → draft the follow-up and ask before sending —
+  a loop never sends a nudge on its own.
+- One nudge per checkpoint, then wait. Do not poll a loop faster than its
+  deadline logic, and never invent urgency to justify a message.
+
+## First Run
+
+`[Companion first-run orientation]` arrives once, when the operator first
+enables proactivity on the bound route. It is consent for one orientation
+report, not for enabling work:
+
+1. Inventory reachable surfaces — installed skills, connectors, native
+   schedule/tasks — with a few bounded metadata reads only.
+2. Report one consolidated message: the handful of things you could take off
+   the user's plate, each as a concrete offer (a named watch, loop, or sweep
+   with its cadence). Ask one clarifying question if priorities are unclear.
+3. Create nothing unasked. If no source is reachable, say so and suggest the
+   smallest useful starting point. Resolve the event when done.
+
+## Reaching the User
+
+Every proactive message is an interruption; spend them like they cost
+something, because they do.
+
+- Two lanes: **needs attention** (a decision, approval, or deadline) ahead of
+  **FYI** (a result or observation). Never let an FYI borrow an urgent tone.
+- At most five items, ranked; declare done at the end ("that's everything
+  worth your attention") rather than trailing off — a bounded list signals
+  the work finished.
+- Stale items die quietly: if the moment passed while the wake queued, drop
+  it or name the missed window; an 8:30 alert sent at 8:45 is noise.
+- End with at most one concrete offer ("want me to draft the follow-up?").
+  An offer is cheap; acting on it is not — external messages, purchases,
+  credential changes, production changes and destructive actions still need
+  explicit approval first.
+- When evidence is ambiguous but a real decision is pending, ask one question
+  instead of guessing. When nothing helps, silence — never filler.
 
 ## Procedure
 

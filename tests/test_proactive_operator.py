@@ -38,6 +38,52 @@ class OperatorTests(unittest.TestCase):
             with self.assertRaises(ValueError): operator.bind(runtime, "invented-route")
             runtime.close()
 
+    def test_binding_falls_back_to_state_db_gateway_routing(self):
+        """sessions.json is a legacy mirror that may not exist; the
+        authoritative record is state.db's gateway_routing table — read-only,
+        same validation, still fail-closed on anything else."""
+        import sqlite3
+        module = load_plugin()
+        operator = importlib.import_module(module.__name__ + ".proactive_operator")
+        route = "agent:main:telegram:dm:123456789"
+        entry = {"session_key": route, "session_id": "abc123",
+                 "platform": "telegram", "chat_type": "dm", "suspended": False}
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            db = sqlite3.connect(home / "state.db")
+            db.execute("""CREATE TABLE gateway_routing (
+                scope TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL,
+                entry_json TEXT NOT NULL, updated_at REAL NOT NULL,
+                PRIMARY KEY (scope, session_key))""")
+            db.execute("INSERT INTO gateway_routing VALUES ('', ?, ?, 0)",
+                       (route, json.dumps(entry)))
+            group = dict(entry, session_key="agent:main:telegram:group:5",
+                         chat_type="group")
+            db.execute("INSERT INTO gateway_routing VALUES ('', ?, ?, 0)",
+                       (group["session_key"], json.dumps(group)))
+            db.commit(); db.close()
+            runtime = module.Runtime(None, home)
+            operator.bind(runtime, route)
+            self.assertEqual(runtime.store.load_policy().session_key, route)
+            self.assertFalse(runtime.store.load_policy().enabled)
+            with self.assertRaises(ValueError):
+                operator.bind(runtime, "agent:main:telegram:group:5")
+            with self.assertRaises(ValueError):
+                operator.bind(runtime, "invented-route")
+            runtime.close()
+
+    def test_binding_stays_fail_closed_without_any_routing_store(self):
+        """No sessions.json and no state.db means no verifiable route — bind
+        refuses rather than trusting a caller-supplied key."""
+        module = load_plugin()
+        operator = importlib.import_module(module.__name__ + ".proactive_operator")
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            with self.assertRaises(ValueError):
+                operator.bind(runtime, "agent:main:telegram:dm:123456789")
+            self.assertFalse(runtime.store.load_policy().session_key)
+            runtime.close()
+
     def test_probe_confirms_a_real_facade_response_without_injecting(self):
         module = load_plugin()
         operator = importlib.import_module(module.__name__ + ".proactive_operator")

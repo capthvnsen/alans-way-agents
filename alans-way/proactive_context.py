@@ -15,9 +15,10 @@ DEFAULT_PREFERENCES = {
     "autonomy": "read_research_draft_continue_approved",
 }
 TASK_FIELDS = {"id", "title", "scope", "next_action", "owner", "status", "approved",
-               "native_task_id", "native_board", "next_review_at", "due_at",
+               "kind", "native_task_id", "native_board", "next_review_at", "due_at",
                "notify_when", "cadence_seconds", "artifact", "verification",
                "consent_reference", "execution_host"}
+TASK_KINDS = {"watch", "loop", "sweep"}
 
 # Signal bookkeeping is written only through report_signal; record_task saves
 # must carry it forward or re-arming a watch would erase its last observation.
@@ -89,6 +90,8 @@ class Ledger:
             _text(task.get(name), 300 if name in ("title", "owner") else 2000)
         if task.get("status") not in {"active", "waiting", "blocked", "done", "cancelled"}:
             raise ValueError("unsupported task status")
+        if task.get("kind", "watch") not in TASK_KINDS:
+            raise ValueError("unsupported task kind")
         if task.get("execution_host", "cloud") not in {"cloud", "mac"}:
             raise ValueError("unsupported execution host")
         for name in ("native_task_id", "native_board", "artifact", "verification", "consent_reference"):
@@ -107,11 +110,13 @@ class Ledger:
         with self.transaction() as data:
             old = data["tasks"].get(task["id"])
             if old and (old["status"] in {"done", "cancelled"} or old["scope"] != task["scope"]
+                        or old.get("kind", "watch") != task.get("kind", old.get("kind", "watch"))
                         or old.get("execution_host", "cloud") != task.get("execution_host", old.get("execution_host", "cloud"))):
-                raise ValueError("terminal, changed scopes or changed execution hosts need a new authorized watch id")
+                raise ValueError("terminal, changed scopes, kinds or hosts need a new authorized watch id")
             if old is None and len(data["tasks"]) >= 64:
                 raise ValueError("watch limit reached")
             saved = copy.deepcopy(task)
+            saved["kind"] = task.get("kind", old.get("kind", "watch") if old else "watch")
             saved["execution_host"] = task.get("execution_host", old.get("execution_host", "cloud") if old else "cloud")
             saved["approved_at"] = old["approved_at"] if old else datetime.now(timezone.utc).isoformat()
             for key in SIGNAL_FIELDS:

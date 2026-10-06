@@ -46,6 +46,7 @@ class PolicyTests(unittest.TestCase):
             "unresolved_ttl_seconds": 3600,
             "max_pending": 64,
             "debounce_seconds": 120,
+            "resume_at": "",
         }
         policy = core.Policy.from_dict({})
         self.assertEqual(policy.to_dict(), expected)

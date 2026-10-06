@@ -134,7 +134,7 @@ def collect(home: Path, ledger, ctx=None):
         except (KeyError, ValueError, TypeError):
             continue
         allowed = {"id", "title", "scope", "next_action", "status", "owner", "approved",
-                   "native_task_id", "next_review_at", "due_at", "notify_when",
+                   "kind", "native_task_id", "next_review_at", "due_at", "notify_when",
                    "cadence_seconds", "signal", "signal_at", "execution_host"}
         tasks.append({k: (v[:300] if isinstance(v, str) and k not in {"id", "native_task_id"} else v)
                       for k, v in task.items() if k in allowed})
@@ -154,6 +154,7 @@ def collect(home: Path, ledger, ctx=None):
     preferences["workspace_mac"] = mac
     by_id = {task["id"]: task for task in snapshot["tasks"]}
     goals = [{"source": "approved-watch", "summary": task["scope"], "watch_id": task["id"],
+              "kind": task.get("kind", "watch"),
               "approved_at": by_id[task["id"]]["approved_at"], "status": task["status"]}
              for task in tasks]
     return {"memory": memory, "schedule": schedule, "tasks": tasks,
