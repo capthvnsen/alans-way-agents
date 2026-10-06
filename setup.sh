@@ -445,7 +445,10 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   if [ -n "$MAC_SSH" ] && [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ -f "$DESKTOP_DIR/desktop/src/computer.cjs" ]; then
     # The running app keeps its own copy of the connector. A newer copy in
     # the home directory is what the router prefers, so computer use reaches
-    # the Mac without waiting for an app rebuild.
+    # the Mac without waiting for an app rebuild. The copy must be
+    # self-contained: every src/ module plus installed package deps — a bare
+    # `node` fallback has no NODE_PATH, and a MODULE_NOT_FOUND child stalls
+    # each profile's MCP connect for the full timeout.
     if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
         'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
       && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
@@ -453,9 +456,14 @@ if [ "$SKIP_BROWSER" = 0 ]; then
         "$DESKTOP_DIR/desktop/scripts/mac-computer.swift" \
         "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/scripts/" \
       && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
-        "$DESKTOP_DIR/desktop/src/computer.cjs" \
-        "$DESKTOP_DIR/desktop/src/computer-policy.cjs" \
-        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/src/"; then
+        "$DESKTOP_DIR"/desktop/src/*.cjs \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/src/" \
+      && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+        "$DESKTOP_DIR/desktop/package.json" \
+        "$DESKTOP_DIR/desktop/package-lock.json" \
+        "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/" \
+      && ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+        'zsh -lc "cd \"$HOME/Library/Application Support/Hermes Workspace/connector\" && npm ci --omit=dev --ignore-scripts"' >/dev/null 2>&1; then
       ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
         'swiftc -O -o "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer" "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer.swift"' >/dev/null 2>&1 \
         || true

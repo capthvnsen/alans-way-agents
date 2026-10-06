@@ -173,7 +173,9 @@ function macBackendCommand(script, node, id, name) {
     const modules = `${app}/Contents/Resources/app/node_modules`;
     return `if [ -x ${shQuote(exe)} ]; then NODE_PATH=${shQuote(modules)} ELECTRON_RUN_AS_NODE=1 exec ${shQuote(exe)} ${args}; fi;`;
   }).join(' ');
-  return `${checks} exec node ${args}`;
+  // A non-login ssh spawn has no shell profile PATH: prefer the common
+  // user-local install before hoping bare `node` resolves.
+  return `${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
 }
 
 // Probe finds the newest installed bundle AND proves the app is actually
@@ -486,35 +488,40 @@ async function main() {
   if (macSsh && shouldProbe) writeSelfProbeAt(probeStampFile);
   const probeErrTail = stderrTail(probeResult.stderr);
 
-  let cmd;
-  let args;
-  if (macScript) {
-    // Run browser-mcp.cjs on the Mac over the same ssh session the probe used.
-    cmd = 'ssh';
-    args = [
-      '-T',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'StrictHostKeyChecking=yes',
-      ...sshControlArgs,
-      macSsh,
-      macBackendCommand(macScript, macNode, botId, botName),
-    ];
-    process.stderr.write('workspace-router: routing to Mac browser host\n');
-  } else {
-    // Mac unreachable or unconfigured — fall back to the local VPS browser host.
-    cmd = process.execPath;
-    args = [vpsScript, '--bot-id', botId];
-    if (botName) args.push('--bot-name', botName);
-    args.push('--connection', vpsConnection);
-    let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
-    if (probeErrTail) reason += ` (${probeErrTail})`;
-    process.stderr.write(
-      macSsh
-        ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
-        : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
-    );
+  const pendingRequests = new Set();
+
+  // Annotation is decoration — a failure here must never take down the
+  // transport (that is how a one-line ReferenceError dropped the whole
+  // browser surface). Degrade to passthrough instead.
+  const safeAnnotator = (host) => {
+    try {
+      return makeAnnotator(host, Boolean(macSsh), macStateFile);
+    } catch (e) {
+      process.stderr.write(`workspace-router: annotator disabled: ${e.message}\n`);
+      return (line) => line;
+    }
+  };
+  let annotate = safeAnnotator(macScript ? 'mac' : 'vps');
+
+  // A backend that dies before answering anything is dead on arrival — for a
+  // Mac spawn that means the remote script crashed (missing module, killed
+  // app), and exiting here would leave the MCP client hanging on a dead
+  // child until its own connect timeout. Falling back to the VPS host in
+  // that window costs ~a second instead. Client lines written to the dead
+  // child are buffered and replayed; nothing it could have acted on ever
+  // produced a response, so no request executes twice. A backend that proved
+  // itself with a first response still exits the router on death — Hermes
+  // respawns it.
+  let activeChild = null;
+  let activeHost = null;
+  let provedAlive = false;
+  let fellBack = false;
+  const bufferedStdin = [];
+
+  async function startVpsBackend() {
+    const vpsArgs = [vpsScript, '--bot-id', botId];
+    if (botName) vpsArgs.push('--bot-name', botName);
+    vpsArgs.push('--connection', vpsConnection);
     if (macSsh) {
       const resumeFile = resumePath(macStateFile);
       const record = readResumeRecord(resumeFile);
@@ -534,27 +541,54 @@ async function main() {
           );
         }
       }
-      args.push(...continuedArgs(continuedTab));
+      vpsArgs.push(...continuedArgs(continuedTab));
     }
-    if (staleSelfProbe && macSeen && macSeen.state === 'offline' && !macScript) {
-      process.stderr.write(
-        'workspace-router: self-probe despite fresh offline verdict — watcher may be misconfigured\n',
-      );
-    }
+    const c = spawn(process.execPath, vpsArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
+    bindChild(c, 'vps');
+    for (const line of bufferedStdin) c.stdin.write(`${line}\n`);
   }
 
-  const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'inherit'] });
-  const pendingRequests = new Set();
-
-  // Annotation is decoration — a failure here must never take down the
-  // transport (that is how a one-line ReferenceError dropped the whole
-  // browser surface). Degrade to passthrough instead.
-  let annotate;
-  try {
-    annotate = makeAnnotator(macScript ? 'mac' : 'vps', Boolean(macSsh), macStateFile);
-  } catch (e) {
-    process.stderr.write(`workspace-router: annotator disabled: ${e.message}\n`);
-    annotate = (line) => line;
+  function bindChild(c, host) {
+    activeChild = c;
+    activeHost = host;
+    annotate = safeAnnotator(host);
+    readline
+      .createInterface({ input: c.stdout, crlfDelay: Infinity })
+      .on('line', (line) => {
+        touchActivity();
+        noteServerRpc(line, pendingRequests);
+        provedAlive = true;
+        bufferedStdin.length = 0;
+        let out;
+        try {
+          out = annotate(line);
+        } catch {
+          out = line;
+        }
+        if (out === null) return;
+        process.stdout.write(`${out}\n`);
+      });
+    c.on('error', (e) => {
+      process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
+      if (!fellBack && host === 'mac') {
+        fellBack = true;
+        void startVpsBackend();
+        return;
+      }
+      process.exit(1);
+    });
+    c.on('exit', (code, sig) => {
+      if (c !== activeChild) return;
+      if (!provedAlive && !fellBack && host === 'mac') {
+        fellBack = true;
+        process.stderr.write(
+          'workspace-router: Mac backend died before its first response — routing to VPS browser host\n',
+        );
+        void startVpsBackend();
+        return;
+      }
+      process.exit(code === null ? (sig ? 1 : 0) : code);
+    });
   }
 
   let lastActivity = Date.now();
@@ -565,30 +599,41 @@ async function main() {
     .on('line', (line) => {
       touchActivity();
       noteClientRpc(line, pendingRequests);
-      child.stdin.write(`${line}\n`);
+      if (!provedAlive) bufferedStdin.push(line);
+      try {
+        if (activeChild && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
+      } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
     });
 
-  readline
-    .createInterface({ input: child.stdout, crlfDelay: Infinity })
-    .on('line', (line) => {
-      touchActivity();
-      noteServerRpc(line, pendingRequests);
-      let out;
-      try {
-        out = annotate(line);
-      } catch {
-        out = line;
-      }
-      if (out === null) return;
-      process.stdout.write(`${out}\n`);
-    });
-  child.on('error', (e) => {
-    process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
-    process.exit(1);
-  });
-  child.on('exit', (code, sig) => {
-    process.exit(code === null ? (sig ? 1 : 0) : code);
-  });
+  if (macScript) {
+    // Run browser-mcp.cjs on the Mac over the same ssh session the probe used.
+    const sshArgs = [
+      '-T',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'StrictHostKeyChecking=yes',
+      ...sshControlArgs,
+      macSsh,
+      macBackendCommand(macScript, macNode, botId, botName),
+    ];
+    process.stderr.write('workspace-router: routing to Mac browser host\n');
+    bindChild(spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'inherit'] }), 'mac');
+  } else {
+    let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
+    if (probeErrTail) reason += ` (${probeErrTail})`;
+    process.stderr.write(
+      macSsh
+        ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
+        : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
+    );
+    if (staleSelfProbe && macSeen && macSeen.state === 'offline') {
+      process.stderr.write(
+        'workspace-router: self-probe despite fresh offline verdict — watcher may be misconfigured\n',
+      );
+    }
+    await startVpsBackend();
+  }
   let routerMtime = 0;
   try { routerMtime = fs.statSync(__filename).mtimeMs; } catch { /* a missing script has nothing newer to load */ }
   const reloadTimer = setInterval(() => {
@@ -597,14 +642,14 @@ async function main() {
     try { mtime = fs.statSync(__filename).mtimeMs; } catch { return; }
     if (mtime <= routerMtime) return;
     process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
-    try { child.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
+    try { if (activeChild) activeChild.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
     process.exit(0);
   }, 5000);
   reloadTimer.unref();
   for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(s, () => {
       try {
-        child.kill(s);
+        if (activeChild) activeChild.kill(s);
       } catch {}
     });
   }
@@ -617,7 +662,7 @@ async function main() {
   // own — no agent shell surgery, no approvals. Two consecutive online
   // reads defend against flapping; the idle window keeps an in-flight tool
   // call alive once no JSON-RPC request is pending.
-  if (!macScript && macSsh) {
+  if (activeHost !== 'mac' && macSsh) {
     let onlineStreak = 0;
     const timer = setInterval(() => {
       const mac = freshMacState(macStateFile);
@@ -634,7 +679,7 @@ async function main() {
           'workspace-router: Mac is online — exiting so the next connection re-probes and routes to it\n',
         );
         try {
-          child.kill('SIGTERM');
+          if (activeChild) activeChild.kill('SIGTERM');
         } catch {}
         process.exit(0);
       }

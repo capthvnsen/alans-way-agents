@@ -222,7 +222,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # exit once mac-watch reports the Mac online — Hermes lazy-respawns
         # the connector and the respawn re-probes, converging on the Mac
         # without any manual process surgery.
-        self.assertIn("!macScript && macSsh", self.source)
+        self.assertIn("activeHost !== 'mac' && macSsh", self.source)
         self.assertIn("freshMacState(macStateFile)", self.source)
         self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)

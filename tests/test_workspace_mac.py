@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -568,6 +569,55 @@ class MacWatchScriptTests(MacStateEnvTest):
             result = self.run_once(directory, online=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((state_dir / "mac-state.json").read_text())["state"], "online")
+
+
+class DeadBackendFallbackTests(unittest.TestCase):
+    def test_a_mac_child_that_dies_before_answering_falls_back_to_vps(self):
+        """A dead-on-arrival Mac spawn must not strand the MCP client until its
+        connect timeout: the router replays buffered requests onto the VPS
+        backend and keeps serving."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "for last in \"$@\"; do :; done\n"
+                "case \"$last\" in\n"
+                "  *conn_script*) printf %s \"/Users/x/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
+                "  *) exit 1 ;;\n"  # the remote backend dies instantly
+                "esac\n",
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{ok:true,stub:'vps'}})+'\\n');});\n",
+                encoding="utf-8")
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(home / "mac-state.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the fallback did not replay the request")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            self.assertIn('"id":1', line)
+            self.assertIn('"stub":"vps"', line)
+            self.assertIn("died before its first response", err)
 
 
 if __name__ == "__main__":
