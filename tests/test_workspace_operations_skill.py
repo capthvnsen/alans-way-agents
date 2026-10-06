@@ -132,6 +132,8 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
         self.assertIn("Do not pass `host`.", self.normalized)
+        self.assertIn("A snapshot defaults to 2000 characters of page text.", self.normalized)
+        self.assertIn("Do not screenshot only because the text was cut.", self.normalized)
         self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
