@@ -66,6 +66,31 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
         self.assertIn("do not move the human's cursor", self.normalized)
 
+    def test_skill_names_the_tools_the_connector_exposes(self):
+        for name in [
+            "cua_alans_way_status",
+            "cua_alans_way_tabs",
+            "cua_alans_way_open",
+            "cua_alans_way_snapshot",
+            "cua_alans_way_screenshot",
+            "cua_alans_way_action",
+            "cua_alans_way_close",
+        ]:
+            with self.subTest(name=name):
+                self.assertIn(name, self.text)
+        for stale in [
+            "workspace_browser_open",
+            "workspace_browser_snapshot",
+            "workspace_browser_screenshot",
+            "workspace_browser_action",
+            "workspace_vps_browser",
+        ]:
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, self.text)
+        desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("cua_alans_way_snapshot", desktop)
+        self.assertNotIn("workspace_vps_browser", desktop)
+
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
             "The in-app Mac browser is the only default host.",

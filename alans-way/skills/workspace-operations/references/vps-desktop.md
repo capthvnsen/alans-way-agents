@@ -1,7 +1,7 @@
 # VPS desktop operations
 
-For managed Chromium tabs, use `workspace_vps_browser` snapshots and tab-specific
-input. That path enforces tab ownership/control epochs and works independently
+For managed Chromium tabs, use `cua_alans_way_snapshot` and `cua_alans_way_action`.
+That path enforces tab ownership/control epochs and works independently
 of the desktop driver's accessibility support. These instructions apply to
 other VPS desktop applications and unmanaged windows.
 
