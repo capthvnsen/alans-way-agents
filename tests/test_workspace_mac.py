@@ -402,6 +402,21 @@ class MacBackendCommandTests(unittest.TestCase):
         self.assertIn("alans-way-localapp.app", command)
         self.assertIn(script, command)
 
+    def test_home_connector_command_parses(self):
+        # The app checks chain `if ...; fi` blocks — a missing separator once
+        # produced "fi if", which zsh rejects and which killed every Mac spawn.
+        # `sh -n` syntax-checks without executing, so the result does not
+        # depend on which /Applications bundles exist on the test host.
+        script = "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"
+        command = subprocess.run(
+            [NODE, "-e", "process.stdout.write(require(process.argv[1]).macBackendCommand("
+                         "process.argv[2], '', 'bot-1', ''))",
+             str(ROUTER), script],
+            capture_output=True, text=True, check=True).stdout
+        result = subprocess.run([SH, "-n", "-c", command],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_mac_node_path_with_spaces_is_quoted(self):
         with tempfile.TemporaryDirectory() as home:
             bundle = Path(home) / "Apps" / "Open Alan.app"

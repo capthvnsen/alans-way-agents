@@ -171,7 +171,7 @@ function macBackendCommand(script, node, id, name) {
   const checks = apps.map((app) => {
     const exe = `${app}/Contents/MacOS/${path.basename(app, '.app')}`;
     const modules = `${app}/Contents/Resources/app/node_modules`;
-    return `if [ -x ${shQuote(exe)} ]; then NODE_PATH=${shQuote(modules)} ELECTRON_RUN_AS_NODE=1 exec ${shQuote(exe)} ${args}; fi`;
+    return `if [ -x ${shQuote(exe)} ]; then NODE_PATH=${shQuote(modules)} ELECTRON_RUN_AS_NODE=1 exec ${shQuote(exe)} ${args}; fi;`;
   }).join(' ');
   return `${checks} exec node ${args}`;
 }
