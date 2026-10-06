@@ -93,9 +93,10 @@ without changing anything, `--non-interactive` for scripted runs,
 
 ### Or let your agent do it
 
-If a Hermes agent already has a terminal on the VPS, paste it the prompt in
-[docs/setup-prompt.md](docs/setup-prompt.md) — it installs Tailscale between
-the machines if needed, runs the same `setup.sh`, and reports back. The
+Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/setup-prompt.md)
+to the agent with a terminal on the VPS (your Hermes bot works). It connects
+the VPS and your Mac over Tailscale with pinned SSH keys both ways, runs the
+same `setup.sh`, and proves both ends work. The
 `workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
 
 ### 3. The Mac app
