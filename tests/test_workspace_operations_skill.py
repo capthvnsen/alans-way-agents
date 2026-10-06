@@ -143,6 +143,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A snapshot, screenshot, or action aimed at the Mac tab is carried onto that VPS tab. Use the tab id in the result.", self.normalized)
         self.assertIn("The continued page may still be loading. Snapshot that tab before acting.", self.normalized)
         self.assertIn("If an action still fails, the error names the VPS tab. Use that tab.", self.normalized)
+        self.assertIn("If that error lists controls, use one of those refs.", self.normalized)
         self.assertIn("The connector opens the last page there when the Mac drops.", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
