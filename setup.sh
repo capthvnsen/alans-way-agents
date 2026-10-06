@@ -114,7 +114,7 @@ else
   ok "hermes ${HERMES_V:-unknown version}"
 fi
 have python3 || bad "python3 required"
-MIN_NODE_MAJOR=18
+MIN_NODE_MAJOR=22
 if have node; then
   NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
   if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
@@ -291,14 +291,20 @@ done
 # ---------------------------------------------------------------- hook
 step "Gateway hook"
 mkdir -p "$HERMES_HOME/hooks"
+# The hook ships inside the plugin so a catalogue install contains it. With
+# --skip-plugin, copy that reviewed tree, not a newer clone of this repo.
+HOOK_SRC="$REPO_DIR/$PLUGIN_NAME/gateway-hook"
+if [ "$SKIP_PLUGIN" = 1 ] && [ -f "$HERMES_HOME/plugins/$PLUGIN_NAME/gateway-hook/handler.py" ]; then
+  HOOK_SRC="$HERMES_HOME/plugins/$PLUGIN_NAME/gateway-hook"
+fi
 install_hook() {
   local target="$1"
   mkdir -p "$target"
-  if [ -f "$target/handler.py" ] && cmp -s "$REPO_DIR/hooks/$PLUGIN_NAME/handler.py" "$target/handler.py" \
-      && cmp -s "$REPO_DIR/hooks/$PLUGIN_NAME/HOOK.yaml" "$target/HOOK.yaml"; then
+  if [ -f "$target/handler.py" ] && cmp -s "$HOOK_SRC/handler.py" "$target/handler.py" \
+      && cmp -s "$HOOK_SRC/HOOK.yaml" "$target/HOOK.yaml"; then
     ok "hook current in $target"
   else
-    cp -r "$REPO_DIR/hooks/$PLUGIN_NAME/." "$target/" && ok "hook installed to $target" \
+    cp -r "$HOOK_SRC/." "$target/" && ok "hook installed to $target" \
       || bad "hook copy failed"
   fi
 }

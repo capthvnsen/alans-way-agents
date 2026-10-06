@@ -8,8 +8,9 @@ what your agents need to think and act:
 - **`alans-way/`** — a native Hermes plugin: one designated primary bot
   gets bounded, event-driven proactivity — reviewing its own work, watching
   approved tasks, and surfacing useful things to do, on a schedule you control.
-- **`hooks/alans-way/`** — a gateway startup hook that arms the plugin
-  only inside the real gateway process.
+- **`alans-way/gateway-hook/`** — the gateway startup hook. `setup.sh` copies
+  it to `$HERMES_HOME/hooks/alans-way/` so proactivity arms only inside the
+  real gateway process. A catalogue install includes this hook.
 - **Workspace browser wiring** — `setup-workspace.sh` writes a managed
   `workspace_browser` block into your Hermes config pointing at
   `scripts/workspace-router.cjs`, which probes your Mac first and falls

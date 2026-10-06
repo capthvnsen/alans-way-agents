@@ -296,7 +296,7 @@ class NodePreflightTests(unittest.TestCase):
             env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
             result = run("--verify", env=env, check=False)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("below 18", result.stdout)
+            self.assertIn("below 22", result.stdout)
 
 
 if __name__ == "__main__":

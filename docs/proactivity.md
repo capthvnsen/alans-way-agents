@@ -93,11 +93,10 @@ explicit review succeeds silently with zero model calls.
 ## Separate native gateway hook
 
 Automatic dispatch requires a second, reviewed installation: the native
-drop-in hook `hooks/alans-way/HOOK.yaml` and `handler.py`. Manually copy the
-reviewed pair into the active profile's `$HERMES_HOME/hooks/alans-way/`,
-without overwriting an existing hook without review. A plugin-subdirectory install
-will not install the repository's separate `hooks/` folder; obtain both files from
-the same reviewed revision.
+drop-in hook shipped at `alans-way/gateway-hook/` (`HOOK.yaml` and
+`handler.py`). `setup.sh` copies that pair into `$HERMES_HOME/hooks/alans-way/`.
+With `--skip-plugin` it copies the hook from the already installed plugin, so
+a catalogue pin is not replaced by a newer clone.
 
 Native hooks are trusted by placement: `plugins.enabled` neither installs nor
 gates them. This hook listens for native `gateway:startup` and stamps the current
