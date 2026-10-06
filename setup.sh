@@ -61,6 +61,7 @@ EOF
 done
 
 [ -n "$HERMES_HOME" ] || HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+[ "$PROFILE" != default ] || PROFILE=""
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
