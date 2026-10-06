@@ -17,16 +17,22 @@ DEFAULT_PREFERENCES = {
 TASK_FIELDS = {"id", "title", "scope", "next_action", "owner", "status", "approved",
                "kind", "native_task_id", "native_board", "next_review_at", "due_at",
                "notify_when", "cadence_seconds", "artifact", "verification",
-               "consent_reference", "execution_host"}
+               "consent_reference", "execution_host", "source"}
 TASK_KINDS = {"watch", "loop", "sweep"}
 TERMINAL = {"done", "cancelled"}
 TERMINAL_RETENTION_SECONDS = 14 * 86400
 MAX_WATCHES = 64
 MAX_PROPOSALS = 8
+MAX_LOG = 20
+DISMISSAL_LIMIT, DISMISSAL_WINDOW_SECONDS = 3, 14 * 86400
 
 # Signal bookkeeping is written only through report_signal; record_task saves
 # must carry it forward or re-arming a watch would erase its last observation.
-SIGNAL_FIELDS = ("signal", "signal_at")
+SIGNAL_FIELDS = ("signal", "signal_at", "snoozed_until")
+
+
+class SourceSuppressed(ValueError):
+    pass
 
 
 def _moment(value):
@@ -122,6 +128,8 @@ class Ledger:
                 _text(task[name], 1000)
         if "notify_when" in task:
             _text(task["notify_when"], 300)
+        if "source" in task:
+            _text(task["source"], 40)
         if "cadence_seconds" in task:
             if type(task["cadence_seconds"]) is not int or not 300 <= task["cadence_seconds"] <= 604800:
                 raise ValueError("cadence_seconds must be an integer in [300, 604800]")
@@ -169,6 +177,7 @@ class Ledger:
                 if old is not None and key in old:
                     saved[key] = old[key]
             data["tasks"][task["id"]] = saved
+            data.get("dismissals", {}).pop(saved.get("source") or saved["kind"], None)
 
     def propose_task(self, task):
         """Model path: the bot may only propose. Returns True when the saved watch awaits approval.
@@ -193,13 +202,17 @@ class Ledger:
                              or old.get("kind", "watch") != task.get("kind", old.get("kind", "watch"))
                              or old.get("execution_host", "cloud") != task.get("execution_host", old.get("execution_host", "cloud"))):
                 raise ValueError("changed scopes, kinds or hosts need a new watch id")
+            source = task.get("source") or task.get("kind", "watch")
+            if not approved and self._suppressed(data, source):
+                raise SourceSuppressed(source)
             if old is None:
                 live = [t for t in data["tasks"].values() if t["status"] not in TERMINAL]
                 if len(live) >= MAX_WATCHES or sum(t["status"] == "proposed" for t in live) >= MAX_PROPOSALS:
                     raise ValueError("watch limit reached")
             keeps = approved and not (
                 task["next_action"] != old["next_action"] or task["owner"] != old["owner"]
-                or (task["status"] == "active" and old["status"] != "active")
+                or (task["status"] == "active" and old["status"] != "active"
+                    and not (old["status"] == "blocked" and old.get("status_by") == "model"))
                 or _sooner(task.get("cadence_seconds"), old.get("cadence_seconds"))
                 or _sooner(task.get("next_review_at"), old.get("next_review_at"))
                 or _sooner(task.get("due_at"), old.get("due_at")))
@@ -210,6 +223,8 @@ class Ledger:
                 saved["approved"], saved["approved_at"] = True, old["approved_at"]
             else:
                 saved["approved"], saved["status"] = False, "proposed"
+            if saved["status"] in ("waiting", "blocked"):
+                saved["status_by"] = "model"
             for key in SIGNAL_FIELDS:
                 if old is not None and key in old:
                     saved[key] = old[key]
@@ -224,6 +239,61 @@ class Ledger:
                 raise ValueError("no proposed watch")
             task.update(status="active", approved=True,
                         approved_at=datetime.now(timezone.utc).isoformat())
+            data.get("dismissals", {}).pop(task.get("source") or task.get("kind", "watch"), None)
+
+    @staticmethod
+    def _recent_dismissals(data, source):
+        cutoff = datetime.now(timezone.utc).timestamp() - DISMISSAL_WINDOW_SECONDS
+        return [t for t in data.get("dismissals", {}).get(source, [])
+                if (_moment(t) or datetime.min.replace(tzinfo=timezone.utc)).timestamp() > cutoff]
+
+    def _suppressed(self, data, source):
+        return len(self._recent_dismissals(data, source)) >= DISMISSAL_LIMIT
+
+    def dismiss_task(self, task_id):
+        """Operator path: drop a proposal and count it against its source."""
+        with self.transaction() as data:
+            task = data["tasks"].get(task_id)
+            if not task or task["status"] != "proposed":
+                raise ValueError("no proposed watch")
+            source = task.get("source") or task.get("kind", "watch")
+            task.update(status="cancelled", closed_at=datetime.now(timezone.utc).isoformat())
+            recent = self._recent_dismissals(data, source)
+            data.setdefault("dismissals", {})[source] = recent + [datetime.now(timezone.utc).isoformat()]
+            return source
+
+    def snooze_task(self, task_id, seconds=86400):
+        """Operator path: keep a proposal but stop re-offering buttons for it."""
+        with self.transaction() as data:
+            task = data["tasks"].get(task_id)
+            if not task or task["status"] != "proposed":
+                raise ValueError("no proposed watch")
+            task["snoozed_until"] = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() + seconds, timezone.utc).isoformat()
+
+    def is_snoozed(self, task_id):
+        task = next((t for t in self.snapshot()["tasks"] if t["id"] == task_id), None)
+        until = _moment((task or {}).get("snoozed_until"))
+        return until is not None and until > datetime.now(timezone.utc)
+
+    def log(self, kind, reason, outcome, job_id=None):
+        """Append one line to the activity log (newest last, bounded)."""
+        with self.transaction() as data:
+            entries = data["observations"].setdefault("__log", [])
+            entries.append({"at": datetime.now(timezone.utc).isoformat(), "kind": kind[:24],
+                            "reason": reason[:160], "outcome": outcome[:24],
+                            **({"job_id": job_id} if job_id else {})})
+            del entries[:-MAX_LOG]
+
+    def set_outcome(self, job_id, outcome):
+        with self.transaction() as data:
+            for entry in data["observations"].get("__log", []):
+                if entry.get("job_id") == job_id:
+                    entry["outcome"] = outcome
+
+    def recent_log(self, count=10):
+        with self.transaction() as data:
+            return list(data["observations"].get("__log", []))[-count:]
 
     def report_signal(self, task_id, signal):
         """Record a bounded observed state on an approved watch.
@@ -256,7 +326,7 @@ class Ledger:
                 raise ValueError("unknown or terminal watch")
             task["next_review_at"] = next_review_at
 
-    def finish_task(self, task_id, status, *, artifact=None, verification=None):
+    def finish_task(self, task_id, status, *, artifact=None, verification=None, by="user"):
         if status not in {"done", "cancelled", "waiting", "blocked"}:
             raise ValueError("invalid final status")
         with self.transaction() as data:
@@ -267,6 +337,7 @@ class Ledger:
                 if value is not None:
                     task[name] = _text(value, 1000)
             task["status"] = status
+            task["status_by"] = by
             if status in TERMINAL:
                 task["closed_at"] = datetime.now(timezone.utc).isoformat()
             self._prune(data)

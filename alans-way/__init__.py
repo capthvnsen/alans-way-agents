@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
-from .proactive_context import TASK_KINDS
+from .proactive_context import TASK_FIELDS, TASK_KINDS
 
 
 # The gateway drops a turn whose whole reply is this marker, so a wake with
@@ -451,6 +451,11 @@ class Runtime:
             relaxed = self._loosening(args.get("changes", args.get("settings", {})))
             if relaxed:
                 return json.dumps({"ok": False, "error": f"That change widens {relaxed} — an operator applies it with /proactivity configure or hermes proactivity configure."})
+        if action == "level" and isinstance(args, dict):
+            from .proactive_core import LEVELS
+            preset = LEVELS.get(args.get("level"))
+            if preset is not None and self._loosening(preset):
+                return json.dumps({"ok": False, "error": "Raising the level is operator-only: the user applies it with /proactivity level or hermes proactivity level."})
         if action == "pause" and isinstance(args, dict) and args.get("resume_at") is not None:
             # A bound session may tighten an active snooze (lift lands later)
             # but never impose or hasten a lift over a paused policy — either
@@ -546,7 +551,12 @@ class Runtime:
                 if (not isinstance(changes, dict) or not changes
                         or {"primary_profile", "session_key", "enabled"}.intersection(changes)):
                     raise ValueError("binding is operator-only")
+                if "level" in changes:
+                    raise ValueError("set the level with the level action")
                 changes = dict(changes)
+                if {"max_daily_wakes", "max_low_purpose_wakes", "max_daily_watch_wakes",
+                        "min_interval_seconds"} & set(changes):
+                    changes["level"] = "custom"
                 preferences = changes.pop("preferences", None)
                 if preferences is not None:
                     if changes:
@@ -556,12 +566,15 @@ class Runtime:
                     if "resume_at" in changes:
                         raise ValueError("snooze through pause, not configure")
                     self.store.update_policy(changes)
+            elif action == "level":
+                from .proactive_core import LEVELS
+                self.store.update_policy({**LEVELS[args["level"]], "level": args["level"]})
             elif action == "record_task":
                 self.ledger.record_task(args.get("task"))
             elif action == "report_signal":
                 self.ledger.report_signal(args.get("task_id", ""), args.get("signal", ""))
             elif action == "finish_task":
-                self.ledger.finish_task(args.get("task_id"), args.get("status", "done"),
+                self.ledger.finish_task(args.get("task_id"), args.get("status", "done"), by="model",
                                         artifact=args.get("artifact"), verification=args.get("verification"))
             elif action == "pause":
                 # resume_at turns a pause into a durable snooze; a bare pause
@@ -638,6 +651,11 @@ class Runtime:
         action = parts[0] if parts else "status"
         if action != "status" and not self._bound_route_only():
             return "Proactivity controls are only available on the bound conversation."
+        if action in self._KNOBS:
+            try:
+                return self.operate(action, parts[1] if len(parts) > 1 else "")
+            except ValueError as exc:
+                return str(exc)
         args = {"action": action}
         if action == "pause" and len(parts) > 1:
             args["resume_at"] = parts[1]
@@ -656,6 +674,60 @@ class Runtime:
             return ("Review suggests " + appraisal["action"] +
                     (" for approved watch " + appraisal["task_id"] if appraisal["task_id"] else "") +
                     ". Verify current scope and consent before acting. No background turn queued.")
+        return self._status_text()
+
+    _KNOBS = ("level", "quiet", "timezone", "snooze", "log")
+
+    def operate(self, action, value=""):
+        """The operator's plain-language knobs, shared by /proactivity and the CLI.
+
+        Raises ValueError carrying the usage line; mutations answer with the
+        read-back status. Never reachable from the model tool.
+        """
+        from .proactive_core import LEVELS
+        policy = self.store.load_policy()
+        if action == "log":
+            return self._log_text(policy.timezone)
+        if action == "level":
+            name = (value or "").strip().lower()
+            if name not in LEVELS:
+                raise ValueError("Use /proactivity level quiet, normal or eager.")
+            result = self.control({"action": "level", "level": name})
+        elif action == "quiet":
+            from .proactive_knobs import parse_quiet
+            start, end = parse_quiet(value)
+            result = self.control({"action": "configure", "changes": {"quiet_start": start, "quiet_end": end}})
+        elif action == "timezone":
+            try:
+                self.store.update_policy({"timezone": (value or "").strip()})
+            except ValueError:
+                raise ValueError("Use /proactivity timezone <IANA name>, for example America/Chicago.") from None
+            result = json.dumps({"ok": True})
+        else:
+            from .proactive_knobs import SNOOZE_USAGE, parse_snooze
+            if (value or "").strip().lower() == "off":
+                if not policy.resume_at:
+                    return "No snooze is active."
+                self.store.update_policy({"enabled": True})
+                result = json.dumps({"ok": True})
+            else:
+                result = self.control({"action": "pause", "resume_at": parse_snooze(value, policy.timezone)})
+        if json.loads(result).get("ok") is not True:
+            raise ValueError("Proactivity control failed. No success is claimed; check the installed tool settings.")
+        return self._status_text()
+
+    def _log_text(self, tz):
+        from zoneinfo import ZoneInfo
+        entries = self.ledger.recent_log(10)
+        if not entries:
+            return "No proactive activity yet."
+        lines = []
+        for entry in reversed(entries):
+            when = datetime.fromisoformat(entry["at"]).astimezone(ZoneInfo(tz)).strftime("%b %d %H:%M")
+            lines.append(f"{when}  {entry['kind']}  {entry['reason']}  [{entry['outcome']}]")
+        return "Recent proactive activity (newest first):\n" + "\n".join(lines)
+
+    def _status_text(self):
         state = json.loads(self.control({"action": "status"}))
         if state.get("ok") is not True:
             return "Control was requested, but its effective state could not be verified."
@@ -667,8 +739,11 @@ class Runtime:
         flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
         snoozed = ("" if state["enabled"] or not policy.get("resume_at")
                    else f" until {policy['resume_at']}")
+        quiet = ("off" if policy["quiet_start"] == policy["quiet_end"]
+                 else f"{policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00")
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused' + snoozed}\n"
-                f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
+                f"Level: {policy['level']}\n"
+                f"Quiet hours: {quiet} ({policy['timezone']})\n"
                 f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
                 f"{policy['max_daily_watch_wakes']} scheduled-watch wakes; "
                 f"{policy['min_interval_seconds'] // 60} minutes between automatic reviews\n"
@@ -738,7 +813,7 @@ class Runtime:
                     return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
                 task = dict(task, status="active")
                 task = {k: v for k, v in task.items()
-                        if k not in {"signal", "signal_at", "approved_at"}}
+                        if k in TASK_FIELDS and k not in {"signal", "signal_at"}}
                 self.ledger.record_task(task)
                 return f"Watch {task_id} is active again."
             if action == "signal":

@@ -49,6 +49,7 @@ class PolicyTests(unittest.TestCase):
             "max_pending": 64,
             "debounce_seconds": 120,
             "resume_at": "",
+            "level": "normal",
         }
         policy = core.Policy.from_dict({})
         self.assertEqual(policy.to_dict(), expected)
@@ -62,7 +63,7 @@ class PolicyTests(unittest.TestCase):
             {"session_key": 123}, {"session_key": "route\ntext"},
             {"timezone": "No/SuchZone"}, {"quiet_start": 24},
             {"quiet_end": -1}, {"quiet_start": True},
-            {"max_daily_wakes": 4}, {"max_low_purpose_wakes": 2},
+            {"max_daily_wakes": 7}, {"max_low_purpose_wakes": 3}, {"level": "turbo"},
             {"min_interval_seconds": -1}, {"event_ttl_seconds": 0},
             {"max_pending": 0}, {"max_pending": 1025},
             {"debounce_seconds": 1.5}, {"debounce_seconds": -1},

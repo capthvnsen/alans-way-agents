@@ -344,6 +344,29 @@ class ControlTests(unittest.TestCase):
             self.assertFalse(self.propose(runtime, scope="Something else")["ok"])
             runtime.close()
 
+    def test_model_may_reactivate_only_a_watch_it_blocked_itself(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            runtime.watch_command("approve rent")
+            state = lambda: runtime.ledger.snapshot()["tasks"][0]["status"]
+            # The model blocks its own watch (Mac offline) and may bring it back.
+            runtime.tool_control({"action": "finish_task", "task_id": "rent", "status": "blocked"})
+            self.assertTrue(self.propose(runtime, status="active")["ok"])
+            self.assertEqual(state(), "active")
+            # A user-blocked or user-paused watch stays the operator's to resume.
+            for command in ("blocked rent", "pause rent"):
+                runtime.watch_command(command)
+                self.assertTrue(self.propose(runtime, status="active")["ok"])
+                self.assertEqual(state(), "proposed", command)
+                runtime.watch_command("approve rent")
+            # A model pause is not a model block.
+            runtime.tool_control({"action": "finish_task", "task_id": "rent", "status": "waiting"})
+            self.propose(runtime, status="active")
+            self.assertEqual(state(), "proposed")
+            runtime.close()
+
     def test_proposals_are_bounded_and_do_not_squat_the_watch_cap(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:
@@ -390,6 +413,105 @@ class ControlTests(unittest.TestCase):
                 "changes": {"timezone": "Pacific/Auckland"}}))["ok"])
             runtime.close()
 
+
+    def bound(self, runtime):
+        route = "agent:main:telegram:dm:123456789"
+        runtime.store.update_policy({"session_key": route})
+        return patch.dict(os.environ, {"HERMES_SESSION_KEY": route})
+
+    def test_level_presets_set_the_wake_budget_and_show_in_status(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            with self.bound(runtime):
+                self.assertIn("Level: normal", runtime.command("status"))
+                self.assertIn("Level: eager", runtime.command("level eager"))
+                policy = runtime.store.load_policy()
+                self.assertEqual((policy.max_daily_wakes, policy.max_low_purpose_wakes,
+                                  policy.max_daily_watch_wakes, policy.min_interval_seconds), (6, 2, 16, 3600))
+                self.assertIn("Level: quiet", runtime.command("level quiet"))
+                policy = runtime.store.load_policy()
+                self.assertEqual((policy.max_daily_wakes, policy.max_low_purpose_wakes,
+                                  policy.max_daily_watch_wakes, policy.min_interval_seconds), (1, 0, 4, 14400))
+                self.assertIn("Level: normal", runtime.command("level normal"))
+                self.assertEqual(runtime.store.load_policy().max_daily_wakes, 3)
+                self.assertIn("quiet, normal or eager", runtime.command("level turbo"))
+                runtime.control({"action": "configure", "changes": {"max_daily_wakes": 2}})
+                self.assertEqual(runtime.store.load_policy().level, "custom")
+                self.assertFalse(json.loads(runtime.control(
+                    {"action": "configure", "changes": {"level": "eager"}}))["ok"])
+            runtime.close()
+
+    def test_model_may_only_lower_the_level(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            with self.bound(runtime):
+                self.assertTrue(json.loads(runtime.tool_control({"action": "level", "level": "quiet"}))["ok"])
+                self.assertEqual(runtime.store.load_policy().level, "quiet")
+                for name in ("normal", "eager"):
+                    refused = json.loads(runtime.tool_control({"action": "level", "level": name}))
+                    self.assertFalse(refused["ok"])
+                    self.assertIn("operator", refused["error"])
+                self.assertEqual(runtime.store.load_policy().level, "quiet")
+                self.assertTrue(json.loads(runtime.control({"action": "level", "level": "eager"}))["ok"])
+            runtime.close()
+
+    def test_quiet_snooze_and_timezone_commands(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            with self.bound(runtime):
+                self.assertIn("Quiet hours: 23:00–07:00", runtime.command("quiet 23-7"))
+                policy = runtime.store.load_policy()
+                self.assertEqual((policy.quiet_start, policy.quiet_end), (23, 7))
+                for bad in ("quiet", "quiet 25-8", "quiet 8"):
+                    self.assertIn("Use /proactivity quiet", runtime.command(bad))
+                self.assertIn("Quiet hours: off", runtime.command("quiet off"))
+                self.assertEqual(runtime.store.load_policy().quiet_start, runtime.store.load_policy().quiet_end)
+                self.assertIn("(Europe/Berlin)", runtime.command("timezone Europe/Berlin"))
+                self.assertIn("Use /proactivity timezone", runtime.command("timezone Mars/Base"))
+                before = datetime.now(timezone.utc)
+                self.assertIn("paused until", runtime.command("snooze 3d"))
+                policy = runtime.store.load_policy()
+                self.assertFalse(policy.enabled)
+                resume = datetime.fromisoformat(policy.resume_at)
+                self.assertAlmostEqual((resume - before).total_seconds(), 3 * 86400, delta=60)
+                self.assertIn("Proactivity: enabled", runtime.command("snooze off"))
+                self.assertEqual(runtime.store.load_policy().resume_at, "")
+                self.assertIn("No snooze", runtime.command("snooze off"))
+                self.assertIn("paused until 2030-01-02T08:00", runtime.command("snooze until 2030-01-02T08:00:00+00:00"))
+                self.assertIn("paused until", runtime.command("snooze until 2031-03-04 08:00"))
+                for bad in ("snooze", "snooze 0d", "snooze soon", "snooze until nonsense", "snooze until 2001-01-01T00:00:00+00:00"):
+                    self.assertIn("Use /proactivity snooze", runtime.command(bad), bad)
+            runtime.close()
+
+    def test_cli_accepts_level_quiet_snooze_timezone_and_log(self):
+        from types import SimpleNamespace
+        module = plugin()
+        operator = sys.modules[module.__name__ + ".proactive_operator"]
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            def run(action, value=None, timezone=None):
+                args = SimpleNamespace(action=action, value=value, timezone=timezone, settings=None,
+                                       session_key=None, watch_id=None)
+                with patch("builtins.print"):
+                    return operator.execute(runtime, args)
+            self.assertEqual(run("level", "eager"), 0)
+            self.assertEqual(runtime.store.load_policy().level, "eager")
+            self.assertEqual(run("level", "turbo"), 1)
+            self.assertEqual(run("quiet", "21-6"), 0)
+            self.assertEqual(runtime.store.load_policy().quiet_start, 21)
+            self.assertEqual(run("snooze", "2h"), 0)
+            self.assertFalse(runtime.store.load_policy().enabled)
+            self.assertEqual(run("snooze", "off"), 0)
+            self.assertEqual(run("timezone", "Europe/Berlin"), 0)
+            self.assertEqual(runtime.store.load_policy().timezone, "Europe/Berlin")
+            self.assertEqual(run("configure", timezone="Asia/Tokyo"), 0)
+            self.assertEqual(runtime.store.load_policy().timezone, "Asia/Tokyo")
+            self.assertEqual(run("log"), 0)
+            runtime.close()
 
     def test_effective_chat_preferences_persist_across_runtime_restart(self):
         module = plugin()

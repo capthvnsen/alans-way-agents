@@ -110,29 +110,43 @@ def probe(runtime):
 
 def setup(parser):
     parser.add_argument("action", nargs="?", default="status",
-                        choices=["status", "pause", "resume", "configure", "review", "bind", "probe", "approve"])
+                        choices=["status", "pause", "resume", "configure", "review", "bind", "probe",
+                                 "approve", "level", "quiet", "snooze", "timezone", "log"])
+    parser.add_argument("value", nargs="?", help="level: quiet|normal|eager; quiet: 22-8|off; "
+                        "snooze: 3d|until <time>|off; timezone: IANA name")
     parser.add_argument("--session-key", help="Exact existing private route; bind only, never echoed")
     parser.add_argument("--watch-id", help="Proposed watch to approve; approve only")
+    parser.add_argument("--timezone", help="IANA timezone for quiet hours, such as America/Chicago")
     parser.add_argument("--settings", help="JSON policy/preferences object for configure")
 
 
 def execute(runtime, args):
     try:
+        value, tz = getattr(args, "value", None), getattr(args, "timezone", None)
         if args.action == "bind":
             bind(runtime, args.session_key)
+            if tz:
+                runtime.operate("timezone", tz)
             result = json.loads(runtime.control({"action": "status"}))
         elif args.action == "approve":
             runtime.ledger.approve_task(args.watch_id)
             result = json.loads(runtime.control({"action": "status"}))
         elif args.action == "probe":
             result = probe(runtime)
+        elif args.action in runtime._KNOBS:
+            result = {"ok": True, "text": runtime.operate(args.action, value)}
+            print(result["text"])
+            return 0
         else:
             payload = {"action": args.action}
             if args.action == "configure":
-                payload["settings"] = json.loads(args.settings or "{}")
+                payload["settings"] = {**json.loads(args.settings or "{}"), **({"timezone": tz} if tz else {})}
             result = json.loads(runtime.control(payload))
         print(json.dumps(result, sort_keys=True))
         return 0 if result.get("ok") is True else 1
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
     except Exception:
         print(json.dumps({"ok": False, "error": "Operator action failed; inspect locally without exposing routing or credentials"}))
         return 1

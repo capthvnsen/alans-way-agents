@@ -18,11 +18,22 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
+# The intensity dial: the four knobs a user feels. "normal" is the Policy default.
+LEVELS = {
+    "quiet": {"max_daily_wakes": 1, "max_low_purpose_wakes": 0,
+              "max_daily_watch_wakes": 4, "min_interval_seconds": 14400},
+    "normal": {"max_daily_wakes": 3, "max_low_purpose_wakes": 1,
+               "max_daily_watch_wakes": 8, "min_interval_seconds": 7200},
+    "eager": {"max_daily_wakes": 6, "max_low_purpose_wakes": 2,
+              "max_daily_watch_wakes": 16, "min_interval_seconds": 3600},
+}
+
+
 @dataclass(frozen=True)
 class Policy:
     """Immutable settings; unknown keys and coercions are rejected.
 
-    Caps can be lowered, never raised above three total/one low-purpose wake.
+    Caps are bounded by the eager level: six total and two low-purpose wakes.
     Equal quiet-hour endpoints disable the quiet window. Integer durations
     are bounded to one year and queues to 1024 to reject unreasonable inputs.
     A nonempty session_key must identify a route validated by the adapter.
@@ -55,6 +66,9 @@ class Policy:
     # Snooze support: "" or an aware ISO timestamp at which a paused policy
     # re-enables itself inside claim(). Never settable while enabled.
     resume_at: str = ""
+    # The preset the four wake knobs were last set from; "custom" once any of
+    # them is edited on its own.
+    level: str = "normal"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -72,7 +86,7 @@ class Policy:
             raise ValueError("timezone must be an available IANA timezone") from exc
         bounds = {
             "quiet_start": (0, 23), "quiet_end": (0, 23),
-            "max_daily_wakes": (0, 3), "max_low_purpose_wakes": (0, 1),
+            "max_daily_wakes": (0, 6), "max_low_purpose_wakes": (0, 2),
             "max_daily_watch_wakes": (0, 24),
             "min_interval_seconds": (0, 31536000),
             "min_watch_interval_seconds": (0, 31536000),
@@ -84,6 +98,8 @@ class Policy:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in [{low}, {high}]")
+        if self.level not in (*LEVELS, "custom"):
+            raise ValueError("level must be quiet, normal, eager or custom")
         if type(self.resume_at) is not str or len(self.resume_at) > 64:
             raise ValueError("resume_at must be an aware ISO timestamp")
         if self.resume_at:
