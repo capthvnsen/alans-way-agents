@@ -129,7 +129,7 @@ app opens them for the user while the tab stays yours to keep working.
    the question; `cua_alans_way_screenshot` accepts `format`
    (`jpeg`|`png`|`webp`), `quality`, and `maxWidth` — jpeg around 70 quality
    at 1280px is the fast default. Use the snapshot's refs and current
-   control epoch for the next action, then inspect the result. The browser
+   control epoch for the next action, then inspect the result. A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text. Use those refs. When it says unchanged, the controls you already have are still valid, so do not snapshot again. The browser
    tools target that tab directly in the background and leave the real
    mouse alone. Completion requires observed page state, rather than the
    absence of a tool error.
