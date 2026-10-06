@@ -135,7 +135,7 @@ ordinary Telegram reply and one bounded browser action before relying on it.
 | `proactive_control` tool | `/proactivity` pause/resume/status, budgets, quiet hours — bound to one designated chat |
 | Observer | 30s check for approved watches, bounded automatic opportunities |
 | Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
-| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Mac apps: `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_action`. The config key is not a tool name. |
+| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Mac apps: `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_action`, `workspace_computer_screenshot` (one window, only when the snapshot cannot name the control). The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac asleep mid-session → the in-flight Mac call fails visibly and the next MCP connection re-routes to a fresh VPS session; live Mac tabs are never migrated. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional systemd watcher (`deploy/`) probes the Mac every 30s and publishes a JSON state file the router and observer read |
 
