@@ -22,21 +22,20 @@ create another primary or replace native Hermes memory, tasks or approvals.
 - The bound primary receives a plugin wake or the user asks for a review.
 - The user adjusts proactivity, quiet hours, priorities, frequency or pause in chat.
 - An approved task has a verified result, deadline, blocker or meaningful next step.
-- Don't use for a second primary, arbitrary specialist inboxes or scheduled filler.
+- Not for a second primary, specialist inboxes or scheduled filler.
 
 ## Prerequisites
 
-The `alans-way` plugin must expose `proactive_control` (this skill loads as
-`alans-way:proactive-primary`; the user's control is `/proactivity`). A missing
-tool or an unbound primary means stop, not fallback. Use the installed tool
-schema; supported fields may vary by release.
+The plugin must expose `proactive_control` (this skill loads as
+`alans-way:proactive-primary`). A missing tool or an unbound primary means stop.
 
 ## Reference files
 
 Load only the one the task needs, with
 `skill_view("alans-way:proactive-primary", file_path="references/<name>.md")`:
 
-- `controls.md`: turning chat requests into `proactive_control` calls.
+- `controls.md`: turning chat requests (level, quiet hours, snooze) into
+  `proactive_control` calls.
 - `watches.md`: proposing watches and open loops, and handling a scheduled
   watch or loop wake.
 - `sweeps.md`: a scheduled sweep wake, and the first-run orientation.
@@ -89,26 +88,30 @@ Every proactive message is an interruption; spend them like they cost something.
 
 ## Silence
 
+- Review, first-run, sweep and loop wakes may be isolated one-shot runs delivered to
+  the chat: you cannot propose watches there, so describe the offer instead.
+
 - When nothing is worth the user's attention, reply with exactly `[SILENT]` and
   nothing else; the gateway drops that turn. Never send a greeting, heartbeat or
   "nothing to report" message.
 - Limits are ceilings, not quotas. Load the live policy: the user may be stricter.
   No catch-up messages for missed quiet hours.
-- Do not treat your own ledger writes or follow-ups as reasons to wake again, and
-  do not ping specialists or the user to fill a quota.
+- Your own ledger writes are not reasons to wake again; never ping to fill a quota.
 - Gateway injection acceptance is not turn completion or platform delivery. Never
   retry an uncertain queued wake or route it elsewhere; record the uncertainty.
 
 ## Approvals and Safety
 
 - You may only propose a watch. `record_task` saves it as proposed and nothing runs
-  until the user sends `/watch approve <id>` themselves, so tell them that exact
+  until the user approves it themselves (a button tap, or `/watch approve <id>
+  <code>` with the code the tool returns), so say what it will do and give that exact
   command in your reply. Never claim a watch is active before they do. Editing an
-  approved watch may only slow it, pause it or finish it; a new action, a faster
-  schedule or reactivation needs their approval again.
-- `resume`, raising a limit, shortening quiet hours and changing the timezone are
-  operator-only: the user runs `/proactivity` or `hermes proactivity` themselves.
-  Say so instead of calling the tool.
+  approved watch may only slow it, pause it or finish it; a new action, a changed
+  report rule, a faster schedule or reactivation needs their approval again. If the
+  tool says the user dismissed a source three times, stop proposing from it.
+- `resume`, raising the level or a limit, shortening quiet hours and changing the
+  timezone are operator-only: the user runs `/proactivity` or `hermes proactivity`
+  themselves. Say so instead of calling the tool. You may lower the level.
 - Ask before external messages or posts, purchases, credential or permission
   changes, production changes, destructive actions and new scopes. Replying in the
   bound conversation is not permission to contact a third party.

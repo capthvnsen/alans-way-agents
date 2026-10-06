@@ -99,7 +99,7 @@ class ProactiveSkillTests(unittest.TestCase):
     def test_reviewer_required_rules_stay_in_the_core_skill(self):
         content = flat(self.skill())
         for requirement in (
-            "`resume`, raising a limit, shortening quiet hours and changing the timezone are operator-only",
+            "`resume`, raising the level or a limit, shortening quiet hours and changing the timezone are operator-only",
             "ask the user before `claim`", "`human_has_control`",
             "You may only propose a watch", "/watch approve <id>",
         ):
@@ -136,7 +136,17 @@ class ProactiveSkillTests(unittest.TestCase):
         ):
             with self.subTest(requirement=requirement):
                 self.assertTrue(requirement in " ".join(content.split()), f"Missing contract: {requirement}")
-        self.assertLessEqual(len(content), 13_500, "Keep the public guide concise")
+        self.assertLessEqual(len(content), 16_000, "Keep the public guide concise")
+
+    def test_docs_lead_with_the_two_knobs_and_do_not_oversell_approval(self):
+        content = flat(DOCS.read_text(encoding="utf-8"))
+        self.assertLess(content.index("## The two knobs"), content.index("## Review and enable"))
+        for requirement in ("/proactivity level quiet|normal|eager", "/proactivity quiet 22-8",
+                            "/proactivity snooze 3d", "/proactivity log", "Approve", "Snooze 1d", "Dismiss",
+                            "policy boundary, not a sandbox", "operator-only through Hermes's command surfaces"):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, content)
+        self.assertNotIn("Approval is yours alone", content)
 
     def test_native_startup_hook_is_separate_trusted_optin_not_cli_dispatch(self):
         self.assertTrue(DOCS.is_file())
@@ -176,7 +186,7 @@ class ProactiveSkillTests(unittest.TestCase):
                     arguments = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
                     self.assertIn(arguments["action"], {
                         "status", "pause", "resume", "configure", "review",
-                        "record_task", "finish_task", "report_signal",
+                        "record_task", "finish_task", "report_signal", "level",
                     })
                     if arguments["action"] == "configure":
                         self.assertIsInstance(arguments["settings"], dict)

@@ -6,7 +6,10 @@ quiet window can widen. `resume`, raising a limit, shrinking quiet hours and cha
 the timezone are refused, and belong to the user's `/proactivity` or `hermes
 proactivity`. When a request needs one of those, say so instead of calling the tool.
 
-The user's own commands: `/proactivity status`, `/proactivity pause`,
+The user's own commands: `/proactivity level quiet|normal|eager` (how active you are),
+`/proactivity quiet 22-8`, `/proactivity snooze 3d` (or `until <time>`, `off`),
+`/proactivity timezone <IANA name>`, `/proactivity log` (the last ten wakes),
+`/proactivity status`, `/proactivity pause`,
 `/proactivity resume`, `/proactivity review` and
 `/proactivity configure {"quiet_start":23,"quiet_end":8}` (JSON, not an invented
 subcommand). Standing watches have their own `/watch` command (see `watches.md`).
@@ -18,6 +21,7 @@ proactive_control(action="pause", resume_at="2026-10-09T08:00:00-06:00")
 proactive_control(action="configure", settings={"quiet_start": 20, "quiet_end": 8})
 proactive_control(action="configure", settings={"max_daily_wakes": 1})
 proactive_control(action="review")
+proactive_control(action="level", level="quiet")
 ```
 
 - "Stop being proactive" -> `pause`. "Resume proactivity" -> ask the user to run
@@ -28,6 +32,8 @@ proactive_control(action="review")
 - "Quiet from 11pm to 8am" -> `configure` the quiet-hour fields when that keeps or
   widens the current quiet window. Shrinking it, or changing the timezone, is
   operator-only.
+- "Be quieter" or "check in less" -> `level` with `quiet` or `normal`, whichever is
+  lower than now. Raising the level (`eager`) is operator-only.
 - "Less often" or "at most once a day" -> `configure` a lower `max_daily_wakes` or a
   higher `min_interval_seconds`. Raising a ceiling is operator-only.
 - "Focus on these priorities" -> `configure` priorities if the live schema supports
