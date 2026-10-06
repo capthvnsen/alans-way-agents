@@ -334,6 +334,15 @@ function continuedPage(record) {
   return { url: record.url, tabId: record.tabId };
 }
 
+// The VPS browser process cannot see the resume file. Pass the tab it should
+// keep using, so a call aimed at the old Mac tab can name this one.
+function continuedArgs(continued) {
+  const url = continued && safeResumeUrl(continued.url);
+  const tabId = continued && continued.tabId;
+  if (!url || typeof tabId !== 'string' || !/^[\w-]{1,100}$/.test(tabId)) return [];
+  return ['--continued-tab', tabId, '--continued-url', url];
+}
+
 // Open the last Mac https page in the local VPS browser. Cookies do not copy.
 // A tab that already has the URL is reused. A missing browser host returns
 // null so the notice can still tell the model to open the page itself.
@@ -509,7 +518,8 @@ async function main() {
     if (macSsh) {
       const resumeFile = resumePath(macStateFile);
       const record = readResumeRecord(resumeFile);
-      if (record && !continuedPage(record)) {
+      let continuedTab = continuedPage(record);
+      if (record && !continuedTab) {
         const continued = await continueRememberedPage({
           connectionFile: vpsConnection,
           record,
@@ -518,11 +528,13 @@ async function main() {
         });
         if (continued) {
           markResumeOpened(resumeFile, record, continued.tabId);
+          continuedTab = { url: continued.url, tabId: continued.tabId };
           process.stderr.write(
             `workspace-router: continued ${continued.url} in the VPS browser as tab ${continued.tabId}\n`,
           );
         }
       }
+      args.push(...continuedArgs(continuedTab));
     }
     if (staleSelfProbe && macSeen && macSeen.state === 'offline' && !macScript) {
       process.stderr.write(
@@ -648,6 +660,7 @@ module.exports = {
   markResumeOpened,
   continueRememberedPage,
   continuedPage,
+  continuedArgs,
   annotateResult,
   makeAnnotator,
   macBackendCommand,

@@ -268,6 +268,21 @@ const fs = require('fs');
             self.assertIsNone(out["remote"])
             self.assertEqual(out["posts"], 1)
 
+    def test_continued_tab_is_passed_to_the_vps_browser(self):
+        script = r"""
+const router = require(process.argv[1]);
+const good = router.continuedArgs({ url: 'https://docs.example/d/abc', tabId: 'tab-9' });
+const secret = router.continuedArgs({ url: 'https://user:secret@docs.example/d/abc', tabId: 'tab-9' });
+const bad = router.continuedArgs({ url: 'https://docs.example/d/abc', tabId: 'tab 9' });
+process.stdout.write(JSON.stringify({ good, secret, bad }));
+"""
+        proc = subprocess.run([NODE, "-e", script, str(ROUTER)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertEqual(out["good"], ["--continued-tab", "tab-9", "--continued-url", "https://docs.example/d/abc"])
+        self.assertEqual(out["secret"], [])
+        self.assertEqual(out["bad"], [])
+
     def test_back_online_notice_fires_once_per_flip(self):
         with tempfile.TemporaryDirectory() as directory:
             lines, _ = self.annotate(directory, [

@@ -140,6 +140,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Open the same URL with `cua_alans_way_open`", self.normalized)
         self.assertIn("If the `[workspace]` line names a page, open that URL.", self.normalized)
         self.assertIn("If the `[workspace]` line says the page was continued, keep working in that tab.", self.normalized)
+        self.assertIn("If a call fails because that tab was on the Mac, the error names the VPS tab. Use that tab.", self.normalized)
         self.assertIn("The connector opens the last page there when the Mac drops.", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
@@ -222,6 +223,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         self.assertIn("re-probes and routes to it", self.source)
         self.assertIn("continueRememberedPage", self.source)
         self.assertIn("markResumeOpened", self.source)
+        self.assertIn("'--continued-tab'", self.source)
         self.assertIn("onlineStreak >= 2", self.source)
         self.assertIn("script replaced — exiting so the next connection loads it", self.source)
 
