@@ -206,6 +206,30 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(store.record_event("manual_review", "opaque-wake-2", purpose=True, now=self.now))
         self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-wake-2")
 
+    def test_refund_returns_only_the_reservation_of_a_claim_that_never_injected(self):
+        store = self.configured(min_interval_seconds=7200)
+        store.record_event("task_changed", "opaque-refund-1", purpose=True, now=self.now)
+        store.record_event("task_changed", "opaque-refund-2", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        store.finish(event["id"], "rejected", refund=True)
+        self.assertEqual(store.status()["reservation_count"], 0)
+        self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-refund-2")
+        self.assertFalse(store.record_event("task_changed", "opaque-refund-1", purpose=True, now=self.now))
+        store.record_event("task_changed", "opaque-refund-3", purpose=True, now=self.now)
+        event = store.claim(now=self.now + timedelta(hours=3))
+        store.finish(event["id"], "accepted_unverified", refund=True)
+        self.assertEqual(store.status()["reservation_count"], 2)
+
+    def test_watch_wakes_age_out_of_the_unresolved_gate_after_ten_minutes(self):
+        store = self.configured(min_interval_seconds=0, min_watch_interval_seconds=0)
+        store.record_event("watch_due", "watchdue:w:r1", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        store.finish(event["id"], "accepted_unverified")
+        store.expire(now=self.now + timedelta(seconds=599))
+        self.assertEqual(store.status()["counts"].get("accepted_unverified"), 1)
+        store.expire(now=self.now + timedelta(seconds=601))
+        self.assertEqual(store.status()["counts"].get("expired"), 1)
+
     def test_stranded_dispatching_events_expire_and_free_the_gate(self):
         """A dispatch that dies between claim() and finish() — not a crash,
         so the reopen recovery never runs — must not hold the one-wake gate

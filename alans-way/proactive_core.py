@@ -121,6 +121,7 @@ class Store:
     # Headroom kept for scheduled watches so speculative context noise can
     # never crowd a due wake out of the pending queue entirely.
     _WATCH_RESERVE = 8
+    _WATCH_UNRESOLVED_TTL = 600
     _MAX_EVENTS = 4096
     # A terminal row is a dedupe tombstone for exactly as long as the re-fire
     # windows it guards can still name the same evidence: the due-review
@@ -193,6 +194,13 @@ class Store:
             " ('dispatching','accepted_unverified','uncertain')"
             " AND COALESCE(claimed_at, created_at)<=?",
             (timestamp - policy.unresolved_ttl_seconds,)).rowcount
+        # A watch wake is short bounded work, and an unresolved one gates every
+        # other watch, so it ages out much sooner than a speculative review.
+        unresolved += db.execute(
+            "UPDATE events SET status='expired' WHERE kind='watch_due' AND status IN"
+            " ('dispatching','accepted_unverified','uncertain')"
+            " AND COALESCE(claimed_at, created_at)<=?",
+            (timestamp - min(policy.unresolved_ttl_seconds, self._WATCH_UNRESOLVED_TTL),)).rowcount
         self._audit(db, "expired_unresolved", revision, unresolved)
         # Spacing and budget reads lean on claimed_at history, so retention
         # never falls below a configured claim interval or a calendar week.
@@ -409,8 +417,11 @@ class Store:
             self._audit(db, "coalesced", self._policy(db)[1], dropped)
             return dropped
 
-    def finish(self, event_id: str, status: str) -> None:
+    def finish(self, event_id: str, status: str, *, refund: bool = False) -> None:
         """Record a caller's explicit outcome, not an injection return value.
+
+        ``refund`` hands back the daily-budget and spacing reservation of a
+        claim that never injected a turn (rejected appraisal, stale wake).
 
         Only the adapter can inspect injection acceptance (it must be ``is True``).
         An accepted queue request is never proof that the review completed.
@@ -428,6 +439,8 @@ class Store:
             if old not in {"dispatching", "uncertain"} and not (old == "accepted_unverified" and status == "resolved"):
                 raise ValueError("invalid dispatch status transition")
             db.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
+            if refund and status in {"rejected", "resolved"}:
+                db.execute("UPDATE events SET claimed_at=NULL WHERE id=?", (event_id,))
             self._audit(db, status, self._policy(db)[1])
 
     def status(self) -> dict:

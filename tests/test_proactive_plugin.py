@@ -711,6 +711,63 @@ class PluginTests(unittest.TestCase):
             runtime.store.finish(result["id"], "resolved")
             runtime.close()
 
+    def test_every_wake_prompt_tells_the_bot_to_reply_silent_when_idle(self):
+        """The gateway drops a turn whose whole reply is [SILENT], so each
+        wake carries the instruction instead of letting filler reach Telegram."""
+        from datetime import datetime, timedelta, timezone
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append(message)
+                return True
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        base = {"title": "T", "scope": "S", "next_action": "N", "owner": "primary",
+                "status": "active", "approved": True, "next_review_at": past}
+        def wake(arrange):
+            with tempfile.TemporaryDirectory() as directory:
+                home, facade = Path(directory), Facade()
+                runtime = module.Runtime(facade, home,
+                                         appraiser=lambda *_: {"useful": True, "action": "ask", "task_id": None})
+                runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789",
+                    "debounce_seconds": 0, "min_interval_seconds": 0, "min_watch_interval_seconds": 0,
+                    "quiet_start": 0, "quiet_end": 0})
+                guard.mark_gateway_ready(home)
+                arrange(runtime)
+                self.assertEqual(runtime.tick()["status"], "accepted_unverified")
+                runtime.close()
+                return facade.received[0]
+        prompts = {
+            "review": wake(lambda r: r.store.record_event("context_changed", "e" * 64, purpose=True)),
+            "first_run": wake(lambda r: r._admit_first_run()),
+        }
+        for kind in ("watch", "loop", "sweep"):
+            def arrange(runtime, kind=kind):
+                runtime.ledger.record_task({**base, "id": "w", "kind": kind})
+                self.assertEqual(runtime.observe(), 1)
+            prompts[kind] = wake(arrange)
+        self.assertEqual(len(prompts), 5)
+        for kind, prompt in prompts.items():
+            with self.subTest(kind=kind):
+                self.assertIn("reply with exactly [SILENT]", prompt)
+
+    def test_rejected_appraisal_refunds_the_daily_budget_and_spacing(self):
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            runtime = module.Runtime(None, home, appraiser=lambda *_: {"useful": False})
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789",
+                "debounce_seconds": 0, "quiet_start": 0, "quiet_end": 0, "max_daily_wakes": 1})
+            guard.mark_gateway_ready(home)
+            for index in range(3):
+                runtime.store.record_event("context_changed", f"{index:064d}", purpose=True)
+                self.assertEqual(runtime.tick()["status"], "no_op")
+            self.assertEqual(runtime.store.status()["reservation_count"], 0)
+            runtime.close()
+
     def test_missing_or_corrupt_kind_falls_back_to_watch_dispatch(self):
         """Hand-edited or pre-kind ledger entries must never crash dispatch —
         an unknown kind reads as an ordinary scheduled watch."""

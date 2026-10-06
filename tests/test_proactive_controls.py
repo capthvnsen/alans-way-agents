@@ -263,6 +263,134 @@ class ControlTests(unittest.TestCase):
                 self.assertEqual(runtime.store.load_policy().quiet_start, 22)
             runtime.close()
 
+    PROPOSAL = {"id": "rent", "title": "Rent", "scope": "Check rent posts",
+                "next_action": "Check the bank feed", "owner": "primary",
+                "status": "active", "cadence_seconds": 3600}
+
+    def propose(self, runtime, **changes):
+        return json.loads(runtime.tool_control({"action": "record_task",
+                                                "task": {**self.PROPOSAL, **changes}}))
+
+    def test_model_can_only_propose_and_the_reply_names_the_approve_command(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            result = self.propose(runtime, approved=True, consent_reference="user said yes",
+                                  next_review_at="2020-01-01T00:00:00+00:00")
+            self.assertTrue(result["ok"])
+            self.assertIn("/watch approve rent", result["tell_user"])
+            task = runtime.ledger.snapshot()["tasks"][0]
+            self.assertEqual((task["status"], task["approved"]), ("proposed", False))
+            self.assertNotIn("approved_at", task)
+            self.assertEqual(runtime.review_context()["tasks"], [])
+            self.assertIn("/watch approve rent", runtime.watch_command("list"))
+            runtime.close()
+
+    def test_only_the_operator_approves_and_it_activates_the_watch(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            self.assertIn("only proposed", runtime.watch_command("resume rent"))
+            self.assertFalse(json.loads(runtime.tool_control({"action": "approve_task", "task_id": "rent"}))["ok"])
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "proposed")
+            self.assertIn("approved", runtime.watch_command("approve rent"))
+            task = runtime.ledger.snapshot()["tasks"][0]
+            self.assertEqual((task["status"], task["approved"]), ("active", True))
+            self.assertTrue(task["approved_at"])
+            self.assertEqual(len(runtime.review_context()["tasks"]), 1)
+            self.assertIn("failed", runtime.watch_command("approve rent"))
+            runtime.close()
+
+    def test_cli_approve_activates_a_proposed_watch(self):
+        from types import SimpleNamespace
+        module = plugin()
+        operator = sys.modules[module.__name__ + ".proactive_operator"]
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            with patch("builtins.print"):
+                self.assertEqual(operator.execute(runtime, SimpleNamespace(action="approve", watch_id="rent")), 0)
+                self.assertEqual(operator.execute(runtime, SimpleNamespace(action="approve", watch_id="rent")), 1)
+            self.assertEqual(runtime.ledger.snapshot()["tasks"][0]["status"], "active")
+            runtime.close()
+
+    def test_approved_watch_may_only_be_tightened_by_the_model(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            self.propose(runtime)
+            runtime.watch_command("approve rent")
+            def state():
+                return runtime.ledger.snapshot()["tasks"][0]["status"]
+            for change in ({"cadence_seconds": 7200}, {"cadence_seconds": 7200, "title": "Rent check"},
+                           {"cadence_seconds": 7200, "status": "waiting"}):
+                self.assertTrue(self.propose(runtime, **change)["ok"])
+                self.assertNotEqual(state(), "proposed", change)
+                self.assertTrue(runtime.ledger.snapshot()["tasks"][0]["approved"])
+            self.assertTrue(json.loads(runtime.tool_control(
+                {"action": "finish_task", "task_id": "rent", "status": "waiting"}))["ok"])
+            # Reactivating a paused watch, a new action or a faster cadence
+            # all need the user again.
+            for change in ({"status": "active"}, {"next_action": "Email the landlord"},
+                           {"status": "active", "cadence_seconds": 600}):
+                runtime.watch_command("resume rent")
+                self.assertNotEqual(state(), "proposed")
+                self.assertTrue(self.propose(runtime, **change)["ok"])
+                self.assertEqual(state(), "proposed", change)
+                self.assertFalse(runtime.ledger.snapshot()["tasks"][0]["approved"])
+                runtime.watch_command("approve rent")
+                runtime.watch_command("pause rent")
+            self.assertFalse(self.propose(runtime, scope="Something else")["ok"])
+            runtime.close()
+
+    def test_proposals_are_bounded_and_do_not_squat_the_watch_cap(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            for index in range(8):
+                self.assertTrue(self.propose(runtime, id=f"w{index}")["ok"])
+            self.assertFalse(self.propose(runtime, id="w8")["ok"])
+            self.assertTrue(self.propose(runtime, id="w0", title="Edited")["ok"])
+            runtime.close()
+
+    def test_terminal_watches_are_pruned_after_two_weeks_and_never_count_toward_the_cap(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            base = {**self.PROPOSAL, "approved": True}
+            for index in range(64):
+                runtime.ledger.record_task({**base, "id": f"w{index}"})
+            with self.assertRaises(ValueError):
+                runtime.ledger.record_task({**base, "id": "extra"})
+            runtime.ledger.finish_task("w0", "done")
+            runtime.ledger.record_task({**base, "id": "extra"})
+            self.assertEqual(len(runtime.ledger.snapshot()["tasks"]), 65)
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["w0"]["closed_at"] = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+            runtime.ledger.finish_task("w1", "cancelled")
+            ids = {task["id"] for task in runtime.ledger.snapshot()["tasks"]}
+            self.assertNotIn("w0", ids)
+            self.assertIn("w1", ids)
+            runtime.close()
+
+    def test_model_cannot_shift_quiet_hours_with_a_timezone_change(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            result = json.loads(runtime.tool_control({"action": "configure",
+                                                      "changes": {"timezone": "Pacific/Auckland"}}))
+            self.assertFalse(result["ok"])
+            self.assertIn("operator", result["error"])
+            self.assertEqual(runtime.store.load_policy().timezone, "America/Denver")
+            self.assertTrue(json.loads(runtime.tool_control({"action": "configure",
+                "changes": {"timezone": "America/Denver", "quiet_start": 21}}))["ok"])
+            self.assertTrue(json.loads(runtime.control({"action": "configure",
+                "changes": {"timezone": "Pacific/Auckland"}}))["ok"])
+            runtime.close()
+
+
     def test_effective_chat_preferences_persist_across_runtime_restart(self):
         module = plugin()
         with tempfile.TemporaryDirectory() as directory:

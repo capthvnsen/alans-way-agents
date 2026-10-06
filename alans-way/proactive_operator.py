@@ -110,8 +110,9 @@ def probe(runtime):
 
 def setup(parser):
     parser.add_argument("action", nargs="?", default="status",
-                        choices=["status", "pause", "resume", "configure", "review", "bind", "probe"])
+                        choices=["status", "pause", "resume", "configure", "review", "bind", "probe", "approve"])
     parser.add_argument("--session-key", help="Exact existing private route; bind only, never echoed")
+    parser.add_argument("--watch-id", help="Proposed watch to approve; approve only")
     parser.add_argument("--settings", help="JSON policy/preferences object for configure")
 
 
@@ -119,6 +120,9 @@ def execute(runtime, args):
     try:
         if args.action == "bind":
             bind(runtime, args.session_key)
+            result = json.loads(runtime.control({"action": "status"}))
+        elif args.action == "approve":
+            runtime.ledger.approve_task(args.watch_id)
             result = json.loads(runtime.control({"action": "status"}))
         elif args.action == "probe":
             result = probe(runtime)

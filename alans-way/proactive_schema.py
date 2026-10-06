@@ -30,19 +30,18 @@ SETTINGS = {
 }
 TASK = {
     "type": "object", "additionalProperties": False,
-    "required": ["id", "title", "scope", "next_action", "owner", "status", "approved"],
+    "required": ["id", "title", "scope", "next_action", "owner", "status"],
     "properties": {**{name: TEXT for name in ["id", "title", "scope", "next_action", "owner", "native_task_id",
                                              "native_board", "next_review_at", "due_at", "notify_when",
                                              "artifact", "verification", "consent_reference"]},
                    "status": {"type": "string", "enum": ["active", "waiting", "blocked", "done", "cancelled"]},
                    "kind": {"type": "string", "enum": ["watch", "loop", "sweep"]},
-                   "approved": {"type": "boolean", "enum": [True]},
                    "cadence_seconds": {"type": "integer", "minimum": 300, "maximum": 604800},
                    "execution_host": {"type": "string", "enum": ["cloud", "mac"]}},
 }
 SCHEMA = {
     "name": "proactive_control",
-    "description": "Read live proactivity status/preferences/tasks; persist explicit user controls or approved watch bookkeeping. Approval fields are not new consent. Binding, resume, and any change that loosens the configured limits are operator-only through /proactivity or the CLI — this tool only tightens. Resolve only after verifying the event's real outcome.",
+    "description": "Read live proactivity status/preferences/tasks; persist explicit user controls or watch bookkeeping. record_task only PROPOSES a watch; it never runs until the user sends /watch approve <id> themselves, so tell them that exact command. On an approved watch it may only tighten (slower, pause, finish); anything wider goes back to proposed. Binding, resume, and any change that loosens the configured limits are operator-only through /proactivity or the CLI — this tool only tightens. Resolve only after verifying the event's real outcome.",
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {

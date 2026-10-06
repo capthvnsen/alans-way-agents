@@ -7,6 +7,12 @@ from .gateway_guard import gateway_ready, hermes_home
 from .proactive_context import TASK_KINDS
 
 
+# The gateway drops a turn whose whole reply is this marker, so a wake with
+# nothing to say costs the user no message.
+SILENT_LINE = ("Your final reply is delivered to the user. If nothing here is worth "
+               "their attention, reply with exactly [SILENT] and nothing else.")
+
+
 class Runtime:
     def __init__(self, ctx, home: Path, *, background=False, store=None, appraiser=None):
         self.ctx, self.home = ctx, home
@@ -135,7 +141,7 @@ class Runtime:
         event_id = event["id"]
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         if event["kind"] == "watch_due":
             return self._dispatch_watch_due(event)
@@ -155,11 +161,11 @@ class Runtime:
             self._record_appraisal_error()
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "no_op"}
         action, task_id = appraisal.get("action", "ask"), appraisal.get("task_id")
         if action not in {"research", "draft", "continue_approved", "ask", "follow_up"}:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         if task_id is not None:
             original = next((t for t in context["tasks"] if t["id"] == task_id), None)
@@ -167,14 +173,14 @@ class Runtime:
             if (not original or not current or current.get("approved") is not True
                     or current.get("status") != "active"
                     or any(original.get(k) != current.get(k) for k in ("scope", "owner", "execution_host"))):
-                self.store.finish(event_id, "rejected")
+                self.store.finish(event_id, "rejected", refund=True)
                 return {"id": event_id, "status": "rejected"}
         elif action in {"continue_approved", "follow_up"}:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         metadata = {"id": event_id, "kind": event["kind"], "purpose": event["purpose"] is True,
                     "recommended_action": action, "task_id": task_id}
@@ -195,7 +201,7 @@ class Runtime:
                    "Record verified results and acknowledge this event with proactive_control "
                    "resolve. If that tool is not available in this session, take no further "
                    "action — the event expires on its own and stays auditable. "
-                   "Caps are not quotas.\nEvent metadata: "
+                   "Caps are not quotas. " + SILENT_LINE + "\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
         status = self._inject(message, event["session_key"])
         self.store.finish(event_id, status)
@@ -224,12 +230,12 @@ class Runtime:
         if oriented:
             # A duplicate admission queued before an earlier wake landed —
             # orientation already happened; retire this one quietly.
-            self.store.finish(event_id, "resolved")
+            self.store.finish(event_id, "resolved", refund=True)
             return {"id": event_id, "status": "stale"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key \
                 or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         metadata = {"id": event_id, "kind": "first_run", "purpose": True}
         message = "\n".join([
@@ -249,6 +255,7 @@ class Runtime:
             "useful source is reachable, say so plainly and suggest the",
             "smallest start. Resolve this event with proactive_control",
             "resolve when done; do not generate a second orientation wake.",
+            SILENT_LINE,
             "Event metadata: " + json.dumps(metadata, sort_keys=True),
         ])
         status = self._inject(message, event["session_key"])
@@ -284,7 +291,7 @@ class Runtime:
         )
         if watch_id is None or epoch is None or watch is None \
                 or watch.get("approved") is not True or watch.get("status") != "active":
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         # Stale-instance check: the watch was re-armed or its deadline moved
         # since this event was admitted — the scheduled moment it names is
@@ -300,7 +307,7 @@ class Runtime:
         else:
             current = _parse_time(watch.get("due_at"))
         if current is None or int(current) != epoch:
-            self.store.finish(event_id, "resolved")
+            self.store.finish(event_id, "resolved", refund=True)
             return {"id": event_id, "status": "stale"}
         # A cadence watch re-arms on its fixed grid as it fires — whether or
         # not the wake succeeds — so one failed dispatch can never strand the
@@ -316,7 +323,7 @@ class Runtime:
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key \
                 or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         # Missing or hand-corrupted kinds fall back to the plain watch
         # contract — a bad label must never crash a scheduled wake.
@@ -395,6 +402,7 @@ class Runtime:
                 "via proactive_control resolve. Native approvals still gate "
                 "external or sensitive actions; unverified work is not complete."
             )
+        lines.append(SILENT_LINE)
         lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
         status = self._inject("\n".join(lines), event["session_key"])
         self.store.finish(event_id, status)
@@ -455,6 +463,8 @@ class Runtime:
                     sooner = True
                 if sooner:
                     return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only — the operator applies it with /proactivity pause <timestamp>."})
+        if action == "record_task" and isinstance(args, dict):
+            return self._propose(args.get("task"))
         result = self.control(args, **kwargs)
         if action == "status" and not self._bound_route_only():
             try:
@@ -465,6 +475,19 @@ class Runtime:
             except (ValueError, TypeError):
                 pass
         return result
+
+    def _propose(self, task):
+        """The model may only propose a watch; the user approves it themselves."""
+        try:
+            pending = self.ledger.propose_task(task)
+        except Exception:
+            return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
+        result = {"ok": True, **self.store.status()}
+        if pending:
+            result["awaiting_approval"] = task["id"]
+            result["tell_user"] = (f"Watch {task['id']} is only proposed and will not run yet. "
+                                   f"In your reply, tell the user to approve it by sending exactly: /watch approve {task['id']}")
+        return json.dumps(result)
 
     def _loosening(self, changes):
         """Name the first limit a configure call would loosen, or None.
@@ -485,6 +508,8 @@ class Runtime:
             value = changes.get(name)
             if type(value) is int and value < getattr(policy, name):
                 return name
+        if "timezone" in changes and changes["timezone"] != policy.timezone:
+            return "timezone"
         if "quiet_start" in changes or "quiet_end" in changes:
             start = changes.get("quiet_start", policy.quiet_start)
             end = changes.get("quiet_end", policy.quiet_end)
@@ -655,9 +680,9 @@ class Runtime:
     def watch_command(self, raw_args):
         """/watch — the operator's direct surface over standing watches.
 
-        A typed slash command is explicit consent in itself, so these actions
-        bypass nothing: they call the same validated ledger paths the tool
-        uses, and mutation output always reads back live state.
+        A typed slash command is explicit consent in itself, and the only way
+        a watch becomes active: the model's tool can just propose one.
+        Mutation output always reads back live state.
         """
         if not self._bound_route_only():
             return "Watch controls are only available on the bound conversation."
@@ -672,7 +697,8 @@ class Runtime:
                     fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
                     kind = t.get("kind") if t.get("kind") in TASK_KINDS else "watch"
-                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
+                    ask = f" (approve with /watch approve {t['id']})" if t["status"] == "proposed" else ""
+                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}{ask}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
                 task = next((t for t in tasks if t["id"] == rest), None)
@@ -694,11 +720,17 @@ class Runtime:
                 task_id = rest.split()[0] if rest else ""
                 self.ledger.finish_task(task_id, status)
                 return f"Watch {task_id} is now {status}."
+            if action == "approve":
+                task_id = rest.split()[0] if rest else ""
+                self.ledger.approve_task(task_id)
+                return f"Watch {task_id} is approved and active."
             if action == "resume":
                 task_id = rest.split()[0] if rest else ""
                 task = next((t for t in tasks if t["id"] == task_id), None)
                 if task is None:
                     return f"No watch {task_id!r}."
+                if task["status"] == "proposed":
+                    return f"Watch {task_id} is only proposed — approve it with /watch approve {task_id}."
                 if task["status"] in {"done", "cancelled"}:
                     return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
                 task = dict(task, status="active")
@@ -713,7 +745,7 @@ class Runtime:
                 self.ledger.report_signal(task_id, signal.strip())
                 return f"Signal recorded on {task_id}."
             return ("Use /watch list, /watch show <id>, /watch add {json}, "
-                    "/watch pause <id>, /watch resume <id>, /watch done <id>, "
+                    "/watch approve <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
                     "/watch cancel <id>, or /watch signal <id> <text>.")
         except (ValueError, KeyError, IndexError, TypeError):
             return "Watch command failed — check the id or JSON payload. No change was claimed."
