@@ -67,14 +67,21 @@ limited() {
   if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi
 }
 
+have_router() { command -v node >/dev/null 2>&1 && [ -f "$ROUTER" ]; }
+if ! have_router; then
+  echo "mac-watch: node or workspace-router.cjs not found; probing sshd only, not the app, so a closed app still reads as online. Put node on this service's PATH." >&2
+fi
+
 probe() {
-  if command -v node >/dev/null 2>&1 && [ -f "$ROUTER" ]; then
+  if have_router; then
     out=$(limited node "$ROUTER" --probe --mac-ssh "$MAC_SSH") || return 1
     case "$out" in ''|vps*) return 1;; *) return 0;; esac
   fi
-  # No node here: all that can be proven is that sshd answers.
+  # No node here: all that can be proven is that sshd answers, so a host whose
+  # app is closed reads as online (warned about once, at startup).
   # 'echo ok' not 'true' — PowerShell (a Windows host's ssh shell) has no true.
-  limited ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok
+  limited ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+    -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok
 }
 
 STATE="" SINCE="" LAST_SEEN="" LAST_TRANSITION="" PENDING="" PENDING_N=0
