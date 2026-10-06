@@ -214,7 +214,7 @@ const fs = require('fs');
 (async () => {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
-    calls.push({ url: String(url), method: opts.method || 'GET' });
+    calls.push({ url: String(url), method: opts.method || 'GET', body: opts.body || '' });
     if ((opts.method || 'GET') === 'GET') {
       const tabs = calls.filter((call) => call.method === 'POST').length
         ? [{ id: 'tab-9', url: 'https://docs.example/d/abc' }] : [];
@@ -248,7 +248,8 @@ const fs = require('fs');
     connectionFile: process.argv[4],
     record, botId: 'bot', fetchImpl,
   });
-  process.stdout.write(JSON.stringify({ first, saved, second, reused, refused, remote, posts: calls.filter((call) => call.method === 'POST').length }));
+  const posted = calls.find((call) => call.method === 'POST');
+  process.stdout.write(JSON.stringify({ first, saved, second, reused, refused, remote, posts: calls.filter((call) => call.method === 'POST').length, postBody: posted && posted.body }));
 })().catch((error) => { process.stderr.write(String(error)); process.exit(1); });
 """
             remote = Path(directory) / "remote.json"
@@ -267,6 +268,7 @@ const fs = require('fs');
             self.assertIsNone(out["refused"])
             self.assertIsNone(out["remote"])
             self.assertEqual(out["posts"], 1)
+            self.assertIn('"settle":false', out["postBody"])
 
     def test_continued_tab_is_passed_to_the_vps_browser(self):
         script = r"""
