@@ -1739,5 +1739,15 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         self.assertFalse(any(entry.endswith(":foreground") for entry in entries))
 
 
+class GitAttributesTests(unittest.TestCase):
+    def test_scripts_setup_runs_are_lf_in_every_checkout(self):
+        files = ["setup.sh", "setup-workspace.sh", "alans-way/scripts/mac-watch.sh", "alans-way/scripts/workspace-router.cjs",
+                 "scripts/check_publication.py", "alans-way/__init__.py", "deploy/mac-watch.service",
+                 "deploy/browser-exec-chromium.service"]
+        out = subprocess.run(["git", "check-attr", "eol", "--", *files], cwd=ROOT, capture_output=True, text=True).stdout
+        for f in files:
+            self.assertIn(f"{f}: eol: lf", out)
+
+
 if __name__ == "__main__":
     unittest.main()
