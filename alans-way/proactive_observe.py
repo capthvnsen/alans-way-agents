@@ -9,6 +9,7 @@ import stat
 import sys
 
 from .proactive_context import TASK_KINDS
+from .proactive_isolated import NAME_PREFIX
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
 DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
@@ -93,8 +94,16 @@ _RUN_BOOKKEEPING = re.compile(
 APPRAISAL_TASK_BYTES = 6000
 
 
-def _jobs_digest(document):
+def _own_jobs_removed(document):
+    """Our own one-shot wake jobs come and go on their own; they are not schedule changes."""
     jobs = document.get("jobs", []) if isinstance(document, dict) else document
+    if not isinstance(jobs, list):
+        return jobs
+    return [job for job in jobs if not (isinstance(job, dict) and str(job.get("name", "")).startswith(NAME_PREFIX))]
+
+
+def _jobs_digest(document):
+    jobs = _own_jobs_removed(document)
     if not isinstance(jobs, list):
         return None
     stable = [{k: ({n: c for n, c in v.items() if n != "completed"} if k == "repeat" and isinstance(v, dict) else v)
@@ -132,7 +141,7 @@ def collect(home: Path, ledger, ctx=None):
             try:
                 document = json.loads(value["text"])
                 signatures[source] = _jobs_digest(document) or value["digest"]
-                jobs = document.get("jobs", []) if isinstance(document, dict) else document
+                jobs = _own_jobs_removed(document)
                 if isinstance(jobs, list):
                     for job in jobs[:12]:
                         if not isinstance(job, dict):

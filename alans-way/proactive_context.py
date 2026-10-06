@@ -329,6 +329,18 @@ class Ledger:
                             **({"job_id": job_id} if job_id else {})})
             del entries[:-MAX_LOG]
 
+    def track_job(self, job_id):
+        with self.transaction() as data:
+            data["observations"].setdefault("__cron", {})[job_id] = datetime.now(timezone.utc).isoformat()
+
+    def untrack_job(self, job_id):
+        with self.transaction() as data:
+            data["observations"].get("__cron", {}).pop(job_id, None)
+
+    def tracked_jobs(self):
+        with self.transaction() as data:
+            return dict(data["observations"].get("__cron", {}))
+
     def set_outcome(self, job_id, outcome):
         with self.transaction() as data:
             for entry in data["observations"].get("__log", []):

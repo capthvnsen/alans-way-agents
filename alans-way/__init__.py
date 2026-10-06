@@ -43,6 +43,24 @@ class Runtime:
         except Exception:
             return "uncertain"
 
+    def _send(self, event, message, *, isolate, kind, reason):
+        """Deliver one wake; returns (store status, result status).
+
+        Exploratory wakes try an isolated one-shot cron job first and fall
+        back to the main session when cron is unusable. An isolated wake never
+        holds the one-wake gate, so it is acknowledged here.
+        """
+        if isolate:
+            from .proactive_isolated import launch
+            job_id = launch(self.ctx, event["session_key"], event["id"], message)
+            if job_id:
+                self.ledger.track_job(job_id)
+                self.ledger.log(kind, reason, "queued", job_id=job_id)
+                return "resolved", "isolated"
+        status = self._inject(message, event["session_key"])
+        self.ledger.log(kind, reason, "sent" if status == "accepted_unverified" else "rejected")
+        return status, status
+
     def _record_appraisal_error(self, exc=None):
         """Status records that appraisal failed, never why — provider details
         and private context stay out of chat-visible status."""
@@ -90,7 +108,10 @@ class Runtime:
 
     def observe(self):
         from .proactive_observe import observe
-        return observe(self)
+        from .proactive_isolated import reap
+        admitted = observe(self)
+        reap(self)
+        return admitted
 
     def review_context(self):
         from .proactive_observe import collect
@@ -162,10 +183,12 @@ class Runtime:
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
             self.store.finish(event_id, "rejected", refund=True, appraised=True)
+            self.ledger.log("review", f"{event['kind']}: nothing useful", "rejected")
             return {"id": event_id, "status": "no_op"}
         action, task_id = appraisal.get("action", "ask"), appraisal.get("task_id")
         if action not in {"research", "draft", "continue_approved", "ask", "follow_up"}:
             self.store.finish(event_id, "rejected", refund=True, appraised=True)
+            self.ledger.log("review", f"{event['kind']}: {action} not allowed", "rejected")
             return {"id": event_id, "status": "rejected"}
         if task_id is not None:
             original = next((t for t in context["tasks"] if t["id"] == task_id), None)
@@ -203,14 +226,15 @@ class Runtime:
                    "action — the event expires on its own and stays auditable. "
                    "Caps are not quotas. " + SILENT_LINE + "\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
-        status = self._inject(message, event["session_key"])
+        status, shown = self._send(event, message, isolate=True, kind="review",
+                                   reason=f"{event['kind']}: {action}" + (f" ({task_id})" if task_id else ""))
         self.store.finish(event_id, status)
-        if status == "accepted_unverified" and hasattr(self.store, "coalesce_pending"):
+        if shown in ("accepted_unverified", "isolated") and hasattr(self.store, "coalesce_pending"):
             # This wake re-reads live context, so any other queued speculative
             # diffs would fire the same turn's work as separate wakes. Fold
             # them now — after acceptance, never before.
             self.store.coalesce_pending()
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def _dispatch_first_run(self, event):
         """The one-time orientation wake after the operator's first resume.
@@ -258,16 +282,16 @@ class Runtime:
             SILENT_LINE,
             "Event metadata: " + json.dumps(metadata, sort_keys=True),
         ])
-        status = self._inject(message, event["session_key"])
+        status, shown = self._send(event, message, isolate=True, kind="first-run", reason="orientation")
         self.store.finish(event_id, status)
-        if status == "accepted_unverified":
+        if shown in ("accepted_unverified", "isolated"):
             try:
                 with self.ledger.transaction() as state:
                     state["observations"]["first_run_done"] = \
                         datetime.now(timezone.utc).isoformat()
             except Exception:
                 pass
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def _dispatch_watch_due(self, event):
         """Dispatch a user-approved scheduled watch without an LLM appraisal.
@@ -292,6 +316,7 @@ class Runtime:
         if watch_id is None or epoch is None or watch is None \
                 or watch.get("approved") is not True or watch.get("status") != "active":
             self.store.finish(event_id, "rejected", refund=True)
+            self.ledger.log("watch", f"{watch_id}: no longer active", "rejected")
             return {"id": event_id, "status": "rejected"}
         # Stale-instance check: the watch was re-armed or its deadline moved
         # since this event was admitted — the scheduled moment it names is
@@ -308,6 +333,7 @@ class Runtime:
             current = _parse_time(watch.get("due_at"))
         if current is None or int(current) != epoch:
             self.store.finish(event_id, "resolved", refund=True)
+            self.ledger.log("watch", f"{watch_id}: already handled", "rejected")
             return {"id": event_id, "status": "stale"}
         # A cadence watch re-arms on its fixed grid as it fires — whether or
         # not the wake succeeds — so one failed dispatch can never strand the
@@ -407,16 +433,17 @@ class Runtime:
             )
         lines.append(SILENT_LINE)
         lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
-        status = self._inject("\n".join(lines), event["session_key"])
+        status, shown = self._send(event, "\n".join(lines), isolate=kind in ("sweep", "loop"),
+                                   kind=kind, reason=f"{watch_id}: {watch.get('title', '')}"[:100])
         self.store.finish(event_id, status)
-        if status == "accepted_unverified" and kind == "sweep" \
+        if shown in ("accepted_unverified", "isolated") and kind == "sweep" \
                 and hasattr(self.store, "coalesce_pending"):
             # The sweep reads live context anyway, so queued speculative diffs
             # are its input — fold them into this one turn instead of
             # waking again. Only after acceptance; a failed dispatch loses
             # nothing.
             self.store.coalesce_pending()
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def close(self):
         import threading
@@ -443,7 +470,7 @@ class Runtime:
         disclosure-free view: watch scopes and preferences stay bound.
         """
         action = args.get("action", "status") if isinstance(args, dict) else "status"
-        if action != "status" and not self._bound_route_only():
+        if action != "status" and not self._bound_route_only() and not self._cron_bookkeeping(action):
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
         if action == "resume":
             return json.dumps({"ok": False, "error": "Resume is operator-only — the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
@@ -484,6 +511,19 @@ class Runtime:
                 pass
         return result
 
+    def _cron_bookkeeping(self, action):
+        """An isolated wake runs in a cron session with no route: it may feed
+        signals and finish watches (both only tighten), nothing else."""
+        if action not in ("report_signal", "finish_task"):
+            return False
+        try:
+            from gateway.session_context import get_session_env
+            from utils import is_truthy_value
+            return is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
+        except Exception:
+            import os
+            return os.environ.get("HERMES_CRON_SESSION", "").lower() in ("1", "true", "yes")
+
     def _propose(self, task):
         """The model may only propose a watch; the user approves it themselves."""
         try:
@@ -492,6 +532,7 @@ class Runtime:
             return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
         result = {"ok": True, **self.store.status()}
         if pending:
+            self.ledger.log("proposal", f"{task['id']}: {task.get('title', '')}", "proposed")
             saved = next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"])
             code = self.ledger.proposal_hash(saved)
             result["awaiting_approval"] = task["id"]
