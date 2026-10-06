@@ -1159,12 +1159,12 @@ class HostOsTests(unittest.TestCase):
             return proc.stdout.strip()
 
     def test_linux_is_a_host_os(self):
-        self.assertEqual(self.probe("linux", "/home/u/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs"),
-                         "linux: /home/u/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs")
+        self.assertEqual(self.probe("linux", "/home/user/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs"),
+                         "linux: /home/user/.config/Hermes Workspace/connector/scripts/browser-mcp.cjs")
         self.assertTrue(self.probe("linux", "").startswith("vps (linux unreachable"))
 
     def test_an_unknown_host_os_still_means_mac(self):
-        path = "/Users/u/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"
+        path = "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"
         self.assertEqual(self.probe("freebsd", path), "mac: " + path)
 
 

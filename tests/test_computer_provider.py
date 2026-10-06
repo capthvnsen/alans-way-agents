@@ -259,7 +259,7 @@ b.stop()
 
 # --- doctor
 import contextlib, io
-for label, probe in (("linux", "linux: /home/u/connector/browser-mcp.cjs"), ("vps", "vps (linux unreachable (ssh: timeout))"), ("junk", "")):
+for label, probe in (("linux", "linux: /home/user/connector/browser-mcp.cjs"), ("vps", "vps (linux unreachable (ssh: timeout))"), ("junk", "")):
     Path(os.environ["FAKE_PROBE"]).write_text(probe)
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
