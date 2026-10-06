@@ -125,6 +125,44 @@ class PluginTests(unittest.TestCase):
             self.assertIsNone(runtime.tick())
             runtime.close()
 
+    def test_wake_prompt_names_the_installed_namespaced_skill(self):
+        """Hermes qualifies plugin skills as '<plugin name>:<skill>' — the wake
+        prompt must name alans-way:proactive-primary or skill_view cannot find it."""
+        from types import SimpleNamespace
+        class Facade:
+            def __init__(self):
+                self.received = []
+            def inject_message(self, message, **kwargs):
+                self.received.append((message, kwargs))
+                return True
+        class FakeStore:
+            def __init__(self):
+                self.finished = []
+                self.pending = True
+            def load_policy(self):
+                return SimpleNamespace(enabled=True, primary_profile="default",
+                                       session_key="agent:main:telegram:dm:123456789")
+            def claim(self, now=None):
+                if not self.pending:
+                    return None
+                self.pending = False
+                return {"id": "sample-event", "kind": "manual_review", "evidence": "a" * 64,
+                        "purpose": False, "session_key": self.load_policy().session_key}
+            def finish(self, event_id, status):
+                self.finished.append((event_id, status))
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            facade, store = Facade(), FakeStore()
+            runtime = module.Runtime(facade, Path(directory), store=store,
+                                     appraiser=lambda *_: {"useful": True})
+            guard.mark_gateway_ready(Path(directory))
+            self.assertEqual(runtime.tick()["status"], "accepted_unverified")
+            message = facade.received[0][0]
+            self.assertIn("alans-way:proactive-primary", message)
+            self.assertNotIn("proactive-primary:proactive-primary", message)
+            runtime.close()
+
     def test_watch_due_dispatches_without_appraiser_and_re_arms_cadence(self):
         from datetime import datetime, timedelta, timezone
         class Facade:

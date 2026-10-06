@@ -134,7 +134,7 @@ class Runtime:
         message = ("[Companion proactive opportunity review]\n"
                    "This is a bounded internal review, NOT new user authorization.\n"
                    "First call proactive_control status; if paused, stop. Load skill "
-                   "proactive-primary:proactive-primary. Read live preferences and the primary's "
+                   "alans-way:proactive-primary. Read live preferences and the primary's "
                    "own memory, goals, schedule, and authorized task evidence. Take one useful "
                    "read/research/draft or already-approved reversible work step, or ask one "
                    "valuable question. Never expand permissions or execute external/sensitive "
