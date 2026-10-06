@@ -230,21 +230,25 @@ function bigLineId(line) {
   return tail ? JSON.parse(tail[1]) : undefined;
 }
 
+// Returns the wall-clock ms a tools/call took when the router timed it.
 function noteServerRpc(line, pending) {
+  const done = (id) => {
+    const req = pending instanceof Map ? pending.get(id) : null;
+    pending.delete(id);
+    return req && req.method === 'tools/call' && typeof req.at === 'number' ? Date.now() - req.at : undefined;
+  };
   try {
     if (line.length > BIG_LINE) {
       const id = bigLineId(line);
-      if (id !== undefined) {
-        pending.delete(id);
-        return;
-      }
+      if (id !== undefined) return done(id);
     }
     const msg = JSON.parse(line);
     if (msg && typeof msg === 'object' && msg.id != null
         && (msg.result !== undefined || msg.error !== undefined)) {
-      pending.delete(msg.id);
+      return done(msg.id);
     }
   } catch {}
+  return undefined;
 }
 
 // The connector's "connection file is gone" error: the host app is not
@@ -763,12 +767,14 @@ function continuationNotice(c, label = 'Mac') {
   return `[workspace] ${label} connection lost; work moved to the VPS browser. ${detail}`;
 }
 
+const workspaceMeta = (host, mac, ms) => (ms === undefined ? { host, mac } : { host, mac, ms });
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
-function annotateResult(msg, host, mac, notice) {
+function annotateResult(msg, host, mac, notice, ms) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
-  msg.result._meta = { ...(msg.result._meta || {}), workspace: { host, mac } };
+  msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
   }
@@ -789,9 +795,9 @@ function resultShape(line) {
   return null;
 }
 
-function appendResultMeta(line, shape, host, mac, notice) {
+function appendResultMeta(line, shape, host, mac, notice, ms) {
   const extra = notice ? `,${JSON.stringify({ type: 'text', text: notice })}` : '';
-  const meta = `],"_meta":${JSON.stringify({ workspace: { host, mac } })}}`;
+  const meta = `],"_meta":${JSON.stringify({ workspace: workspaceMeta(host, mac, ms) })}}`;
   if (shape === 'id-first') return `${line.slice(0, -3)}${extra}${meta}}`;
   const tail = RESULT_SDK_TAIL.exec(line.slice(-120))[0];
   return `${line.slice(0, line.length - tail.length)}${extra}${meta}${tail.slice(2)}`;
@@ -806,7 +812,7 @@ function appendResultMeta(line, shape, host, mac, notice) {
 function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) {
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile, ctx.botId);
-  return function annotateLine(line) {
+  return function annotateLine(line, ms) {
     const shape = resultShape(line);
     let msg;
     if (!shape) {
@@ -841,8 +847,9 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
         notice = workspaceNotice(host, mac, resume, continued, label, ctx.restoredNote);
       }
     }
-    if (shape) return appendResultMeta(line, shape, host, mac, notice);
-    return JSON.stringify(annotateResult(msg, host, mac, notice));
+    if (notice && ms !== undefined) notice += ` (took ${ms}ms)`;
+    if (shape) return appendResultMeta(line, shape, host, mac, notice, ms);
+    return JSON.stringify(annotateResult(msg, host, mac, notice, ms));
   };
 }
 
@@ -1260,13 +1267,13 @@ async function main() {
             unavailableStreak = 0;
           }
         }
-        noteServerRpc(line, pendingRequests);
+        const callMs = noteServerRpc(line, pendingRequests);
         provedAlive = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
         bufferedStdin.length = 0;
         let out;
         try {
-          out = annotate(line);
+          out = annotate(line, callMs);
         } catch {
           out = line;
         }

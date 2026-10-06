@@ -279,5 +279,19 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
                 self.assertIn(forbidden, self.normalized)
 
 
+class DesktopAppsSkillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.normalized = _normalized(SKILL_PATH.read_text(encoding="utf-8"))
+
+    def test_desktop_apps_go_through_the_workspace_tools_only(self):
+        self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
+        self.assertIn("or the `computer_use` tool when that provider is selected", self.normalized)
+
+    def test_a_permission_error_names_the_app_and_both_switches(self):
+        self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)
+        self.assertIn("System Settings", self.normalized)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -962,6 +962,35 @@ process.stdout.write(JSON.stringify(out));
                                               "id": expected_id, "size": 3000000})
         self.assertEqual(data["odd"], {"pending": 0, "parts": ["image", "text"], "host": "vps"})
 
+    def test_each_tool_call_reports_its_round_trip_even_for_a_screenshot(self):
+        out = self.js(r"""
+const router = require(process.argv[1]);
+const fs = require('fs'), os = require('os'), path = require('path');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wsr-'));
+const state = path.join(dir, 'mac-state.json');
+fs.writeFileSync(state, JSON.stringify({ state: 'offline', since: 'T0' }));
+const small = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'ok' }] } });
+const big = JSON.stringify({ result: { content: [{ type: 'image', data: 'A'.repeat(3000000), mimeType: 'image/png' }] }, jsonrpc: '2.0', id: 2 });
+const realParse = JSON.parse;
+const out = {};
+for (const [name, line, id, method] of [['small', small, 1, 'tools/call'], ['big', big, 2, 'tools/call'], ['list', small, 1, 'tools/list']]) {
+  const pending = new Map([[id, { method, at: Date.now() - 412 }]]);
+  JSON.parse = (text, ...rest) => { if (name === 'big' && String(text).length > 100000 && !/^"/.test(text)) throw new Error('parsed a screenshot'); return realParse(text, ...rest); };
+  const ms = router.noteServerRpc(line, pending);
+  const msg = realParse((router.makeAnnotator('vps', true, state)(line, ms)));
+  JSON.parse = realParse;
+  out[name] = { ms: msg.result._meta.workspace.ms, text: msg.result.content[msg.result.content.length - 1].text };
+}
+process.stdout.write(JSON.stringify(out));
+""")
+        data = json.loads(out)
+        for name in ("small", "big"):
+            with self.subTest(shape=name):
+                self.assertGreaterEqual(data[name]["ms"], 412)
+                self.assertLess(data[name]["ms"], 2000)
+                self.assertIn("took %dms" % data[name]["ms"], data[name]["text"])
+        self.assertNotIn("ms", data["list"])
+
     def test_restore_mirror_reports_what_the_host_did(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = Path(directory) / "connection.json"

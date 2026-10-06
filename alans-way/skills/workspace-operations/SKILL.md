@@ -265,6 +265,10 @@ human's cursor. Skip the focused window, Keychain, and password fields. Do not o
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
 
+For any desktop app on the user's computer, use the `workspace_computer_*`
+tools (or the `computer_use` tool when that provider is selected), and never run screencapture, osascript or ssh scripts to drive the user's desktop.
+If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp) in System Settings, then retry.
+
 ## Preserve vanilla Hermes
 
 Keep integration in supported profile configuration, optional plugins, hooks
