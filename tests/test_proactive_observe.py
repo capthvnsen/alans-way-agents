@@ -141,6 +141,137 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(runtime.observe(), 1)
             runtime.close()
 
+    def test_digests_ignore_run_bookkeeping_and_memory_reordering(self):
+        import json
+        module = plugin()
+        observe = sys.modules[module.__name__ + ".proactive_observe"]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "cron").mkdir()
+            (home / "memories").mkdir()
+            jobs = {"jobs": [{"id": "a", "name": "brief", "enabled": True,
+                              "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+                              "next_run_at": "2026-10-07T08:00:00-06:00",
+                              "last_run_at": "2026-10-06T08:00:00-06:00",
+                              "last_status": "ok", "state": "scheduled", "failure_streak": 0,
+                              "monitor_state": {"hash": "a"}, "repeat": {"times": 5, "completed": 4}}]}
+            def digests():
+                (home / "cron" / "jobs.json").write_text(json.dumps(jobs))
+                (home / "memories" / "MEMORY.md").write_text(memory)
+                runtime = module.Runtime(None, home)
+                signatures = observe.collect(home, runtime.ledger)[1]
+                runtime.close()
+                return signatures
+            memory = "Alpha  note\n§\nBeta note\n"
+            first = digests()
+            job = jobs["jobs"][0]
+            job.update(next_run_at="2026-10-08T08:00:00-06:00", last_run_at="2026-10-07T08:00:00-06:00",
+                       last_status="error", state="error", failure_streak=3,
+                       monitor_state={"hash": "b"}, repeat={"times": 5, "completed": 5})
+            memory = "Beta note\n§\nAlpha note\n\n"
+            again = digests()
+            self.assertEqual(first["cron/jobs.json"], again["cron/jobs.json"])
+            self.assertEqual(first["memories/MEMORY.md"], again["memories/MEMORY.md"])
+            job["repeat"]["times"] = 9
+            changed_repeat = digests()
+            self.assertNotEqual(first["cron/jobs.json"], changed_repeat["cron/jobs.json"])
+            job["enabled"] = False
+            memory += "§\nGamma note\n"
+            changed = digests()
+            self.assertNotEqual(first["cron/jobs.json"], changed["cron/jobs.json"])
+            self.assertNotEqual(first["memories/MEMORY.md"], changed["memories/MEMORY.md"])
+
+    def test_old_digest_baselines_migrate_without_a_wake_burst(self):
+        import json
+        from hashlib import sha256
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "cron").mkdir()
+            (home / "memories").mkdir()
+            raw = json.dumps({"jobs": [{"id": "a", "name": "brief", "next_run_at": "x"}]})
+            (home / "cron" / "jobs.json").write_text(raw)
+            (home / "memories" / "MEMORY.md").write_text("Alpha\n")
+            runtime = module.Runtime(None, home)
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789"})
+            with runtime.ledger.transaction() as data:
+                data["observations"]["cron/jobs.json"] = sha256(raw.encode()).hexdigest()
+                data["observations"]["memories/MEMORY.md"] = sha256(b"Alpha\n").hexdigest()
+            self.assertEqual(runtime.observe(), 0)
+            self.assertEqual(runtime.store.status()["counts"].get("pending", 0), 0)
+            (home / "memories" / "MEMORY.md").write_text("Alpha\n§\nBeta\n")
+            self.assertEqual(runtime.observe(), 1)
+            runtime.close()
+
+    def test_long_overdue_deadline_stops_re_waking(self):
+        module = plugin()
+        observe = sys.modules[module.__name__ + ".proactive_observe"]
+        day = 86400
+        self.assertEqual(observe._deadline_tag(-2 * day), "gone")
+        self.assertEqual(observe._deadline_tag(-6.9 * day), "gone")
+        self.assertIsNone(observe._deadline_tag(-7 * day))
+        self.assertIsNone(observe._deadline_tag(-30 * day))
+
+    def test_heartbeat_rewrites_the_ledger_at_most_every_ten_minutes(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.observe()
+            first = runtime.ledger.snapshot()["observed_at"]
+            runtime.observe()
+            self.assertEqual(runtime.ledger.snapshot()["observed_at"], first)
+            with runtime.ledger.transaction() as data:
+                data["observations"]["__heartbeat"] = (
+                    datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            runtime.observe()
+            self.assertGreater(runtime.ledger.snapshot()["observed_at"], first)
+            runtime.close()
+
+    def test_appraisal_context_lists_every_active_watch_soonest_due_first(self):
+        from datetime import datetime, timedelta, timezone
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            now = datetime.now(timezone.utc)
+            for index in range(9):
+                runtime.ledger.record_task({"id": f"w{index}", "title": "T", "scope": "S",
+                    "next_action": "N", "owner": "primary", "status": "active", "approved": True,
+                    "next_review_at": (now + timedelta(hours=9 - index)).isoformat()})
+            runtime.ledger.record_task({"id": "manual", "title": "T", "scope": "S", "next_action": "N",
+                                        "owner": "primary", "status": "active", "approved": True})
+            with runtime.ledger.transaction() as data:
+                data["tasks"]["w8"]["approved_at"] = (now - timedelta(days=90)).isoformat()
+            ids = [task["id"] for task in runtime.review_context()["tasks"]]
+            # The 30-day approval expiry applies here exactly as it does to native reads.
+            self.assertEqual(ids, [f"w{index}" for index in range(7, -1, -1)] + ["manual"])
+            runtime.close()
+
+    def test_appraisal_context_is_token_bounded(self):
+        module = plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            for index in range(40):
+                runtime.ledger.record_task({"id": f"w{index:02}", "title": "T" * 300, "scope": "S" * 300,
+                    "next_action": "N" * 300, "owner": "primary", "status": "active", "approved": True})
+            tasks = runtime.review_context()["tasks"]
+            self.assertTrue(0 < len(tasks) < 40)
+            self.assertLessEqual(sum(len(str(task)) for task in tasks), 8000)
+            runtime.close()
+
+    def test_native_watches_beyond_the_check_budget_are_not_marked_blocked(self):
+        from types import SimpleNamespace
+        module = plugin()
+        host = SimpleNamespace(dispatch_tool=lambda name, args: {"task": {"id": args["task_id"], "status": "running"}})
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(host, Path(directory))
+            for index in range(6):
+                runtime.ledger.record_task({"id": f"w{index}", "title": "T", "scope": "S", "next_action": "N",
+                    "owner": "primary", "status": "active", "approved": True, "native_task_id": f"native-{index}"})
+            statuses = {t["id"]: t["status"] for t in runtime.review_context()["tasks"]}
+            self.assertEqual(statuses, {f"w{index}": "active" for index in range(6)})
+            runtime.close()
+
     def test_unapproved_or_terminal_watches_never_fire(self):
         from datetime import datetime, timedelta, timezone
         module = plugin()

@@ -49,6 +49,7 @@ class PolicyTests(unittest.TestCase):
             "max_pending": 64,
             "debounce_seconds": 120,
             "resume_at": "",
+            "level": "normal",
         }
         policy = core.Policy.from_dict({})
         self.assertEqual(policy.to_dict(), expected)
@@ -62,7 +63,7 @@ class PolicyTests(unittest.TestCase):
             {"session_key": 123}, {"session_key": "route\ntext"},
             {"timezone": "No/SuchZone"}, {"quiet_start": 24},
             {"quiet_end": -1}, {"quiet_start": True},
-            {"max_daily_wakes": 4}, {"max_low_purpose_wakes": 2},
+            {"max_daily_wakes": 7}, {"max_low_purpose_wakes": 3}, {"level": "turbo"},
             {"min_interval_seconds": -1}, {"event_ttl_seconds": 0},
             {"max_pending": 0}, {"max_pending": 1025},
             {"debounce_seconds": 1.5}, {"debounce_seconds": -1},
@@ -205,6 +206,48 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(counts.get("expired"), 1)
         self.assertTrue(store.record_event("manual_review", "opaque-wake-2", purpose=True, now=self.now))
         self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-wake-2")
+
+    def test_refund_returns_only_the_reservation_of_a_claim_that_never_injected(self):
+        store = self.configured(min_interval_seconds=7200)
+        store.record_event("task_changed", "opaque-refund-1", purpose=True, now=self.now)
+        store.record_event("task_changed", "opaque-refund-2", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        store.finish(event["id"], "rejected", refund=True)
+        self.assertEqual(store.status()["reservation_count"], 0)
+        self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-refund-2")
+        self.assertFalse(store.record_event("task_changed", "opaque-refund-1", purpose=True, now=self.now))
+        store.record_event("task_changed", "opaque-refund-3", purpose=True, now=self.now)
+        event = store.claim(now=self.now + timedelta(hours=3))
+        store.finish(event["id"], "accepted_unverified", refund=True)
+        self.assertEqual(store.status()["reservation_count"], 2)
+        # A spent wake cannot be refunded after the fact either.
+        store.finish(event["id"], "resolved", refund=True)
+        self.assertEqual(store.status()["reservation_count"], 2)
+
+    def test_refunded_appraisals_still_pay_spacing_and_a_daily_appraisal_cap(self):
+        """A rejected appraisal made an LLM call: it returns the wake budget but
+        not the spacing, and appraisals stay capped at twice the daily wakes."""
+        store = self.configured(min_interval_seconds=7200, max_daily_wakes=1)
+        for index in range(5):
+            store.record_event("context_changed", f"opaque-noise-{index}", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        store.finish(event["id"], "rejected", refund=True, appraised=True)
+        self.assertEqual(store.status()["reservation_count"], 0)
+        self.assertIsNone(store.claim(now=self.now + timedelta(minutes=10)))
+        event = store.claim(now=self.now + timedelta(hours=2, minutes=1))
+        self.assertIsNotNone(event)
+        store.finish(event["id"], "rejected", refund=True, appraised=True)
+        self.assertIsNone(store.claim(now=self.now + timedelta(hours=5)))
+
+    def test_watch_wakes_age_out_of_the_unresolved_gate_after_ten_minutes(self):
+        store = self.configured(min_interval_seconds=0, min_watch_interval_seconds=0)
+        store.record_event("watch_due", "watchdue:w:r1", purpose=True, now=self.now)
+        event = store.claim(now=self.now)
+        store.finish(event["id"], "accepted_unverified")
+        store.expire(now=self.now + timedelta(seconds=599))
+        self.assertEqual(store.status()["counts"].get("accepted_unverified"), 1)
+        store.expire(now=self.now + timedelta(seconds=601))
+        self.assertEqual(store.status()["counts"].get("expired"), 1)
 
     def test_stranded_dispatching_events_expire_and_free_the_gate(self):
         """A dispatch that dies between claim() and finish() — not a crash,
