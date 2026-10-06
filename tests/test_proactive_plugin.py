@@ -410,6 +410,41 @@ class PluginTests(unittest.TestCase):
             self.assertTrue(runtime.store.load_policy().enabled)
             runtime.close()
 
+    def test_model_tool_cannot_turn_a_pause_or_snooze_into_a_resume(self):
+        """With resume operator-only, a bound-session pause+resume_at must
+        never move the lift earlier: imposing a snooze on a permanent pause
+        or shortening an existing snooze is a resume and is refused. A later
+        lift tightens and is allowed, as is a fresh snooze while enabled."""
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            route = "agent:main:telegram:dm:123456789"
+            runtime.store.update_policy({"session_key": route, "enabled": True})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": route}):
+                # Operator pauses permanently through the operator path.
+                self.assertTrue(json.loads(runtime.control({"action": "pause"}))["ok"])
+                # A snooze imposed over a permanent pause is refused.
+                refused = json.loads(runtime.tool_control(
+                    {"action": "pause", "resume_at": "2030-01-02T09:00:00+00:00"}))
+                self.assertFalse(refused["ok"])
+                self.assertIn("operator", refused["error"])
+                self.assertEqual(runtime.store.load_policy().resume_at, "")
+                # Operator snoozes; the model may push the lift later but not earlier.
+                self.assertTrue(json.loads(runtime.control(
+                    {"action": "pause", "resume_at": "2030-01-03T09:00:00+00:00"}))["ok"])
+                refused = json.loads(runtime.tool_control(
+                    {"action": "pause", "resume_at": "2030-01-02T09:00:00+00:00"}))
+                self.assertFalse(refused["ok"])
+                self.assertTrue(json.loads(runtime.tool_control(
+                    {"action": "pause", "resume_at": "2030-01-04T09:00:00+00:00"}))["ok"])
+                self.assertEqual(runtime.store.load_policy().resume_at,
+                                 "2030-01-04T09:00:00+00:00")
+                # While enabled, a fresh snooze is a restriction and is allowed.
+                self.assertTrue(json.loads(runtime.control({"action": "resume"}))["ok"])
+                self.assertTrue(json.loads(runtime.tool_control(
+                    {"action": "pause", "resume_at": "2030-01-05T09:00:00+00:00"}))["ok"])
+            runtime.close()
+
     def test_tool_status_redacts_scopes_and_preferences_for_foreign_sessions(self):
         """Status stays open for health answers, but watch scopes and focus
         lists are private — a foreign session gets the disclosure-free view."""
