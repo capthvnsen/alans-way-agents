@@ -42,7 +42,7 @@ TASK = {
 }
 SCHEMA = {
     "name": "proactive_control",
-    "description": "Read live proactivity status/preferences/tasks; persist explicit user controls or approved watch bookkeeping. Approval fields are not new consent. Binding is operator-only. Resolve only after verifying the event's real outcome.",
+    "description": "Read live proactivity status/preferences/tasks; persist explicit user controls or approved watch bookkeeping. Approval fields are not new consent. Binding, resume, and any change that loosens the configured limits are operator-only through /proactivity or the CLI — this tool only tightens. Resolve only after verifying the event's real outcome.",
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {

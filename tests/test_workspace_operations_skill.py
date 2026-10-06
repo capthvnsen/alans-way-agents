@@ -60,6 +60,62 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             self.normalized,
         )
 
+    def test_every_model_uses_refs_before_screenshots(self):
+        self.assertIn("same for every Hermes model", self.normalized)
+        self.assertIn("workspace_computer_snapshot", self.normalized)
+        self.assertIn("{unchanged:true}", self.normalized)
+        self.assertIn("since=", self.normalized)
+        self.assertIn("desktop tree is the same", self.normalized)
+        self.assertIn("When it says `unchanged`, do not snapshot again.", self.normalized)
+        self.assertIn("workspace_computer_screenshot", self.normalized)
+        self.assertIn("drag a slider or scroll bar to the end point", self.normalized)
+        self.assertIn("A drag on a slider sets its value from the end point.", self.normalized)
+        self.assertIn("A check box or radio name ends in on or off.", self.normalized)
+        self.assertIn("A disabled control's name ends in disabled, so do not press it.", self.normalized)
+        self.assertIn("a select name includes the chosen option", self.normalized)
+        self.assertIn("a section name ends in open or closed", self.normalized)
+        self.assertIn("a selected tab's name ends in selected", self.normalized)
+        self.assertIn("the current link's name ends in current", self.normalized)
+        self.assertIn("A menu item, option, tree item, slider, or clickable div is listed by its name, so do not screenshot it to find it.", self.normalized)
+        self.assertIn("A control inside an open shadow root is listed the same way; a closed root is not readable.", self.normalized)
+        self.assertIn("A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable.", self.normalized)
+        self.assertIn("A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label.", self.normalized)
+        self.assertIn("A pressed toggle's name ends in on or off, so do not screenshot it to see the state.", self.normalized)
+        self.assertIn("A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text.", self.normalized)
+        self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
+        self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
+        self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
+        self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
+        self.assertIn("do not move the human's cursor", self.normalized)
+
+    def test_skill_names_the_tools_the_connector_exposes(self):
+        for name in [
+            "cua_alans_way_status",
+            "cua_alans_way_tabs",
+            "cua_alans_way_open",
+            "cua_alans_way_snapshot",
+            "cua_alans_way_screenshot",
+            "cua_alans_way_action",
+            "cua_alans_way_close",
+        ]:
+            with self.subTest(name=name):
+                self.assertIn(name, self.text)
+        for stale in [
+            "workspace_browser_open",
+            "workspace_browser_snapshot",
+            "workspace_browser_screenshot",
+            "workspace_browser_action",
+            "workspace_vps_browser",
+        ]:
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, self.text)
+        desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("cua_alans_way_snapshot", desktop)
+        self.assertIn("workspace_computer_action", desktop)
+        self.assertIn("does not move the pointer", desktop)
+        self.assertNotIn("workspace_vps_browser", desktop)
+        self.assertNotIn("Cua Driver", desktop)
+
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
             "The in-app Mac browser is the only default host.",
@@ -75,10 +131,18 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
+        self.assertIn("Do not pass `host`.", self.normalized)
+        self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
+        self.assertNotIn("explicit `host: vps` open", self.normalized)
 
-    def test_human_has_control_claim_not_wait(self):
+    def test_human_has_control_asks_before_claim(self):
         self.assertIn('action:"claim"', self.normalized)
-        self.assertIn("do not wait, ask, or describe a handoff", self.normalized)
+        self.assertIn("ask the user before", self.normalized)
+        # A human-controlled tab is never claimed silently — not for reach
+        # and not to reuse a login that only exists there.
+        self.assertNotIn("do not wait, ask, or describe a handoff", self.normalized)
+        self.assertNotIn("only exists there", self.normalized)
 
     def test_bounded_snapshot_and_screenshot_params_documented(self):
         # Snapshots must stay cheap: bound the payload, re-check by
@@ -146,6 +210,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)
         self.assertIn("onlineStreak >= 2", self.source)
+        self.assertIn("script replaced — exiting so the next connection loads it", self.source)
 
     def test_probe_mode_exists(self):
         self.assertIn("--probe", self.source)
@@ -178,6 +243,7 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
     def test_retry_once_then_report(self):
         self.assertIn("retry once", self.normalized)
         self.assertIn("report the failure in one line and stop", self.normalized)
+        self.assertIn("exits after the current call", self.normalized)
 
     def test_no_connector_surgery(self):
         self.assertIn("Never repair the connector layer yourself", self.normalized)

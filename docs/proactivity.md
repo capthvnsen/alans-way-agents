@@ -113,30 +113,31 @@ the separately installed hook; review its removal independently.
 ## Durable controls in ordinary chat
 
 The primary translates natural-language preferences into the explicit
-`proactive_control` tool, then reads `status` back before confirming.
-Frontend controls: `/proactivity status`, `/proactivity pause` (optionally
-with an aware ISO timestamp to snooze until then), `/proactivity resume`,
-`/proactivity review`, `/proactivity configure {"quiet_start":23}` (JSON).
+`proactive_control` tool, then reads `status` back before confirming. Frontend:
+`/proactivity status`, `/proactivity pause` (an aware ISO timestamp snoozes),
+`/proactivity resume`, `/proactivity review`, `/proactivity configure {"quiet_start":23}`
+— `resume` and limit-widening changes are operator-only.
 
 | User request | Tool action |
 | --- | --- |
 | "Stop being proactive." | `pause` |
-| "Resume proactivity." | `resume`, only with explicit consent |
+| "Resume proactivity." | `resume` (operator-only) |
 | "Quiet until Thursday / a break." | `pause` with a concrete `resume_at`; snoozed pause auto-resumes |
-| "Quiet from 11pm to 8am." | `configure` supported quiet-hour/timezone fields |
-| "At most once a day / less often." | `configure` daily ceiling/minimum interval |
+| "Quiet from 11pm to 8am." | `configure` quiet-hour/timezone fields (widening only) |
+| "At most once a day / less often." | `configure` a lower ceiling or higher interval |
 | "Focus on these priorities." | `configure` only fields the live schema supports |
 | "Review what would help now." | `review`, immediate read-only appraisal, including while paused |
 
 ```python
-proactive_control(action="configure", settings={"quiet_start": 23})
+proactive_control(action="configure", settings={"quiet_start": 20})
+proactive_control(action="status")
 ```
 
-Unsupported preferences are reported as unsupported, never silently claimed
-saved. Policy and bookkeeping live only under the active profile's
+Unsupported preferences are reported, never silently claimed. Policy and
+bookkeeping live only under the active profile's
 `$HERMES_HOME/companion/proactivity`; do not hand-edit that state or store
 settings in general memory. Pause/stop survives restart. Resume never revives
-a cancelled task or turns a stale event into renewed permission.
+a cancelled task or renews stale permission.
 
 ## When it does something
 

@@ -11,9 +11,11 @@ this plugin, and do not replace this plugin with a git checkout.
 
 ## Drive the other repo; don't reimplement it
 
-Fetch this page and follow it for Tailscale, the Mac app, and SSH keys:
+Fetch this page and follow it for Tailscale, the Mac app, and SSH keys. Both
+remotes stay pinned to the commits the catalog submission was reviewed
+against — do not substitute `main` or a newer tip:
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/main/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/13f50f0be5cabaca56989b8bbc0d020c37e034bb/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -25,7 +27,10 @@ Use this command instead. `--non-interactive` means you do not wait for
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
-~/alans-way-agents/setup.sh --skip-plugin --bot-id <numeric-telegram-bot-id> \
+git -C ~/alans-way-agents checkout 80aa518049b89c42c84ce642f2a7fefc03ba7a41
+~/alans-way-agents/setup.sh --skip-plugin \
+    --desktop-ref 13f50f0be5cabaca56989b8bbc0d020c37e034bb \
+    --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<mac-host> --timezone <IANA-zone> --non-interactive \
     --bind --proactive <yes|no> [--profile <name>] --restart
 ```

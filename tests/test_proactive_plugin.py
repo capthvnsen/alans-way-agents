@@ -395,14 +395,19 @@ class PluginTests(unittest.TestCase):
             self.assertIs(denied["ok"], False)
             self.assertIs(status["ok"], True)
             self.assertFalse(runtime.store.load_policy().enabled)
+            # resume is operator-only: even the bound route's model call is
+            # refused, while mutations the tool still owns (pause) work there.
             with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:main:telegram:dm:1"}):
-                allowed = _json.loads(runtime.tool_control({"action": "resume"}))
-            self.assertIs(allowed["ok"], True)
-            self.assertTrue(runtime.store.load_policy().enabled)
+                refused = _json.loads(runtime.tool_control({"action": "resume"}))
+                paused = _json.loads(runtime.tool_control({"action": "pause"}))
+            self.assertIs(refused["ok"], False)
+            self.assertIs(paused["ok"], True)
             os.environ.pop("HERMES_SESSION_KEY", None)
-            operator = _json.loads(runtime.control({"action": "pause"}))
+            # The operator's own control() path is not bound-route-gated and
+            # still resumes.
+            operator = _json.loads(runtime.control({"action": "resume"}))
             self.assertIs(operator["ok"], True)
-            self.assertFalse(runtime.store.load_policy().enabled)
+            self.assertTrue(runtime.store.load_policy().enabled)
             runtime.close()
 
     def test_tool_status_redacts_scopes_and_preferences_for_foreign_sessions(self):

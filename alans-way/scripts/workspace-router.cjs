@@ -429,6 +429,18 @@ async function main() {
   child.on('exit', (code, sig) => {
     process.exit(code === null ? (sig ? 1 : 0) : code);
   });
+  let routerMtime = 0;
+  try { routerMtime = fs.statSync(__filename).mtimeMs; } catch { /* a missing script has nothing newer to load */ }
+  const reloadTimer = setInterval(() => {
+    if (pendingRequests.size > 0 || Date.now() - lastActivity < 1000) return;
+    let mtime = routerMtime;
+    try { mtime = fs.statSync(__filename).mtimeMs; } catch { return; }
+    if (mtime <= routerMtime) return;
+    process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
+    try { child.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
+    process.exit(0);
+  }, 5000);
+  reloadTimer.unref();
   for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(s, () => {
       try {

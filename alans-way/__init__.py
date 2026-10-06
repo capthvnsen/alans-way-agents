@@ -414,6 +414,14 @@ class Runtime:
         if self.worker and self.worker is not threading.current_thread():
             self.worker.join(timeout=1.0)
 
+    # A model-called configure may narrow the envelope the operator set,
+    # never widen it: caps do not rise and intervals do not shrink. Resume and
+    # loosening changes belong to /proactivity or ``hermes proactivity``.
+    _CAPS = ("max_daily_wakes", "max_low_purpose_wakes", "max_daily_watch_wakes",
+             "max_pending", "event_ttl_seconds")
+    _INTERVALS = ("min_interval_seconds", "min_watch_interval_seconds",
+                  "debounce_seconds")
+
     def tool_control(self, args, **kwargs):
         """Tool entry: mutating actions belong to the bound route.
 
@@ -426,6 +434,27 @@ class Runtime:
         action = args.get("action", "status") if isinstance(args, dict) else "status"
         if action != "status" and not self._bound_route_only():
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
+        if action == "resume":
+            return json.dumps({"ok": False, "error": "Resume is operator-only — the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
+        if action == "configure" and isinstance(args, dict):
+            relaxed = self._loosening(args.get("changes", args.get("settings", {})))
+            if relaxed:
+                return json.dumps({"ok": False, "error": f"That change widens {relaxed} — an operator applies it with /proactivity configure or hermes proactivity configure."})
+        if action == "pause" and isinstance(args, dict) and args.get("resume_at") is not None:
+            # A bound session may tighten an active snooze (lift lands later)
+            # but never impose or hasten a lift over a paused policy — either
+            # way the pause boundary moves earlier, which is a resume and
+            # therefore operator-only, exactly like a loosening configure.
+            policy = self.store.load_policy()
+            if not policy.enabled:
+                try:
+                    proposed = datetime.fromisoformat(args["resume_at"])
+                    current = datetime.fromisoformat(policy.resume_at) if policy.resume_at else None
+                    sooner = current is None or proposed < current
+                except (TypeError, ValueError):
+                    sooner = True
+                if sooner:
+                    return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only — the operator applies it with /proactivity pause <timestamp>."})
         result = self.control(args, **kwargs)
         if action == "status" and not self._bound_route_only():
             try:
@@ -436,6 +465,42 @@ class Runtime:
             except (ValueError, TypeError):
                 pass
         return result
+
+    def _loosening(self, changes):
+        """Name the first limit a configure call would loosen, or None.
+
+        Caps stay at or below the operator's values, intervals at or above,
+        and the quiet window only grows — every direction beyond that is the
+        operator's, exactly like binding. A non-dict payload fails later in
+        ``control``'s own validation, so it returns no limit here.
+        """
+        if not isinstance(changes, dict):
+            return None
+        policy = self.store.load_policy()
+        for name in self._CAPS:
+            value = changes.get(name)
+            if type(value) is int and value > getattr(policy, name):
+                return name
+        for name in self._INTERVALS:
+            value = changes.get(name)
+            if type(value) is int and value < getattr(policy, name):
+                return name
+        if "quiet_start" in changes or "quiet_end" in changes:
+            start = changes.get("quiet_start", policy.quiet_start)
+            end = changes.get("quiet_end", policy.quiet_end)
+            if type(start) is int and type(end) is int:
+                def quiet(first, last):
+                    if first <= last:
+                        return {h for h in range(24) if first <= h < last}
+                    return {h for h in range(24) if h >= first or h < last}
+                if not quiet(start, end) >= quiet(policy.quiet_start, policy.quiet_end):
+                    return "quiet hours"
+        preferences = changes.get("preferences")
+        if isinstance(preferences, dict) and type(preferences.get("max_work_minutes")) is int:
+            current = self.ledger.snapshot()["preferences"].get("max_work_minutes", 0)
+            if preferences["max_work_minutes"] > current:
+                return "max_work_minutes"
+        return None
 
     def control(self, args, **kwargs):
         try:

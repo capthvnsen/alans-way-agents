@@ -1,10 +1,10 @@
 name: alans-way
-version: "0.4.1"
+version: "0.4.2"
 description: "Proactive primary bot for Hermes. The Mac app and machine setup are a separate repo; the workspace-setup skill walks the agent through them."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"
-requires_hermes: ">=0.21"
+requires_hermes: ">=0.21.5"
 tags:
   - proactivity
   - orchestrator
