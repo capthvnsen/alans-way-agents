@@ -76,7 +76,8 @@ def write_private_json(path: Path, value: dict) -> None:
         raise ValueError("Companion state must not be symlinked")
     fd, temporary = tempfile.mkstemp(prefix=".proactive-", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, ensure_ascii=False, sort_keys=True)
             handle.flush()
