@@ -997,26 +997,28 @@ def _primary_profile(ctx) -> bool:
 
 def register(ctx, *, home=None, background=True):
     runtime = Runtime(ctx, Path(home) if home is not None else _owning_home(), background=background)
-    from .proactive_schema import SCHEMA
-    ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
-                      handler=runtime.tool_control, check_fn=lambda: True)
-    ctx.register_command("proactivity", runtime.command,
-                         description="Status, pause, resume, and configure proactive work")
-    ctx.register_command("watch", runtime.watch_command,
-                         description="List, schedule, pause, or cancel standing proactive watches")
+    primary = _primary_profile(ctx)
     skills_dir = Path(__file__).parent / "skills"
-    ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
+    if primary:
+        from .proactive_schema import SCHEMA
+        ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
+                          handler=runtime.tool_control, check_fn=lambda: True)
+        ctx.register_command("proactivity", runtime.command,
+                             description="Status, pause, resume, and configure proactive work")
+        ctx.register_command("watch", runtime.watch_command,
+                             description="List, schedule, pause, or cancel standing proactive watches")
+        ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
     ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills_dir / "workspace-setup" / "SKILL.md")
     ctx.on_unload(runtime.close)
-    if hasattr(ctx, "register_telegram_handler"):
+    if primary and hasattr(ctx, "register_telegram_handler"):
         from .proactive_telegram import wire
         ctx.register_telegram_handler(wire(runtime))
         runtime.telegram_handler = True
-    if hasattr(ctx, "register_cli_command"):
+    if primary and hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,
                                  lambda args: execute(runtime, args))
-    if background and _primary_profile(ctx):
+    if background and primary:
         runtime.start()
     return runtime

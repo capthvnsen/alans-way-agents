@@ -531,6 +531,35 @@ class PluginTests(unittest.TestCase):
             self.assertTrue(primary.worker.is_alive())
             primary.close()
 
+    def test_only_the_primary_registers_proactivity_surfaces(self):
+        """Every bot profile loads the plugin for the workspace skills; the
+        proactive tool, commands, button handler, CLI and skill are the primary's."""
+        module = load_plugin()
+        class Facade:
+            def __init__(self, profile=None):
+                if profile is not None:
+                    self.profile_name = profile
+                self.tools, self.commands, self.skills, self.extras = [], [], [], []
+            def register_tool(self, **kwargs): self.tools.append(kwargs["name"])
+            def register_command(self, name, *args, **kwargs): self.commands.append(name)
+            def register_skill(self, name, *args, **kwargs): self.skills.append(name)
+            def register_telegram_handler(self, *args, **kwargs): self.extras.append("telegram")
+            def register_cli_command(self, *args, **kwargs): self.extras.append("cli")
+            def on_unload(self, *args): pass
+        workspace = ["workspace-operations", "workspace-setup"]
+        with tempfile.TemporaryDirectory() as directory:
+            for profile in (None, "default", "custom"):
+                facade = Facade(profile)
+                module.register(facade, home=Path(directory) / "p", background=False).close()
+                self.assertEqual(facade.tools, ["proactive_control"], profile)
+                self.assertEqual(facade.commands, ["proactivity", "watch"], profile)
+                self.assertEqual(sorted(facade.skills), sorted(workspace + ["proactive-primary"]), profile)
+                self.assertEqual(sorted(facade.extras), ["cli", "telegram"], profile)
+            facade = Facade("coder")
+            module.register(facade, home=Path(directory) / "coder", background=False).close()
+            self.assertEqual((facade.tools, facade.commands, facade.extras), ([], [], []))
+            self.assertEqual(sorted(facade.skills), workspace)
+
     def test_first_run_orientation_is_admitted_once_on_resume(self):
         """The first explicit resume queues one orientation wake; it dispatches
         without an appraiser, and later resumes never re-admit it."""
