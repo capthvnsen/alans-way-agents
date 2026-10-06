@@ -76,6 +76,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("a section name ends in open or closed", self.normalized)
         self.assertIn("a selected tab's name ends in selected", self.normalized)
         self.assertIn("the current link's name ends in current", self.normalized)
+        self.assertIn("A menu item, option, tree item, slider, or clickable div is listed by its name, so do not screenshot it to find it.", self.normalized)
         self.assertIn("A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text.", self.normalized)
         self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
