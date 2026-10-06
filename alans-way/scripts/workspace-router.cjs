@@ -16,21 +16,25 @@
 // Configuration (all optional unless noted):
 //   --bot-id ID                required: this bot's tab-owner identity
 //   --bot-name NAME            optional display name for the agent cursor
-//   --mac-ssh USER@HOST        Mac ssh alias/host for the Mac path
-//   --mac-node PATH            node binary on the Mac (default: the app's own runtime)
-//   --mac-script PATH          browser-mcp.cjs path on the Mac
-//                              (default: the installed app's bundled copy)
+//   --mac-ssh USER@HOST        ssh alias/host for the user's computer
+//   --host-os mac|windows      OS of the user's computer (default: mac)
+//   --mac-node PATH            node binary on the user's computer
+//                              (default: the app's own runtime; mac only)
+//   --mac-script PATH          browser-mcp.cjs path on the user's computer
+//                              (default: the installed app's bundled copy; mac only)
 //   --vps-script PATH          browser-mcp.cjs path on this host
 //                              (default: sibling copy, then the deployed copy)
-//   --vps-connection PATH      VPS browser connection.json
+//   --vps-connection PATH      local browser host connection.json
 //   --mac-state-file PATH      mac-watch state file
-//                              (default: /var/lib/hermes-alans-way/mac-state.json)
-//   --probe                    run the Mac probe once, print the decision,
+//                              (default: /var/lib/hermes-alans-way/mac-state.json,
+//                               ~/Library/Application Support/... on a macOS guest)
+//   --probe                    run the host probe once, print the decision,
 //                              and exit — read-only, for install/verify checks
 // Environment fallbacks: HERMES_WORKSPACE_BOT_ID, HERMES_BOT_NAME,
-//   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_MAC_NODE,
-//   HERMES_WORKSPACE_MAC_MCP, HERMES_WORKSPACE_VPS_MCP,
-//   HERMES_WORKSPACE_CONNECTION, HERMES_MAC_STATE_FILE.
+//   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_HOST_OS,
+//   HERMES_WORKSPACE_MAC_NODE, HERMES_WORKSPACE_MAC_MCP,
+//   HERMES_WORKSPACE_VPS_MCP, HERMES_WORKSPACE_CONNECTION,
+//   HERMES_MAC_STATE_FILE.
 // With no Mac ssh configured the router always serves the local VPS host.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -47,31 +51,49 @@ const botId = arg('--bot-id') || process.env.HERMES_WORKSPACE_BOT_ID || '';
 const botName = arg('--bot-name') || process.env.HERMES_BOT_NAME || '';
 const macSsh = arg('--mac-ssh') || process.env.HERMES_WORKSPACE_MAC_SSH || '';
 const macNode = arg('--mac-node') || process.env.HERMES_WORKSPACE_MAC_NODE || '';
+// The user's machine runs either macOS or Windows; everything else would
+// silently probe POSIX shell on a Windows sshd and never converge.
+const hostOs = (arg('--host-os') || process.env.HERMES_WORKSPACE_HOST_OS || 'mac') === 'windows' ? 'windows' : 'mac';
+const hostName = hostOs === 'windows' ? 'Windows host' : 'Mac';
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
 const macScripts = configuredMacScript
   ? [configuredMacScript]
-  : [
-      '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
-      '/Applications/Open Alan.app/Contents/Resources/app/scripts/browser-mcp.cjs',
-      "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
-      '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs',
-    ];
-const connectorSuffix = 'Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs';
+  : hostOs === 'windows'
+    ? []
+    : [
+        '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
+        '/Applications/Open Alan.app/Contents/Resources/app/scripts/browser-mcp.cjs',
+        "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
+        '/Applications/Hermes Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs',
+      ];
+const connectorSuffix = hostOs === 'windows'
+  ? 'connector\\scripts\\browser-mcp.cjs'
+  : 'Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs';
 const siblingScript = path.join(__dirname, 'browser-mcp.cjs');
+// setup.sh installs the app copy under /opt when root and under
+// ~/.local/share otherwise — probe both well-known locations.
+const vpsScriptCandidates = [
+  siblingScript,
+  '/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs',
+  path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'app', 'desktop', 'scripts', 'browser-mcp.cjs'),
+];
 const vpsScript =
   arg('--vps-script') ||
   process.env.HERMES_WORKSPACE_VPS_MCP ||
-  (fs.existsSync(siblingScript)
-    ? siblingScript
-    : '/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs');
+  vpsScriptCandidates.find(p => fs.existsSync(p)) ||
+  '/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs';
 const vpsConnection =
   arg('--vps-connection') ||
   process.env.HERMES_WORKSPACE_CONNECTION ||
-  path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'browser', 'connection.json');
+  (process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'hermes-alans-way', 'browser', 'connection.json')
+    : path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'browser', 'connection.json'));
 const macStateFile =
   arg('--mac-state-file') ||
   process.env.HERMES_MAC_STATE_FILE ||
-  '/var/lib/hermes-alans-way/mac-state.json';
+  (process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'hermes-alans-way', 'mac-state.json')
+    : '/var/lib/hermes-alans-way/mac-state.json');
 
 // Reuse one ssh connection between the probe and the backend spawn: the
 // probe's handshake becomes the spawn's (~5ms vs a full handshake), and
@@ -89,6 +111,8 @@ const sshControlArgs = [
 
 // Quote a value for the remote command line ssh builds from argv.
 const shQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+// Same for a remote PowerShell: single-quoted literal, '' escapes '.
+const psQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;
 
 const SELF_PROBE_INTERVAL_MS = 600000;
 const RECONVERGE_IDLE_MS = 60000;
@@ -178,10 +202,49 @@ function macBackendCommand(script, node, id, name) {
   return `${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
 }
 
+// Windows backend: same idea over PowerShell — run the connector with the
+// app's own Electron-as-Node runtime, falling back to the installer's private
+// Node then PATH. The spawned process sits in Session 0, which is fine here:
+// it only talks HTTP to the app's loopback API; desktop actions are served by
+// the app itself. NODE_PATH supplies the pushed connector's dependencies.
+function windowsBackendCommand(script, id, name) {
+  const tail = [psQuote(script), '--bot-id', psQuote(id)];
+  if (name) tail.push('--bot-name', psQuote(name));
+  const args = tail.join(' ');
+  const exe = '"$env:LOCALAPPDATA\\Programs\\alans-way-localapp\\alans-way-localapp.exe"';
+  const modules = '"$env:LOCALAPPDATA\\Programs\\alans-way-localapp\\resources\\app\\node_modules"';
+  const node = '"$env:USERPROFILE\\.alans-way\\node\\node.exe"';
+  return `$env:NODE_PATH = ${modules}; if (Test-Path ${exe}) { $env:ELECTRON_RUN_AS_NODE = '1'; & ${exe} ${args} } elseif (Test-Path ${node}) { & ${node} ${args} } else { & node ${args} }`;
+}
+
 // Probe finds the newest installed bundle AND proves the app is actually
 // serving — a closed app still has the script on disk, so file-existence
 // alone would route to a dead host. The API answers 401 without auth, which
 // still proves liveness; a refused connection means the app is not running.
+// Same probe over PowerShell: connection.json proves the app is serving
+// (any HTTP response, even 401, means the API is up), then emit the newest
+// connector script path — the pushed home copy wins over the install.
+function windowsProbeCommand() {
+  return [
+    // Invoke-WebRequest's progress stream can reach stdout over ssh and would
+    // break the single-path output contract below.
+    '$ProgressPreference = "SilentlyContinue"',
+    '$conn = "$env:APPDATA\\Hermes Workspace\\connection.json"',
+    'if (-not (Test-Path $conn)) { exit 1 }',
+    '$port = 9464',
+    'try { $port = ([uri](Get-Content $conn -Raw | ConvertFrom-Json).url).Port } catch {}',
+    '$alive = $false',
+    `try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Uri "http://127.0.0.1:$port/v1/status"; $alive = $true }`,
+    'catch { $alive = ($null -ne $_.Exception.Response) }',
+    'if (-not $alive) { exit 1 }',
+    'foreach ($s in @(' +
+      '"$env:APPDATA\\Hermes Workspace\\connector\\scripts\\browser-mcp.cjs",' +
+      '"$env:LOCALAPPDATA\\Programs\\alans-way-localapp\\resources\\app\\scripts\\browser-mcp.cjs")) ' +
+      '{ if (Test-Path $s) { Write-Output $s; exit 0 } }',
+    'exit 1',
+  ].join('; ');
+}
+
 function probeMac(timeoutMs, connectTimeout = 6) {
   return new Promise((resolve) => {
     const alive =
@@ -189,9 +252,10 @@ function probeMac(timeoutMs, connectTimeout = 6) {
       `[ -f "$conn" ] && ` +
       `port=$(sed -n 's/.*"url"[^0-9]*[0-9.]*:\\([0-9]*\\).*/\\1/p' "$conn" | head -1) && ` +
       `curl -s -m 4 -o /dev/null "http://127.0.0.1:\${port:-9464}/status"; }`;
-    const probe = `conn_script="$HOME/${connectorSuffix}"; if [ -f "$conn_script" ] && ${alive}; then printf %s "$conn_script"; exit 0; fi; ` + macScripts
-      .map(script => `if [ -f ${shQuote(script)} ] && ${alive}; then printf %s ${shQuote(script)}; exit 0; fi`)
-      .join('; ') + '; exit 1';
+    const probe = hostOs === 'windows' ? windowsProbeCommand()
+      : `conn_script="$HOME/${connectorSuffix}"; if [ -f "$conn_script" ] && ${alive}; then printf %s "$conn_script"; exit 0; fi; ` + macScripts
+        .map(script => `if [ -f ${shQuote(script)} ] && ${alive}; then printf %s ${shQuote(script)}; exit 0; fi`)
+        .join('; ') + '; exit 1';
     const child = spawn(
       'ssh',
       [
@@ -222,7 +286,11 @@ function probeMac(timeoutMs, connectTimeout = 6) {
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      const script = code === 0 && (macScripts.includes(output) || output.endsWith(connectorSuffix)) ? output : null;
+      const found = output.trim();
+      const valid = hostOs === 'windows'
+        ? /^[A-Za-z]:[\\/].*browser-mcp\.cjs$/i.test(found)
+        : macScripts.includes(found) || found.endsWith(connectorSuffix);
+      const script = code === 0 && valid ? found : null;
       resolve({ script, stderr: errOutput });
     });
   });
@@ -383,20 +451,20 @@ async function continueRememberedPage({ connectionFile, record, botId, botName, 
   } catch { return null; }
 }
 
-function workspaceNotice(host, mac, resumeUrl, continued) {
+function workspaceNotice(host, mac, resumeUrl, continued, label = 'Mac') {
   if (!mac || host !== 'vps') return null;
   if (mac.state === 'online') {
     return (
-      `[workspace] Mac is back online as of ${mac.since || 'unknown'} — ` +
-      'tasks waiting on Mac-local resources can resume. New web work goes to the in-app Mac browser.'
+      `[workspace] ${label} is back online as of ${mac.since || 'unknown'} — ` +
+      `tasks waiting on ${label}-local resources can resume. New web work goes to the in-app host browser.`
     );
   }
   const page = continued && continued.url && continued.tabId
     ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, say so and stop only that page.`
     : resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
   return (
-    `[workspace] Mac unreachable since ${mac.since || 'unknown'} — ` +
-    `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the Mac keep going. Mac-local files are unavailable.`
+    `[workspace] ${label} unreachable since ${mac.since || 'unknown'} — ` +
+    `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the ${label} keep going. ${label}-local files are unavailable.`
   );
 }
 
@@ -416,7 +484,7 @@ function annotateResult(msg, host, mac, notice) {
 // re-read per message so a mid-session flip is seen; the "back online" notice
 // fires once per online transition while the offline one rides every tool
 // result, since either may be the agent's only signal that host changed.
-function makeAnnotator(host, macConfigured, stateFile) {
+function makeAnnotator(host, macConfigured, stateFile, label = 'Mac') {
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile);
   return function annotateLine(line) {
@@ -439,11 +507,11 @@ function makeAnnotator(host, macConfigured, stateFile) {
     let notice = null;
     if (mac && Array.isArray(msg.result.content)) {
       if (mac.state === 'online') {
-        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume, continued);
+        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume, continued, label);
         onlineAnnounced = true;
       } else {
         onlineAnnounced = false;
-        notice = workspaceNotice(host, mac, resume, continued);
+        notice = workspaceNotice(host, mac, resume, continued, label);
       }
     }
     return JSON.stringify(annotateResult(msg, host, mac, notice));
@@ -455,12 +523,12 @@ async function main() {
     const probe = macSsh ? await probeMac(12000) : { script: null, stderr: '' };
     const tail = stderrTail(probe.stderr);
     if (probe.script) {
-      process.stdout.write(`mac: ${probe.script}\n`);
+      process.stdout.write(`${hostOs}: ${probe.script}\n`);
       return;
     }
     const detail = tail ? ` (${tail})` : '';
     process.stdout.write(
-      `vps${macSsh ? ` (mac unreachable${detail})` : ' (no mac-ssh)'}\n`,
+      `vps${macSsh ? ` (${hostOs} unreachable${detail})` : ' (no mac-ssh)'}\n`,
     );
     return;
   }
@@ -495,7 +563,7 @@ async function main() {
   // browser surface). Degrade to passthrough instead.
   const safeAnnotator = (host) => {
     try {
-      return makeAnnotator(host, Boolean(macSsh), macStateFile);
+      return makeAnnotator(host, Boolean(macSsh), macStateFile, hostName);
     } catch (e) {
       process.stderr.write(`workspace-router: annotator disabled: ${e.message}\n`);
       return (line) => line;
@@ -535,7 +603,7 @@ async function main() {
       superseded.add(stuck);
       fellBack = true;
       process.stderr.write(
-        `workspace-router: Mac backend silent ${MAC_WATCHDOG_MS}ms after initialize — routing to VPS browser host\n`,
+        `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize — routing to VPS browser host\n`,
       );
       void startVpsBackend();
       try { stuck.kill('SIGKILL'); } catch { /* already gone */ }
@@ -619,7 +687,7 @@ async function main() {
         if (!fellBack) {
           fellBack = true;
           process.stderr.write(
-            'workspace-router: Mac backend died before its first response — routing to VPS browser host\n',
+            `workspace-router: ${hostName} backend died before its first response — routing to VPS browser host\n`,
           );
           void startVpsBackend();
         }
@@ -645,7 +713,7 @@ async function main() {
     });
 
   if (macScript) {
-    // Run browser-mcp.cjs on the Mac over the same ssh session the probe used.
+    // Run browser-mcp.cjs on the user's machine over the same ssh session the probe used.
     const sshArgs = [
       '-T',
       '-o',
@@ -654,17 +722,19 @@ async function main() {
       'StrictHostKeyChecking=yes',
       ...sshControlArgs,
       macSsh,
-      macBackendCommand(macScript, macNode, botId, botName),
+      hostOs === 'windows'
+        ? windowsBackendCommand(macScript, botId, botName)
+        : macBackendCommand(macScript, macNode, botId, botName),
     ];
-    process.stderr.write('workspace-router: routing to Mac browser host\n');
+    process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
     bindChild(spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'inherit'] }), 'mac');
   } else {
     let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
     if (probeErrTail) reason += ` (${probeErrTail})`;
     process.stderr.write(
       macSsh
-        ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
-        : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
+        ? `workspace-router: ${hostName} ${reason} — routing to VPS browser host\n`
+        : 'workspace-router: no host ssh configured — routing to VPS browser host\n',
     );
     if (staleSelfProbe && macSeen && macSeen.state === 'offline') {
       process.stderr.write(
@@ -715,7 +785,7 @@ async function main() {
         now: Date.now(),
       })) {
         process.stderr.write(
-          'workspace-router: Mac is online — exiting so the next connection re-probes and routes to it\n',
+          `workspace-router: ${hostName} is online — exiting so the next connection re-probes and routes to it\n`,
         );
         try {
           if (activeChild) activeChild.kill('SIGTERM');
@@ -748,7 +818,10 @@ module.exports = {
   annotateResult,
   makeAnnotator,
   macBackendCommand,
+  windowsBackendCommand,
+  windowsProbeCommand,
   shQuote,
+  psQuote,
   stderrTail,
   noteClientRpc,
   noteServerRpc,

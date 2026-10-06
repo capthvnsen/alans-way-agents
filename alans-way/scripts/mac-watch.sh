@@ -45,7 +45,8 @@ mkdir -p "$STATE_DIR"
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 probe() {
-  ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes "$MAC_SSH" true
+  # 'echo ok' not 'true' — PowerShell (a Windows host's ssh shell) has no true.
+  ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok
 }
 
 STATE="" SINCE="" LAST_SEEN="" LAST_TRANSITION=""

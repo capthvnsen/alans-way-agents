@@ -6,12 +6,17 @@ import json
 import os
 import re
 import stat
+import sys
 
 from .proactive_context import TASK_KINDS
 
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
 DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
-MAC_STATE_FILE = "/var/lib/hermes-alans-way/mac-state.json"
+MAC_STATE_FILE = (
+    os.path.expanduser("~/Library/Application Support/hermes-alans-way/mac-state.json")
+    if sys.platform == "darwin"
+    else "/var/lib/hermes-alans-way/mac-state.json"
+)
 WATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 
 

@@ -17,7 +17,7 @@ REPO_URL="https://github.com/capthvnsen/alans-way-agents"
 DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
+BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 HERMES_HOME="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 
@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do
     --bot-id) BOT_ID="$2"; shift 2;;
     --bot-name) BOT_NAME="$2"; shift 2;;
     --mac-ssh) MAC_SSH="$2"; shift 2;;
+    --host-os) HOST_OS="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --hermes-home) HERMES_HOME="$2"; shift 2;;
@@ -46,7 +47,8 @@ while [ $# -gt 0 ]; do
 setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
-  --mac-ssh HOST   how this host reaches your Mac over ssh (Tailscale name/IP)
+  --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP)
+  --host-os OS     OS of that computer: mac (default) or windows
   --profile NAME   Hermes profile to configure (default: main config)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
@@ -118,6 +120,18 @@ else
   REPO_DIR=""
 fi
 
+# The guest is the machine setup.sh runs on (Hermes' home); the host is the
+# user's computer reached over --mac-ssh.
+GUEST_OS="$(uname -s 2>/dev/null || echo Linux)"
+case "$GUEST_OS" in
+  Darwin|Linux) ;;
+  *) warn "guest OS '$GUEST_OS' untested — assuming Linux paths"; GUEST_OS=Linux;;
+esac
+case "${HOST_OS:-mac}" in
+  mac|windows) HOST_OS="${HOST_OS:-mac}";;
+  *) echo "setup: --host-os must be mac or windows" >&2; exit 2;;
+esac
+
 # ---------------------------------------------------------------- preflight
 step "Preflight"
 if ! have hermes; then
@@ -183,7 +197,10 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
       && ok "gateway hook present for $(basename "$profile_home")" \
       || warn "gateway hook missing for profile $(basename "$profile_home") — a profile-scoped startup emit cannot arm the gateway"
   done
-  CONN_DIR="$HOME/.local/share/hermes-alans-way/browser"
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) CONN_DIR="$HOME/Library/Application Support/hermes-alans-way/browser";;
+    *) CONN_DIR="$HOME/.local/share/hermes-alans-way/browser";;
+  esac
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
@@ -445,11 +462,29 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   if [ -n "$MAC_SSH" ] && [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ -f "$DESKTOP_DIR/desktop/src/computer.cjs" ]; then
     # The running app keeps its own copy of the connector. A newer copy in
     # the home directory is what the router prefers, so computer use reaches
-    # the Mac without waiting for an app rebuild. The copy must be
+    # the host machine without waiting for an app rebuild. The copy must be
     # self-contained: every src/ module plus installed package deps — a bare
     # `node` fallback has no NODE_PATH, and a MODULE_NOT_FOUND child stalls
     # each profile's MCP connect for the full timeout.
-    if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+    if [ "$HOST_OS" = windows ]; then
+      # Windows sshd defaults to PowerShell (connect-windows.ps1 sets it). scp
+      # targets resolve relative to the user profile with forward slashes. The
+      # backend command sets NODE_PATH to the installed app's node_modules, so
+      # the copy needs the whole src tree but not its own npm install.
+      WCONN='AppData/Roaming/Hermes Workspace/connector'
+      if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+          'New-Item -ItemType Directory -Force "$env:APPDATA\Hermes Workspace\connector\scripts", "$env:APPDATA\Hermes Workspace\connector\src" | Out-Null' \
+        && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+          "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
+          "$MAC_SSH:$WCONN/scripts/" \
+        && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+          "$DESKTOP_DIR"/desktop/src/*.cjs \
+          "$MAC_SSH:$WCONN/src/"; then
+        ok "Windows connector updated — computer use runs through the app's local API"
+      else
+        warn "could not copy the Windows connector — the installed app's scripts stay in use"
+      fi
+    elif ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
         'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
       && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
         "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
@@ -469,7 +504,26 @@ if [ "$SKIP_BROWSER" = 0 ]; then
         || true
       ok "Mac connector updated for browser and computer use"
     else
-      warn "could not copy the Mac connector — the installed app's scripts stay in use"
+      if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+          'mkdir -p "$HOME/Library/Application Support/Hermes Workspace/connector/scripts" "$HOME/Library/Application Support/Hermes Workspace/connector/src"' \
+        && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+          "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" \
+          "$DESKTOP_DIR/desktop/scripts/mac-computer.swift" \
+          "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/scripts/" \
+        && scp -q -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+          "$DESKTOP_DIR/desktop/src/computer.cjs" \
+          "$DESKTOP_DIR/desktop/src/computer-policy.cjs" \
+          "$DESKTOP_DIR/desktop/src/computer-snapshot.cjs" \
+          "$DESKTOP_DIR/desktop/src/connector-reload.cjs" \
+          "$DESKTOP_DIR/desktop/src/omit-icons.cjs" \
+          "$MAC_SSH:Library/Application Support/Hermes Workspace/connector/src/"; then
+        ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$MAC_SSH" \
+          'swiftc -O -o "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer" "$HOME/Library/Application Support/Hermes Workspace/connector/scripts/mac-computer.swift"' >/dev/null 2>&1 \
+          || true
+        ok "Mac connector updated for browser and computer use"
+      else
+        warn "could not copy the Mac connector — the installed app's scripts stay in use"
+      fi
     fi
   fi
   if [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ ! -d "$DESKTOP_DIR/desktop/node_modules/@modelcontextprotocol" ]; then
@@ -478,6 +532,19 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       && ok "dependencies installed" || warn "npm ci failed — connector may not start"
   fi
 
+  if [ "$GUEST_OS" = Darwin ]; then
+    if [ "$SKIP_SERVICES" = 0 ]; then
+      # The shared script writes config.json (Chromium.app discovery) and the
+      # two LaunchAgents that replace the Linux systemd units — no X11 on macOS.
+      if [ -f "$DESKTOP_DIR/scripts/mac-guest-services.sh" ]; then
+        sh "$DESKTOP_DIR/scripts/mac-guest-services.sh" \
+          && ok "browser services installed via launchd" \
+          || warn "mac-guest-services.sh failed — see docs/mac-vm-guest.md in the alans-way repo"
+      else
+        warn "$DESKTOP_DIR/scripts/mac-guest-services.sh missing — update the desktop repo checkout"
+      fi
+    fi
+  else
   DATA_DIR="${HERMES_VPS_BROWSER_DATA:-$HOME/.local/share/hermes-alans-way/browser}"
   mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
   if [ ! -f "$DATA_DIR/config.json" ]; then
@@ -588,12 +655,61 @@ EOF
   else
     warn "systemd unavailable or skipped — see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
   fi
+  fi
+
+  # mac-watch as a per-user LaunchAgent on a macOS guest. The router's darwin
+  # default state file matches the --state-file below.
+  if [ "$GUEST_OS" = Darwin ] && [ "$SKIP_SERVICES" = 0 ] && [ -n "$MAC_SSH" ]; then
+    WATCH_STATE="$HOME/Library/Application Support/hermes-alans-way/mac-state.json"
+    WATCH_PLIST="$HOME/Library/LaunchAgents/com.alans-way.mac-watch.plist"
+    mkdir -p "$(dirname "$WATCH_STATE")" "$HOME/Library/LaunchAgents"
+    cat > "$WATCH_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.alans-way.mac-watch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>$REPO_DIR/alans-way/scripts/mac-watch.sh</string>
+		<string>--interval</string>
+		<string>30</string>
+		<string>--state-file</string>
+		<string>$WATCH_STATE</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HERMES_WORKSPACE_MAC_SSH</key>
+		<string>$MAC_SSH</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
+EOF
+    launchctl bootout "gui/$(id -u)/com.alans-way.mac-watch" 2>/dev/null || true
+    if launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
+      || launchctl load -w "$WATCH_PLIST" 2>/dev/null; then
+      ok "host availability watcher installed (launchd)"
+    else
+      warn "could not load mac-watch agent — the bot won't notice the host going on or offline"
+    fi
+  fi
 fi
 
 # ------------------------------------------------------------- desktop prereqs (guided)
 if [ "$SKIP_BROWSER" = 0 ]; then
   step "Desktop prerequisites (guided)"
-  if have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
+  if [ "$GUEST_OS" = Darwin ]; then
+    say "  macOS guest needs no X11 stack. Grant the console user Accessibility and"
+    say "  Screen Recording for the connector once, then the LaunchAgents run the"
+    say "  browser host in the window session. Guide: docs/mac-vm-guest.md in the"
+    say "  alans-way repo. Preview: scripts/mac-vm-preview.sh on the host."
+  elif have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
     ok "an X display stack is present"
   else
     say "  no Xvfb/x11vnc detected — for the VPS desktop, install a display stack:"
@@ -615,6 +731,7 @@ if [ -n "$BOT_ID" ]; then
   set -- --bot-id "$BOT_ID"
   [ -n "$BOT_NAME" ] && set -- "$@" --bot-name "$BOT_NAME"
   [ -n "$MAC_SSH" ] && set -- "$@" --mac-ssh "$MAC_SSH"
+  set -- "$@" --host-os "$HOST_OS"
   if [ -n "$PROFILE" ]; then set -- "$@" --profile "$PROFILE"
   elif [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
@@ -791,16 +908,21 @@ if [ -n "$BOT_ID" ]; then
     || grep -q '^  workspace_browser:' "$CFG"; } \
     && ok "workspace_browser block in $CFG" || warn "workspace_browser block not found in $CFG"
 fi
-[ -f "$HOME/.local/share/hermes-alans-way/browser/connection.json" ] && ok "browser host running" \
+if [ "$GUEST_OS" = Darwin ]; then
+  VCONN="$HOME/Library/Application Support/hermes-alans-way/browser/connection.json"
+else
+  VCONN="$HOME/.local/share/hermes-alans-way/browser/connection.json"
+fi
+[ -f "$VCONN" ] && ok "browser host running" \
   || warn "browser host not running yet (start the service or desktop session)"
 
 step "Done"
-cat <<'EOF'
+cat <<EOF
   Next:
-  • On your Mac: open Hermes — Alan's Way → Settings → Agent setup → save this
-    Mac's SSH address → Test agent path.
+  • On your computer: open Hermes — Alan's Way → Settings → Agent setup → save this
+    machine's SSH address → Test agent path.
   • In Telegram: message your primary bot — proactivity is on once bound
     (/proactivity status shows it; /proactivity pause quiets it).
-  • Browser work routes to the Mac while it's reachable, else the VPS host.
+  • Browser work routes to your ${HOST_OS} computer while it's reachable, else this host.
 EOF
 [ "$FAILS" = 0 ] && exit 0 || { say "setup: $FAILS check(s) failed — see above."; exit 1; }

@@ -235,5 +235,19 @@ class VerifyTests(unittest.TestCase):
             self.assertIn("workspace_browser timeout 120s", result.stdout)
 
 
+class HostOsFlagTests(unittest.TestCase):
+    def test_host_os_is_emitted_in_the_env_block(self):
+        out = run("--bot-id", "bot_123", "--host-os", "windows").stdout
+        self.assertIn('HERMES_WORKSPACE_HOST_OS: "windows"', out)
+
+    def test_host_os_defaults_to_mac(self):
+        out = run("--bot-id", "bot_123").stdout
+        self.assertIn('HERMES_WORKSPACE_HOST_OS: "mac"', out)
+
+    def test_host_os_rejects_other_values(self):
+        result = run("--bot-id", "bot_123", "--host-os", "linux", check=False)
+        self.assertNotEqual(result.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

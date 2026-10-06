@@ -17,12 +17,13 @@
 # Mac ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
+BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
     --bot-name) BOT_NAME="$2"; shift 2;;
     --mac-ssh) MAC_SSH="$2"; shift 2;;
+    --host-os) HOST_OS="$2"; shift 2;;
     --router) ROUTER="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
@@ -36,6 +37,7 @@ if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
   echo "setup-workspace: --profile and --config are mutually exclusive" >&2
   exit 2
 fi
+case "${HOST_OS:-mac}" in mac|windows) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac or windows" >&2; exit 2;; esac
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
     *[!0-9A-Za-z_.-]*)
@@ -67,23 +69,26 @@ if [ "$VERIFY" = 1 ]; then
     bad "node not on PATH (router is a node script)"
   fi
   if [ -n "$MAC_SSH" ]; then
-    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes "$MAC_SSH" true 2>/dev/null; then
-      ok "mac ssh reachable: $MAC_SSH"
+    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok 2>/dev/null; then
+      ok "host ssh reachable: $MAC_SSH"
       # Run the router's own probe — the exact code path connections take —
       # so a broken probe fails here at verify time, not mid-session.
-      decision=$(HERMES_WORKSPACE_MAC_SSH="$MAC_SSH" node "$ROUTER" --probe 2>/dev/null || true)
+      decision=$(HERMES_WORKSPACE_MAC_SSH="$MAC_SSH" HERMES_WORKSPACE_HOST_OS="$HOST_OS" node "$ROUTER" --probe 2>/dev/null || true)
       case "$decision" in
-        "mac: "*) ok "router probe → $decision";;
-        "vps (mac unreachable)") warn "router probe → $decision (ok only if the Mac app is asleep/closed right now)";;
+        "mac: "*|"windows: "*) ok "router probe → $decision";;
+        "vps ("*) warn "router probe → $decision (ok only if the host app is asleep/closed right now)";;
         *) bad "router probe returned no decision";;
       esac
     else
-      bad "mac ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the Mac is asleep — this is only a failure if the Mac should be up)"
+      bad "host ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the host is asleep — this is only a failure if the host should be up)"
     fi
   else
-    skip "mac check (no --mac-ssh given; VPS-only routing)"
+    skip "host check (no --mac-ssh given; VPS-only routing)"
   fi
-  CONN="$HOME/.local/share/hermes-alans-way/browser/connection.json"
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) CONN="$HOME/Library/Application Support/hermes-alans-way/browser/connection.json";;
+    *) CONN="$HOME/.local/share/hermes-alans-way/browser/connection.json";;
+  esac
   if [ -f "$CONN" ]; then
     ok "vps connection file: $CONN"
     port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("port",9465))' "$CONN" 2>/dev/null || echo 9465)
@@ -160,6 +165,7 @@ $MARK_BEGIN
     timeout: $TOOL_TIMEOUT
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
+      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")
 $MARK_END
 EOF
 }

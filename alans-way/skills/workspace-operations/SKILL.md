@@ -36,13 +36,17 @@ Reach for the browser when:
   landed, or screenshot the final state
 - a link or site comes up in chat — open it in your own tab and look
 
-The in-app Mac browser is the only default host. When the Mac is reachable,
-ALL web work goes through the `cua_alans_way_*` tools (Mac host) — never
+The in-app host browser is the only default host. The user's computer is
+usually a Mac — this skill says "Mac" — but it can be a Windows PC instead;
+every rule below is identical either way. (Likewise "VPS" is Hermes' own
+computer, which can be a Linux VPS or a macOS virtual machine.) When the
+user's computer is reachable, ALL web work goes through the
+`cua_alans_way_*` tools (Mac host) — never
 `host:"vps"`, never another browser tool (browser_exec, computer-use
 drivers), and never opening a URL in the human's personal browser via
-terminal/`open`. Do not pass `host`. The connector opens on the Mac when the
-Mac is reachable, and on the VPS browser and Linux desktop when the Mac is
-unreachable. If a workspace browser call fails, report the failure;
+terminal/`open`. Do not pass `host`. The connector opens on the user's
+computer when it is reachable, and on the VPS browser and Linux desktop when
+it is unreachable. If a workspace browser call fails, report the failure;
 do not silently substitute another browser.
 
 ## Choose the execution host
