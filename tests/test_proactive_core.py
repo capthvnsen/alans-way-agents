@@ -203,6 +203,28 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(store.record_event("manual_review", "opaque-wake-2", purpose=True, now=self.now))
         self.assertEqual(store.claim(now=self.now)["evidence"], "opaque-wake-2")
 
+    def test_stranded_dispatching_events_expire_and_free_the_gate(self):
+        """A dispatch that dies between claim() and finish() — not a crash,
+        so the reopen recovery never runs — must not hold the one-wake gate
+        forever; past the unresolved TTL it expires like any dead wake."""
+        store = self.configured(min_interval_seconds=0, unresolved_ttl_seconds=600)
+        store.record_event("manual_review", "opaque-stuck", purpose=True, now=self.now)
+        self.assertIsNotNone(store.claim(now=self.now))
+        self.assertEqual(store.status()["counts"]["dispatching"], 1)
+        store.expire(now=self.now + timedelta(seconds=599))
+        self.assertEqual(store.status()["counts"]["dispatching"], 1)
+        store.expire(now=self.now + timedelta(seconds=601))
+        counts = store.status()["counts"]
+        self.assertIsNone(counts.get("dispatching"))
+        self.assertEqual(counts.get("expired"), 1)
+        # The tombstone remains: the same evidence cannot re-fire, but a
+        # distinct event claims again with the gate free.
+        self.assertFalse(store.record_event("manual_review", "opaque-stuck",
+                                            purpose=True, now=self.now + timedelta(seconds=601)))
+        store.record_event("manual_review", "opaque-again", purpose=True,
+                           now=self.now + timedelta(seconds=601))
+        self.assertIsNotNone(store.claim(now=self.now + timedelta(seconds=601)))
+
     def test_purpose_then_kind_priority_then_fifo_selects_work(self):
         store = self.configured(min_interval_seconds=0)
         for kind, evidence, purpose in [

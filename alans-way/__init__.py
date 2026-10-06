@@ -90,6 +90,18 @@ class Runtime:
         event = self.store.claim()
         if event is None:
             return None
+        try:
+            return self._dispatch(event)
+        except BaseException:
+            # Any escape between claim and finish must not strand the event in
+            # 'dispatching': it would hold the one-wake gate open forever.
+            try:
+                self.store.finish(event["id"], "uncertain")
+            except Exception:
+                pass
+            raise
+
+    def _dispatch(self, event):
         event_id = event["id"]
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key:

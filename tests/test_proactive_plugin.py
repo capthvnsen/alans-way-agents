@@ -182,6 +182,36 @@ class PluginTests(unittest.TestCase):
             self.assertNotIn("proactive-primary:proactive-primary", message)
             runtime.close()
 
+    def test_dispatch_error_after_claim_still_releases_the_event(self):
+        """An exception escaping between claim() and finish() must not strand
+        the event in 'dispatching' — it would hold the one-wake gate forever."""
+        from types import SimpleNamespace
+        class FakeStore:
+            def __init__(self):
+                self.finished = []
+                self.policy_calls = 0
+            def load_policy(self):
+                self.policy_calls += 1
+                if self.policy_calls > 1:
+                    raise RuntimeError("state backend went away mid-dispatch")
+                return SimpleNamespace(enabled=True, primary_profile="default",
+                                       session_key="agent:main:telegram:dm:123456789")
+            def claim(self, now=None):
+                return {"id": "e", "kind": "manual_review", "evidence": "a" * 64,
+                        "purpose": False, "session_key": "agent:main:telegram:dm:123456789"}
+            def finish(self, event_id, status):
+                self.finished.append((event_id, status))
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        with tempfile.TemporaryDirectory() as directory:
+            store = FakeStore()
+            runtime = module.Runtime(SimpleNamespace(), Path(directory), store=store)
+            guard.mark_gateway_ready(Path(directory))
+            with self.assertRaises(RuntimeError):
+                runtime.tick()
+            self.assertEqual(store.finished, [("e", "uncertain")])
+            runtime.close()
+
     def test_watch_due_dispatches_without_appraiser_and_re_arms_cadence(self):
         from datetime import datetime, timedelta, timezone
         class Facade:

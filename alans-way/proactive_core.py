@@ -158,13 +158,15 @@ class Store:
     def _expire(self, db, timestamp: float, policy: Policy, revision: int) -> None:
         expired = db.execute("UPDATE events SET status='expired' WHERE status='pending' AND created_at<=?", (timestamp - policy.event_ttl_seconds,)).rowcount
         self._audit(db, "expired", revision, expired)
-        # Dispatched-but-never-acknowledged events (accepted_unverified, or
-        # uncertain after a crash recovery) would otherwise hold the one-wake
+        # Dispatched-but-never-acknowledged events (accepted_unverified,
+        # uncertain after a crash recovery, or dispatching when the dispatch
+        # died inside this live process) would otherwise hold the one-wake
         # gate forever when the session cannot resolve them — e.g. the control
         # toolset missing from the bound session's platform. Aging them out is
         # not an eviction: dedupe tombstones remain, so nothing replays.
         unresolved = db.execute(
-            "UPDATE events SET status='expired' WHERE status IN ('accepted_unverified','uncertain')"
+            "UPDATE events SET status='expired' WHERE status IN"
+            " ('dispatching','accepted_unverified','uncertain')"
             " AND COALESCE(claimed_at, created_at)<=?",
             (timestamp - policy.unresolved_ttl_seconds,)).rowcount
         self._audit(db, "expired_unresolved", revision, unresolved)
