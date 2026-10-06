@@ -551,6 +551,9 @@ async function main() {
   function bindChild(c, host) {
     activeChild = c;
     activeHost = host;
+    // A write after the Mac ssh has already exited emits EPIPE asynchronously.
+    // That must not kill the process that is about to answer from the VPS.
+    c.stdin.on('error', () => {});
     annotate = safeAnnotator(host);
     readline
       .createInterface({ input: c.stdout, crlfDelay: Infinity })
@@ -608,7 +611,7 @@ async function main() {
       noteClientRpc(line, pendingRequests);
       if (!provedAlive) bufferedStdin.push(line);
       try {
-        if (activeChild && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
+        if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
       } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
     });
 
