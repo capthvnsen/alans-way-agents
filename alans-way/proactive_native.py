@@ -78,6 +78,16 @@ def _snapshot(document, native_id):
     return {"status": card["status"], "updated_at": _updated_at(card.get("updated_at"))}
 
 
+_BUDGET = 4
+
+
+def unchecked(tasks: list) -> set:
+    """Ids of eligible native-linked watches the per-pass budget never reaches."""
+    now = datetime.now(timezone.utc)
+    eligible = [task["id"] for task in tasks if _eligible(task, now)]
+    return set(eligible[_BUDGET:])
+
+
 def collect(ctx, tasks: list) -> dict:
     if type(tasks) is not list:
         return {}
@@ -85,7 +95,7 @@ def collect(ctx, tasks: list) -> dict:
     now = datetime.now(timezone.utc)
     calls = 0
     for task in tasks:
-        if calls == 4:
+        if calls == _BUDGET:
             break
         if not _eligible(task, now):
             continue

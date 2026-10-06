@@ -17,6 +17,7 @@ MAC_STATE_FILE = (
     if sys.platform == "darwin"
     else "/var/lib/hermes-alans-way/mac-state.json"
 )
+HEARTBEAT_SECONDS = 600
 WATCH_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 
 
@@ -84,6 +85,33 @@ def capabilities(home: Path):
         return None
 
 
+# Bookkeeping a scheduler or the agent rewrites on every run says nothing about
+# what the user's schedule or memory means, so it must not count as a change.
+_RUN_BOOKKEEPING = re.compile(r"(?:^(?:last|next)_|_at$|^(?:state|status|repeat|runs?|run_count)$)")
+APPRAISAL_TASK_BYTES = 6000
+
+
+def _jobs_digest(document):
+    jobs = document.get("jobs", []) if isinstance(document, dict) else document
+    if not isinstance(jobs, list):
+        return None
+    stable = [{k: v for k, v in job.items() if not _RUN_BOOKKEEPING.search(k)}
+              if isinstance(job, dict) else job for job in jobs]
+    return sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _memory_digest(text):
+    """Entries are order- and whitespace-insensitive; only added, edited or removed ones count."""
+    entries = sorted({" ".join(entry.split()) for entry in text.split("§")} - {""})
+    return sha256("\n§\n".join(entries).encode()).hexdigest()
+
+
+def _next_due(task):
+    moments = [m for m in (_parse_time(task.get("next_review_at")), _parse_time(task.get("due_at")))
+               if m is not None]
+    return min(moments) if moments else float("inf")
+
+
 def collect(home: Path, ledger, ctx=None):
     memory, schedule, documents, signatures = [], [], [], {}
     for source in SOURCES + DOCUMENTS:
@@ -92,6 +120,7 @@ def collect(home: Path, ledger, ctx=None):
             continue
         signatures[source] = value["digest"]
         if source.startswith("memories/"):
+            signatures[source] = _memory_digest(value["text"])
             memory.append({"source": Path(source).name, "text": value["text"][:3072]})
         elif source in DOCUMENTS:
             documents.append({"source": source, "text": value["text"][:3072],
@@ -99,6 +128,7 @@ def collect(home: Path, ledger, ctx=None):
         else:
             try:
                 document = json.loads(value["text"])
+                signatures[source] = _jobs_digest(document) or value["digest"]
                 jobs = document.get("jobs", []) if isinstance(document, dict) else document
                 if isinstance(jobs, list):
                     for job in jobs[:12]:
@@ -114,7 +144,8 @@ def collect(home: Path, ledger, ctx=None):
             except (ValueError, TypeError):
                 pass
     snapshot = ledger.snapshot()
-    from .proactive_native import collect as collect_native
+    from .proactive_native import collect as collect_native, unchecked
+    snapshot["tasks"].sort(key=lambda t: (_next_due(t), str(t.get("id"))))
     native = collect_native(ctx, snapshot["tasks"]) if ctx is not None else {}
     for watch_id, value in native.items():
         signatures["task:" + watch_id] = sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -130,31 +161,35 @@ def collect(home: Path, ledger, ctx=None):
     skills = capabilities(home)
     if skills is not None:
         signatures["skills"] = sha256("\n".join(skills).encode()).hexdigest()
-    tasks = []
+    tasks, used = [], 0
     now = datetime.now(timezone.utc)
-    for task in snapshot["tasks"]:
+    skipped = unchecked(snapshot["tasks"])
+    for task in sorted(snapshot["tasks"], key=lambda t: (_next_due(t), str(t.get("id")))):
         try:
             approved_at = datetime.fromisoformat(task["approved_at"])
             if (task.get("approved") is not True or task.get("status") in {"done", "cancelled"}
-                    or approved_at.tzinfo is None or (now - approved_at).total_seconds() > 2592000):
+                    or approved_at.tzinfo is None):
                 continue
         except (KeyError, ValueError, TypeError):
             continue
         allowed = {"id", "title", "scope", "next_action", "status", "owner", "approved",
                    "kind", "native_task_id", "next_review_at", "due_at", "notify_when",
                    "cadence_seconds", "signal", "signal_at", "execution_host"}
-        tasks.append({k: (v[:300] if isinstance(v, str) and k not in {"id", "native_task_id"} else v)
-                      for k, v in task.items() if k in allowed})
-        if tasks[-1].get("kind", "watch") not in TASK_KINDS:
-            tasks[-1]["kind"] = "watch"
-        if task.get("native_task_id"):
+        row = {k: (v[:300] if isinstance(v, str) and k not in {"id", "native_task_id"} else v)
+               for k, v in task.items() if k in allowed}
+        if row.get("kind", "watch") not in TASK_KINDS:
+            row["kind"] = "watch"
+        if task.get("native_task_id") and task["id"] not in skipped:
             current = native.get(task["id"])
             if current is None or current["status"] == "blocked":
-                tasks[-1]["status"] = "blocked"
+                row["status"] = "blocked"
             elif current["status"] in {"done", "archived"}:
-                tasks[-1]["status"] = "done"
-        if len(tasks) == 4:
+                row["status"] = "done"
+        size = len(json.dumps(row))
+        if tasks and used + size > APPRAISAL_TASK_BYTES:
             break
+        tasks.append(row)
+        used += size
     preferences = dict(snapshot["preferences"])
     for key in ("focus", "ignore"):
         preferences[key] = [value[:100] for value in preferences[key][:8]]
@@ -213,7 +248,10 @@ def _deadline_tag(delta):
         return "h4"
     if delta > -86400:
         return "over"
-    return "gone"
+    # The "gone" tombstone is pruned after a week; stop before it can re-fire forever.
+    if delta > -7 * 86400:
+        return "gone"
+    return None
 
 
 def _due_instance(nra_ts, cadence, now_ts):
@@ -320,5 +358,8 @@ def observe(runtime):
                     previous[key] = digest
         if bound:
             admitted += _admit_due(runtime, state["tasks"], now, active)
-        previous["__heartbeat"] = now.isoformat()
+        # Every pass rewriting the ledger would hit the disk every 30 seconds.
+        last = _parse_time(previous.get("__heartbeat"))
+        if last is None or now.timestamp() - last >= HEARTBEAT_SECONDS:
+            previous["__heartbeat"] = now.isoformat()
     return admitted
