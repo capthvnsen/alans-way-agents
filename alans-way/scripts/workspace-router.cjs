@@ -32,6 +32,8 @@
 //                               ~/.local/share/hermes-alans-way/... on a Windows guest)
 //   --probe                    run the host probe once, print the decision,
 //                              and exit — read-only, for install/verify checks
+//   --host-timezone-command    print the command that makes the host's node
+//                              report its IANA timezone (setup.sh runs it over ssh)
 //   --watch [--interval S] [--hysteresis N] [--state-file PATH] [--once]
 //                              the availability watcher (mac-watch.sh wraps it):
 //                              probe every S seconds (default 30) and publish the
@@ -279,7 +281,7 @@ function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, n
 // its own Electron binary with ELECTRON_RUN_AS_NODE. PATH node is only the
 // fallback for bundles without one; an explicit --mac-node always wins.
 function macBackendCommand(script, node, id, name, scriptWord = shQuote(script)) {
-  const tail = [scriptWord, '--bot-id', shQuote(id)];
+  const tail = id === null ? [scriptWord] : [scriptWord, '--bot-id', shQuote(id)];
   if (name) tail.push('--bot-name', shQuote(name));
   const args = tail.join(' ');
   if (node) return `exec ${shQuote(node)} ${args}`;
@@ -312,7 +314,7 @@ function macBackendCommand(script, node, id, name, scriptWord = shQuote(script))
 // connection file from the macOS path by default, so point it at the Linux
 // userData dir ($XDG_CONFIG_HOME or ~/.config, then "Hermes Workspace").
 function linuxBackendCommand(script, node, id, name, scriptWord = shQuote(script)) {
-  const tail = [scriptWord, '--bot-id', shQuote(id)];
+  const tail = id === null ? [scriptWord] : [scriptWord, '--bot-id', shQuote(id)];
   if (name) tail.push('--bot-name', shQuote(name));
   const args = tail.join(' ');
   const env = 'HERMES_WORKSPACE_CONNECTION="${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json"; export HERMES_WORKSPACE_CONNECTION; ';
@@ -377,7 +379,7 @@ function posixAutoBackendCommand(node, id, name) {
 // it only talks HTTP to the app's loopback API; desktop actions are served by
 // the app itself. NODE_PATH supplies the pushed connector's dependencies.
 function windowsBackendCommand(script, id, name) {
-  const tail = [psQuote(script), '--bot-id', psQuote(id)];
+  const tail = id === null ? [script] : [psQuote(script), '--bot-id', psQuote(id)];
   if (name) tail.push('--bot-name', psQuote(name));
   const args = tail.join(' ');
   const exe = '"$env:LOCALAPPDATA\\Programs\\alans-way-localapp\\alans-way-localapp.exe"';
@@ -409,6 +411,15 @@ function windowsProbeCommand() {
       '{ if (Test-Path $s) { Write-Output $s; exit 0 } }',
     'exit 1',
   ].join('; ');
+}
+
+// The user's zone is whatever their computer's own node reports: the same
+// Electron-as-node invocation the backend uses, run with -p instead of a script.
+// setup.sh runs this over its ssh path, so every host OS answers the same way.
+function hostTimezoneCommand() {
+  const expr = '-p \'Intl.DateTimeFormat().resolvedOptions().timeZone\'';
+  if (hostOs === 'windows') return windowsBackendCommand(expr, null);
+  return (hostOs === 'linux' ? linuxBackendCommand : macBackendCommand)('', '', null, '', expr);
 }
 
 function probeMac(timeoutMs, connectTimeout = 6) {
@@ -913,6 +924,10 @@ async function watch() {
 
 async function main() {
   if (process.argv.includes('--watch')) return watch();
+  if (process.argv.includes('--host-timezone-command')) {
+    process.stdout.write(hostTimezoneCommand());
+    return;
+  }
   if (process.argv.includes('--probe')) {
     const probe = macSsh ? await probeMac(12000) : { script: null, stderr: '' };
     const tail = stderrTail(probe.stderr);

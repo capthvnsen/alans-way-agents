@@ -568,37 +568,6 @@ derive_bot_id_from_env() {
 }
 
 # The proactivity timezone is the user's, not the VM's: ask their computer.
-iana_from_windows_id() {
-  python3 - "$1" <<'PY'
-import sys
-zones = {
-    "UTC": "Etc/UTC", "GMT Standard Time": "Europe/London", "Greenwich Standard Time": "Atlantic/Reykjavik",
-    "W. Europe Standard Time": "Europe/Berlin", "Central Europe Standard Time": "Europe/Budapest",
-    "Central European Standard Time": "Europe/Warsaw", "Romance Standard Time": "Europe/Paris",
-    "E. Europe Standard Time": "Europe/Chisinau", "GTB Standard Time": "Europe/Bucharest",
-    "FLE Standard Time": "Europe/Kiev", "Russian Standard Time": "Europe/Moscow", "Turkey Standard Time": "Europe/Istanbul",
-    "Israel Standard Time": "Asia/Jerusalem", "Egypt Standard Time": "Africa/Cairo", "South Africa Standard Time": "Africa/Johannesburg",
-    "W. Central Africa Standard Time": "Africa/Lagos", "E. Africa Standard Time": "Africa/Nairobi",
-    "Arab Standard Time": "Asia/Riyadh", "Arabian Standard Time": "Asia/Dubai", "Iran Standard Time": "Asia/Tehran",
-    "Pakistan Standard Time": "Asia/Karachi", "India Standard Time": "Asia/Kolkata", "Bangladesh Standard Time": "Asia/Dhaka",
-    "SE Asia Standard Time": "Asia/Bangkok", "China Standard Time": "Asia/Shanghai", "Singapore Standard Time": "Asia/Singapore",
-    "Taipei Standard Time": "Asia/Taipei", "W. Australia Standard Time": "Australia/Perth", "Tokyo Standard Time": "Asia/Tokyo",
-    "Korea Standard Time": "Asia/Seoul", "AUS Eastern Standard Time": "Australia/Sydney", "E. Australia Standard Time": "Australia/Brisbane",
-    "Cen. Australia Standard Time": "Australia/Adelaide", "New Zealand Standard Time": "Pacific/Auckland",
-    "Hawaiian Standard Time": "Pacific/Honolulu", "Alaskan Standard Time": "America/Anchorage",
-    "Pacific Standard Time": "America/Los_Angeles", "Mountain Standard Time": "America/Denver",
-    "US Mountain Standard Time": "America/Phoenix", "Central Standard Time": "America/Chicago",
-    "Eastern Standard Time": "America/New_York", "US Eastern Standard Time": "America/Indianapolis",
-    "Atlantic Standard Time": "America/Halifax", "Newfoundland Standard Time": "America/St_Johns",
-    "Canada Central Standard Time": "America/Regina", "Central America Standard Time": "America/Guatemala",
-    "Mexico Standard Time": "America/Mexico_City", "SA Pacific Standard Time": "America/Bogota",
-    "SA Western Standard Time": "America/La_Paz", "SA Eastern Standard Time": "America/Cayenne",
-    "E. South America Standard Time": "America/Sao_Paulo", "Argentina Standard Time": "America/Buenos_Aires",
-    "Pacific SA Standard Time": "America/Santiago",
-}
-print(zones.get(sys.argv[1].strip(), ""))
-PY
-}
 valid_iana() {
   case "$1" in UTC|GMT) return 0;; [A-Z]*/??*) ;; *) return 1;; esac
   case "$1" in *[!A-Za-z0-9_/+-]*|/*|*/|*..*) return 1;; esac
@@ -606,13 +575,15 @@ valid_iana() {
 }
 detect_host_timezone() {
   [ -z "$TIMEZONE" ] && [ -n "$MAC_SSH" ] || return 0
-  case "$HOST_OS" in
-    mac) _tz="$(host_ssh 'readlink /etc/localtime' 2>/dev/null | sed 's|.*/zoneinfo/||' | head -1 || true)";;
-    linux) _tz="$(host_ssh 'timedatectl show -p Timezone --value' 2>/dev/null | head -1 || true)";;
-    windows) _tz="$(iana_from_windows_id "$(host_ssh 'tzutil /g' 2>/dev/null | head -1 | tr -d '\r' || true)")";;
-  esac
-  _tz="$(printf '%s' "${_tz:-}" | tr -d ' \r\n')"
-  valid_iana "$_tz" || return 0
+  # The router builds the host-OS-specific node command; ssh runs it on the computer.
+  _cmd="$(node "$(wpath "$REPO_DIR")/alans-way/scripts/workspace-router.cjs" --host-timezone-command --host-os "${HOST_OS:-mac}" 2>/dev/null || true)"
+  _tz=""
+  [ -z "$_cmd" ] || _tz="$(host_ssh "$_cmd" 2>/dev/null | head -1 || true)"
+  _tz="$(printf '%s' "$_tz" | tr -d ' \r\n')"
+  if ! valid_iana "$_tz"; then
+    warn "could not read your computer's timezone over ssh"
+    return 0
+  fi
   TIMEZONE="$_tz"
   ok "using timezone $TIMEZONE from your computer ($HOST_OS) for quiet hours"
 }
@@ -621,23 +592,6 @@ ask_timezone() {
   _tz="$(ask "  Your timezone for quiet hours (IANA, e.g. Europe/Berlin; empty to skip)" "")"
   valid_iana "$_tz" || return 0
   TIMEZONE="$_tz"
-}
-
-detect_vps_timezone() {
-  [ -n "$TIMEZONE" ] && return
-  has_tty && return
-  _tz=""
-  if have timedatectl; then
-    _tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  elif [ -f /etc/timezone ]; then
-    _tz="$(tr -d ' \n' < /etc/timezone)"
-  elif [ -L /etc/localtime ]; then
-    _tz="$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || true)"
-  fi
-  if [ -n "$_tz" ] && [ "$_tz" != "UTC" ]; then
-    TIMEZONE="$_tz"
-    ok "using VPS timezone $TIMEZONE for quiet hours (non-interactive)"
-  fi
 }
 
 # ---------------------------------------------------------------- telegram
@@ -1397,7 +1351,6 @@ if have systemctl; then
 fi
 
 detect_host_timezone
-detect_vps_timezone
 ask_timezone
 
 # ------------------------------------------------------------- bind proactivity

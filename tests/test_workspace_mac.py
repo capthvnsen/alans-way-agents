@@ -1578,5 +1578,26 @@ class HostFailoverTests(unittest.TestCase):
         self.assertEqual(self.served_by(self.recv()), "mac")
 
 
+class HostTimezoneCommandTests(unittest.TestCase):
+    def command(self, host_os):
+        return subprocess.run([NODE, str(ROUTER), "--host-timezone-command", "--host-os", host_os],
+                              capture_output=True, text=True, check=True).stdout
+
+    def test_posix_hosts_run_node_for_the_zone(self):
+        for host_os in ("mac", "linux"):
+            command = self.command(host_os)
+            self.assertIn("ELECTRON_RUN_AS_NODE=1", command)
+            self.assertNotIn("--bot-id", command)
+            zone = subprocess.run([SH, "-c", command], capture_output=True, text=True,
+                                  env={"PATH": str(Path(NODE).parent) + os.pathsep + "/usr/bin:/bin"}).stdout.strip()
+            self.assertRegex(zone, r"^[A-Za-z_+\-]+(/[A-Za-z0-9_+\-]+)*$", host_os)
+
+    def test_windows_runs_the_app_runtime_in_powershell(self):
+        command = self.command("windows")
+        self.assertIn("ELECTRON_RUN_AS_NODE", command)
+        self.assertIn("-p 'Intl.DateTimeFormat().resolvedOptions().timeZone'", command)
+        self.assertNotIn("--bot-id", command)
+
+
 if __name__ == "__main__":
     unittest.main()

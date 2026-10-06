@@ -173,7 +173,7 @@ exit 0
 
 
 class TimezoneFallbackTests(unittest.TestCase):
-    def test_non_interactive_uses_vps_timezone_when_not_utc(self):
+    def test_the_vps_timezone_is_never_used_for_quiet_hours(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes_home"
             home.mkdir()
@@ -196,7 +196,8 @@ class TimezoneFallbackTests(unittest.TestCase):
                 "--hermes-home", str(home),
                 env=env,
             )
-            self.assertIn("using VPS timezone America/Denver", result.stdout)
+            self.assertNotIn("VPS timezone", result.stdout)
+            self.assertNotIn("America/Denver", result.stdout)
 
 
 def logging_hermes_bin(directory: Path, log: Path, version="0.21.5"):
@@ -1169,40 +1170,24 @@ class HostTimezoneTests(unittest.TestCase):
         self.calls = read_log(log)
         return result
 
-    def test_mac_reads_the_localtime_link(self):
-        result = self.attempt("mac", {"readlink /etc/localtime": "/var/db/timezone/zoneinfo/Europe/Berlin"})
-        self.assertIn("from your computer", result.stdout)
-        self.assertIn("--timezone Europe/Berlin", self.calls)
-
-    def test_linux_asks_timedatectl(self):
-        self.attempt("linux", {"timedatectl show -p Timezone --value": "America/Chicago"})
-        self.assertIn('--timezone America/Chicago', self.calls)
-
-    def test_windows_zone_ids_are_mapped_to_iana(self):
-        self.attempt("windows", {"tzutil /g": "W. Europe Standard Time"})
-        self.assertIn("--timezone Europe/Berlin", self.calls)
-        self.attempt("windows", {"tzutil /g": "Pacific Standard Time"})
-        self.assertIn('--timezone America/Los_Angeles', self.calls)
+    def test_every_host_os_asks_node_for_its_zone(self):
+        for host_os in ("mac", "linux", "windows"):
+            result = self.attempt(host_os, {"Intl.DateTimeFormat": "Europe/Berlin"})
+            self.assertIn("from your computer", result.stdout, host_os)
+            self.assertIn("--timezone Europe/Berlin", self.calls, host_os)
+        self.assertIn("ELECTRON_RUN_AS_NODE", read_log(self.ssh_log))
 
     def test_explicit_flag_wins_and_skips_the_ssh_lookup(self):
-        self.attempt("mac", {"readlink": "Europe/Berlin"}, "--timezone", "Asia/Tokyo")
+        self.attempt("mac", {"Intl.DateTimeFormat": "Europe/Berlin"}, "--timezone", "Asia/Tokyo")
         self.assertIn('--timezone Asia/Tokyo', self.calls)
-        self.assertNotIn("readlink", read_log(self.ssh_log))
+        self.assertNotIn("Intl.DateTimeFormat", read_log(self.ssh_log))
 
-    def test_timedatectl_n_a_and_other_shapeless_answers_are_rejected(self):
-        for reply in ("n/a", "Local", "garbage"):
-            result = self.attempt("linux", {"timedatectl show -p Timezone --value": reply})
+    def test_unusable_answers_are_skipped_with_a_warning(self):
+        for reply in ("not a zone!", "../../etc/passwd", "n/a", "Local", ""):
+            result = self.attempt("mac", {"Intl.DateTimeFormat": reply})
             self.assertNotIn("from your computer", result.stdout, reply)
-        result = self.attempt("linux", {"timedatectl show -p Timezone --value": "UTC"})
-        self.assertIn("from your computer", result.stdout)
-
-    def test_unusable_answers_are_ignored(self):
-        for reply in ("not a zone!", "../../etc/passwd", "Mars Standard Time"):
-            host_os = "windows" if "Mars" in reply else "mac"
-            needle = "tzutil /g" if host_os == "windows" else "readlink /etc/localtime"
-            result = self.attempt(host_os, {needle: reply})
-            self.assertNotIn("from your computer", result.stdout, reply)
-            self.assertNotIn(reply, self.calls)
+            self.assertIn("could not read your computer's timezone", result.stdout, reply)
+            self.assertNotIn("--timezone", self.calls)
 
 
 class WatcherServiceTests(unittest.TestCase):
