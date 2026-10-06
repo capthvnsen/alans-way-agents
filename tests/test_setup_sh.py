@@ -7,8 +7,10 @@ import shutil
 import stat
 import subprocess
 import signal
+import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 import importlib.util
@@ -884,6 +886,10 @@ class BrowserHostServiceTests(unittest.TestCase):
 
 
 class DeployExampleTests(unittest.TestCase):
+    def test_watcher_example_runs_the_router_directly(self):
+        unit = (ROOT / "deploy" / "mac-watch.service").read_text(encoding="utf-8")
+        self.assertRegex(unit, r"ExecStart=/usr/bin/node \S+/workspace-router\.cjs --watch --interval 10")
+
     def test_exec_example_avoids_root_and_snap(self):
         config = json.loads((ROOT / "deploy" / "browser-exec-config.json").read_text(encoding="utf-8"))
         self.assertNotIn("/snap/", config["browserCommand"])
@@ -918,6 +924,102 @@ class GatewayGuardPortabilityTests(unittest.TestCase):
                 self.assertEqual(json.loads(target.read_text()), {"ok": True})
         finally:
             os.fchmod = saved
+
+
+class WindowsGuestPluginTests(unittest.TestCase):
+    """Native Windows has no fcntl, O_NOFOLLOW, fchmod, /proc or ps, and its default home is %LOCALAPPDATA%\\hermes."""
+
+    def load(self, name):
+        path = ROOT / "alans-way"
+        spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        self.addCleanup(lambda: [sys.modules.pop(k) for k in [k for k in sys.modules if k == name or k.startswith(name + ".")]])
+        spec.loader.exec_module(module)
+        return module
+
+    def test_state_and_observation_work_without_the_posix_only_apis(self):
+        calls = []
+        fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=lambda fd, mode, size: calls.append(mode))
+        saved = {name: getattr(os, name) for name in ("fchmod", "O_NOFOLLOW")}
+        for name in saved:
+            delattr(os, name)
+        try:
+            with patch.dict(sys.modules, {"fcntl": None, "msvcrt": fake_msvcrt}):
+                plugin = self.load("windows_guest_plugin_test")
+                context, core, observe = (importlib.import_module(plugin.__name__ + "." + name)
+                                          for name in ("proactive_context", "proactive_core", "proactive_observe"))
+                with tempfile.TemporaryDirectory() as directory:
+                    home = Path(directory)
+                    with context.Ledger(home / "ledger").transaction() as data:
+                        data["tasks"]["a"] = {"id": "a"}
+                    core.Store(home / "store")
+                    (home / "SOUL.md").write_text("be kind\r\n", encoding="utf-8")
+                    seen = observe.read_source(home, "SOUL.md")
+                    self.assertEqual(seen["text"], "be kind\r\n")
+        finally:
+            for name, value in saved.items():
+                setattr(os, name, value)
+        self.assertEqual(calls, [1, 0])
+
+    def test_sqlite_is_opened_by_file_uri_not_a_pasted_path(self):
+        for name in ("proactive_operator.py", "proactive_board.py"):
+            source = (ROOT / "alans-way" / name).read_text(encoding="utf-8")
+            self.assertNotIn('f"file:{', source, name)
+            self.assertIn(".as_uri()", source, name)
+
+    def test_the_default_home_is_localappdata_on_native_windows(self):
+        spec = importlib.util.spec_from_file_location("guard_on_windows", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        with tempfile.TemporaryDirectory() as directory:
+            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+            env["LOCALAPPDATA"] = directory
+            with patch.dict(os.environ, env, clear=True), patch.object(guard.sys, "platform", "win32"):
+                self.assertEqual(guard.hermes_home(), (Path(directory) / "hermes").absolute())
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(guard.hermes_home(), (Path.home() / ".hermes").absolute())
+
+    def test_the_startup_hook_arms_the_windows_default_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory).resolve()
+            home = local / "hermes"
+            hook = home / "hooks" / "alans-way"
+            hook.mkdir(parents=True)
+            shutil.copy(ROOT / "alans-way" / "gateway-hook" / "handler.py", hook / "handler.py")
+            (home / "plugins" / "alans-way").mkdir(parents=True)
+            shutil.copy(ROOT / "alans-way" / "gateway_guard.py", home / "plugins" / "alans-way" / "gateway_guard.py")
+            spec = importlib.util.spec_from_file_location("hook_on_windows", hook / "handler.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+            env["LOCALAPPDATA"] = str(local)
+            with patch.dict(os.environ, env, clear=True), patch.object(module.sys, "platform", "win32"):
+                module.handle("gateway:startup", {})
+            self.assertTrue((home / "companion" / "proactivity" / "gateway-owner.json").exists())
+
+    def test_process_start_comes_from_psutil_where_there_is_no_proc_or_ps(self):
+        spec = importlib.util.spec_from_file_location("guard_psutil", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        begun = time.time() - 300
+        fake_psutil = types.SimpleNamespace(Process=lambda pid=None: types.SimpleNamespace(create_time=lambda: begun))
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            started = guard._process_started_at()
+        self.assertAlmostEqual(started.timestamp(), begun, delta=1)
+
+    def test_a_host_with_no_psutil_and_no_ps_degrades_to_the_registration_window(self):
+        spec = importlib.util.spec_from_file_location("guard_blind", ROOT / "alans-way" / "gateway_guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        with patch.dict(sys.modules, {"psutil": None}), patch("subprocess.check_output", side_effect=FileNotFoundError("ps")):
+            started = guard._process_started_at()
+        self.assertTrue(started is None or started.tzinfo is not None)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            guard.mark_gateway_ready(home)
+            with patch.object(guard, "_process_started_at", return_value=None):
+                self.assertTrue(guard.gateway_ready(home, guard.datetime.now(guard.timezone.utc)))
 
 
 class GatewayHookProfileTests(unittest.TestCase):
@@ -1069,6 +1171,8 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertIn("--interval 10", watch)
         self.assertNotIn("--interval 30", watch)
         self.assertIn("RestartPreventExitStatus=2", watch)
+        self.assertRegex(watch, r"ExecStart=\S*node \S+/alans-way/scripts/workspace-router\.cjs --watch --interval 10")
+        self.assertNotIn("mac-watch.sh", watch)
         self.assertRegex(watch, r"Environment=PATH=\S*:/usr/bin")
         env = (self.etc / "mac-watch.env").read_text()
         self.assertIn("HERMES_WORKSPACE_MAC_SSH=me@mac.tail1234.ts.net", env)
@@ -1091,8 +1195,240 @@ class WatcherServiceTests(unittest.TestCase):
         plist = (self.root / "Library" / "LaunchAgents" / "com.alans-way.mac-watch.plist").read_text()
         self.assertIn("<string>10</string>", plist)
         self.assertNotIn("<string>30</string>", plist)
+        self.assertRegex(plist, r"<string>[^<]*/alans-way/scripts/workspace-router\.cjs</string>\s*<string>--watch</string>")
+        self.assertNotIn("mac-watch.sh", plist)
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
+
+
+FAKE_POWERSHELL = r"""script="$(cat)"
+printf '%s\n----\n' "$script" >> "$PS_LOG"
+case "$script" in
+  *Get-Service*) echo "${FAKE_SSHD:-running user shell-ps}";;
+  *) if [ -n "${AW_TASK:-}" ]; then
+       reg="$PS_STATE/$AW_TASK"; new="$AW_EXE|$AW_ARGS"
+       mkdir -p "$PS_STATE"
+       if [ -f "$reg" ] && [ "$(cat "$reg")" = "$new" ]; then echo unchanged
+       elif [ -f "$reg" ]; then printf '%s' "$new" > "$reg"; echo updated
+       else printf '%s' "$new" > "$reg"; echo registered; fi
+     fi;;
+esac
+exit 0
+"""
+
+
+class WindowsGuestSetupTests(unittest.TestCase):
+    """Git Bash on a native-Windows Hermes box, simulated with a fake uname, cygpath, powershell and exes."""
+
+    HOST = "me@mac.tail1234.ts.net"
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.local = self.root / "Local"
+        self.programs = self.root / "Program Files"
+        self.system_root = self.root / "Windows"
+        self.program_data = self.root / "ProgramData"
+        for path in (self.home, self.local):
+            path.mkdir()
+        self.app = desktop_tree(self.root / "app")
+        self.log = self.root / "hermes.log"
+        self.ps_log = self.root / "powershell.log"
+        self.ps_state = self.root / "tasks"
+        self.bin_dir = logging_hermes_bin(self.root, self.log)
+        fake(self.bin_dir, "uname", "echo MINGW64_NT-10.0-26100\n")
+        fake(self.bin_dir, "cygpath", 'echo "$*" >> "%s"\ncase "$1" in\n'
+             '  -m) case "$2" in "$FAKE_PREFIXED"*) printf "C:%%s" "$2";; */tmp.*) [ -d "$2" ] && printf "C:%%s" "$2" || printf "%%s" "$2";; *) printf "%%s" "$2";; esac;;\n'
+             '  -w) printf "W:%%s" "$2" | tr / "\\\\";;\n  *) printf "%%s" "$2";;\nesac\n' % (self.root / "cygpath.log"))
+        fake(self.bin_dir, "powershell", FAKE_POWERSHELL)
+        fake(self.bin_dir, "ssh", 'echo path-ssh >> "%s"\nexit 0\n' % (self.root / "ssh.log"))
+        fake(self.bin_dir, "icacls", 'echo "$*" >> "%s"\n' % (self.root / "icacls.log"))
+        self.native = self.system_root / "System32" / "OpenSSH"
+        self.exe(self.native / "ssh.exe", 'echo "ssh $*" >> "%s"\ncat >/dev/null 2>&1 </dev/null\nexit 0\n' % (self.root / "native.log"))
+        self.exe(self.native / "scp.exe", 'echo "scp $*" >> "%s"\nexit 0\n' % (self.root / "native.log"))
+        self.exe(self.programs / "Tailscale" / "tailscale.exe", TAILSCALE_UP)
+        self.chrome = self.programs / "Google" / "Chrome" / "Application" / "chrome.exe"
+        self.exe(self.chrome, "exit 0\n")
+        self.data = self.home / ".local" / "share" / "hermes-alans-way" / "browser"
+
+    def exe(self, path: Path, body: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def env(self, **extra):
+        node = Path(shutil.which("node")).parent
+        env = {k: v for k, v in os.environ.items() if k not in ("HERMES_HOME", "WSL_DISTRO_NAME")}
+        env.update(HOME=str(self.home), USERPROFILE=str(self.home), USERNAME="winuser", LOCALAPPDATA=str(self.local),
+                   PROGRAMFILES=str(self.programs), PROGRAMDATA=str(self.program_data), SYSTEMROOT=str(self.system_root),
+                   PS_LOG=str(self.ps_log), PS_STATE=str(self.ps_state),
+                   FAKE_PREFIXED=str(ROOT), ALANS_WAY_RESTART_DELAY="3",
+                   PATH=os.pathsep.join([str(self.bin_dir), str(node), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+        env.update(extra)
+        return env
+
+    def setup(self, *flags, env=None, host=True, host_os="mac"):
+        args = ["--skip-plugin", "--desktop-dir", str(self.app), "--bot-id", "111222333", "--non-interactive", *flags]
+        if host:
+            args += ["--mac-ssh", self.HOST, "--host-os", host_os]
+        return run(*args, env=env or self.env(), check=False)
+
+    def tasks(self):
+        return {path.name: path.read_text() for path in self.ps_state.glob("*")}
+
+    def test_native_paths_and_no_untested_guest_warning(self):
+        result = self.setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("untested", result.stdout)
+        config = (self.local / "hermes" / "config.yaml").read_text()
+        self.assertIn('"C:%s/alans-way/scripts/workspace-router.cjs"' % ROOT, config)
+        self.assertIn("HERMES_WORKSPACE_HOST_OS", config)
+        self.assertNotIn("systemd", result.stdout)
+
+    def test_chrome_is_configured_without_the_linux_only_flags(self):
+        self.setup()
+        config = json.loads((self.data / "config.json").read_text())
+        self.assertEqual(config["browserCommand"], str(self.chrome))
+        args = config["browserArgs"]
+        self.assertIn("--user-data-dir=%s" % (self.data / "chromium"), args)
+        self.assertIn("--remote-debugging-port=9223", args)
+        self.assertIn("--no-first-run", args)
+        for flag in ("--ozone-platform=x11", "--disable-dev-shm-usage", "--no-sandbox"):
+            self.assertNotIn(flag, args)
+        self.assertEqual(args[-1], "about:blank")
+
+    def test_edge_is_used_when_no_chrome_is_installed(self):
+        self.chrome.unlink()
+        edge = Path(str(self.programs) + " (x86)") / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+        self.exe(edge, "exit 0\n")
+        self.setup()
+        self.assertEqual(json.loads((self.data / "config.json").read_text())["browserCommand"], str(edge))
+
+    def test_no_browser_at_all_warns_how_to_install_one(self):
+        self.chrome.unlink()
+        result = self.setup()
+        self.assertIn("winget install Google.Chrome", result.stdout)
+
+    def test_services_are_logon_tasks_that_restart_on_failure(self):
+        self.setup()
+        tasks = self.tasks()
+        self.assertEqual(set(tasks), {"AlansWay_Chromium", "AlansWay_Browser", "AlansWay_MacWatch"})
+        scripts = self.ps_log.read_text()
+        for needle in ("New-ScheduledTaskTrigger -AtLogOn", "-RestartCount", "-RunLevel Limited", "Register-ScheduledTask",
+                       "-ExecutionTimeLimit"):
+            self.assertIn(needle, scripts)
+        host = tasks["AlansWay_Browser"]
+        scripts_dir = r"W:%s\desktop\scripts" % str(self.app).replace("/", "\\")
+        self.assertIn("powershell.exe|-NoProfile -WindowStyle Hidden -Command", host)
+        self.assertIn("'%s\\vps-browser-host.cjs' serve" % scripts_dir, host)
+        self.assertIn("HERMES_VPS_BROWSER_DATA='%s'" % self.data, host)
+        self.assertIn("exit $LASTEXITCODE", host)
+        self.assertIn("Start-Sleep -Seconds 5; $env:HERMES_VPS_BROWSER_DATA", host)
+        self.assertNotIn("Start-Sleep", tasks["AlansWay_Chromium"] + tasks["AlansWay_MacWatch"])
+        self.assertIn("'%s\\vps-chromium-host.cjs'" % scripts_dir, tasks["AlansWay_Chromium"])
+        watch = tasks["AlansWay_MacWatch"]
+        self.assertIn("workspace-router.cjs' --watch --interval 10 --mac-ssh '%s' --host-os 'mac'" % self.HOST, watch)
+
+    def test_no_watcher_task_without_a_host(self):
+        self.setup(host=False)
+        self.assertEqual(set(self.tasks()), {"AlansWay_Chromium", "AlansWay_Browser"})
+
+    def test_skip_services_registers_nothing(self):
+        self.setup("--skip-services")
+        self.assertEqual(self.tasks(), {})
+
+    def test_a_second_run_changes_nothing_and_a_moved_checkout_reports_an_update(self):
+        self.setup()
+        second = self.setup()
+        self.assertEqual(second.stdout.count("already current"), 4, second.stdout)
+        self.assertNotIn("restarted", second.stdout)
+        moved = desktop_tree(self.root / "moved")
+        third = run("--skip-plugin", "--desktop-dir", str(moved), "--bot-id", "111222333", "--non-interactive",
+                    "--mac-ssh", self.HOST, "--host-os", "mac", env=self.env(), check=False)
+        self.assertIn("AlansWay_Browser updated", third.stdout)
+        self.assertIn(str(moved).replace("/", "\\"), self.tasks()["AlansWay_Browser"])
+
+    def test_tailscale_is_found_under_program_files_when_it_is_not_on_path(self):
+        result = self.setup()
+        self.assertIn("is on your tailnet", result.stdout)
+
+    def test_every_host_call_uses_the_native_openssh(self):
+        self.setup(host_os="windows")
+        self.assertFalse((self.root / "ssh.log").exists(), "an ssh from PATH was used")
+        calls = (self.root / "native.log").read_text()
+        self.assertIn("StrictHostKeyChecking=yes", calls)
+        self.assertIn("scp -q", calls)
+
+    def test_the_connector_is_staged_with_a_windows_path_for_scp(self):
+        self.setup(host_os="windows")
+        scp = [line for line in (self.root / "native.log").read_text().splitlines() if line.startswith("scp")]
+        self.assertRegex(scp[0], r" -- C:/\S+/tmp\.\w+/connector ")
+
+    def test_the_plugin_installs_from_a_file_url_with_a_drive_path(self):
+        run("--desktop-dir", str(self.app), "--bot-id", "111222333", "--non-interactive", "--skip-browser",
+            env=self.env(), check=False)
+        self.assertIn("file:///C:%s#alans-way" % ROOT, read_log(self.log))
+
+    def test_the_restart_is_a_one_shot_scheduled_task_that_outlives_the_gateway(self):
+        result = self.setup("--restart", "--skip-browser")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        task = self.tasks()["AlansWay_GatewayRestart"]
+        self.assertIn("Start-Sleep -Seconds 3", task)
+        self.assertIn("gateway restart", task)
+        self.assertIn("-p 'default'", task)
+        self.assertIn("HERMES_HOME='%s'" % (self.local / "hermes"), task)
+        self.assertIn("Unregister-ScheduledTask -TaskName 'AlansWay_GatewayRestart'", task)
+        self.assertIn("Start-ScheduledTask", self.ps_log.read_text())
+        self.assertIn("Restarting the gateway in 3s", result.stdout)
+
+    def test_no_restart_task_without_the_flag(self):
+        self.setup("--skip-browser")
+        self.assertNotIn("AlansWay_GatewayRestart", self.tasks())
+
+    def test_the_computer_provider_needs_hermes_python_which_is_not_on_path(self):
+        result = self.setup("--skip-browser")
+        self.assertIn("HERMES_PYTHON", result.stdout)
+
+    def test_a_missing_sshd_says_how_to_install_it(self):
+        result = self.setup(env=self.env(FAKE_SSHD="missing"))
+        self.assertIn("Add-WindowsCapability", result.stdout)
+
+    def test_a_non_powershell_default_shell_is_flagged(self):
+        result = self.setup(env=self.env(FAKE_SSHD="running user shell-other"))
+        self.assertIn("DefaultShell", result.stdout)
+
+    def test_an_admin_account_gets_its_key_in_the_administrators_file(self):
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@mac"
+        (self.program_data / "ssh").mkdir(parents=True)
+        self.setup("--mac-key", key, env=self.env(FAKE_SSHD="running admin shell-ps"))
+        self.assertIn(key, (self.program_data / "ssh" / "administrators_authorized_keys").read_text())
+        self.assertIn(key, (self.home / ".ssh" / "authorized_keys").read_text())
+        self.assertIn("S-1-5-32-544", (self.root / "icacls.log").read_text())
+
+    def test_a_blocked_task_registration_is_a_warning_not_a_crash(self):
+        fake(self.bin_dir, "powershell", 'cat >/dev/null\necho "Register-ScheduledTask : Access is denied."\nexit 1\n')
+        result = self.setup()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("could not schedule AlansWay_Browser (group policy may block logon tasks): Register-ScheduledTask : Access is denied.", result.stdout)
+
+    def test_a_store_stub_python3_gives_way_to_a_real_python(self):
+        fake(self.bin_dir, "python3", 'echo "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 49\n')
+        fake(self.bin_dir, "python", 'exec %s "$@"\n' % shutil.which("python3"))
+        result = self.setup("--skip-browser")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+        self.assertIn("workspace_browser configured", result.stdout)
+
+    def test_wsl_is_linux_not_native_windows(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "systemctl", "exit 0\n")
+        fake(self.bin_dir, "tailscale", TAILSCALE_UP)
+        result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units")))
+        self.assertEqual(self.tasks(), {})
+        self.assertFalse(self.ps_log.exists())
+        self.assertTrue((self.root / "units" / "hermes-alans-way-browser.service").exists(), result.stdout)
 
 
 class ProfileLayoutTests(unittest.TestCase):

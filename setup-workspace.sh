@@ -49,17 +49,29 @@ if [ -n "$MAC_SSH" ]; then
   case "$_host" in ''|-*|.*|*[!A-Za-z0-9.:-]*) _bad=1;; esac
   [ "$_bad" = 0 ] || { echo "setup-workspace: invalid --mac-ssh '$MAC_SSH' (use user@host or host; no spaces, nothing may start with '-')" >&2; exit 2; }
 fi
+
+[ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
+# Git Bash on native Windows: the router path goes into config.yaml for Hermes
+# and node, which want C:/ paths, and ssh is the native OpenSSH the router uses.
+SSH=ssh HERMES_HOME_DEFAULT="$HOME/.hermes"
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    ROUTER="$(cygpath -m "$ROUTER")"
+    HERMES_HOME_DEFAULT="$(cygpath -m "${LOCALAPPDATA:-$HOME/AppData/Local}")/hermes"
+    _native="$(cygpath -u "${SYSTEMROOT:-${WINDIR:-C:/Windows}}")/System32/OpenSSH/ssh.exe"
+    [ ! -x "$_native" ] || SSH="$_native";;
+esac
+# setup.sh hands over the Python it chose: Windows has python.exe, and python3 may be a Store stub.
+if [ -n "${ALANS_WAY_PYTHON:-}" ]; then python3() { "$ALANS_WAY_PYTHON" "$@"; }; fi
+command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
     *[!0-9A-Za-z_.-]*)
       echo "setup-workspace: bad --profile" >&2
       exit 2;;
   esac
-  CONFIG="${HERMES_HOME:-$HOME/.hermes}/profiles/$PROFILE/config.yaml"
+  CONFIG="${HERMES_HOME:-$HERMES_HOME_DEFAULT}/profiles/$PROFILE/config.yaml"
 fi
-
-[ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
-command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 
 ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
@@ -80,7 +92,7 @@ if [ "$VERIFY" = 1 ]; then
     bad "node not on PATH (router is a node script)"
   fi
   if [ -n "$MAC_SSH" ]; then
-    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes -- "$MAC_SSH" echo ok 2>/dev/null; then
+    if "$SSH" -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes -- "$MAC_SSH" echo ok 2>/dev/null; then
       ok "host ssh reachable: $MAC_SSH"
       # Run the router's own probe — the exact code path connections take —
       # so a broken probe fails here at verify time, not mid-session.

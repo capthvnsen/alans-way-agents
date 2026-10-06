@@ -28,9 +28,14 @@
 //   --vps-connection PATH      local browser host connection.json
 //   --mac-state-file PATH      mac-watch state file
 //                              (default: /var/lib/hermes-alans-way/mac-state.json,
-//                               ~/Library/Application Support/... on a macOS guest)
+//                               ~/Library/Application Support/... on a macOS guest,
+//                               ~/.local/share/hermes-alans-way/... on a Windows guest)
 //   --probe                    run the host probe once, print the decision,
 //                              and exit — read-only, for install/verify checks
+//   --watch [--interval S] [--hysteresis N] [--state-file PATH] [--once]
+//                              the availability watcher (mac-watch.sh wraps it):
+//                              probe every S seconds (default 30) and publish the
+//                              state file the router and observer read
 // Environment fallbacks: HERMES_WORKSPACE_BOT_ID, HERMES_BOT_NAME,
 //   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_HOST_OS,
 //   HERMES_WORKSPACE_MAC_NODE, HERMES_WORKSPACE_MAC_MCP,
@@ -102,12 +107,27 @@ const vpsConnection =
   (process.platform === 'darwin'
     ? path.join(os.homedir(), 'Library', 'Application Support', 'hermes-alans-way', 'browser', 'connection.json')
     : path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'browser', 'connection.json'));
+// A native-Windows guest keeps its state beside the browser host's, under the
+// profile (the same ~/.local/share tree the app's host scripts default to).
 const macStateFile =
   arg('--mac-state-file') ||
   process.env.HERMES_MAC_STATE_FILE ||
   (process.platform === 'darwin'
     ? path.join(os.homedir(), 'Library', 'Application Support', 'hermes-alans-way', 'mac-state.json')
-    : '/var/lib/hermes-alans-way/mac-state.json');
+    : process.platform === 'win32'
+      ? path.join(os.homedir(), '.local', 'share', 'hermes-alans-way', 'mac-state.json')
+      : '/var/lib/hermes-alans-way/mac-state.json');
+
+// Windows guest: Win32-OpenSSH is the ssh the user's keys, agent and
+// known_hosts already belong to, and a Git-for-Windows ssh earlier on PATH can
+// differ. It has no ControlMaster (privateSocketDir below returns null on
+// win32), so every spawn pays a fresh handshake over the tailnet.
+function chooseSsh() {
+  if (process.platform !== 'win32') return 'ssh';
+  const native = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe');
+  return fs.existsSync(native) ? native : 'ssh';
+}
+const sshBinary = chooseSsh();
 
 // Reuse one ssh connection between the probe and the backend spawn: the
 // probe's handshake becomes the spawn's (~5ms vs a full handshake), and
@@ -395,7 +415,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
   return new Promise((resolve) => {
     const probe = hostOs === 'windows' ? windowsProbeCommand() : posixProbeCommand();
     const child = spawn(
-      'ssh',
+      sshBinary,
       [
         '-T',
         '-o',
@@ -408,7 +428,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
         macSsh,
         probe,
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
     );
     let output = '';
     let errOutput = '';
@@ -815,7 +835,84 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
   };
 }
 
+// What mac-watch.sh used to be, in node so a Windows guest needs no sh, sed or
+// timeout. "online" means the app answers, not just sshd (probeMac). A flip
+// needs --hysteresis consecutive reads so one dropped probe does not move the
+// agent between machines; the pending count rides in the state file so it
+// survives --once runs and restarts. The file is rewritten atomically every
+// tick: a stale mtime tells freshMacState the watcher is dead. Exit status 2
+// is a configuration error a restart cannot fix.
+async function watch() {
+  const positive = (flag, fallback) => {
+    const raw = arg(flag);
+    if (raw === undefined) return fallback;
+    if (!/^[1-9]\d*$/.test(raw)) {
+      process.stderr.write('mac-watch: --interval and --hysteresis must be positive integers\n');
+      process.exit(2);
+    }
+    return Number(raw);
+  };
+  const interval = positive('--interval', 30);
+  const hysteresis = positive('--hysteresis', 2);
+  if (!macSsh) {
+    process.stderr.write(
+      'mac-watch: HERMES_WORKSPACE_MAC_SSH is not set. Set it to user@host-of-your-computer (in /etc/hermes-alans-way/mac-watch.env for the systemd unit), or pass --mac-ssh. Not retrying.\n',
+    );
+    process.exit(2);
+  }
+  const file = arg('--state-file') || macStateFile;
+  const eventsLog = path.join(path.dirname(file), 'mac-events.log');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const isoNow = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  let st = { state: '', since: '', lastSeen: '', lastTransition: '', pending: '', pendingCount: 0 };
+  try {
+    if (!fs.lstatSync(file).isSymbolicLink()) {
+      const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (prev && (prev.state === 'online' || prev.state === 'offline')) {
+        const text = (v) => (typeof v === 'string' ? v : '');
+        st = {
+          state: prev.state, since: text(prev.since), lastSeen: text(prev.lastSeenOnline),
+          lastTransition: text(prev.lastTransition),
+          pending: prev.pending === 'online' || prev.pending === 'offline' ? prev.pending : '',
+          pendingCount: Number.isInteger(prev.pendingCount) && prev.pendingCount > 0 ? prev.pendingCount : 0,
+        };
+      }
+    }
+  } catch { /* no usable previous state: start unknown */ }
+  const write = () => {
+    const doc = {
+      state: st.state, since: st.since, lastSeenOnline: st.lastSeen || null, lastTransition: st.lastTransition,
+      ...(st.pending ? { pending: st.pending, pendingCount: st.pendingCount } : {}),
+    };
+    const tmp = `${file}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, `${JSON.stringify(doc)}\n`);
+    fs.renameSync(tmp, file);
+  };
+  const tick = async () => {
+    const ts = isoNow();
+    const current = (await probeMac(12000)).script ? 'online' : 'offline';
+    if (current === 'online') st.lastSeen = ts;
+    if (st.state && current !== st.state) {
+      if (current === st.pending) st.pendingCount += 1;
+      else { st.pending = current; st.pendingCount = 1; }
+      if (st.pendingCount < hysteresis) { write(); return; }
+    }
+    st.pending = ''; st.pendingCount = 0;
+    if (current !== st.state) {
+      fs.appendFileSync(eventsLog, `${ts} ${st.state || 'unknown'} -> ${current}\n`);
+      st = { ...st, state: current, since: ts, lastTransition: ts };
+    }
+    write();
+  };
+  for (;;) {
+    await tick();
+    if (process.argv.includes('--once')) return;
+    await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+  }
+}
+
 async function main() {
+  if (process.argv.includes('--watch')) return watch();
   if (process.argv.includes('--probe')) {
     const probe = macSsh ? await probeMac(12000) : { script: null, stderr: '' };
     const tail = stderrTail(probe.stderr);
@@ -978,7 +1075,7 @@ async function main() {
     const vpsArgs = [vpsScript, '--bot-id', botId];
     if (botName) vpsArgs.push('--bot-name', botName);
     vpsArgs.push('--connection', vpsConnection, ...extraArgs);
-    const c = spawn(process.execPath, vpsArgs, { stdio: ['pipe', 'pipe', 'inherit'] });
+    const c = spawn(process.execPath, vpsArgs, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
     bindChild(c, 'vps');
     return c;
   }
@@ -1219,7 +1316,7 @@ async function main() {
       macCommand,
     ];
     process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
-    bindChild(spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'inherit'] }), 'mac');
+    bindChild(spawn(sshBinary, sshArgs, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true }), 'mac');
   } else {
     let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
     if (probeErrTail) reason += ` (${probeErrTail})`;
@@ -1361,6 +1458,8 @@ module.exports = {
   noteServerRpc,
   mayReconverge,
   sshControlArgs,
+  sshBinary,
+  macStateFile,
   restoreMirror,
   continuationNotice,
   hostUnavailableLine,

@@ -11,7 +11,7 @@ this plugin, and do not replace this plugin with a git checkout.
 
 The user's computer may be a Mac (`--host-os mac`, the default), a Windows
 PC (`--host-os windows`) or a Linux desktop (`--host-os linux`). The computer
-Hermes runs on may be a Linux VPS or a macOS virtual machine. Host scripts
+Hermes runs on may be a Linux VPS, a macOS virtual machine or a Windows PC. Host scripts
 differ per OS: use `connect-mac.sh` on a Mac, `connect-windows.ps1` on Windows
 and `connect-linux.sh` on Linux; everything else in this skill is the same.
 
@@ -77,14 +77,21 @@ different bot's route silently.
    must be running for computer control even when the PC is reachable.
    Follow the steps in the app's `docs/setup-prompt.md`. Never use
    `StrictHostKeyChecking=accept-new` or ask for a password.
-4. **The display stack is guided, never auto-installed.** On a Linux guest
+4. **A Windows guest runs `setup.sh` from Git Bash.** Hermes' terminal tool
+   already uses Git Bash on native Windows, so run the same command there (WSL2
+   counts as Linux). It needs Node 22+, Python 3 (or `HERMES_PYTHON` pointing at
+   a `python.exe`), Tailscale and Chrome or Edge. It registers Scheduled Tasks
+   instead of systemd units, which start at logon, so tell the user to keep the PC
+   awake and turn on automatic sign-in (`netplwiz`). Relay the OpenSSH Server lines
+   it prints verbatim: they need an elevated PowerShell that only the human can open.
+5. **The display stack is guided, never auto-installed.** On a Linux guest
    that means X11/VNC: if the bootstrap prints display-stack instructions,
    relay them verbatim; browser services without a display fail-loop quietly.
    A macOS guest needs no X11: `scripts/mac-guest-services.sh` installs
    launchd agents, and the user grants Accessibility and Screen Recording
    once in the VM's System Settings (cannot be scripted; TCC is
    SIP-protected).
-5. **The gateway restart ends your own session, so it comes last.** You are
+6. **The gateway restart ends your own session, so it comes last.** You are
    most likely running inside this gateway. `setup.sh --restart` installs,
    binds, sets the timezone and verifies first, prints its summary, and only
    then schedules the restart, detached, about ten seconds later. As soon as
@@ -93,7 +100,7 @@ different bot's route silently.
    conversation off. It goes through the gateway's real owner (`hermes gateway
    restart`, or the supervisor that owns it), so never kill -9 a gateway
    mid-message. If the restart was skipped, a check failed: say which one.
-6. **Bind only after a real DM route exists.** If no routes are listed, the
+7. **Bind only after a real DM route exists.** If no routes are listed, the
    user messages the bot once, then `setup.sh --bind`.
 
 ## Report, don't claim
