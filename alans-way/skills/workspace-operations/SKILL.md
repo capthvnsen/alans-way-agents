@@ -204,10 +204,13 @@ read as text.
 Native Mac apps use `workspace_computer_apps`, then
 `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
 `ref` from that snapshot. Use `click` or `drag` with the snapshot's x,y only
-when the control has no name. These calls drive a background app and do not
-move the human's cursor. Skip the frontmost app, Keychain, and password
-fields. Do not open a browser tab to do a native app's job, and do not drive
-a native app to do a website's job.
+when the control has no name. `workspace_computer_screenshot` captures that
+one window as a small jpeg, and only when the snapshot has no named control
+for what you need. Scale image pixels by `window.width / imageWidth`. Do not
+screenshot a window you can already read as names and refs. These calls drive
+a background app and do not move the human's cursor. Skip the frontmost app,
+Keychain, and password fields. Do not open a browser tab to do a native app's
+job, and do not drive a native app to do a website's job.
 
 ## Preserve vanilla Hermes
 
