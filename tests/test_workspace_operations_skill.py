@@ -66,6 +66,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("{unchanged:true}", self.normalized)
         self.assertIn("since=", self.normalized)
         self.assertIn("desktop tree is the same", self.normalized)
+        self.assertIn("When it says `unchanged`, do not snapshot again.", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
         self.assertIn("On the Linux desktop, press is the action.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
