@@ -281,6 +281,18 @@ class Runtime:
         if self.worker and self.worker is not threading.current_thread():
             self.worker.join(timeout=1.0)
 
+    def tool_control(self, args, **kwargs):
+        """Tool entry: mutating actions belong to the bound route.
+
+        The CLI operator and slash commands call ``control`` themselves (the
+        slash path checks the route first), so gating here would lock the
+        operator out of a shell that has no session key.
+        """
+        action = args.get("action", "status") if isinstance(args, dict) else "status"
+        if action != "status" and not self._bound_route_only():
+            return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
+        return self.control(args, **kwargs)
+
     def control(self, args, **kwargs):
         try:
             if not isinstance(args, dict):
@@ -500,7 +512,7 @@ def register(ctx, *, home=None, background=True):
     runtime = Runtime(ctx, Path(home) if home is not None else _owning_home(), background=background)
     from .proactive_schema import SCHEMA
     ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
-                      handler=runtime.control, check_fn=lambda: True)
+                      handler=runtime.tool_control, check_fn=lambda: True)
     ctx.register_command("proactivity", runtime.command,
                          description="Status, pause, resume, and configure proactive work")
     ctx.register_command("watch", runtime.watch_command,

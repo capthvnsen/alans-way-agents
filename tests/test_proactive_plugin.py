@@ -79,6 +79,15 @@ class PluginTests(unittest.TestCase):
             with patch.object(guard, "_process_started_at", return_value=process_start):
                 self.assertTrue(guard.gateway_ready(home, registered))
 
+    def test_process_start_is_probeable_without_proc(self):
+        """macOS has no /proc; the ps fallback must still return a real start."""
+        from datetime import datetime, timezone
+        module = load_plugin()
+        guard = sys.modules[module.__name__ + ".gateway_guard"]
+        started = guard._process_started_at()
+        self.assertIsNotNone(started)
+        self.assertLess(abs((datetime.now(timezone.utc) - started).total_seconds()), 86400)
+
     def test_gateway_hook_is_passive_for_non_startup_events(self):
         hook = ROOT / "hooks/alans-way/handler.py"
         spec = importlib.util.spec_from_file_location("proactive_hook_test", hook)
@@ -371,6 +380,28 @@ class PluginTests(unittest.TestCase):
             result = __import__("json").loads(runtime.control(
                 {"action": "report_signal", "task_id": "ghost", "signal": "x"}))
             self.assertIs(result["ok"], False)
+            runtime.close()
+
+    def test_tool_mutations_stay_on_the_bound_route_but_the_operator_does_not(self):
+        import json as _json
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:1"})
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:other:telegram:dm:9"}):
+                denied = _json.loads(runtime.tool_control({"action": "resume"}))
+                status = _json.loads(runtime.tool_control({"action": "status"}))
+            self.assertIs(denied["ok"], False)
+            self.assertIs(status["ok"], True)
+            self.assertFalse(runtime.store.load_policy().enabled)
+            with patch.dict(os.environ, {"HERMES_SESSION_KEY": "agent:main:telegram:dm:1"}):
+                allowed = _json.loads(runtime.tool_control({"action": "resume"}))
+            self.assertIs(allowed["ok"], True)
+            self.assertTrue(runtime.store.load_policy().enabled)
+            os.environ.pop("HERMES_SESSION_KEY", None)
+            operator = _json.loads(runtime.control({"action": "pause"}))
+            self.assertIs(operator["ok"], True)
+            self.assertFalse(runtime.store.load_policy().enabled)
             runtime.close()
 
     def test_register_uses_the_plugin_load_scope_home_not_the_launch_environment(self):

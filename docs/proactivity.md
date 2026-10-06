@@ -192,7 +192,11 @@ pending queue also reserves headroom so speculative noise cannot starve them.
 A re-armed instance retires as stale; a finished watch's queued wake is
 rejected. `/watch list|show|add {json}|pause|resume|done|cancel|signal` is the
 operator's direct surface over the ledger; like mutating `/proactivity`
-actions it answers only on the bound conversation; status stays open.
+actions and the `proactive_control` tool it answers only on the bound
+conversation; status stays open. Under a multiplexed gateway, Hermes
+dispatches plugin slash commands through the launch profile, so
+`/proactivity` and `/watch` on any other profile answer from that launch
+profile's store — use `proactive_control` inside the profile's own chat.
 
 Telegram remains the conversation owner. A watch's `execution_host` is `cloud`
 or `mac`; omitting it preserves the existing choice. Explicitly local work

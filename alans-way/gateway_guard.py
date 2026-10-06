@@ -49,6 +49,24 @@ def _process_started_at() -> datetime | None:
     try:
         return datetime.fromtimestamp(os.stat("/proc/self").st_ctime, timezone.utc)
     except OSError:
+        pass
+    # macOS has no /proc. etime is elapsed clock time ([[dd-]hh:]mm:ss), so
+    # the result is UTC regardless of the machine's zone. BSD ps has no etimes.
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["ps", "-o", "etime=", "-p", str(os.getpid())],
+            text=True, timeout=2, stderr=subprocess.DEVNULL).strip()
+        days, _, clock = out.partition("-")
+        if not clock:
+            clock, days = days, "0"
+        parts = [int(part) for part in clock.split(":")]
+        weights = (1, 60, 3600)
+        if not parts or len(parts) > 3:
+            return None
+        seconds = int(days) * 86400 + sum(part * weights[index] for index, part in enumerate(reversed(parts)))
+        return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
