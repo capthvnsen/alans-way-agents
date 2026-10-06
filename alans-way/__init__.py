@@ -501,7 +501,7 @@ class Runtime:
         disclosure-free view: watch scopes and preferences stay bound.
         """
         action = args.get("action", "status") if isinstance(args, dict) else "status"
-        if action != "status" and not self._bound_route_only() and not self._cron_bookkeeping(action):
+        if action != "status" and not self._bound_route_only() and not self._cron_bookkeeping(action, kwargs.get("task_id")):
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
         if action == "resume":
             return json.dumps({"ok": False, "error": "Resume is operator-only: the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
@@ -543,18 +543,22 @@ class Runtime:
                 pass
         return result
 
-    def _cron_bookkeeping(self, action):
+    def _cron_bookkeeping(self, action, task_id=None):
         """An isolated wake runs in a cron session with no route: it may feed
-        signals and finish watches (both only tighten), nothing else."""
+        signals and finish watches (both only tighten), nothing else. Only the
+        wake jobs this plugin created count: Hermes names that session's
+        task_id ``cron:<job id>:<run>``, and the job must still be tracked."""
         if action not in ("report_signal", "finish_task"):
             return False
         try:
             from gateway.session_context import get_session_env
             from utils import is_truthy_value
-            return is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
+            cron = is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
         except Exception:
             import os
-            return os.environ.get("HERMES_CRON_SESSION", "").lower() in ("1", "true", "yes")
+            cron = os.environ.get("HERMES_CRON_SESSION", "").lower() in ("1", "true", "yes")
+        parts = str(task_id or "").split(":")
+        return cron and parts[0] == "cron" and len(parts) > 1 and parts[1] in self.ledger.tracked_jobs()
 
     def _propose(self, task):
         """The model may only propose a watch; the user approves it themselves."""
@@ -916,7 +920,7 @@ class Runtime:
                 if task["status"] == "proposed":
                     return f"Watch {task_id} is only proposed. Approve it with /watch approve {task_id}."
                 if task["status"] in {"done", "cancelled"}:
-                    return f"Watch {task_id} is {task['status']}. Terminal watches need a new id."
+                    return f"Watch {task_id} is {task['status']}; terminal watches need a new id."
                 task = dict(task, status="active")
                 task = {k: v for k, v in task.items()
                         if k in TASK_FIELDS and k not in {"signal", "signal_at"}}

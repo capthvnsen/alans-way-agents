@@ -242,9 +242,13 @@ class IsolatedWakeTests(unittest.TestCase):
             runtime = self.runtime(Ctx(), directory)
             runtime.ledger.record_task({"id": "w", "title": "T", "scope": "S", "next_action": "N",
                                         "owner": "primary", "status": "active", "approved": True})
-            call = lambda args: json.loads(runtime.tool_control(args))["ok"]
+            runtime.ledger.track_job("job1", "review")
+            call = lambda args, task_id="cron:job1:run7": json.loads(runtime.tool_control(args, task_id=task_id))["ok"]
             self.assertFalse(call({"action": "report_signal", "task_id": "w", "signal": "x"}))
             with patch.dict(os.environ, {"HERMES_CRON_SESSION": "1"}):
+                for foreign in ("cron:other:run7", "", "job1", "cron:"):
+                    self.assertFalse(call({"action": "finish_task", "task_id": "w", "status": "done"}, foreign), foreign)
+                self.assertFalse(call({"action": "report_signal", "task_id": "w", "signal": "x"}, None))
                 self.assertTrue(call({"action": "report_signal", "task_id": "w", "signal": "x"}))
                 self.assertFalse(call({"action": "pause"}))
                 self.assertFalse(call({"action": "record_task", "task": {"id": "n"}}))
