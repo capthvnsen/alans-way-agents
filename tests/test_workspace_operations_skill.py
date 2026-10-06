@@ -134,6 +134,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Do not pass `host`.", self.normalized)
         self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
+        self.assertIn("continue the task on the VPS", self.normalized)
+        self.assertIn("Open the same URL with `cua_alans_way_open`", self.normalized)
+        self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
+        self.assertIn("A closed laptop does not stop them.", self.normalized)
+        self.assertIn("A closed laptop is not this handoff.", self.normalized)
+        self.assertNotIn("do not improvise on the VPS", self.normalized)
         self.assertNotIn("explicit `host: vps` open", self.normalized)
 
     def test_human_has_control_asks_before_claim(self):
