@@ -8,7 +8,8 @@
 #   ./setup.sh --verify                                       # re-check an install
 #
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
-#        --hermes-home DIR --desktop-dir DIR --skip-browser --skip-plugin --skip-services
+#        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
+#        --skip-browser --skip-plugin --skip-services
 #        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
@@ -17,7 +18,7 @@ DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
-HERMES_HOME="" DESKTOP_DIR=""
+HERMES_HOME="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 
 while [ $# -gt 0 ]; do
@@ -29,6 +30,8 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="$2"; shift 2;;
     --hermes-home) HERMES_HOME="$2"; shift 2;;
     --desktop-dir) DESKTOP_DIR="$2"; shift 2;;
+    --repo-ref) REPO_REF="$2"; shift 2;;
+    --desktop-ref) DESKTOP_REF="$2"; shift 2;;
     --skip-browser) SKIP_BROWSER=1; shift;;
     --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
@@ -54,6 +57,8 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --config FILE    edit this Hermes config.yaml instead of the profile's
   --hermes-home D  Hermes home directory (default: ~/.hermes)
   --desktop-dir D  where the alans-way app checkout lives (cloned if missing)
+  --repo-ref SHA   pin this repo's clone/update to a reviewed commit or tag
+  --desktop-ref SHA  pin the alans-way desktop repo clone/update the same way
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --skip-browser / --skip-services / --non-interactive for constrained runs
 EOF
@@ -64,6 +69,14 @@ done
 
 [ -n "$HERMES_HOME" ] || HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 [ "$PROFILE" != default ] || PROFILE=""
+
+# Refs drive git fetch/checkout — reject anything that isn't a plain ref.
+for _ref in "$REPO_REF" "$DESKTOP_REF"; do
+  [ -z "$_ref" ] && continue
+  case "$_ref" in -*|*:*|*..*|*[!A-Za-z0-9._/-]*)
+    echo "setup: invalid ref '$_ref'" >&2; exit 2;;
+  esac
+done
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -190,14 +203,30 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
   exit "$([ "$FAILS" = 0 ] && echo 0 || echo 1)"
 fi
 
-# Fetch the repo when running via curl|bash.
+# Fetch the repo when running via curl|bash. A --repo-ref pin checks out a
+# reviewed commit instead of tracking main.
 if [ -z "$REPO_DIR" ]; then
   step "Fetching alans-way-agents"
   REPO_DIR="$HOME/.local/share/alans-way-agents"
   if [ -d "$REPO_DIR/.git" ]; then
-    git -C "$REPO_DIR" pull --ff-only -q && ok "updated $REPO_DIR" || warn "could not update $REPO_DIR — using existing checkout"
+    if [ -n "$REPO_REF" ]; then
+      # A requested pin that can't be applied is a stop, not a fallback —
+      # continuing on the wrong tree defeats the review boundary. Fetch only
+      # when the local objects don't already satisfy the ref.
+      if git -C "$REPO_DIR" checkout -q "$REPO_REF" 2>/dev/null \
+          || { git -C "$REPO_DIR" fetch -q origin && git -C "$REPO_DIR" checkout -q "$REPO_REF"; }; then
+        ok "pinned $REPO_DIR to $REPO_REF"
+      else
+        bad "could not pin $REPO_DIR to $REPO_REF"; exit 1
+      fi
+    else
+      git -C "$REPO_DIR" pull --ff-only -q && ok "updated $REPO_DIR" || warn "could not update $REPO_DIR — using existing checkout"
+    fi
   else
-    git clone -q "$REPO_URL" "$REPO_DIR" && ok "cloned to $REPO_DIR" || { bad "git clone failed"; exit 1; }
+    git clone -q "$REPO_URL" "$REPO_DIR" \
+      && { [ -z "$REPO_REF" ] || git -C "$REPO_DIR" checkout -q "$REPO_REF"; } \
+      && ok "cloned to $REPO_DIR${REPO_REF:+ at $REPO_REF}" \
+      || { bad "git clone or pin failed"; exit 1; }
   fi
 fi
 
@@ -252,6 +281,24 @@ else
   fi
 fi
 
+# A catalog install records provenance in the plugins dir's
+# .install-metadata.json (a ``catalog`` block naming the reviewed pin) and
+# drops a .hermes-catalog.json convenience copy inside the plugin. Either
+# marker means the catalog pin is the install's only legitimate source.
+plugin_is_catalog_installed() {
+  [ -f "$HERMES_HOME/plugins/$PLUGIN_NAME/.hermes-catalog.json" ] && return 0
+  [ -f "$HERMES_HOME/plugins/.install-metadata.json" ] || return 1
+  python3 - "$HERMES_HOME" "$PLUGIN_NAME" <<'PY'
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1] + "/plugins/.install-metadata.json"))
+except Exception:
+    sys.exit(1)
+row = rows.get(sys.argv[2])
+sys.exit(0 if isinstance(row, dict) and isinstance(row.get("catalog"), dict) else 1)
+PY
+}
+
 # ---------------------------------------------------------------- plugin
 step "Plugin"
 if [ "$SKIP_PLUGIN" = 1 ]; then
@@ -261,7 +308,12 @@ if [ "$SKIP_PLUGIN" = 1 ]; then
     bad "no $PLUGIN_NAME plugin installed. Install it from the Hermes catalog, or re-run without --skip-plugin."
   fi
 elif hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
-  if diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$HERMES_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
+  if plugin_is_catalog_installed; then
+    # Never install --force over the catalog pin: the reviewed build stays
+    # the only plugin source, updated only through the catalog itself.
+    ok "plugin installed from the Hermes catalog — leaving its pin in place"
+    say "  to move it forward: hermes plugins update $PLUGIN_NAME"
+  elif diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$HERMES_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
   else
     hermes plugins install --force "file://$REPO_DIR#$PLUGIN_NAME" >/dev/null 2>&1 \
@@ -292,9 +344,11 @@ done
 step "Gateway hook"
 mkdir -p "$HERMES_HOME/hooks"
 # The hook ships inside the plugin so a catalogue install contains it. With
-# --skip-plugin, copy that reviewed tree, not a newer clone of this repo.
+# --skip-plugin or a catalog-installed plugin, copy that reviewed tree, not
+# a newer clone of this repo.
 HOOK_SRC="$REPO_DIR/$PLUGIN_NAME/gateway-hook"
-if [ "$SKIP_PLUGIN" = 1 ] && [ -f "$HERMES_HOME/plugins/$PLUGIN_NAME/gateway-hook/handler.py" ]; then
+if { [ "$SKIP_PLUGIN" = 1 ] || plugin_is_catalog_installed; } \
+    && [ -f "$HERMES_HOME/plugins/$PLUGIN_NAME/gateway-hook/handler.py" ]; then
   HOOK_SRC="$HERMES_HOME/plugins/$PLUGIN_NAME/gateway-hook"
 fi
 install_hook() {
@@ -326,16 +380,31 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     if [ -d "$DESKTOP_DIR/.git" ]; then
       OLD_LOCK="$(cksum < "$DESKTOP_DIR/desktop/package-lock.json" 2>/dev/null || true)"
       OLD_REV="$(git -C "$DESKTOP_DIR" rev-parse HEAD 2>/dev/null || true)"
-      if git -C "$DESKTOP_DIR" pull --ff-only -q 2>/dev/null; then
-        if [ "$OLD_REV" != "$(git -C "$DESKTOP_DIR" rev-parse HEAD)" ]; then
-          BROWSER_UPDATED=1; ok "updated browser scripts in $DESKTOP_DIR"
-          [ "$OLD_LOCK" = "$(cksum < "$DESKTOP_DIR/desktop/package-lock.json")" ] \
+      DESKTOP_SYNCED=0
+      if [ -n "$DESKTOP_REF" ]; then
+        # A requested pin that can't be applied is a stop, not a fallback —
+        # updating anyway would run unreviewed code. Fetch only when the
+        # local objects don't already satisfy the ref.
+        if git -C "$DESKTOP_DIR" checkout -q "$DESKTOP_REF" 2>/dev/null \
+            || { git -C "$DESKTOP_DIR" fetch -q origin 2>/dev/null \
+                 && git -C "$DESKTOP_DIR" checkout -q "$DESKTOP_REF" 2>/dev/null; }; then
+          DESKTOP_SYNCED=1
+        else
+          bad "could not pin $DESKTOP_DIR to $DESKTOP_REF"; exit 1
+        fi
+      elif git -C "$DESKTOP_DIR" pull --ff-only -q 2>/dev/null; then
+        DESKTOP_SYNCED=1
+      else
+        warn "could not update $DESKTOP_DIR (local changes?) — using it as is"
+      fi
+      if [ "$DESKTOP_SYNCED" = 1 ]; then
+        if [ "$OLD_REV" != "$(git -C "$DESKTOP_DIR" rev-parse HEAD 2>/dev/null || true)" ]; then
+          BROWSER_UPDATED=1; ok "updated browser scripts in $DESKTOP_DIR${DESKTOP_REF:+ to $DESKTOP_REF}"
+          [ "$OLD_LOCK" = "$(cksum < "$DESKTOP_DIR/desktop/package-lock.json" 2>/dev/null || true)" ] \
             || rm -rf "$DESKTOP_DIR/desktop/node_modules"
         else
           ok "browser scripts at $DESKTOP_DIR are current"
         fi
-      else
-        warn "could not update $DESKTOP_DIR (local changes?) — using it as is"
       fi
     else
       warn "browser scripts at $DESKTOP_DIR are not a git checkout, so setup can't update them — move it aside and re-run to reinstall"
@@ -343,17 +412,29 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   else
     mkdir -p "$(dirname "$DESKTOP_DIR")"
     SIBLING=""
-    for d in "$SCRIPT_DIR/../alans-way" "$SCRIPT_DIR/../hermes-companion"; do
-      [ -d "$d/desktop/scripts" ] && { SIBLING="$d"; break; }
-    done
+    # A pinned ref means "exactly this reviewed tree" — clone it rather than
+    # trusting whatever sibling checkout happens to be lying nearby.
+    if [ -z "$DESKTOP_REF" ]; then
+      for d in "$SCRIPT_DIR/../alans-way" "$SCRIPT_DIR/../hermes-companion"; do
+        [ -d "$d/desktop/scripts" ] && { SIBLING="$d"; break; }
+      done
+    fi
     if [ -n "$SIBLING" ]; then
       mkdir -p "$DESKTOP_DIR"
       cp -R "$SIBLING/desktop" "$DESKTOP_DIR/" && ok "copied desktop checkout to $DESKTOP_DIR"
     else
       rm -rf "$DESKTOP_DIR.tmp"
-      git clone -q --depth 1 "$DESKTOP_REPO_URL" "$DESKTOP_DIR.tmp" \
-        && mv "$DESKTOP_DIR.tmp" "$DESKTOP_DIR" && ok "cloned companion repo to $DESKTOP_DIR" \
-        || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo — browser host skipped"; }
+      if [ -n "$DESKTOP_REF" ]; then
+        git clone -q "$DESKTOP_REPO_URL" "$DESKTOP_DIR.tmp" \
+          && git -C "$DESKTOP_DIR.tmp" checkout -q "$DESKTOP_REF" \
+          && mv "$DESKTOP_DIR.tmp" "$DESKTOP_DIR" \
+          && ok "cloned companion repo to $DESKTOP_DIR at $DESKTOP_REF" \
+          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo at $DESKTOP_REF — browser host skipped"; }
+      else
+        git clone -q --depth 1 "$DESKTOP_REPO_URL" "$DESKTOP_DIR.tmp" \
+          && mv "$DESKTOP_DIR.tmp" "$DESKTOP_DIR" && ok "cloned companion repo to $DESKTOP_DIR" \
+          || { rm -rf "$DESKTOP_DIR.tmp"; warn "could not fetch desktop repo — browser host skipped"; }
+      fi
     fi
   fi
   if [ -n "$MAC_SSH" ] && [ -f "$DESKTOP_DIR/desktop/scripts/browser-mcp.cjs" ] && [ -f "$DESKTOP_DIR/desktop/src/computer.cjs" ]; then

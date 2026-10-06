@@ -223,6 +223,56 @@ class SkipPluginTests(unittest.TestCase):
             self.assertIn("not replacing it", result.stdout)
             self.assertNotIn("plugins install", calls)
 
+    def test_catalog_install_is_never_force_replaced_without_skip_plugin(self):
+        """A catalog-installed plugin is provenance in .install-metadata.json;
+        setup must stop short of install --force and point at the catalog's
+        own update path instead."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            plugin_dir = home / "plugins" / "alans-way"
+            plugin_dir.mkdir(parents=True)
+            (home / "plugins" / ".install-metadata.json").write_text(
+                '{"alans-way": {"source": "catalog", "catalog": {"name": "alans-way", '
+                '"sha": "3a74614aa6ef43353500553526325c2fc33da9e5"}, "pinned": true}}',
+                encoding="utf-8",
+            )
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run(
+                "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home),
+                env=env, check=False,
+            )
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("leaving its pin in place", result.stdout)
+            self.assertIn("hermes plugins update", result.stdout)
+            self.assertNotIn("plugins install", calls)
+
+    def test_catalog_sidecar_alone_also_marks_a_catalog_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            plugin_dir = home / "plugins" / "alans-way"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".hermes-catalog.json").write_text(
+                '{"catalog_name": "alans-way", "sha": "3a74614aa6ef43353500553526325c2fc33da9e5"}',
+                encoding="utf-8",
+            )
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run(
+                "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home),
+                env=env, check=False,
+            )
+            self.assertNotIn("plugins install", log.read_text(encoding="utf-8"))
+
+    def test_ref_flags_reject_non_ref_values(self):
+        result = run("--repo-ref", "HEAD:hook.py", "--verify", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid ref", result.stderr)
+
 
 class AgentShellTests(unittest.TestCase):
     def test_runs_to_completion_without_a_controlling_terminal(self):

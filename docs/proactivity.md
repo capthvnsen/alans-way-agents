@@ -118,19 +118,20 @@ The primary translates natural-language preferences into the explicit
 `proactive_control` tool, then reads `status` back before confirming a change.
 Frontend controls are `/proactivity status`, `/proactivity pause`,
 `/proactivity resume`, `/proactivity review`, and
-`/proactivity configure {"quiet_start":23,"quiet_end":8}`. Configure accepts JSON.
+`/proactivity configure {"quiet_start":23,"quiet_end":8}`. Configure accepts JSON;
+`resume` and limit-widening changes are operator-only.
 
 | User request | Tool action |
 | --- | --- |
 | "Stop being proactive." | `pause` |
-| "Resume proactivity." | `resume`, only with explicit consent |
-| "Quiet from 11pm to 8am." | `configure` supported quiet-hour/timezone fields |
-| "At most once a day / less often." | `configure` daily ceiling/minimum interval |
+| "Resume proactivity." | `resume` (operator-only) |
+| "Quiet from 11pm to 8am." | `configure` quiet-hour/timezone fields (widening only) |
+| "At most once a day / less often." | `configure` a lower ceiling or higher interval |
 | "Focus on these priorities." | `configure` only fields the live schema supports |
 | "Review what would help now." | `review`, immediate read-only appraisal, including while paused |
 
 ```python
-proactive_control(action="configure", settings={"quiet_start": 23})
+proactive_control(action="configure", settings={"quiet_start": 20})
 proactive_control(action="status")
 ```
 

@@ -59,8 +59,7 @@ own `/watch` command (see below).
 ```python
 proactive_control(action="status")
 proactive_control(action="pause")
-proactive_control(action="resume")
-proactive_control(action="configure", settings={"quiet_start": 23, "quiet_end": 8})
+proactive_control(action="configure", settings={"quiet_start": 20, "quiet_end": 8})
 proactive_control(action="configure", settings={"max_daily_wakes": 1})
 proactive_control(action="review")
 proactive_control(action="record_task", task={
@@ -80,11 +79,19 @@ consent before any action. It does not queue an automatic wake.
 
 ## Durable Chat Controls
 
-Translate the user's ordinary chat into an explicit `proactive_control` action:
+Translate the user's ordinary chat into an explicit `proactive_control` action.
+The tool only ever tightens what the operator set — caps can drop, intervals can
+grow, and the quiet window can widen — while `resume` and any loosening change
+are refused and belong to the human's `/proactivity` or `hermes proactivity`.
+When a request needs one of those, say so instead of calling the tool.
 
-- "Stop being proactive" → `pause`; "resume proactivity" → `resume` only on clear consent.
-- "Quiet from 11pm to 8am" → `configure` the supported quiet-hour fields and timezone.
-- "Less often / at most once a day" → `configure` `max_daily_wakes` or `min_interval_seconds`.
+- "Stop being proactive" → `pause`; "resume proactivity" → ask the user to run
+  `/proactivity resume` themselves — resume is operator-only.
+- "Quiet from 11pm to 8am" → `configure` the supported quiet-hour fields and
+  timezone when that keeps or widens the current quiet window; shrinking it is
+  operator-only.
+- "Less often / at most once a day" → `configure` a lower `max_daily_wakes` or a
+  higher `min_interval_seconds`; raising the ceiling is operator-only.
 - "Focus on these priorities" → `configure` priorities if the live schema supports them;
   otherwise explain the unsupported setting. Do not invent fields or claim it was saved.
 - "Review what would help now" → `review`; follow the procedure below once.

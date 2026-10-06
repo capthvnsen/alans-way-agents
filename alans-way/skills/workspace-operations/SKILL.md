@@ -147,13 +147,12 @@ app opens them for the user while the tab stays yours to keep working.
    express, `{action:"cdp", method:"...", params:{...}}` sends a raw Chrome
    DevTools Protocol command scoped to the tab — for example
    `Accessibility.getFullAXTree` or `Network.enable` interception.
-4. On `human_has_control`, do not wait, ask, or describe a handoff — call
-   `workspace_browser_action` with `action:"claim"` on that tab to take
-   control yourself. You have priority in the in-app browser; claim needs no
-   human involvement, returns a fresh epoch, and the human can always grab
-   the tab back just by interacting. Claim is also how you reach a tab whose
-   login or page state only exists there (e.g. a site logged in on a human
-   tab). If claim is refused because another bot owns the tab, open a fresh
+4. On `human_has_control`, the tab is the human's — ask the user before
+   taking it. Say what you need from it and claim only after they agree:
+   `workspace_browser_action` with `action:"claim"` returns a fresh epoch,
+   and the human can always grab the tab back just by interacting. They can
+   also hand the tab over themselves with the app's Give-to-agent control.
+   If claim is refused or the user wants the tab left alone, open a fresh
    owned tab instead. Use `action:"release"` to hand a tab back to the human
    when their review matters. On a stale
    epoch, inspect the current state before deciding on another action. Treat a
@@ -180,9 +179,9 @@ The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
 pause browser or desktop agents. Coordinate work in the same window with the
 human. Mac **Take over / Give to agent** enforces local tab control separately.
-For a VPS tab reporting `human_has_control`, claim it with
-`action:"claim"` the same way rather than treating the viewer switch as
-permission or waiting on a release.
+For a VPS tab reporting `human_has_control`, the same consent rule applies:
+ask the user before claiming it — the viewer's control switch is not
+permission, and a release is not required once the user agrees.
 Separate desktop streams and automatic Mac/VPS login propagation remain
 additional work.
 
