@@ -289,16 +289,90 @@ function writeResume(file, url) {
   } catch { /* remembering a page must not break the tool result */ }
 }
 
-function readResume(file, now = Date.now()) {
+function safeResumeUrl(value) {
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!data || typeof data.url !== 'string' || typeof data.at !== 'number') return null;
-    if (now - data.at > RESUME_MAX_AGE_MS) return null;
-    return data.url;
+    const url = new URL(value);
+    if (url.username || url.password || url.protocol !== 'https:') return null;
+    url.hash = '';
+    if (url.href.length > 500) return null;
+    return url.href;
   } catch { return null; }
 }
 
-function workspaceNotice(host, mac, resumeUrl) {
+function readResumeRecord(file, now = Date.now()) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const url = data && safeResumeUrl(data.url);
+    if (!url || typeof data.at !== 'number') return null;
+    if (now - data.at > RESUME_MAX_AGE_MS) return null;
+    const openedAt = typeof data.openedAt === 'number' ? data.openedAt : 0;
+    const tabId = typeof data.tabId === 'string' && /^[\w-]{1,100}$/.test(data.tabId) ? data.tabId : '';
+    return { url, at: data.at, openedAt, tabId };
+  } catch { return null; }
+}
+
+function readResume(file, now = Date.now()) {
+  const record = readResumeRecord(file, now);
+  return record ? record.url : null;
+}
+
+// One open per Mac observation. A later Mac snapshot rewrites `at` and this
+// opens again; a router respawn while the laptop stays closed does not.
+function markResumeOpened(file, record, tabId, now = Date.now()) {
+  const url = safeResumeUrl(record && record.url);
+  if (!url || typeof record.at !== 'number' || !/^[\w-]{1,100}$/.test(String(tabId || ''))) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ url, at: record.at, openedAt: now, tabId }));
+    fs.renameSync(tmp, file);
+  } catch { /* the next spawn can open the page again */ }
+}
+
+function continuedPage(record) {
+  if (!record || !(record.openedAt >= record.at) || !record.tabId) return null;
+  return { url: record.url, tabId: record.tabId };
+}
+
+// Open the last Mac https page in the local VPS browser. Cookies do not copy.
+// A tab that already has the URL is reused. A missing browser host returns
+// null so the notice can still tell the model to open the page itself.
+async function continueRememberedPage({ connectionFile, record, botId, botName, fetchImpl, now = Date.now() }) {
+  const safe = record && safeResumeUrl(record.url);
+  if (!safe || typeof record.at !== 'number' || now - record.at > RESUME_MAX_AGE_MS) return null;
+  if (record.openedAt >= record.at && record.tabId) return { url: safe, tabId: record.tabId, already: true };
+  let connection;
+  try { connection = JSON.parse(fs.readFileSync(connectionFile, 'utf8')); } catch { return null; }
+  let base;
+  try { base = new URL(connection.url); } catch { return null; }
+  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || !connection.token || !botId) return null;
+  const fetch = fetchImpl || globalThis.fetch;
+  const headers = {
+    Authorization: `Bearer ${connection.token}`,
+    'X-Hermes-Bot': botId,
+    ...(botName ? { 'X-Hermes-Bot-Name': encodeURIComponent(String(botName).slice(0, 80)) } : {}),
+  };
+  try {
+    const listed = await fetch(new URL('/v1/tabs', base), { headers, signal: AbortSignal.timeout(4000) });
+    if (!listed.ok) return null;
+    const body = await listed.json();
+    const tabs = body && Array.isArray(body.tabs) ? body.tabs : [];
+    const existing = tabs.find((tab) => tab && safeResumeUrl(tab.url) === safe && typeof tab.id === 'string' && /^[\w-]{1,100}$/.test(tab.id));
+    if (existing) return { url: safe, tabId: existing.id, already: true };
+    const opened = await fetch(new URL('/v1/tabs', base), {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: safe, background: true }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!opened.ok) return null;
+    const tab = await opened.json();
+    if (!tab || typeof tab.id !== 'string' || !/^[\w-]{1,100}$/.test(tab.id)) return null;
+    return { url: safe, tabId: tab.id, already: false };
+  } catch { return null; }
+}
+
+function workspaceNotice(host, mac, resumeUrl, continued) {
   if (!mac || host !== 'vps') return null;
   if (mac.state === 'online') {
     return (
@@ -306,7 +380,9 @@ function workspaceNotice(host, mac, resumeUrl) {
       'tasks waiting on Mac-local resources can resume. New web work goes to the in-app Mac browser.'
     );
   }
-  const page = resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
+  const page = continued && continued.url && continued.tabId
+    ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, say so and stop only that page.`
+    : resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
   return (
     `[workspace] Mac unreachable since ${mac.since || 'unknown'} — ` +
     `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the Mac keep going. Mac-local files are unavailable.`
@@ -346,15 +422,17 @@ function makeAnnotator(host, macConfigured, stateFile) {
       if (seen) writeResume(remembered, seen);
     }
     const mac = macConfigured ? readMacState(stateFile) : null;
-    const resume = host === 'vps' ? readResume(remembered) : null;
+    const record = host === 'vps' ? readResumeRecord(remembered) : null;
+    const resume = record ? record.url : null;
+    const continued = continuedPage(record);
     let notice = null;
     if (mac && Array.isArray(msg.result.content)) {
       if (mac.state === 'online') {
-        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume);
+        if (!onlineAnnounced) notice = workspaceNotice(host, mac, resume, continued);
         onlineAnnounced = true;
       } else {
         onlineAnnounced = false;
-        notice = workspaceNotice(host, mac, resume);
+        notice = workspaceNotice(host, mac, resume, continued);
       }
     }
     return JSON.stringify(annotateResult(msg, host, mac, notice));
@@ -428,6 +506,24 @@ async function main() {
         ? `workspace-router: Mac ${reason} — routing to VPS browser host\n`
         : 'workspace-router: no Mac ssh configured — routing to VPS browser host\n',
     );
+    if (macSsh) {
+      const resumeFile = resumePath(macStateFile);
+      const record = readResumeRecord(resumeFile);
+      if (record && !continuedPage(record)) {
+        const continued = await continueRememberedPage({
+          connectionFile: vpsConnection,
+          record,
+          botId,
+          botName,
+        });
+        if (continued) {
+          markResumeOpened(resumeFile, record, continued.tabId);
+          process.stderr.write(
+            `workspace-router: continued ${continued.url} in the VPS browser as tab ${continued.tabId}\n`,
+          );
+        }
+      }
+    }
     if (staleSelfProbe && macSeen && macSeen.state === 'offline' && !macScript) {
       process.stderr.write(
         'workspace-router: self-probe despite fresh offline verdict — watcher may be misconfigured\n',
@@ -545,8 +641,13 @@ module.exports = {
   workspaceNotice,
   pageUrlFromMessage,
   readResume,
+  readResumeRecord,
   writeResume,
   resumePath,
+  safeResumeUrl,
+  markResumeOpened,
+  continueRememberedPage,
+  continuedPage,
   annotateResult,
   makeAnnotator,
   macBackendCommand,

@@ -391,7 +391,8 @@ reachability). They are oversight signals, not assignments.
   someone else's work. No changed card means silence — an unchanged board is not
   evidence.
 - `workspace_mac` offline → do not invent Mac work. Web work already in
-  progress continues on the VPS browser, and API, MCP, and connector calls
+  progress continues on the VPS browser. The connector opens the last page
+  there when the Mac drops, and API, MCP, and connector calls
   that do not run on the Mac keep going. `workspace_mac` back online
   → check watches you recorded as blocked for Mac unavailability and, only after
   re-verifying consent and the live tool result, return them to active. New

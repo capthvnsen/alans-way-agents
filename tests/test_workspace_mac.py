@@ -104,12 +104,14 @@ TOOL_RESULT = json.dumps({"jsonrpc": "2.0", "id": 1,
 
 ROUTER_DRIVER = (
     "const fs = require('fs');"
+    "const path = require('path');"
     "const router = require(process.argv[1]);"
     "const annotate = router.makeAnnotator(process.argv[2], process.argv[3] === '1', process.argv[4]);"
     "for (const op of JSON.parse(fs.readFileSync(0, 'utf8'))) {"
     "  if ('rm' in op) fs.rmSync(process.argv[4], { force: true });"
     "  if ('raw' in op) fs.writeFileSync(process.argv[4], op.raw);"
     "  if ('state' in op) fs.writeFileSync(process.argv[4], JSON.stringify(op.state));"
+    "  if ('resume' in op) fs.writeFileSync(path.join(path.dirname(process.argv[4]), 'resume-url.json'), JSON.stringify(op.resume));"
     "  if ('line' in op) {"
     "    const out = annotate(op.line);"
     "    if (out !== null) process.stdout.write(out + '\\n');"
@@ -187,6 +189,84 @@ class RouterNoticeTests(MacStateEnvTest):
             self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
             self.assertNotIn("other.example", notice)
             self.assertNotIn("password", notice)
+
+    def test_an_opened_page_tells_the_model_to_keep_that_tab(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = int(time.time() * 1000)
+            [line], _ = self.annotate(directory, [
+                {"resume": {"url": "https://docs.example/d/abc", "at": now, "openedAt": now + 1, "tabId": "tab-9"},
+                 "state": {"state": "offline", "since": "2026-02-01T10:05:00Z"},
+                 "line": TOOL_RESULT},
+            ])
+            notice = json.loads(line)["result"]["content"][1]["text"]
+            self.assertIn("Continued https://docs.example/d/abc in the VPS browser as tab tab-9.", notice)
+            self.assertIn("Keep working in that tab.", notice)
+            self.assertIn("A login does not copy", notice)
+            self.assertNotIn("Reopen", notice)
+
+    def test_continue_opens_the_page_once_and_reuses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            connection = Path(directory) / "connection.json"
+            connection.write_text(json.dumps({"url": "http://127.0.0.1:9", "token": "AAFakeTokenForTests"}))
+            script = r"""
+const router = require(process.argv[1]);
+const fs = require('fs');
+(async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || 'GET' });
+    if ((opts.method || 'GET') === 'GET') {
+      const tabs = calls.filter((call) => call.method === 'POST').length
+        ? [{ id: 'tab-9', url: 'https://docs.example/d/abc' }] : [];
+      return { ok: true, json: async () => ({ tabs }) };
+    }
+    return { ok: true, json: async () => ({ id: 'tab-9', url: 'https://docs.example/d/abc' }) };
+  };
+  const now = Date.now();
+  const record = { url: 'https://docs.example/d/abc', at: now, openedAt: 0, tabId: '' };
+  const first = await router.continueRememberedPage({
+    connectionFile: process.argv[2], record, botId: 'bot', botName: 'Alan', fetchImpl,
+  });
+  router.markResumeOpened(process.argv[3], record, first.tabId, now + 1);
+  const saved = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+  const second = await router.continueRememberedPage({
+    connectionFile: process.argv[2],
+    record: router.readResumeRecord(process.argv[3], now + 2),
+    botId: 'bot', fetchImpl,
+  });
+  const reused = await router.continueRememberedPage({
+    connectionFile: process.argv[2],
+    record: { url: 'https://docs.example/d/abc', at: now, openedAt: 0, tabId: '' },
+    botId: 'bot', fetchImpl,
+  });
+  const refused = await router.continueRememberedPage({
+    connectionFile: process.argv[2],
+    record: { url: 'https://user:secret@docs.example/private', at: now, openedAt: 0, tabId: '' },
+    botId: 'bot', fetchImpl,
+  });
+  const remote = await router.continueRememberedPage({
+    connectionFile: process.argv[4],
+    record, botId: 'bot', fetchImpl,
+  });
+  process.stdout.write(JSON.stringify({ first, saved, second, reused, refused, remote, posts: calls.filter((call) => call.method === 'POST').length }));
+})().catch((error) => { process.stderr.write(String(error)); process.exit(1); });
+"""
+            remote = Path(directory) / "remote.json"
+            remote.write_text(json.dumps({"url": "http://example.com", "token": "AAFakeTokenForTests"}))
+            resume = Path(directory) / "resume-url.json"
+            proc = subprocess.run(
+                [NODE, "-e", script, str(ROUTER), str(connection), str(resume), str(remote)],
+                capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = json.loads(proc.stdout)
+            self.assertEqual(out["first"], {"url": "https://docs.example/d/abc", "tabId": "tab-9", "already": False})
+            self.assertEqual(out["saved"]["tabId"], "tab-9")
+            self.assertGreaterEqual(out["saved"]["openedAt"], out["saved"]["at"])
+            self.assertEqual(out["second"]["already"], True)
+            self.assertEqual(out["reused"], {"url": "https://docs.example/d/abc", "tabId": "tab-9", "already": True})
+            self.assertIsNone(out["refused"])
+            self.assertIsNone(out["remote"])
+            self.assertEqual(out["posts"], 1)
 
     def test_back_online_notice_fires_once_per_flip(self):
         with tempfile.TemporaryDirectory() as directory:
