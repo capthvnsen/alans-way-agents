@@ -185,6 +185,37 @@ if [ -z "$REPO_DIR" ]; then
   fi
 fi
 
+derive_bot_id_from_env() {
+  _env="$1"
+  [ -f "$_env" ] || return 1
+  _token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_env" 2>/dev/null | head -1 | cut -d= -f2-)"
+  _token="${_token#\"}"; _token="${_token%\"}"; _token="${_token#\'}"; _token="${_token%\'}"
+  case "$_token" in
+    [0-9]*:*)
+      BOT_ID="${_token%%:*}"
+      ok "using bot id $BOT_ID from $_env (token not printed)"
+      return 0;;
+  esac
+  return 1
+}
+
+detect_vps_timezone() {
+  [ -n "$TIMEZONE" ] && return
+  [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ] && return
+  _tz=""
+  if have timedatectl; then
+    _tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  elif [ -f /etc/timezone ]; then
+    _tz="$(tr -d ' \n' < /etc/timezone)"
+  elif [ -L /etc/localtime ]; then
+    _tz="$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || true)"
+  fi
+  if [ -n "$_tz" ] && [ "$_tz" != "UTC" ]; then
+    TIMEZONE="$_tz"
+    ok "using VPS timezone $TIMEZONE for quiet hours (non-interactive)"
+  fi
+}
+
 # ---------------------------------------------------------------- telegram
 step "Telegram gateway"
 ENV_FILE="$HERMES_HOME/.env"
@@ -423,6 +454,9 @@ fi
 
 # ------------------------------------------------------------- workspace config
 step "Workspace browser config"
+if [ -z "$BOT_ID" ]; then
+  derive_bot_id_from_env "$ENV_FILE" || derive_bot_id_from_env "$HERMES_HOME/.env" || true
+fi
 if [ -z "$BOT_ID" ] && [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ]; then
   BOT_ID="$(ask "  Numeric Telegram bot ID for this agent (empty to skip)" "")"
 fi
@@ -456,6 +490,8 @@ if [ "$DO_RESTART" = 1 ] || { [ "$NON_INTERACTIVE" = 0 ] && [ -r /dev/tty ] && c
 else
   say "  $GW_HINT"
 fi
+
+detect_vps_timezone
 
 # ------------------------------------------------------------- bind proactivity
 step "Primary bot binding"
