@@ -1284,7 +1284,7 @@ def repo_with_computer_plugin(root: Path) -> Path:
     """A throwaway checkout that also carries the (separately developed) provider plugin dir."""
     repo = root / "repo"
     shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
-    (repo / "alans-way-computer").mkdir()
+    (repo / "alans-way-computer").mkdir(exist_ok=True)
     return repo / "setup.sh"
 
 
