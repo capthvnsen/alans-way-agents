@@ -205,26 +205,70 @@ if [ ! -f "$CONFIG" ]; then
   chmod 600 "$CONFIG"
 fi
 
-cp "$CONFIG" "$CONFIG.bak-alans-way"
 MARK_BEGIN="$MARK_BEGIN" MARK_END="$MARK_END" BLOCK="$(block)" python3 - "$CONFIG" <<'PY'
-import os, sys
+import os, re, shutil, sys, time
 path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ["MARK_END"], os.environ["BLOCK"]
-lines = open(path).read().splitlines(keepends=True)
-has_managed = any(l.rstrip("\n") == mark_b for l in lines)
+original = open(path, encoding="utf-8", newline="").read()
+nl = "\r\n" if "\r\n" in original else "\n"
+block = block.replace("\n", nl)
+lines = re.findall(r"[^\n]*\n|[^\n]+", original)
+text = lambda l: l.rstrip("\r\n")
+
+# Earlier installs left a second router behind: a legacy managed block, or a
+# hand-written mcp_servers entry that spawns the router or browser-mcp. Either
+# duplicates the tools, so each profile keeps exactly one workspace_browser.
+LEGACY_B = "# >>> alans-way cua_alans_way managed block >>>"
+LEGACY_E = "# <<< alans-way cua_alans_way managed block <<<"
+SCRIPTS = ("workspace-router.cjs", "browser-mcp.cjs")
+indent = lambda l: len(l) - len(l.lstrip(" "))
+kept, removed, i, in_servers, entry_indent, in_managed = [], [], 0, False, None, False
+while i < len(lines):
+    line, t = lines[i], text(lines[i])
+    if t == LEGACY_B:
+        j = i
+        while j < len(lines) and text(lines[j]) != LEGACY_E:
+            j += 1
+        if j < len(lines):
+            removed.append("legacy managed block cua_alans_way")
+            i = j + 1
+            continue
+    if t == mark_b:
+        in_managed = True
+    elif t == mark_e:
+        in_managed = False
+    if t and not t.startswith((" ", "#")):
+        in_servers, entry_indent = t == "mcp_servers:", None
+    elif in_servers and not in_managed and t.strip() and not t.lstrip().startswith("#"):
+        entry_indent = indent(t) if entry_indent is None else entry_indent
+        name = re.match(r" *([\w.-]+|\"[^\"]+\"|'[^']+'):\s*(#.*)?$", t) if indent(t) == entry_indent else None
+        if name and name.group(1) != "workspace_browser":
+            j = i + 1
+            while j < len(lines) and (not text(lines[j]).strip() or indent(text(lines[j])) > entry_indent):
+                j += 1
+            while not text(lines[j - 1]).strip():
+                j -= 1
+            if any(s in l for l in lines[i:j] if not l.lstrip().startswith("#") for s in SCRIPTS):
+                removed.append("unmanaged mcp_servers entry " + name.group(1).strip("\"'"))
+                i = j
+                continue
+    kept.append(line)
+    i += 1
+lines = kept
+has_managed = any(text(l) == mark_b for l in lines)
 out, skipping, inserted = [], False, False
 in_servers, adopting = False, False
 # Insert under the profile's own top-level mcp_servers key, never a nested or
 # commented one. A top-level key has no leading whitespace and no trailing text.
 for line in lines:
-    if line.rstrip("\n") == mark_b:
+    if text(line) == mark_b:
         skipping = True
-        out.append(block + "\n")
+        out.append(block + nl)
         continue
     if skipping:
-        if line.rstrip("\n") == mark_e:
+        if text(line) == mark_e:
             skipping = False
         continue
-    stripped = line.rstrip("\n")
+    stripped = text(line)
     if stripped and not stripped.startswith((" ", "#")):
         in_servers = stripped == "mcp_servers:"
     # A hand-pasted, unmarked entry is replaced in place; a second
@@ -235,20 +279,30 @@ for line in lines:
         adopting = False
     if not has_managed and in_servers and stripped == "  workspace_browser:":
         if not inserted:
-            out.append(block + "\n")
+            out.append(block + nl)
             inserted = True
         adopting = True
         continue
     out.append(line)
     if not has_managed and not inserted:
-        stripped = line.rstrip("\n")
+        stripped = text(line)
         if stripped == "mcp_servers:":
-            out.append(block + "\n")
+            out.append(block + nl)
             inserted = True
 if not has_managed and not inserted:
-    out.append("\nmcp_servers:\n" + block + "\n")
-open(path, "w").writelines(out)
+    out.append(nl + "mcp_servers:" + nl + block + nl)
+result = "".join(out)
+for what in removed:
+    print("setup-workspace: removed " + what)
+if result != original:
+    if original:
+        backup = path + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+        while os.path.exists(backup):
+            backup += "x"
+        shutil.copy2(path, backup)
+        print("setup-workspace: backup: " + backup)
+    open(path, "w", encoding="utf-8", newline="").write(result)
 PY
 
-echo "setup-workspace: wrote managed workspace_browser block to $CONFIG (backup: $CONFIG.bak-alans-way)"
+echo "setup-workspace: wrote managed workspace_browser block to $CONFIG"
 echo "setup-workspace: restart the gateway to load it."

@@ -70,7 +70,8 @@ class ConfigEditTests(unittest.TestCase):
             text = config.read_text(encoding="utf-8")
             self.assertIn("mcp_servers:\n", text)
             self.assertIn("workspace_browser:", text)
-            self.assertTrue((config.parent / "config.yaml.bak-alans-way").exists())
+            [backup] = config.parent.glob("config.yaml.bak-*")
+            self.assertEqual(backup.read_text(encoding="utf-8"), "model:\n  default: gpt-4\n")
 
     def test_inserts_under_existing_top_level_mcp_servers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +154,75 @@ class ConfigEditTests(unittest.TestCase):
             # Commented/indented mcp_servers are left alone; a new top-level key is created.
             self.assertEqual(text.count("mcp_servers:"), 3)
             self.assertIn("\nmcp_servers:\n", text)
+
+
+HAND_WRITTEN = (
+    "model:\n  default: gpt-4  # keep\r\n"
+    "mcp_servers:\n"
+    "  # mine\n"
+    "  other:\n    command: echo\n"
+    "  cua_alans_way:\n"
+    "    command: node\n"
+    "    args:\n"
+    "      - /opt/x/workspace-router.cjs\n"
+    "      - --bot-id\n"
+    "      - '123'\n"
+    "    # note\n"
+    "  cua_alans_way_vps:\n"
+    "    command: node\n"
+    "    args: [\"/opt/x/browser-mcp.cjs\", \"--bot-id\", \"123\"]\n"
+    "\n"
+    "  keepme:\n    command: node\n    args: [server.js]\n"
+    "# tail\nagent:\n  x: 1\n"
+)
+LEGACY_BLOCK = (
+    "# >>> alans-way cua_alans_way managed block >>>\n"
+    "  cua_alans_way:\n    command: node\n    args:\n      - /opt/workspace-router.cjs\n"
+    "# <<< alans-way cua_alans_way managed block <<<\n"
+)
+
+
+class LegacyCleanupTests(unittest.TestCase):
+    def setup_config(self, text):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "config.yaml"
+        config.write_bytes(text.encode("utf-8"))
+        return config
+
+    def test_hand_written_router_entries_are_replaced_by_one_managed_block(self):
+        config = self.setup_config(HAND_WRITTEN)
+        out = run("--bot-id", "bot123", "--config", str(config)).stdout
+        text = config.read_bytes().decode("utf-8")
+        self.assertEqual(text.count("workspace_browser:"), 1)
+        self.assertNotIn("cua_alans_way", text)
+        self.assertNotIn("workspace-router.cjs\n      - --bot", text)
+        self.assertNotIn("browser-mcp.cjs", text)
+        self.assertIn("removed unmanaged mcp_servers entry cua_alans_way\n", out)
+        self.assertIn("removed unmanaged mcp_servers entry cua_alans_way_vps\n", out)
+        for kept in ("model:\n  default: gpt-4  # keep\r\n", "  # mine\n  other:\n    command: echo\n",
+                     "\n  keepme:\n    command: node\n    args: [server.js]\n# tail\nagent:\n  x: 1\n"):
+            self.assertIn(kept, text)
+        [backup] = config.parent.glob("config.yaml.bak-*")
+        self.assertEqual(backup.read_bytes().decode("utf-8"), HAND_WRITTEN)
+
+    def test_the_legacy_managed_block_is_removed_beside_the_current_one(self):
+        before = "mcp_servers:\n" + LEGACY_BLOCK + "  other:\n    command: echo\nmodel:\n  default: x\n"
+        config = self.setup_config(before)
+        out = run("--bot-id", "bot123", "--config", str(config)).stdout
+        text = config.read_text(encoding="utf-8")
+        self.assertNotIn("cua_alans_way", text)
+        self.assertEqual(text.count("workspace_browser:"), 1)
+        self.assertIn("removed legacy managed block cua_alans_way\n", out)
+        self.assertIn("  other:\n    command: echo\nmodel:\n  default: x\n", text)
+        run("--bot-id", "bot123", "--config", str(config))
+        self.assertEqual(config.read_text(encoding="utf-8"), text)
+        self.assertEqual(len(list(config.parent.glob("config.yaml.bak-*"))), 1)
+
+    def test_a_clean_config_gets_no_removal_report(self):
+        config = self.setup_config("mcp_servers:\n  other:\n    command: echo\n")
+        out = run("--bot-id", "bot123", "--config", str(config)).stdout
+        self.assertNotIn("removed", out)
 
 
 class ProfileOptionTests(unittest.TestCase):
