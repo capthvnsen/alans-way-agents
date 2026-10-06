@@ -8,7 +8,7 @@
 #   ./setup.sh --verify                                       # re-check an install
 #
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
-#        --hermes-home DIR --desktop-dir DIR --skip-browser --skip-services
+#        --hermes-home DIR --desktop-dir DIR --skip-browser --skip-plugin --skip-services
 #        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
@@ -18,7 +18,7 @@ PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 HERMES_HOME="" DESKTOP_DIR=""
-SKIP_BROWSER=0 SKIP_SERVICES=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
+SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     --hermes-home) HERMES_HOME="$2"; shift 2;;
     --desktop-dir) DESKTOP_DIR="$2"; shift 2;;
     --skip-browser) SKIP_BROWSER=1; shift;;
+    --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
     --bind) DO_BIND=1; shift;;
     --proactive) PROACTIVE="$2"; shift 2;;
@@ -53,6 +54,7 @@ setup.sh — Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --config FILE    edit this Hermes config.yaml instead of the profile's
   --hermes-home D  Hermes home directory (default: ~/.hermes)
   --desktop-dir D  where the alans-way app checkout lives (cloned if missing)
+  --skip-plugin    leave an already installed plugin in place (catalog installs)
   --skip-browser / --skip-services / --non-interactive for constrained runs
 EOF
       exit 0;;
@@ -252,7 +254,13 @@ fi
 
 # ---------------------------------------------------------------- plugin
 step "Plugin"
-if hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
+if [ "$SKIP_PLUGIN" = 1 ]; then
+  if hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
+    ok "plugin already installed; not replacing it"
+  else
+    bad "no $PLUGIN_NAME plugin installed. Install it from the Hermes catalog, or re-run without --skip-plugin."
+  fi
+elif hermes plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
   if diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$HERMES_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
   else

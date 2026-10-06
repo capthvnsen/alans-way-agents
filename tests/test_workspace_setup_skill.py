@@ -27,6 +27,10 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("setup.sh", self.normalized)
         self.assertIn("--bot-id", self.normalized)
         self.assertIn("--mac-ssh", self.normalized)
+        self.assertIn("--skip-plugin", self.normalized)
+        self.assertIn("https://github.com/capthvnsen/alans-way", self.text)
+        self.assertIn("docs/setup-prompt.md", self.text)
+        self.assertIn("do not replace this plugin", self.normalized)
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)

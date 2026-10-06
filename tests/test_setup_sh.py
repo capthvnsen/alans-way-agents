@@ -206,6 +206,24 @@ exit 0
     return bin_dir
 
 
+class SkipPluginTests(unittest.TestCase):
+    def test_skip_plugin_does_not_reinstall_an_existing_plugin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "plugins" / "alans-way").mkdir(parents=True)
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log)
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run(
+                "--skip-plugin", "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home),
+                env=env, check=False,
+            )
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("not replacing it", result.stdout)
+            self.assertNotIn("plugins install", calls)
+
+
 class AgentShellTests(unittest.TestCase):
     def test_runs_to_completion_without_a_controlling_terminal(self):
         with tempfile.TemporaryDirectory() as directory:

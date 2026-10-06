@@ -1,26 +1,38 @@
 ---
 name: workspace-setup
-description: Set up or onboard Alan's Way on a Hermes gateway host — plugin install, workspace browser wiring, VPS browser host, gateway restart, and proactivity binding. Use when the user asks to install, connect, onboard, or repair the Alan's Way setup on this machine or a new one.
+description: Set up Alan's Way after this plugin is installed — connect a Mac, install the desktop app, wire the workspace browser, and bind proactivity. Use when the user asks to install, connect, onboard, or repair Alan's Way.
 ---
 
 # Workspace setup
 
-## Drive the bootstrap; don't reimplement it
+This plugin is the piece that runs inside Hermes. The Mac app and the
+machine-to-machine setup live in a separate repo. Do not copy that app into
+this plugin, and do not replace this plugin with a git checkout.
 
-The repo ships `setup.sh`, a deterministic bootstrap that owns every step:
-preflight, plugin install, gateway hook, VPS browser host and systemd units,
-workspace_browser config, gateway restart, and primary-route binding. It is
-idempotent — safe to re-run, safe to use `setup.sh --verify` alone to audit.
+## Drive the other repo; don't reimplement it
+
+Fetch and follow this page exactly. Its text block is the setup:
+
+https://raw.githubusercontent.com/capthvnsen/alans-way/main/docs/setup-prompt.md
+
+Repo: https://github.com/capthvnsen/alans-way
+
+That page connects Tailscale, installs the Mac app, and pins SSH keys. When
+it tells you to run `setup.sh` from `alans-way-agents`, clone that repo only
+to run the script, and pass `--skip-plugin` so this installed copy stays in
+place:
 
 ```sh
-git clone https://github.com/capthvnsen/alans-way-agents   # or git -C alans-way-agents pull
-./alans-way-agents/setup.sh --bot-id <numeric-telegram-bot-id> \
-    --mac-ssh <user>@<mac-host> --restart
+git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
+~/alans-way-agents/setup.sh --skip-plugin --bot-id <numeric-telegram-bot-id> \
+    --mac-ssh <user>@<mac-host> --timezone <IANA-zone> --non-interactive \
+    --bind --proactive <yes|no> --restart
 ```
 
-Follow its prompts. If it asks which Telegram route is the primary, pick the
-bot matching the conversation you're in unless the user said otherwise — do not
-bind a different bot's route silently.
+`setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
+audit. Follow its prompts. If it asks which Telegram route is the primary,
+pick the bot matching the conversation you're in unless the user said
+otherwise — do not bind a different bot's route silently.
 
 ## Order of work
 
