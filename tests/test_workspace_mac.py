@@ -619,6 +619,54 @@ class DeadBackendFallbackTests(unittest.TestCase):
             self.assertIn('"stub":"vps"', line)
             self.assertIn("died before its first response", err)
 
+    def test_a_mac_child_that_hangs_silently_falls_back_to_vps(self):
+        """A wedged remote that never exits is the stall this prevents: once
+        the client is talking, a silent Mac backend is routed around after the
+        watchdog window instead of burning the whole MCP connect_timeout."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "for last in \"$@\"; do :; done\n"
+                "case \"$last\" in\n"
+                "  *conn_script*) printf %s \"/Users/x/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
+                "  *) sleep 30 ;;\n"  # the remote backend wedges: no exit, no output
+                "esac\n",
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{ok:true,stub:'vps'}})+'\\n');});\n",
+                encoding="utf-8")
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       HERMES_ROUTER_MAC_WATCHDOG_MS="400")
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(home / "mac-state.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the watchdog fallback did not fire")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            self.assertIn('"id":1', line)
+            self.assertIn('"stub":"vps"', line)
+            self.assertIn("silent 400ms after initialize", err)
+
 
 if __name__ == "__main__":
     unittest.main()

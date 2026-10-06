@@ -516,7 +516,32 @@ async function main() {
   let activeHost = null;
   let provedAlive = false;
   let fellBack = false;
+  let watchdog = null;
   const bufferedStdin = [];
+  const superseded = new Set();
+
+  // A wedged remote that never exits is the worst boot stall: without this,
+  // the client waits out its full connect_timeout on dead air. Once the
+  // client is actually talking to us, a silent Mac backend gets MAC_WATCHDOG_MS
+  // to answer before we route around it. Healthy cold starts answer in ~2s;
+  // the client sends initialize immediately after spawn.
+  const MAC_WATCHDOG_MS = Number(process.env.HERMES_ROUTER_MAC_WATCHDOG_MS) || 8000;
+  function armWatchdog() {
+    if (watchdog || provedAlive || fellBack || activeHost !== 'mac') return;
+    watchdog = setTimeout(() => {
+      watchdog = null;
+      if (provedAlive || fellBack || activeHost !== 'mac' || !activeChild) return;
+      const stuck = activeChild;
+      superseded.add(stuck);
+      fellBack = true;
+      process.stderr.write(
+        `workspace-router: Mac backend silent ${MAC_WATCHDOG_MS}ms after initialize — routing to VPS browser host\n`,
+      );
+      void startVpsBackend();
+      try { stuck.kill('SIGKILL'); } catch { /* already gone */ }
+    }, MAC_WATCHDOG_MS);
+    watchdog.unref();
+  }
 
   async function startVpsBackend() {
     const vpsArgs = [vpsScript, '--bot-id', botId];
@@ -561,6 +586,7 @@ async function main() {
         touchActivity();
         noteServerRpc(line, pendingRequests);
         provedAlive = true;
+        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
         bufferedStdin.length = 0;
         let out;
         try {
@@ -572,6 +598,7 @@ async function main() {
         process.stdout.write(`${out}\n`);
       });
     c.on('error', (e) => {
+      if (superseded.has(c)) return;
       process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
       if (host === 'mac' && !provedAlive) {
         if (!fellBack) {
@@ -583,6 +610,7 @@ async function main() {
       process.exit(1);
     });
     c.on('exit', (code, sig) => {
+      if (superseded.has(c)) return;
       if (c !== activeChild) return;
       // A Mac process that never answered must not take the router down.
       // Spawn can emit error and exit for the same death; the second one
@@ -613,6 +641,7 @@ async function main() {
       try {
         if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
       } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
+      armWatchdog();
     });
 
   if (macScript) {

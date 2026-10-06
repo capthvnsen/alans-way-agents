@@ -623,6 +623,33 @@ else
   say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
 fi
 
+# The gateway CLI derives its restart-wait budget from TimeoutStartSec, and a
+# multi-profile boot (several platform adapters + MCP connects) routinely
+# exceeds the 90s default — the service keeps booting fine while the CLI
+# reports a timeout. Widen it where systemd owns the unit; never clobber an
+# operator-set drop-in.
+if have systemctl; then
+  for scope in "--user" ""; do
+    if systemctl $scope cat hermes-gateway.service >/dev/null 2>&1; then
+      if [ -n "$scope" ]; then
+        drop_dir="$HOME/.config/systemd/user/hermes-gateway.service.d"
+      elif [ "$(id -u)" = 0 ]; then
+        drop_dir="/etc/systemd/system/hermes-gateway.service.d"
+      else
+        break
+      fi
+      if [ ! -f "$drop_dir/timeout.conf" ]; then
+        mkdir -p "$drop_dir" \
+          && printf '[Service]\nTimeoutStartSec=180\n' > "$drop_dir/timeout.conf" \
+          && systemctl $scope daemon-reload >/dev/null 2>&1 \
+          && ok "hermes-gateway restart patience widened (TimeoutStartSec=180)" \
+          || warn "could not write $drop_dir/timeout.conf — long restarts may report a timeout"
+      fi
+      break
+    fi
+  done
+fi
+
 # ------------------------------------------------------------- gateway restart
 step "Gateway restart"
 GW_HINT="A running gateway holds already-imported code — restart it to load the plugin."
