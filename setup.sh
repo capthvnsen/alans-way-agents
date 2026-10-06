@@ -415,7 +415,7 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
       skip "workspace_browser block in $cfg (--skip-browser)"
     elif [ -f "$cfg" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$cfg"; then
       ok "workspace_browser block in $cfg"
-    elif [ -f "$cfg" ] && grep -q '^  workspace_browser:' "$cfg"; then
+    elif [ -f "$cfg" ] && grep -q '^ \+workspace_browser:' "$cfg"; then
       bad "workspace_browser entry in $cfg is unmanaged: re-run setup to install the managed block"
     else
       bad "no workspace_browser block in $cfg"
@@ -1624,7 +1624,7 @@ have hermes && plugin_listed "$PLUGIN_NAME" && ok "plugin enabled" || bad "plugi
 if [ -n "$BOT_ID" ]; then
   CFG="$CONFIG"; [ -n "$CFG" ] || { [ -n "$PROFILE" ] && CFG="$HERMES_HOME/profiles/$PROFILE/config.yaml" || CFG="$HERMES_HOME/config.yaml"; }
   [ -f "$CFG" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$CFG" \
-    || grep -q '^  workspace_browser:' "$CFG"; } \
+    || grep -q '^ \+workspace_browser:' "$CFG"; } \
     && ok "workspace_browser block in $CFG" || warn "workspace_browser block not found in $CFG"
 fi
 if [ "$GUEST_OS" = Darwin ]; then

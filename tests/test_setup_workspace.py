@@ -1,6 +1,7 @@
 """setup-workspace.sh CLI: profile selection, safe YAML quoting, and config editing."""
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -223,6 +224,106 @@ class LegacyCleanupTests(unittest.TestCase):
         config = self.setup_config("mcp_servers:\n  other:\n    command: echo\n")
         out = run("--bot-id", "bot123", "--config", str(config)).stdout
         self.assertNotIn("removed", out)
+
+
+def servers(text):
+    """Names of the mcp_servers children, read by indentation (no YAML library here)."""
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if re.match(r"mcp_servers:\s*(#.*)?$", l))
+    names, indent = [], None
+    for line in lines[start + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        depth = len(line) - len(line.lstrip())
+        indent = depth if indent is None else indent
+        if depth == indent and not line.lstrip().startswith("-"):
+            names.append(line.strip().split(":")[0])
+    return names, indent
+
+
+class MappingShapeTests(unittest.TestCase):
+    def apply(self, text, check=True):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "config.yaml"
+        config.write_bytes(text.encode("utf-8"))
+        result = run("--bot-id", "42", "--config", str(config), check=check)
+        return config, config.read_bytes().decode("utf-8"), result
+
+    def test_children_keep_the_indent_the_file_already_uses(self):
+        before = ("mcp_servers:\n    keepme:\n        command: node\n    cua_alans_way:\n        command: node\n"
+                  "        args:\n            - /x/workspace-router.cjs\nagent:\n  x: 1\n")
+        _, text, _ = self.apply(before)
+        self.assertEqual(servers(text), (["workspace_browser", "keepme"], 4))
+        self.assertIn("    workspace_browser:\n      command: \"node\"\n      args:\n        - ", text)
+        self.assertIn("      env:\n        HERMES_WORKSPACE_MAC_SSH", text)
+        self.assertIn("    keepme:\n        command: node\nagent:\n  x: 1\n", text)
+
+    def test_a_crlf_file_stays_crlf_throughout(self):
+        _, text, _ = self.apply("mcp_servers:\r\n  keepme:\r\n    command: node\r\nmodel:\r\n  x: 1\r\n")
+        self.assertNotIn("\r\r", text)
+        self.assertEqual(text.count("\n"), text.count("\r\n"))
+        self.assertEqual(servers(text.replace("\r", "")), (["workspace_browser", "keepme"], 2))
+
+    def test_an_undeterminable_indent_refuses_and_leaves_the_file_alone(self):
+        before = "mcp_servers:\n- keepme\nmodel:\n  default: x\n"
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "config.yaml"
+        config.write_text(before, encoding="utf-8")
+        result = run("--bot-id", "42", "--config", str(config), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot tell how mcp_servers is indented", result.stderr)
+        self.assertEqual(config.read_text(encoding="utf-8"), before)
+        self.assertEqual(list(config.parent.glob("config.yaml.bak-*")), [])
+
+    def test_a_trailing_comment_on_mcp_servers_does_not_create_a_second_key(self):
+        before = ("mcp_servers:   # my servers\n  keepme:\n    command: node\n  cua_alans_way:\n"
+                  "    command: node\n    args: [/x/workspace-router.cjs]\n")
+        _, text, _ = self.apply(before)
+        self.assertEqual(text.count("mcp_servers:"), 1)
+        self.assertTrue(text.startswith("mcp_servers:   # my servers\n"))
+        self.assertEqual(servers(text), (["workspace_browser", "keepme"], 2))
+
+    def test_an_empty_mcp_servers_value_is_replaced_not_duplicated(self):
+        for empty in ("{}", "[]", "null", "~", "{}  # none yet"):
+            with self.subTest(empty=empty):
+                _, text, _ = self.apply("mcp_servers: %s\nmodel:\n  default: x\n" % empty)
+                self.assertEqual(text.count("mcp_servers:"), 1)
+                self.assertEqual(servers(text), (["workspace_browser"], 2))
+                self.assertTrue(text.endswith("model:\n  default: x\n"))
+
+    def test_a_non_empty_inline_mcp_servers_is_refused_untouched(self):
+        before = "mcp_servers: {a: {command: x}}\n"
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "config.yaml"
+        config.write_text(before, encoding="utf-8")
+        result = run("--bot-id", "42", "--config", str(config), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot tell how mcp_servers is indented", result.stderr)
+        self.assertEqual(config.read_text(encoding="utf-8"), before)
+
+    def test_the_inline_mapping_form_is_removed_too(self):
+        before = ("mcp_servers:\n  keepme:\n    command: node\n"
+                  "  cua_alans_way: {command: node, args: [/x/workspace-router.cjs, --bot-id, '1']}\n"
+                  "  other: {command: \"node\", args: [\"C:\\\\app\\\\browser-mcp.cjs\"]}\n")
+        _, text, out = self.apply(before)
+        self.assertEqual(servers(text), (["workspace_browser", "keepme"], 2))
+        self.assertIn("removed unmanaged mcp_servers entry other", out.stdout)
+
+    def test_only_node_entries_that_run_our_script_are_removed(self):
+        before = ("mcp_servers:\n"
+                  "  npx_one:\n    command: npx\n    args: [-y, /x/workspace-router.cjs]\n"
+                  "  mentions:\n    command: node\n    args: [server.js]\n    env:\n      NOTE: browser-mcp.cjs\n"
+                  "  commented:\n    command: node\n    # old: workspace-router.cjs\n    args: [a]\n"
+                  "  other_script:\n    command: node\n    args: [/x/not-browser-mcp.cjs.sh]\n"
+                  "  ours:\n    command: node\n    args:\n    - /x/browser-mcp.cjs\n    - --vps\n")
+        _, text, _ = self.apply(before)
+        self.assertEqual(servers(text)[0], ["workspace_browser", "npx_one", "mentions", "commented", "other_script"])
+        self.assertIn("# old: workspace-router.cjs", text)
 
 
 class ProfileOptionTests(unittest.TestCase):

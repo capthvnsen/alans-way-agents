@@ -126,7 +126,7 @@ if [ "$VERIFY" = 1 ]; then
   if [ -n "$CONFIG" ]; then
     if [ -f "$CONFIG" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG"; then
       ok "managed workspace_browser block present in $CONFIG"
-    elif [ -f "$CONFIG" ] && grep -q '^  workspace_browser:' "$CONFIG"; then
+    elif [ -f "$CONFIG" ] && grep -q '^ \+workspace_browser:' "$CONFIG"; then
       ok "workspace_browser entry present in $CONFIG (unmanaged: re-run setup to manage it)"
     else
       bad "no workspace_browser block in $CONFIG"
@@ -210,18 +210,78 @@ import os, re, shutil, sys, time
 path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ["MARK_END"], os.environ["BLOCK"]
 original = open(path, encoding="utf-8", newline="").read()
 nl = "\r\n" if "\r\n" in original else "\n"
-block = block.replace("\n", nl)
 lines = re.findall(r"[^\n]*\n|[^\n]+", original)
 text = lambda l: l.rstrip("\r\n")
+indent = lambda l: len(l) - len(l.lstrip(" "))
+
+def refuse(why):
+    sys.stderr.write(f"setup-workspace: cannot tell how mcp_servers is indented in {path} ({why}); "
+                     "nothing was changed. Add the block by hand: run this script without --config to print it.\n")
+    sys.exit(3)
+
+ROOT_KEY = re.compile(r"mcp_servers:(.*)$")
+EMPTY_VALUES = ("{}", "[]", "null", "~", "Null", "NULL")
+head, head_empty, head_comment = None, False, ""
+for n, l in enumerate(lines):
+    m = ROOT_KEY.match(text(l))
+    if m:
+        value = re.sub(r"(^|\s)#.*$", "", m.group(1)).strip()
+        comment = re.search(r"(^|\s)(#.*)$", m.group(1))
+        head, head_empty, head_comment = n, value in EMPTY_VALUES, (" " + comment.group(2)) if comment else ""
+        if value and not head_empty:
+            refuse("its value is written inline")
+        break
+
+# Children of mcp_servers keep the indent the file already uses (2 when there are none).
+child = 2
+if head is not None and not head_empty:
+    for l in lines[head + 1:]:
+        t = text(l)
+        if not t.strip() or t.lstrip().startswith("#"):
+            continue
+        if not t.startswith(" "):
+            if t.startswith("-"):
+                refuse("it holds a list")
+            break
+        if not re.match(r" +[\w.\"'-]+:(\s|$)", t):
+            refuse("the first entry is not a plain key")
+        child = indent(t)
+        break
+shift = child - 2
+reindent = lambda l: l if not l.startswith("  ") else (" " * shift + l if shift >= 0 else l[-shift:])
+block = nl.join(reindent(l) for l in block.split("\n"))
 
 # Earlier installs left a second router behind: a legacy managed block, or a
-# hand-written mcp_servers entry that spawns the router or browser-mcp. Either
-# duplicates the tools, so each profile keeps exactly one workspace_browser.
+# hand-written mcp_servers entry that runs this plugin's router or browser-mcp
+# under node. Either duplicates the tools, so each profile keeps exactly one
+# workspace_browser.
 LEGACY_B = "# >>> alans-way cua_alans_way managed block >>>"
 LEGACY_E = "# <<< alans-way cua_alans_way managed block <<<"
-SCRIPTS = ("workspace-router.cjs", "browser-mcp.cjs")
-indent = lambda l: len(l) - len(l.lstrip(" "))
-kept, removed, i, in_servers, entry_indent, in_managed = [], [], 0, False, None, False
+OURS = ("workspace-router.cjs", "browser-mcp.cjs")
+base = lambda value: re.split(r"[\\/]", value.strip().strip("\"'"))[-1]
+
+def runs_our_script(entry):
+    body = "".join(l for l in entry if not l.lstrip().startswith("#"))
+    cmd = re.search(r"(?:^|[{,\s])command:\s*(\"[^\"]*\"|'[^']*'|[^\s,}#]+)", body)
+    if not cmd or base(cmd.group(1)).lower() not in ("node", "node.exe"):
+        return False
+    flow = re.search(r"args:\s*\[(.*?)\]", body, re.S)
+    if flow:
+        items = re.findall(r"\"[^\"]*\"|'[^']*'|[^\s,]+", flow.group(1))
+    else:
+        items, args_indent = [], None
+        for l in entry:
+            t = text(l)
+            if args_indent is None:
+                m = re.match(r"( *)args:\s*$", t)
+                args_indent = len(m.group(1)) if m else None
+            elif t.strip() and not t.lstrip().startswith("-") and indent(t) <= args_indent:
+                break
+            elif t.lstrip().startswith("-"):
+                items.append(t.lstrip()[1:].strip())
+    return any(base(i) in OURS for i in items)
+
+kept, removed, i, in_servers, in_managed = [], [], 0, False, False
 while i < len(lines):
     line, t = lines[i], text(lines[i])
     if t == LEGACY_B:
@@ -237,17 +297,16 @@ while i < len(lines):
     elif t == mark_e:
         in_managed = False
     if t and not t.startswith((" ", "#")):
-        in_servers, entry_indent = t == "mcp_servers:", None
-    elif in_servers and not in_managed and t.strip() and not t.lstrip().startswith("#"):
-        entry_indent = indent(t) if entry_indent is None else entry_indent
-        name = re.match(r" *([\w.-]+|\"[^\"]+\"|'[^']+'):\s*(#.*)?$", t) if indent(t) == entry_indent else None
+        in_servers = bool(ROOT_KEY.match(t))
+    elif in_servers and not in_managed and indent(t) == child and t.strip() and not t.lstrip().startswith("#"):
+        name = re.match(r" *([\w.-]+|\"[^\"]+\"|'[^']+'):(\s.*)?$", t)
         if name and name.group(1) != "workspace_browser":
             j = i + 1
-            while j < len(lines) and (not text(lines[j]).strip() or indent(text(lines[j])) > entry_indent):
+            while j < len(lines) and (not text(lines[j]).strip() or indent(text(lines[j])) > child):
                 j += 1
             while not text(lines[j - 1]).strip():
                 j -= 1
-            if any(s in l for l in lines[i:j] if not l.lstrip().startswith("#") for s in SCRIPTS):
+            if runs_our_script(lines[i:j]):
                 removed.append("unmanaged mcp_servers entry " + name.group(1).strip("\"'"))
                 i = j
                 continue
@@ -255,40 +314,47 @@ while i < len(lines):
     i += 1
 lines = kept
 has_managed = any(text(l) == mark_b for l in lines)
-out, skipping, inserted = [], False, False
-in_servers, adopting = False, False
+out, skipping, inserted, adopting, blanks = [], False, False, False, []
+in_servers = False
 # Insert under the profile's own top-level mcp_servers key, never a nested or
-# commented one. A top-level key has no leading whitespace and no trailing text.
+# commented one. A top-level key has no leading whitespace.
 for line in lines:
-    if text(line) == mark_b:
+    stripped = text(line)
+    if stripped == mark_b:
         skipping = True
         out.append(block + nl)
         continue
     if skipping:
-        if text(line) == mark_e:
+        if stripped == mark_e:
             skipping = False
         continue
-    stripped = text(line)
     if stripped and not stripped.startswith((" ", "#")):
-        in_servers = stripped == "mcp_servers:"
+        in_servers = bool(ROOT_KEY.match(stripped))
     # A hand-pasted, unmarked entry is replaced in place; a second
     # workspace_browser key would leave Hermes silently using one of them.
     if adopting:
-        if not stripped or stripped.startswith("   "):
+        if not stripped:
+            blanks.append(line)
+            continue
+        if indent(stripped) > child:
+            blanks = []
             continue
         adopting = False
-    if not has_managed and in_servers and stripped == "  workspace_browser:":
+        out.extend(blanks)
+        blanks = []
+    if not has_managed and in_servers and indent(stripped) == child and re.match(r" *workspace_browser:", stripped):
         if not inserted:
             out.append(block + nl)
             inserted = True
         adopting = True
         continue
+    if not has_managed and not inserted and ROOT_KEY.match(stripped):
+        out.append("mcp_servers:" + head_comment + nl if head_empty else line)
+        out.append(block + nl)
+        inserted = True
+        continue
     out.append(line)
-    if not has_managed and not inserted:
-        stripped = text(line)
-        if stripped == "mcp_servers:":
-            out.append(block + nl)
-            inserted = True
+out.extend(blanks)
 if not has_managed and not inserted:
     out.append(nl + "mcp_servers:" + nl + block + nl)
 result = "".join(out)
