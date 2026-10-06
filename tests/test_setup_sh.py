@@ -414,6 +414,55 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn("-p sprk1 proactivity bind --session-key agent:sprk1:telegram:dm:42", calls)
 
 
+class PinAndListTests(unittest.TestCase):
+    def setup_env(self, plugins_list="alans-way"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.log = self.root / "log"
+        bin_dir = tooling(self.root, self.log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "plugins list") printf "%s\\n";;\nesac\nexit 0\n' % (self.log, plugins_list))
+        return env_for(self.root, bin_dir, self.home)
+
+    def test_a_longer_plugin_name_does_not_satisfy_the_check(self):
+        env = self.setup_env("alans-way-computer")
+        result = run("--verify", "--skip-browser", env=env, check=False)
+        self.assertIn("not in hermes plugins list", result.stdout)
+        env = self.setup_env("alans-way\\nalans-way-computer")
+        result = run("--verify", "--skip-browser", env=env, check=False)
+        self.assertNotIn("not in hermes plugins list", result.stdout)
+
+    def test_desktop_ref_on_a_non_git_checkout_stops(self):
+        env = self.setup_env()
+        app = desktop_tree(self.root / "app")
+        result = run("--skip-plugin", "--desktop-dir", str(app), "--desktop-ref", "abc1234", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not a git checkout", result.stdout)
+
+    def test_repo_ref_from_a_clone_must_match_the_checkout(self):
+        env = self.setup_env()
+        repo = self.root / "repo"
+        shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
+        script = repo / "setup.sh"
+        flags = ("--repo-ref", "abc1234", "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(self.home))
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "x"], check=True)
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        flags = ("--repo-ref", head, *flags[2:])
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertIn("is at %s" % head, result.stdout)
+
+
 class DocFlagTests(unittest.TestCase):
     def test_setup_prompt_flags_exist_in_setup_sh(self):
         prompt = (ROOT / "docs" / "setup-prompt.md").read_text(encoding="utf-8")

@@ -129,6 +129,8 @@ esac
 # profile is named too, so a sticky active_profile can never redirect a call.
 PROFILE_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; PROFILE_HOME="${PROFILE_HOME:-$HERMES_HOME}"
 hermes_p() { hermes -p "${PROFILE:-default}" "$@"; }
+# Whole-name match: "alans-way" must not be satisfied by "alans-way-computer".
+plugin_listed() { hermes_p plugins list 2>/dev/null | grep -qE "(^|[^A-Za-z0-9_-])$1([^A-Za-z0-9_-]|\$)"; }
 
 # Refs drive git fetch/checkout — reject anything that isn't a plain ref.
 for _ref in "$REPO_REF" "$DESKTOP_REF"; do
@@ -310,7 +312,7 @@ fi
 if [ "$VERIFY" = 1 ]; then
   # --verify: report state without changing anything
   step "Install state"
-  have hermes && hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME" \
+  have hermes && plugin_listed "$PLUGIN_NAME" \
     && ok "plugin '$PLUGIN_NAME' installed" || bad "plugin '$PLUGIN_NAME' not in hermes plugins list"
   CFG_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; CFG_HOME="${CFG_HOME:-$HERMES_HOME}"
   if have hermes; then
@@ -535,6 +537,12 @@ if [ -z "$REPO_DIR" ]; then
       && ok "cloned to $REPO_DIR${REPO_REF:+ at $REPO_REF}" \
       || { bad "git clone or pin failed"; exit 1; }
   fi
+elif [ -n "$REPO_REF" ]; then
+  # Running from a clone: setup never moves the user's checkout, so the pin must already hold.
+  [ "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" = "$(git -C "$REPO_DIR" rev-parse --verify -q "$REPO_REF^{commit}" 2>/dev/null)" ] \
+    && [ -n "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" ] \
+    || { bad "$REPO_DIR is not at --repo-ref $REPO_REF (git checkout $REPO_REF there, or run setup from a fresh download)"; exit 1; }
+  ok "$REPO_DIR is at $REPO_REF"
 fi
 
 # hermes plugins install clones this URL: file:///C:/... on Windows.
@@ -673,12 +681,12 @@ PY
 # ---------------------------------------------------------------- plugin
 step "Plugin"
 if [ "$SKIP_PLUGIN" = 1 ]; then
-  if hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
+  if plugin_listed "$PLUGIN_NAME"; then
     ok "plugin already installed; not replacing it"
   else
     bad "no $PLUGIN_NAME plugin installed. Install it from the Hermes catalog, or re-run without --skip-plugin."
   fi
-elif hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME"; then
+elif plugin_listed "$PLUGIN_NAME"; then
   if plugin_is_catalog_installed; then
     # Never install --force over the catalog pin: the reviewed build stays
     # the only plugin source, updated only through the catalog itself.
@@ -721,7 +729,7 @@ if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
   case "$_shebang" in /usr/bin/env|'') ;; /*) HERMES_PYTHON="$_shebang";; esac
 fi
 if [ -n "${HERMES_PYTHON:-}" ] && "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' >/dev/null 2>&1; then
-  if hermes_p plugins list 2>/dev/null | grep -q "$COMPUTER_PLUGIN"; then
+  if plugin_listed "$COMPUTER_PLUGIN"; then
     ok "computer-use provider already installed; leaving it as it is"
     COMPUTER_READY=1
   elif hermes_p plugins install "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
@@ -879,6 +887,9 @@ if [ "$SKIP_BROWSER" = 0 ]; then
         fi
       fi
     else
+      if [ -n "$DESKTOP_REF" ]; then
+        bad "$DESKTOP_DIR is not a git checkout, so --desktop-ref $DESKTOP_REF can't be applied: move it aside and re-run"; exit 1
+      fi
       warn "browser scripts at $DESKTOP_DIR are not a git checkout, so setup can't update them: move it aside and re-run to reinstall"
     fi
   else
@@ -1511,7 +1522,7 @@ fi
 
 # ---------------------------------------------------------------- verify
 step "Verify"
-have hermes && hermes_p plugins list 2>/dev/null | grep -q "$PLUGIN_NAME" && ok "plugin enabled" || bad "plugin missing"
+have hermes && plugin_listed "$PLUGIN_NAME" && ok "plugin enabled" || bad "plugin missing"
 if [ -n "$BOT_ID" ]; then
   CFG="$CONFIG"; [ -n "$CFG" ] || { [ -n "$PROFILE" ] && CFG="$HERMES_HOME/profiles/$PROFILE/config.yaml" || CFG="$HERMES_HOME/config.yaml"; }
   [ -f "$CFG" ] && { grep -q '>>> alans-way workspace_browser managed block >>>' "$CFG" \
