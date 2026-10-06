@@ -128,6 +128,11 @@ class Store:
     # dedupe rests on the fired-instance stale check and context digests on
     # the ledger baselines, so dead rows make room instead of capping forever.
     _TERMINAL_RETENTION_SECONDS = 7 * 86400
+    # One ordering for every pending queue: operator asks and the one-time
+    # orientation first, contracted watches next, speculative diffs last.
+    _KIND_PRIORITY = ("CASE kind WHEN 'manual_review' THEN 0 WHEN 'first_run' THEN 0"
+                      " WHEN 'watch_due' THEN 1 WHEN 'task_changed' THEN 2"
+                      " WHEN 'worker_update' THEN 3 ELSE 4 END")
 
     def __init__(self, state_dir: Path):
         self.state_dir = Path(state_dir)
@@ -246,11 +251,9 @@ class Store:
                 if new.session_key != old.session_key:
                     dropped = db.execute("UPDATE events SET status='dropped' WHERE status='pending'").rowcount
                     self._audit(db, "route_dropped", revision + 1, dropped)
-                dropped = db.execute("""UPDATE events SET status='dropped' WHERE sequence IN (
+                dropped = db.execute(f"""UPDATE events SET status='dropped' WHERE sequence IN (
                     SELECT sequence FROM events WHERE status='pending' ORDER BY purpose DESC,
-                    CASE kind WHEN 'manual_review' THEN 0 WHEN 'first_run' THEN 0
-                    WHEN 'watch_due' THEN 1
-                    WHEN 'task_changed' THEN 2 WHEN 'worker_update' THEN 3 ELSE 4 END,
+                    {self._KIND_PRIORITY},
                     created_at, sequence LIMIT -1 OFFSET ?)""", (new.max_pending,)).rowcount
                 self._audit(db, "queue_dropped", revision + 1, dropped)
                 db.execute("UPDATE policy SET settings=?, revision=? WHERE singleton=1", (json.dumps(new.to_dict()), revision + 1))
@@ -375,11 +378,9 @@ class Store:
             if not allow_watch and not allow_other:
                 return None
             allow_low = budget["low"] < policy.max_low_purpose_wakes
-            event = db.execute("""SELECT * FROM events WHERE status='pending' AND created_at<=?
+            event = db.execute(f"""SELECT * FROM events WHERE status='pending' AND created_at<=?
                 AND ((kind='watch_due' AND ? AND ?) OR (kind!='watch_due' AND ? AND ? AND (purpose=1 OR ?)))
-                ORDER BY purpose DESC, CASE kind WHEN 'manual_review' THEN 0
-                WHEN 'first_run' THEN 0 WHEN 'watch_due' THEN 1
-                WHEN 'task_changed' THEN 2 WHEN 'worker_update' THEN 3 ELSE 4 END,
+                ORDER BY purpose DESC, {self._KIND_PRIORITY},
                 created_at, sequence LIMIT 1""",
                 (timestamp - policy.debounce_seconds, allow_watch, watch_open,
                  allow_other, shared_open, allow_low)).fetchone()

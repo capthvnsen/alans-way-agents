@@ -577,11 +577,31 @@ class PluginTests(unittest.TestCase):
             self.assertTrue(policy.enabled)
             self.assertEqual(policy.resume_at, "")
             self.assertIsNotNone(event)
-            # Invalid or naive resume_at values are rejected outright.
-            for bad in ("soon", "2026-10-09 08:00", 1234):
+            # Invalid, naive, or non-string resume_at values are rejected
+            # outright — including falsy ones a truthiness check would coerce
+            # into a bare pause.
+            for bad in ("soon", "2026-10-09 08:00", 1234, 0, False, []):
                 result = json.loads(runtime.control(
                     {"action": "pause", "resume_at": bad}))
                 self.assertFalse(result["ok"])
+            runtime.close()
+
+    def test_pause_slash_command_accepts_a_snooze_timestamp(self):
+        """/proactivity pause <iso> must carry the timestamp through — a
+        silently dropped argument would turn a snooze into a stuck pause."""
+        from datetime import datetime, timedelta, timezone
+        module = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = module.Runtime(None, Path(directory))
+            future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+            reply = runtime.command("pause " + future)
+            self.assertIn("paused until " + future, reply)
+            policy = runtime.store.load_policy()
+            self.assertFalse(policy.enabled)
+            self.assertEqual(policy.resume_at, future)
+            # A bad timestamp fails loudly, not as a bare pause.
+            self.assertIn("failed", runtime.command("pause not-a-time").lower())
+            self.assertEqual(runtime.store.load_policy().resume_at, future)
             runtime.close()
 
     def test_loop_and_sweep_kinds_dispatch_distinct_messages(self):

@@ -72,6 +72,66 @@ class OperatorTests(unittest.TestCase):
                 operator.bind(runtime, "invented-route")
             runtime.close()
 
+    def test_binding_scopes_state_db_rows_to_this_sessions_dir(self):
+        """gateway_routing's PK is (scope, session_key) where scope is the
+        resolved sessions dir — a row owned by another store's scope must
+        never verify this profile's route; the right scope must."""
+        import sqlite3
+        module = load_plugin()
+        operator = importlib.import_module(module.__name__ + ".proactive_operator")
+        route = "agent:main:telegram:dm:123456789"
+        entry = {"session_key": route, "session_id": "abc123",
+                 "platform": "telegram", "chat_type": "dm", "suspended": False}
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            db = sqlite3.connect(home / "state.db")
+            db.execute("""CREATE TABLE gateway_routing (
+                scope TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL,
+                entry_json TEXT NOT NULL, updated_at REAL NOT NULL,
+                PRIMARY KEY (scope, session_key))""")
+            db.execute("INSERT INTO gateway_routing VALUES (?, ?, ?, 0)",
+                       ("/some/other/sessions", route, json.dumps(entry)))
+            db.commit(); db.close()
+            runtime = module.Runtime(None, home)
+            with self.assertRaises(ValueError):
+                operator.bind(runtime, route)
+            scope = str((home / "sessions").resolve())
+            db = sqlite3.connect(home / "state.db")
+            db.execute("INSERT INTO gateway_routing VALUES (?, ?, ?, 0)",
+                       (scope, route, json.dumps(entry)))
+            db.commit(); db.close()
+            operator.bind(runtime, route)
+            self.assertEqual(runtime.store.load_policy().session_key, route)
+            runtime.close()
+
+    def test_binding_authoritative_db_overrides_a_stale_mirror(self):
+        """A sessions.json entry that fails validation cannot veto a route the
+        authoritative gateway_routing table confirms — Hermes' own load order
+        is DB primary, mirror fills keys the DB lacks."""
+        import sqlite3
+        module = load_plugin()
+        operator = importlib.import_module(module.__name__ + ".proactive_operator")
+        route = "agent:main:telegram:dm:123456789"
+        entry = {"session_key": route, "session_id": "abc123",
+                 "platform": "telegram", "chat_type": "dm", "suspended": False}
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "sessions").mkdir()
+            (home / "sessions/sessions.json").write_text(json.dumps(
+                {route: dict(entry, platform="discord")}))
+            db = sqlite3.connect(home / "state.db")
+            db.execute("""CREATE TABLE gateway_routing (
+                scope TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL,
+                entry_json TEXT NOT NULL, updated_at REAL NOT NULL,
+                PRIMARY KEY (scope, session_key))""")
+            db.execute("INSERT INTO gateway_routing VALUES ('', ?, ?, 0)",
+                       (route, json.dumps(entry)))
+            db.commit(); db.close()
+            runtime = module.Runtime(None, home)
+            operator.bind(runtime, route)
+            self.assertEqual(runtime.store.load_policy().session_key, route)
+            runtime.close()
+
     def test_binding_stays_fail_closed_without_any_routing_store(self):
         """No sessions.json and no state.db means no verifiable route — bind
         refuses rather than trusting a caller-supplied key."""

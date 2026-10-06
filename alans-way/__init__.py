@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
+from .proactive_context import TASK_KINDS
 
 
 class Runtime:
@@ -20,6 +21,21 @@ class Runtime:
         self.worker = None
         self.observer_error = None
         self.appraisal_error = None
+
+    def _inject(self, message, session_key):
+        """One injection attempt → tri-state outcome.
+
+        Only the adapter can inspect acceptance (``is True``); a queued
+        request proves nothing about the turn, so anything else stays
+        honest about not knowing.
+        """
+        try:
+            accepted = self.ctx.inject_message(message, role="user",
+                                               session_key=session_key)
+            return ("accepted_unverified" if accepted is True
+                    else "rejected" if accepted is False else "uncertain")
+        except Exception:
+            return "uncertain"
 
     def _record_appraisal_error(self, exc=None):
         """Status records that appraisal failed, never why — provider details
@@ -179,11 +195,7 @@ class Runtime:
                    "action — the event expires on its own and stays auditable. "
                    "Caps are not quotas.\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
-        try:
-            accepted = self.ctx.inject_message(message, role="user", session_key=event["session_key"])
-            status = "accepted_unverified" if accepted is True else "rejected" if accepted is False else "uncertain"
-        except Exception:
-            status = "uncertain"
+        status = self._inject(message, event["session_key"])
         self.store.finish(event_id, status)
         if status == "accepted_unverified" and hasattr(self.store, "coalesce_pending"):
             # This wake re-reads live context, so any other queued speculative
@@ -235,13 +247,7 @@ class Runtime:
             "not generate a second orientation wake.",
             "Event metadata: " + json.dumps(metadata, sort_keys=True),
         ])
-        try:
-            accepted = self.ctx.inject_message(message, role="user",
-                                               session_key=event["session_key"])
-            status = ("accepted_unverified" if accepted is True
-                      else "rejected" if accepted is False else "uncertain")
-        except Exception:
-            status = "uncertain"
+        status = self._inject(message, event["session_key"])
         self.store.finish(event_id, status)
         if status == "accepted_unverified":
             try:
@@ -311,7 +317,7 @@ class Runtime:
         # Missing or hand-corrupted kinds fall back to the plain watch
         # contract — a bad label must never crash a scheduled wake.
         kind = watch.get("kind", "watch")
-        if kind not in ("watch", "loop", "sweep"):
+        if kind not in TASK_KINDS:
             kind = "watch"
         metadata = {"id": event_id, "kind": "watch_due", "watch_kind": kind,
                     "purpose": True, "watch_id": watch_id,
@@ -378,13 +384,7 @@ class Runtime:
                 "external or sensitive actions; unverified work is not complete."
             )
         lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
-        try:
-            accepted = self.ctx.inject_message("\n".join(lines), role="user",
-                                               session_key=event["session_key"])
-            status = ("accepted_unverified" if accepted is True
-                      else "rejected" if accepted is False else "uncertain")
-        except Exception:
-            status = "uncertain"
+        status = self._inject("\n".join(lines), event["session_key"])
         self.store.finish(event_id, status)
         if status == "accepted_unverified" and kind == "sweep" \
                 and hasattr(self.store, "coalesce_pending"):
@@ -448,8 +448,11 @@ class Runtime:
             elif action == "pause":
                 # resume_at turns a pause into a durable snooze; a bare pause
                 # clears any pending snooze rather than inheriting one.
+                resume_at = args.get("resume_at")
+                if resume_at is not None and type(resume_at) is not str:
+                    raise ValueError("resume_at must be an aware ISO timestamp")
                 self.store.update_policy({"enabled": False,
-                                          "resume_at": args.get("resume_at") or ""})
+                                          "resume_at": resume_at or ""})
             elif action == "resume":
                 if not self.store.load_policy().session_key:
                     raise ValueError("bind an existing route first")
@@ -518,6 +521,8 @@ class Runtime:
         if action != "status" and not self._bound_route_only():
             return "Proactivity controls are only available on the bound conversation."
         args = {"action": action}
+        if action == "pause" and len(parts) > 1:
+            args["resume_at"] = parts[1]
         if action == "configure":
             try:
                 args["changes"] = json.loads(parts[1])
@@ -576,7 +581,7 @@ class Runtime:
                 def line(t):
                     fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
-                    kind = t.get("kind") if t.get("kind") in {"watch", "loop", "sweep"} else "watch"
+                    kind = t.get("kind") if t.get("kind") in TASK_KINDS else "watch"
                     return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":

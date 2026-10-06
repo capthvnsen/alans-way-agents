@@ -15,11 +15,36 @@ def _entry_is_dm_route(entry, session_key):
 def _routing_entry(home: Path, session_key: str):
     """Resolve a routing record without ever writing to either store.
 
-    ``sessions/sessions.json`` is only a legacy mirror Hermes may stop writing;
-    the authoritative index is state.db's ``gateway_routing`` table. Both are
-    read-only for us: a missing or unreadable source falls through, never
-    fabricates.
+    Same read order Hermes uses at load time: state.db's ``gateway_routing``
+    table is primary; ``sessions/sessions.json`` is the legacy import that
+    fills keys the DB cannot confirm. Rows are namespaced by the resolved
+    sessions dir (``scope``), with ``''`` covering pre-scoping databases. A
+    missing or unreadable source falls through, never fabricates.
     """
+    db_path = home / "state.db"
+    try:
+        scope = str((home / "sessions").resolve())
+    except Exception:
+        scope = str(home / "sessions")
+    try:
+        if db_path.is_file() and not db_path.is_symlink():
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = db.execute(
+                    "SELECT entry_json FROM gateway_routing WHERE session_key=?"
+                    " AND scope IN (?, '') ORDER BY CASE WHEN scope=? THEN 0 ELSE 1 END",
+                    (session_key, scope, scope)).fetchall()
+            finally:
+                db.close()
+            for (entry_json,) in rows:
+                try:
+                    entry = json.loads(entry_json)
+                except ValueError:
+                    continue
+                if type(entry) is dict:
+                    return entry
+    except (OSError, ValueError, sqlite3.Error):
+        pass
     index = home / "sessions" / "sessions.json"
     try:
         if index.is_file() and not index.is_symlink() and index.stat().st_size <= 16777216:
@@ -28,23 +53,7 @@ def _routing_entry(home: Path, session_key: str):
                 return data[session_key]
     except (OSError, ValueError):
         pass
-    db_path = home / "state.db"
-    try:
-        if not db_path.is_file() or db_path.is_symlink():
-            return None
-        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-        try:
-            row = db.execute(
-                "SELECT entry_json FROM gateway_routing WHERE session_key=?",
-                (session_key,)).fetchone()
-        finally:
-            db.close()
-        if row is None:
-            return None
-        entry = json.loads(row[0])
-        return entry if type(entry) is dict else None
-    except (OSError, ValueError, sqlite3.Error):
-        return None
+    return None
 
 
 def bind(runtime, session_key):

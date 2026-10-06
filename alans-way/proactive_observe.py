@@ -7,6 +7,8 @@ import os
 import re
 import stat
 
+from .proactive_context import TASK_KINDS
+
 SOURCES = ("memories/MEMORY.md", "memories/USER.md", "cron/jobs.json")
 DOCUMENTS = ("SOUL.md", "AGENTS.md", "IDENTITY.md")
 MAC_STATE_FILE = "/var/lib/hermes-alans-way/mac-state.json"
@@ -138,6 +140,8 @@ def collect(home: Path, ledger, ctx=None):
                    "cadence_seconds", "signal", "signal_at", "execution_host"}
         tasks.append({k: (v[:300] if isinstance(v, str) and k not in {"id", "native_task_id"} else v)
                       for k, v in task.items() if k in allowed})
+        if tasks[-1].get("kind", "watch") not in TASK_KINDS:
+            tasks[-1]["kind"] = "watch"
         if task.get("native_task_id"):
             current = native.get(task["id"])
             if current is None or current["status"] == "blocked":

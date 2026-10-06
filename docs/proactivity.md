@@ -114,9 +114,9 @@ the separately installed hook; review its removal independently.
 
 The primary translates natural-language preferences into the explicit
 `proactive_control` tool, then reads `status` back before confirming.
-Frontend controls: `/proactivity status`, `/proactivity pause`,
-`/proactivity resume`, `/proactivity review`, and
-`/proactivity configure {"quiet_start":23,"quiet_end":8}` (JSON).
+Frontend controls: `/proactivity status`, `/proactivity pause` (optionally
+with an aware ISO timestamp to snooze until then), `/proactivity resume`,
+`/proactivity review`, `/proactivity configure {"quiet_start":23}` (JSON).
 
 | User request | Tool action |
 | --- | --- |

@@ -76,9 +76,9 @@ proactive_control(action="record_task", task={
     "next_action": "Run the Source Sweeps procedure; report only actionable items",
     "cadence_seconds": 86400, "notify_when": "actionable items exist"})
 proactive_control(action="record_task", task={
-    "id": "loop_keith", "kind": "loop", "title": "Keith financials",
+    "id": "loop_vendor", "kind": "loop", "title": "Vendor documents",
     "owner": "primary", "status": "active", "approved": True,
-    "scope": "Waiting on Keith for 3 years of financials + 2026 sales (offered Sep 30)",
+    "scope": "Waiting on the vendor for the requested documents (offered Sep 30)",
     "next_action": "Check inbox for reply; if still silent, draft a follow-up and offer to send it",
     "due_at": "2026-10-08T00:00:00+00:00", "notify_when": "reply arrives or due passes"})
 proactive_control(action="report_signal", task_id="rent_due",
