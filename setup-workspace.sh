@@ -83,6 +83,81 @@ bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
 warn() { echo "  warn $1"; }
 skip() { echo "  skip $1"; }
 
+# The state of the workspace_browser block's desktop-input gate in config $1:
+#   opt-in    the --allow-desktop-actions marker env is present
+#   excluded  workspace_computer_action sits under the block's tools.exclude
+#   exposed   a workspace_browser block exists without either
+#   absent    no workspace_browser block at all
+# Anchored on the managed markers when they exist (a bare grep would accept the
+# tool name in a comment or under another server's exclude); without markers
+# the bare workspace_browser entry is audited instead.
+workspace_block_state() {
+  [ -f "$1" ] || { echo absent; return 0; }
+  python3 - "$1" <<'PY'
+import re, sys
+MARK_B = "# >>> alans-way workspace_browser managed block >>>"
+MARK_E = "# <<< alans-way workspace_browser managed block <<<"
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    print("absent")
+    sys.exit(0)
+lines, inside, saw = [], False, False
+for line in raw:
+    text = line.strip()
+    if text == MARK_B:
+        inside, saw = True, True
+        continue
+    if text == MARK_E:
+        inside = False
+        continue
+    if inside:
+        lines.append(line)
+if not saw:
+    lines = raw
+if not any(not l.lstrip().startswith("#") and re.match(r"\s*workspace_browser\s*:", l) for l in lines):
+    print("absent")
+    sys.exit(0)
+if any(not l.lstrip().startswith("#") and re.match(
+        r"\s*HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS\s*:", l) for l in lines):
+    print("opt-in")
+    sys.exit(0)
+stack, excl = [], None
+for line in lines:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        continue
+    item = re.match(r"^(\s*)-\s+(\S+)", line)
+    if excl is not None:
+        if item and len(item.group(1)) > excl:
+            if item.group(2).strip("\"'").rstrip(",") == "workspace_computer_action":
+                print("excluded")
+                sys.exit(0)
+            continue
+        excl = None
+    key = re.match(r"^(\s*)([\w.\"'-]+):\s*(.*?)\s*$", line)
+    if not key:
+        continue
+    depth = len(key.group(1))
+    while stack and stack[-1][0] >= depth:
+        stack.pop()
+    stack.append((depth, key.group(2).strip("\"'")))
+    keys = [k for _, k in stack]
+    value = key.group(3)
+    if keys[-3:] == ["workspace_browser", "tools", "exclude"]:
+        if re.search(r"\bworkspace_computer_action\b", value):
+            print("excluded")
+            sys.exit(0)
+        if not value:
+            excl = depth
+    elif keys[-2:] == ["workspace_browser", "tools"] and re.search(
+            r"exclude[^\n]*\bworkspace_computer_action\b", value):
+        print("excluded")
+        sys.exit(0)
+print("exposed")
+PY
+}
+
 # browser-mcp gives a browser action up to 90s; Hermes must wait longer or it
 # abandons a batch that is still running and the agent retries on top of it.
 TOOL_TIMEOUT=120
@@ -156,15 +231,11 @@ PY
     else
       ok "workspace_browser timeout ${timeout}s"
     fi
-    if [ -f "$CONFIG" ] && grep -q 'workspace_browser' "$CONFIG"; then
-      if grep -q 'HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS' "$CONFIG"; then
-        ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)"
-      elif grep -q 'workspace_computer_action' "$CONFIG"; then
-        ok "ungated desktop input excluded from workspace_browser"
-      else
-        warn "workspace_browser does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately"
-      fi
-    fi
+    case "$(workspace_block_state "$CONFIG")" in
+      opt-in) ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)";;
+      excluded) ok "ungated desktop input excluded from workspace_browser";;
+      exposed) warn "workspace_browser does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately";;
+    esac
   else
     skip "config check (no --config given)"
   fi

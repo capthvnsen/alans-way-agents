@@ -454,6 +454,37 @@ class VerifyTests(unittest.TestCase):
             result = run("--verify", "--config", str(config), check=False)
             self.assertIn("does not exclude workspace_computer_action", result.stdout)
 
+    def test_verify_counts_only_the_exclusion_under_the_blocks_own_tools_exclude(self):
+        # The tool name appearing anywhere else in the file is not an
+        # exclusion: a comment, or another server's tools.exclude.
+        for extra in (
+            "    # workspace_computer_action is not excluded here\n",
+            "  other_server:\n    command: x\n    tools:\n      exclude:\n        - workspace_computer_action\n",
+        ):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                config.write_text(
+                    "# >>> alans-way workspace_browser managed block >>>\n"
+                    "  workspace_browser:\n    command: node\n    timeout: 120\n" + extra +
+                    "# <<< alans-way workspace_browser managed block <<<\n",
+                    encoding="utf-8")
+                result = run("--verify", "--config", str(config), check=False)
+                self.assertIn("does not exclude workspace_computer_action", result.stdout)
+                self.assertNotIn("ungated desktop input excluded", result.stdout)
+
+    def test_verify_reads_the_exclusion_inside_the_managed_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "# >>> alans-way workspace_browser managed block >>>\n"
+                "  workspace_browser:\n    command: node\n    timeout: 120\n"
+                "    tools:\n      exclude:\n        - workspace_computer_action\n"
+                "# <<< alans-way workspace_browser managed block <<<\n"
+                "  other_server:\n    command: x\n",
+                encoding="utf-8")
+            result = run("--verify", "--config", str(config), check=False)
+            self.assertIn("ungated desktop input excluded from workspace_browser", result.stdout)
+
 
 class HostOsFlagTests(unittest.TestCase):
     def test_host_os_is_emitted_in_the_env_block(self):

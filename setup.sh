@@ -197,29 +197,100 @@ write_if_changed() {
 }
 
 
-# When the computer-use provider is the selected backend, its own doctor decides.
-# Otherwise the built-in toolset stays on (it is approval-gated); what verify
-# must catch is the ungated workspace_computer_action tool being exposed.
+# The state of the workspace_browser block's desktop-input gate in config $1:
+#   opt-in    the --allow-desktop-actions marker env is present
+#   excluded  workspace_computer_action sits under the block's tools.exclude
+#   exposed   a workspace_browser block exists without either
+#   absent    no workspace_browser block at all
+# Anchored on the managed markers when they exist (a bare grep would accept the
+# tool name in a comment or under another server's exclude); without markers
+# the bare workspace_browser entry is audited instead.
+workspace_block_state() {
+  [ -f "$1" ] || { echo absent; return 0; }
+  python3 - "$1" <<'PY'
+import re, sys
+MARK_B = "# >>> alans-way workspace_browser managed block >>>"
+MARK_E = "# <<< alans-way workspace_browser managed block <<<"
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    print("absent")
+    sys.exit(0)
+lines, inside, saw = [], False, False
+for line in raw:
+    text = line.strip()
+    if text == MARK_B:
+        inside, saw = True, True
+        continue
+    if text == MARK_E:
+        inside = False
+        continue
+    if inside:
+        lines.append(line)
+if not saw:
+    lines = raw
+if not any(not l.lstrip().startswith("#") and re.match(r"\s*workspace_browser\s*:", l) for l in lines):
+    print("absent")
+    sys.exit(0)
+if any(not l.lstrip().startswith("#") and re.match(
+        r"\s*HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS\s*:", l) for l in lines):
+    print("opt-in")
+    sys.exit(0)
+stack, excl = [], None
+for line in lines:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        continue
+    item = re.match(r"^(\s*)-\s+(\S+)", line)
+    if excl is not None:
+        if item and len(item.group(1)) > excl:
+            if item.group(2).strip("\"'").rstrip(",") == "workspace_computer_action":
+                print("excluded")
+                sys.exit(0)
+            continue
+        excl = None
+    key = re.match(r"^(\s*)([\w.\"'-]+):\s*(.*?)\s*$", line)
+    if not key:
+        continue
+    depth = len(key.group(1))
+    while stack and stack[-1][0] >= depth:
+        stack.pop()
+    stack.append((depth, key.group(2).strip("\"'")))
+    keys = [k for _, k in stack]
+    value = key.group(3)
+    if keys[-3:] == ["workspace_browser", "tools", "exclude"]:
+        if re.search(r"\bworkspace_computer_action\b", value):
+            print("excluded")
+            sys.exit(0)
+        if not value:
+            excl = depth
+    elif keys[-2:] == ["workspace_browser", "tools"] and re.search(
+            r"exclude[^\n]*\bworkspace_computer_action\b", value):
+        print("excluded")
+        sys.exit(0)
+print("exposed")
+PY
+}
+
+# The managed block's desktop-input exclusion is audited on every run: a block
+# that predates this setup or was hand-edited keeps the ungated tool registered
+# even when the provider is the selected backend. When the provider is
+# selected, its own doctor runs too; otherwise the built-in toolset stays on
+# (it is approval-gated).
 check_computer_provider() {
-  have hermes || return 0
-  if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
-    _cfg="$HERMES_HOME/config.yaml"
-    if [ -n "$PROFILE" ]; then
-      _cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
-    elif [ -n "$CONFIG" ]; then
-      _cfg="$CONFIG"
-    fi
-    if [ -f "$_cfg" ] && grep -q 'workspace_browser' "$_cfg"; then
-      if grep -q 'HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS' "$_cfg"; then
-        ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)${PROFILE:+ in profile $PROFILE}"
-      elif grep -q 'workspace_computer_action' "$_cfg"; then
-        ok "ungated desktop input excluded from workspace_browser${PROFILE:+ in profile $PROFILE}"
-      else
-        warn "workspace_browser in $_cfg does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately"
-      fi
-    fi
-    return 0
+  _cfg="$HERMES_HOME/config.yaml"
+  if [ -n "$PROFILE" ]; then
+    _cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+  elif [ -n "$CONFIG" ]; then
+    _cfg="$CONFIG"
   fi
+  case "$(workspace_block_state "$_cfg")" in
+    opt-in) ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)${PROFILE:+ in profile $PROFILE}";;
+    excluded) ok "ungated desktop input excluded from workspace_browser${PROFILE:+ in profile $PROFILE}";;
+    exposed) warn "workspace_browser in $_cfg does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately";;
+  esac
+  have hermes || return 0
+  [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = alans-way-computer ] || return 0
   if hermes_p computer-use doctor >/dev/null 2>&1; then
     ok "computer-use provider passes hermes computer-use doctor"
   else
@@ -706,9 +777,46 @@ check_repo_pin() {
   _want="$(git -C "$REPO_DIR" rev-parse --verify -q "$REPO_REF^{commit}" 2>/dev/null || true)"
   _head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
   if [ -n "$_want" ] && [ "$_head" = "$_want" ]; then return 0; fi
-  bad "$REPO_DIR is not at --repo-ref $REPO_REF (git checkout $REPO_REF there, or run setup from a fresh download)"
+  if [ -n "$_want" ]; then
+    bad "$REPO_DIR is not at --repo-ref $REPO_REF (git checkout $REPO_REF there, or run setup from a fresh download)"
+  else
+    bad "cannot resolve --repo-ref $REPO_REF to a commit in $REPO_DIR (a release tag must be pushed to exist; check the ref or fetch the remote)"
+  fi
   exit 1
 }
+# A catalog install records the commit it was checked out at in the profile's
+# plugins/.install-metadata.json (installer-owned, so a repo cannot forge it).
+# That sha is this clone's only legitimate pin and outranks --repo-ref: a tag
+# can be re-pointed upstream, the recorded commit cannot move. Without a
+# catalog record --repo-ref stays the pin; the skill passes the release tag.
+catalog_repo_sha() {
+  [ -f "$PROFILE_HOME/plugins/.install-metadata.json" ] || return 0
+  python3 - "$PROFILE_HOME" "$PLUGIN_NAME" <<'PY'
+import json, re, sys
+try:
+    rows = json.load(open(sys.argv[1] + "/plugins/.install-metadata.json"))
+except Exception:
+    sys.exit(0)
+row = rows.get(sys.argv[2])
+if not isinstance(row, dict):
+    sys.exit(0)
+cat = row.get("catalog")
+if isinstance(cat, dict):
+    sha = str(cat.get("sha") or cat.get("pin") or "")
+elif row.get("catalog_name"):
+    sha = str(row.get("revision") or "")
+else:
+    sha = ""
+sys.stdout.write(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")
+PY
+}
+_catalog_sha="$(catalog_repo_sha || true)"
+if [ -n "$_catalog_sha" ]; then
+  if [ -n "$REPO_REF" ] && [ "$REPO_REF" != "$_catalog_sha" ]; then
+    warn "--repo-ref $REPO_REF ignored: the catalog-installed plugin pins this repo to $_catalog_sha"
+  fi
+  REPO_REF="$_catalog_sha"
+fi
 if [ -z "$REPO_DIR" ]; then
   step "Fetching alans-way-agents"
   REPO_DIR="$BROWSER_HOME/.local/share/alans-way-agents"

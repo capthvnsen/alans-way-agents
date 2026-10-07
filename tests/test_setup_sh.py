@@ -278,9 +278,13 @@ class SkipPluginTests(unittest.TestCase):
             home = Path(directory) / "hermes_home"
             plugin_dir = home / "plugins" / "alans-way"
             plugin_dir.mkdir(parents=True)
+            # The recorded sha pins the clone too: record this checkout's HEAD.
+            head = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
             (home / "plugins" / ".install-metadata.json").write_text(
                 '{"alans-way": {"source": "catalog", "catalog": {"name": "alans-way", '
-                '"sha": "3a74614aa6ef43353500553526325c2fc33da9e5"}, "pinned": true}}',
+                '"sha": "%s"}, "pinned": true}}' % head,
                 encoding="utf-8",
             )
             log = Path(directory) / "log"
@@ -485,6 +489,72 @@ class PinAndListTests(unittest.TestCase):
         result = run(*flags, env=env, check=False, script=script)
         self.assertIn("is at v9.9.9", result.stdout)
         self.assertNotIn("is not at --repo-ref", result.stdout)
+
+    def make_git_repo(self):
+        repo = self.root / "repo"
+        shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "x"], check=True)
+        return repo / "setup.sh", git
+
+    def write_catalog_record(self, sha):
+        plugins = self.home / "plugins"
+        plugins.mkdir(parents=True, exist_ok=True)
+        (plugins / "alans-way").mkdir(exist_ok=True)
+        (plugins / ".install-metadata.json").write_text(
+            json.dumps({"alans-way": {"pinned": True, "revision": sha, "source": "catalog",
+                                      "catalog": {"name": "alans-way", "sha": sha}}}),
+            encoding="utf-8")
+
+    def test_a_catalog_record_pins_the_clone_to_the_reviewed_sha(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        self.write_catalog_record(head)
+        flags = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(self.home))
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertIn("is at %s" % head, result.stdout)
+        # Once the clone drifts off the recorded commit, setup hard-stops.
+        subprocess.run([*git, "commit", "-qm", "unreviewed change", "--allow-empty"], check=True)
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is not at --repo-ref %s" % head, result.stdout)
+
+    def test_a_moved_tag_cannot_override_the_recorded_sha(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run([*git, "commit", "-qm", "moved", "--allow-empty"], check=True)
+        subprocess.run([*git, "tag", "v9.9.9"], check=True)  # the tag now sits past the pin
+        subprocess.run([*git, "checkout", "-q", head], check=True)
+        self.write_catalog_record(head)
+        # Passing the moved tag still resolves to the recorded sha, not the tag.
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertIn("--repo-ref v9.9.9 ignored", result.stdout)
+        self.assertIn("is at %s" % head, result.stdout)
+        self.assertNotIn("is not at --repo-ref", result.stdout)
+
+    def test_without_a_catalog_record_the_release_tag_is_the_pin(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        subprocess.run([*git, "tag", "v9.9.9"], check=True)
+        subprocess.run([*git, "commit", "-qm", "unreviewed change", "--allow-empty"], check=True)
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is not at --repo-ref v9.9.9", result.stdout)
+        self.assertNotIn("ignored", result.stdout)
+
+    def test_a_ref_that_cannot_be_resolved_stops_with_a_clear_error(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot resolve --repo-ref v9.9.9", result.stdout)
 
 
 class DocFlagTests(unittest.TestCase):
@@ -1963,6 +2033,35 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         self.assertIn("computer-use doctor", read_log(log))
         self.assertRegex(result.stdout, r"FAIL .*computer")
 
+    def test_verify_audits_the_block_exclusion_even_when_the_provider_is_selected(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "config get computer_use.backend") echo alans-way-computer;;\n'
+             '  "computer-use doctor") exit 0;;\nesac\nexit 0\n' % log)
+        # A managed block that predates the exclusion must be flagged even with
+        # the provider backend selected; only a block-scoped exclusion counts.
+        (home / "config.yaml").write_text(
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    # workspace_computer_action mentioned in a comment\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+        self.assertIn("does not exclude workspace_computer_action", result.stdout)
+        self.assertIn("computer-use doctor", read_log(log))
+        (home / "config.yaml").write_text(
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    tools:\n      exclude:\n        - workspace_computer_action\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+        self.assertIn("ungated desktop input excluded from workspace_browser", result.stdout)
+
     def test_the_approval_allowlist_is_only_seeded_on_request(self):
         result = self.run_setup()
         self.assertNotIn("command_allowlist", read_log(self.log))
@@ -2259,8 +2358,10 @@ class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertIn("does not exclude workspace_computer_action", verify())
         # The explicit opt-in marker is reported as deliberate, not an error.
         gamma = self.root / "home" / "profiles" / "gamma" / "config.yaml"
-        gamma.write_text(gamma.read_text() + '      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"\n',
-                         encoding="utf-8")
+        gamma.write_text(gamma.read_text().replace(
+            "# <<< alans-way workspace_browser managed block <<<",
+            '      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"\n'
+            "# <<< alans-way workspace_browser managed block <<<"), encoding="utf-8")
         self.assertIn("workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions) in profile gamma",
                       verify())
 
