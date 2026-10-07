@@ -671,7 +671,9 @@ class StockBrowserTests(unittest.TestCase):
     def test_disables_the_stock_browser_and_says_so(self):
         result, calls = self.setup_run()
         self.assertIn("tools disable browser --platform telegram", calls)
-        self.assertIn("built-in browser toolset disabled", result.stdout)
+        self.assertIn("tools disable browser --platform cron", calls)
+        self.assertIn("built-in browser toolset disabled for telegram", result.stdout)
+        self.assertIn("built-in browser toolset disabled for cron", result.stdout)
         self.assertIn("--keep-browser", result.stdout)
 
     def test_keep_browser_opts_out(self):
@@ -701,6 +703,26 @@ class StockBrowserTests(unittest.TestCase):
             self.assertNotIn("built-in 'browser' toolset still enabled", kept.stdout)
             plain = run("--verify", env=env_for(root, bin_dir, home), check=False)
             self.assertIn("built-in 'browser' toolset still enabled", plain.stdout)
+
+    def test_verify_checks_cron_for_the_stock_browser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            (home / "hooks" / "alans-way").mkdir(parents=True)
+            (home / "hooks" / "alans-way" / "handler.py").write_text("# stub\n", encoding="utf-8")
+            bin_dir = tooling(root, root / "log")
+            fake(bin_dir, "hermes", '[ "$1" = -p ] && shift 2\ncase "$1" in\n'
+                 '  --version) echo "hermes 0.21.5";;\n'
+                 '  plugins) [ "$2" = list ] && echo alans-way;;\n'
+                 '  tools) [ "$2" = list ] && case "$4" in\n'
+                 '    cron) echo "enabled browser"; echo "enabled proactivity";;\n'
+                 '    *) echo "enabled proactivity";;\n'
+                 '  esac;;\n'
+                 'esac\n')
+            result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+            self.assertIn("browser' toolset still enabled for cron", result.stdout)
+            self.assertIn("browser toolset disabled for telegram", result.stdout)
 
 
 class HostAddressTests(unittest.TestCase):
@@ -1800,6 +1822,7 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         result = self.run_setup(python_ok=False)
         calls = read_log(self.log)
         self.assertIn("-p default tools disable computer_use --platform telegram\n", calls)
+        self.assertIn("-p default tools disable computer_use --platform cron\n", calls)
         self.assertIn("--keep-computer-use", result.stdout)
         self.assertIn("tools enable computer_use --platform telegram", result.stdout)
 
@@ -1930,7 +1953,8 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
     def test_each_profile_gets_the_per_profile_work_but_only_the_primary_is_bound(self):
         result, home, calls = self.run_all()
         for name in ("default", "alpha", "beta", "gamma", "quoted"):
-            for needed in ("tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
+            for needed in ("tools disable browser --platform telegram", "tools disable browser --platform cron",
+                           "config set computer_use.backend alans-way-computer"):
                 self.assertIn("-p %s %s" % (name, needed), calls, (name, needed))
         self.assertIn("-p default tools enable proactivity --platform cron", calls)
         self.assertNotIn("proactivity --platform", calls.replace("-p default tools enable proactivity", ""))
@@ -1979,6 +2003,7 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
         result, home, calls = self.run_all(python_ok=False)
         for name in ("default", "alpha", "beta", "gamma", "quoted"):
             self.assertIn("-p %s tools disable computer_use --platform telegram\n" % name, calls, name)
+            self.assertIn("-p %s tools disable computer_use --platform cron\n" % name, calls, name)
         self.assertNotIn("-p botless tools disable computer_use", calls)
         self.assertNotIn("config set computer_use.backend", calls)
         _, _, kept = self.run_all("--keep-computer-use", python_ok=False)
@@ -2101,6 +2126,7 @@ class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertIn("profile botless has no Telegram bot of its own", out)
         self.assertIn("profile aaa-bad was not checked: config.yaml is not valid UTF-8 text", out)
         self.assertIn("browser' toolset still enabled for telegram in profile beta", out)
+        self.assertIn("browser' toolset still enabled for cron in profile beta", out)
         self.assertRegex(out, r"FAIL .*hermes -p alpha computer-use doctor")
         self.assertNotRegex(out, r"FAIL .*-p beta computer-use")
         keep = run("--verify", "--keep-browser", "--hermes-home", str(self.root / "home"), env=self.env, check=False, script=self.script)
@@ -2114,7 +2140,9 @@ class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
                                    env=self.env, check=False, script=self.script).stdout
         out = verify()
         self.assertIn("computer_use' toolset still enabled for telegram in profile beta", out)
+        self.assertIn("computer_use' toolset still enabled for cron in profile beta", out)
         self.assertRegex(out, r"ok   .*computer_use toolset disabled for telegram in profile alpha")
+        self.assertRegex(out, r"ok   .*computer_use toolset disabled for cron in profile alpha")
         self.assertNotIn("computer_use' toolset still enabled", verify("--keep-computer-use"))
 
 

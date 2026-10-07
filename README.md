@@ -112,8 +112,8 @@ The bootstrap runs every step in order and says what it did:
   prints the one-time TCC grants instead (guided, never auto-installed)
 - **Workspace config** — writes the managed `workspace_browser` block into the
   right profile's config, then turns off Hermes' built-in browser toolset for
-  Telegram so the agent uses your workspace browser (setup says so; pass
-  `--keep-browser` to leave it on)
+  Telegram and cron so the agent uses your workspace browser (setup says so;
+  pass `--keep-browser` to leave it on)
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)
@@ -141,7 +141,7 @@ without changing anything, `--non-interactive` for scripted runs,
 checking their format. When Hermes has the pluggable computer-use API, setup
 also installs the `alans-way-computer` provider for the profile and selects it
 once the workspace browser is configured. Without that API, setup turns off
-Hermes' built-in `computer_use` toolset for Telegram so the agent uses the
+Hermes' built-in `computer_use` toolset for Telegram and cron so the agent uses the
 workspace computer tools (`--keep-computer-use` leaves it on). A `cua-driver`
 MCP server you added yourself is kept, and setup warns that the agent then sees
 two computer-use paths and prints the `hermes mcp remove` command. Desktop control asks for approval in

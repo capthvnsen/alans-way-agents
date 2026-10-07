@@ -75,10 +75,10 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --desktop-ref SHA  pin the alans-way desktop repo clone/update the same way
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
-                   for Telegram once the workspace browser is configured)
+                   for Telegram and cron once the workspace browser is configured)
   --keep-computer-use  leave Hermes' built-in computer_use toolset on when this Hermes has
-                   no pluggable provider API (setup turns it off for Telegram so the
-                   agent uses the workspace_computer_* tools)
+                   no pluggable provider API (setup turns it off for Telegram and cron
+                   so the agent uses the workspace_computer_* tools)
   --allow-desktop-actions  stop Telegram approval prompts for desktop control (click, type,
                    key, scroll...) by adding them to command_allowlist; off unless you ask
   --skip-browser / --skip-services / --non-interactive for constrained runs
@@ -198,10 +198,14 @@ check_computer_provider() {
   if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
     if [ "$KEEP_COMPUTER" = 1 ]; then
       skip "built-in computer_use toolset check${PROFILE:+ for profile $PROFILE} (--keep-computer-use)"
-    elif hermes_p tools list --platform telegram 2>/dev/null | grep -Eq "enabled[[:space:]]+computer_use([[:space:]]|$)"; then
-      warn "built-in 'computer_use' toolset still enabled for telegram${PROFILE:+ in profile $PROFILE}: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform telegram)"
     else
-      ok "built-in computer_use toolset disabled for telegram${PROFILE:+ in profile $PROFILE}"
+      for platform in telegram cron; do
+        if hermes_p tools list --platform "$platform" 2>/dev/null | grep -Eq "enabled[[:space:]]+computer_use([[:space:]]|$)"; then
+          warn "built-in 'computer_use' toolset still enabled for $platform${PROFILE:+ in profile $PROFILE}: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform $platform)"
+        else
+          ok "built-in computer_use toolset disabled for $platform${PROFILE:+ in profile $PROFILE}"
+        fi
+      done
     fi
     return 0
   fi
@@ -406,10 +410,16 @@ if [ "$VERIFY" = 1 ]; then
     fi
     if [ "$KEEP_BROWSER" = 1 ]; then
       skip "built-in browser toolset check (--keep-browser)"
-    elif printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
-      warn "built-in 'browser' toolset still enabled for telegram: the agent may bypass the workspace browser (run: hermes tools disable browser --platform telegram)"
     else
-      ok "built-in browser toolset disabled for telegram"
+      for platform in telegram cron; do
+        _platform_tools="$TOOLS"
+        [ "$platform" = telegram ] || _platform_tools="$(hermes_p tools list --platform "$platform" 2>/dev/null || true)"
+        if printf '%s\n' "$_platform_tools" | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
+          warn "built-in 'browser' toolset still enabled for $platform: the agent may bypass the workspace browser (run: hermes tools disable browser --platform $platform)"
+        else
+          ok "built-in browser toolset disabled for $platform"
+        fi
+      done
     fi
   fi
   if have hermes; then
@@ -473,10 +483,14 @@ print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") i
     if have hermes; then
       if [ "$KEEP_BROWSER" = 1 ]; then
         skip "built-in browser toolset check for profile $_name (--keep-browser)"
-      elif hermes_p tools list --platform telegram 2>/dev/null | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
-        warn "built-in 'browser' toolset still enabled for telegram in profile $_name: its agent may bypass the workspace browser (run: hermes -p $_name tools disable browser --platform telegram)"
       else
-        ok "built-in browser toolset disabled for telegram in profile $_name"
+        for platform in telegram cron; do
+          if hermes_p tools list --platform "$platform" 2>/dev/null | grep -Eq "enabled[[:space:]]+browser([[:space:]]|$)"; then
+            warn "built-in 'browser' toolset still enabled for $platform in profile $_name: its agent may bypass the workspace browser (run: hermes -p $_name tools disable browser --platform $platform)"
+          else
+            ok "built-in browser toolset disabled for $platform in profile $_name"
+          fi
+        done
       fi
     fi
     check_computer_provider
@@ -1514,18 +1528,22 @@ workspace_for_profile() {
       if [ "$KEEP_COMPUTER" = 1 ]; then
         say "  keeping the built-in computer_use toolset on (--keep-computer-use); the agent may pick it instead of your workspace computer tools"
       else
-        hermes_p tools disable computer_use --platform telegram >/dev/null 2>&1 \
-          && ok "built-in computer_use toolset disabled for telegram so the agent uses your workspace computer tools. To keep it on, re-run with --keep-computer-use or run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform telegram" \
-          || warn "could not disable the built-in computer_use toolset for telegram: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform telegram)"
+        for platform in telegram cron; do
+          hermes_p tools disable computer_use --platform "$platform" >/dev/null 2>&1 \
+            && ok "built-in computer_use toolset disabled for $platform so the agent uses your workspace computer tools. To keep it on, re-run with --keep-computer-use or run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform" \
+            || warn "could not disable the built-in computer_use toolset for $platform: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform $platform)"
+        done
       fi
     fi
     warn_user_cua_driver
     # The workspace browser replaces Hermes' built-in browser tool: leaving both
-    # enabled lets the agent pick a different browser than the user's app.
+    # enabled lets the agent pick a different browser than the user's app. Cron
+    # sessions see the same workspace tools, so the stock toolset goes off there
+    # too (a cron-run agent has reached for the built-in browser first).
     if [ "$KEEP_BROWSER" = 1 ]; then
       say "  keeping the built-in browser toolset on (--keep-browser); the agent may pick it instead of your workspace browser"
     else
-      for platform in telegram; do
+      for platform in telegram cron; do
         hermes_p tools disable browser --platform "$platform" >/dev/null 2>&1 \
           && ok "built-in browser toolset disabled for $platform so the agent uses your workspace browser. To keep it on, re-run with --keep-browser or run: hermes${PROFILE:+ -p $PROFILE} tools enable browser --platform $platform" \
           || warn "could not disable the built-in browser toolset for $platform: the agent may bypass the workspace browser (run: hermes${PROFILE:+ -p $PROFILE} tools disable browser --platform $platform)"
