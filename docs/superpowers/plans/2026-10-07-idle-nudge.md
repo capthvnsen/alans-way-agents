@@ -6,21 +6,26 @@
 
 **Architecture:** `alans-way/proactivity.py` holds everything:
 - pure schedule math (`due_at`, `next_active`, `validate`)
-- a read-only `state.db` activity reader
-- a small JSON state file
-- a 60-second daemon thread that calls `ctx.inject_message` only inside a live gateway
+- `pre_llm_call`/`post_llm_call` hooks that record when the bound chat was last active and whether a turn is running
+- state in `ctx.state`
+- a 60-second daemon thread started from a Telegram `register_platform_handler` factory, so it only exists inside the gateway, which calls `ctx.inject_message`
 - one `proactivity` tool and the `hermes proactivity` CLI
 
-`__init__.py` shrinks to `register()`. The old modules, skill, hook and tests are deleted.
+`__init__.py` shrinks to `register()`. The old modules, skill, hook, guard and tests are deleted. Only public Hermes plugin surfaces are used, so the plugin can pass catalog submission.
 
-**Tech Stack:** Python 3.11 stdlib only (`zoneinfo`, `sqlite3`, `threading`, `dataclasses`), `unittest`, bash (`setup.sh`).
+**Tech Stack:** Python 3.11 stdlib only (`zoneinfo`, `threading`, `dataclasses`, `sqlite3` only for the one-time 0.6 import), `unittest`, bash (`setup.sh`).
 
 **Spec:** `docs/superpowers/specs/2026-10-07-idle-nudge-design.md`
 
 ## Global Constraints
 
 - Work in `/Users/alex/orca/workspaces/alans-way-agents/idle-nudge` on branch `capthvnsen/idle-nudge`.
-- Stdlib only. No new dependencies. `requires_hermes: ">=0.21.5"` is unchanged.
+- Stdlib only. No new dependencies. `requires_hermes: ">=0.21.5"` is unchanged. Every Hermes surface used below exists in the 0.21.5 release (`v2026.9.24`); verified on 2026-10-07. Do NOT use `post_gateway_admission` (canary only).
+- **Hermes plugin catalog rules** (https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission):
+  - Public surfaces only: `register_*`, hooks, `ctx.state`, `ctx.inject_message`, and `gateway.session_context.get_session_env` (read only).
+  - No reading or writing private attributes (`ctx._manager`, ...). No `setattr` on core.
+  - `plugin.yaml` `provides_tools` and `provides_hooks` must match what `register()` registers.
+  - Risky behavior is disclosed in `alans-way/README.md`: the background thread, injected prompts, the one-time read of the 0.6 store, and the skills that run shell commands.
 - **The active window is the USER's timezone**, never the server's. An unknown timezone is `""`, treated as UTC, and the nudge prompt asks the bot to learn it.
 - Defaults:
   - `base_minutes=120`
@@ -39,8 +44,8 @@
 1. **User timezone different from the server's, across a DST change:** the 8:00 and 22:00 boundaries stay at local wall-clock time for the user. Tested in Task 1.
 2. **Gateway back after a long outage or overnight:** exactly one nudge, at the next active-window start, never a burst. Tested in Task 3.
 3. **Injection refused or raising** (for example `allow_gateway_injection` missing): no hot loop, the back-off still advances, and status shows the outcome. Tested in Task 3.
-4. **Missing `state.db`, a bound chat that never had a message, or a corrupt `state.json`:** no crash, and the wait anchors at bind time. Tested in Tasks 2 and 3.
-5. **A different chat or a CLI process:** a non-bound session can't `set`, and a CLI or TUI process never injects. Tested in Task 3.
+4. **A turn that never finishes** (crash, `/stop`, so `post_llm_call` never fires): the busy flag expires after 3 hours instead of silencing check-ins forever. Tested in Task 3.
+5. **A different chat, a CLI process, or the bot's own check-in turn:** none of these reset the back-off or change settings, and a CLI or TUI process never starts the loop. Tested in Tasks 2 and 3.
 
 ---
 
@@ -295,142 +300,188 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Activity reader, route check and state file
+### Task 2: State, binding and activity hooks
 
 **Files:**
 - Modify: `alans-way/proactivity.py` (append)
-- Test: `tests/test_proactivity.py` (append the classes below before `if __name__`)
+- Test: `tests/test_proactivity.py` (append the code below before `if __name__`)
 
 **Interfaces:**
-- Consumes: `Settings`, `validate` from Task 1; `write_private_json(path, dict)` from `alans-way/gateway_guard.py` (it already exists; leave it as it is).
+- Consumes: `Settings`, `validate`, `is_paused` from Task 1. From the ctx: `ctx.state.get(key, default=None)` and `ctx.state.set(key, value)`, Hermes' profile-scoped JSON state, the same file for the gateway and CLI processes of one profile.
 - Produces:
-  - `read_activity(home: Path, session_key: str) -> tuple[float|None, float|None]`, returning (newest real message from either side, newest real user message) as epoch seconds
-  - `routing_entry(home, session_key) -> dict|None`
-  - `is_dm_route(entry, session_key) -> bool`
+  - `MARKER = "[Proactive check-in]"`
+  - `STATE_KEY = "idle"`
   - `caller_session_key() -> str`
-  - `class Proactivity(ctx, home, *, clock=None)` with `.path`, `.load() -> dict`, `.save(state)`, `.settings(state) -> Settings`, `.update(changes, *, min_base=15)`, `.bind(session_key)`
+  - `class Proactivity(ctx, *, clock=None, legacy_home=None)`, with:
+    - `.load() -> dict`, `.save(state)`, `.settings(state) -> Settings`
+    - `.update(changes, *, min_base=15)`, `.bind(session_key)`
+    - `.on_turn_start(**kw) -> None`, the `pre_llm_call` hook
+    - `.on_turn_end(**kw) -> None`, the `post_llm_call` hook
+    - attributes `.gateway: bool` (False) and `.busy_since: datetime|None`
 
-State file `<home>/companion/proactivity/state.json` holds these keys:
+State dict under `STATE_KEY` holds these keys:
 - `session_key`
 - `bound_ts` (float)
 - `settings` (dict)
 - `nudges` (int)
 - `last_user_ts` (float)
+- `last_activity_ts` (float)
 - `last_nudge_ts` (float)
 - `last_result` (str)
 
 - [ ] **Step 1: Write the failing tests**
 
+Add `from unittest.mock import patch` to the test file's imports, then append:
+
 ```python
-def make_db(home, rows, key="agent:main:telegram:dm:1"):
-    """rows: (role, timestamp, platform_message_id or None)."""
-    db = sqlite3.connect(home / "state.db")
-    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, session_key TEXT)")
-    db.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT,"
-               " content TEXT, timestamp REAL, platform_message_id TEXT)")
-    db.execute("CREATE TABLE gateway_routing (scope TEXT, session_key TEXT, entry_json TEXT, updated_at REAL)")
-    db.execute("INSERT INTO sessions VALUES ('s1', ?)", (key,))
-    db.execute("INSERT INTO sessions VALUES ('other', 'agent:main:telegram:dm:2')")
-    for role, ts, pmid in rows:
-        db.execute("INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)"
-                   " VALUES ('s1', ?, 'x', ?, ?)", (role, ts, pmid))
-    db.execute("INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)"
-               " VALUES ('other', 'user', 'x', 9999999999, '7')")
-    db.execute("INSERT INTO gateway_routing VALUES ('', ?, ?, 0)", (key, json.dumps(
-        {"session_key": key, "platform": "telegram", "chat_type": "dm", "session_id": "s1"})))
+class FakeState:
+    """ctx.state stand-in: JSON round-trips like Hermes' file-backed facade."""
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key, default=None):
+        return json.loads(json.dumps(self.data.get(key, default)))
+
+    def set(self, key, value):
+        self.data[key] = json.loads(json.dumps(value))
+
+
+class FakeCtx(SimpleNamespace):
+    def __init__(self, accept=True):
+        super().__init__(state=FakeState(), sent=[], accept=accept)
+
+    def inject_message(self, content, role="user", *, session_key=None):
+        if isinstance(self.accept, Exception):
+            raise self.accept
+        self.sent.append((content, session_key))
+        return self.accept
+
+
+KEY = "agent:main:telegram:dm:42"
+
+
+def runtime(ctx, now, **settings):
+    clock = SimpleNamespace(now=now)
+    p = P.Proactivity(ctx, clock=lambda: clock.now)
+    p.gateway = True
+    p.bind(KEY)
+    p.update({"timezone": "UTC", **settings}, min_base=1)
+    return p, clock
+
+
+def turn(p, clock, when, text="hi", key=KEY, finish=True):
+    """One agent turn in session `key`, as Hermes' pre/post_llm_call hooks see it."""
+    clock.now = when
+    with patch.object(P, "caller_session_key", return_value=key):
+        assert p.on_turn_start(user_message=text, platform="telegram", sender_id="42") is None
+        if finish:
+            assert p.on_turn_end(platform="telegram", sender_id="42") is None
+
+
+def write_legacy(home, policy):
+    old = home / "companion" / "proactivity" / "proactivity.sqlite3"
+    old.parent.mkdir(parents=True)
+    db = sqlite3.connect(old)
+    db.execute("CREATE TABLE policy (singleton INTEGER PRIMARY KEY, settings TEXT, revision INTEGER)")
+    db.execute("INSERT INTO policy VALUES (1, ?, 3)", (json.dumps(policy),))
     db.commit()
     db.close()
-
-
-class ActivityTests(unittest.TestCase):
-    def test_injected_and_compaction_turns_are_not_the_user(self):
-        with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            make_db(home, [("user", 100.0, "11"), ("assistant", 150.0, None),
-                           ("user", 200.0, None), ("tool", 300.0, None)])
-            self.assertEqual(P.read_activity(home, "agent:main:telegram:dm:1"), (150.0, 100.0))
-
-    def test_missing_db_means_no_activity(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(P.read_activity(Path(d), "k"), (None, None))
-
-    def test_route_check(self):
-        with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            make_db(home, [])
-            key = "agent:main:telegram:dm:1"
-            self.assertTrue(P.is_dm_route(P.routing_entry(home, key), key))
-            self.assertFalse(P.is_dm_route(P.routing_entry(home, "agent:main:telegram:dm:9"), "agent:main:telegram:dm:9"))
+    return old
 
 
 class StateTests(unittest.TestCase):
-    def test_bind_requires_an_existing_dm_route(self):
-        with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            make_db(home, [])
-            p = P.Proactivity(SimpleNamespace(), home)
-            with self.assertRaises(ValueError):
-                p.bind("agent:main:telegram:dm:9")
-            p.bind("agent:main:telegram:dm:1")
-            state = p.load()
-            self.assertEqual(state["session_key"], "agent:main:telegram:dm:1")
-            self.assertEqual(state["nudges"], 0)
-            self.assertIn("bound_ts", state)
+    def test_bind_takes_only_a_telegram_dm_key(self):
+        p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
+        for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1", None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                p.bind(bad)
+        p.bind(KEY)
+        state = p.load()
+        self.assertEqual((state["session_key"], state["nudges"]), (KEY, 0))
+        self.assertEqual(state["bound_ts"], at("2026-10-07T09:00").timestamp())
 
     def test_update_validates_and_persists(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = P.Proactivity(SimpleNamespace(), Path(d))
-            p.update({"level": "less", "timezone": "Asia/Tokyo"})
-            self.assertEqual(p.settings(p.load()), P.Settings(timezone="Asia/Tokyo", base_minutes=240))
-            with self.assertRaises(ValueError):
-                p.update({"base_minutes": 2})
-            p.update({"base_minutes": 2}, min_base=1)
-            self.assertEqual(p.settings(p.load()).base_minutes, 2)
+        p = P.Proactivity(FakeCtx())
+        p.update({"level": "less", "timezone": "Asia/Tokyo"})
+        self.assertEqual(p.settings(p.load()), P.Settings(timezone="Asia/Tokyo", base_minutes=240))
+        with self.assertRaises(ValueError):
+            p.update({"base_minutes": 2})
+        p.update({"base_minutes": 2}, min_base=1)
+        self.assertEqual(p.settings(p.load()).base_minutes, 2)
 
     def test_corrupt_state_reads_as_unbound(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = P.Proactivity(SimpleNamespace(), Path(d))
-            p.path.parent.mkdir(parents=True)
-            p.path.write_text("{not json", encoding="utf-8")
-            self.assertEqual(p.load(), {})
+        ctx = FakeCtx()
+        ctx.state.data[P.STATE_KEY] = "junk"
+        self.assertEqual(P.Proactivity(ctx).load(), {})
 
     def test_imports_an_upgraders_binding_once(self):
         with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            old = home / "companion" / "proactivity" / "proactivity.sqlite3"
-            old.parent.mkdir(parents=True)
-            db = sqlite3.connect(old)
-            db.execute("CREATE TABLE policy (singleton INTEGER PRIMARY KEY, settings TEXT, revision INTEGER)")
-            db.execute("INSERT INTO policy VALUES (1, ?, 3)", (json.dumps(
-                {"session_key": "agent:main:telegram:dm:1", "timezone": "Europe/Berlin", "enabled": True}),))
-            db.commit()
-            db.close()
-            p = P.Proactivity(SimpleNamespace(), home)
+            old = write_legacy(Path(d), {"session_key": KEY, "timezone": "Europe/Berlin", "enabled": True})
+            ctx = FakeCtx()
+            p = P.Proactivity(ctx, legacy_home=Path(d))
             state = p.load()
-            self.assertEqual(state["session_key"], "agent:main:telegram:dm:1")
+            self.assertEqual(state["session_key"], KEY)
             self.assertEqual(p.settings(state).timezone, "Europe/Berlin")
-            self.assertTrue(p.path.exists())
+            self.assertIn(P.STATE_KEY, ctx.state.data)
             self.assertTrue(old.exists())
 
     def test_imported_pause_stays_paused(self):
         with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            old = home / "companion" / "proactivity" / "proactivity.sqlite3"
-            old.parent.mkdir(parents=True)
-            db = sqlite3.connect(old)
-            db.execute("CREATE TABLE policy (singleton INTEGER PRIMARY KEY, settings TEXT, revision INTEGER)")
-            db.execute("INSERT INTO policy VALUES (1, ?, 3)", (json.dumps(
-                {"session_key": "k", "timezone": "UTC", "enabled": False}),))
-            db.commit()
-            db.close()
-            p = P.Proactivity(SimpleNamespace(), home)
+            write_legacy(Path(d), {"session_key": KEY, "timezone": "UTC", "enabled": False})
+            p = P.Proactivity(FakeCtx(), legacy_home=Path(d))
             self.assertEqual(p.settings(p.load()).paused_until, "off")
+
+
+class HookTests(unittest.TestCase):
+    def test_real_user_message_resets_backoff(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        state = p.load()
+        state["nudges"] = 3
+        p.save(state)
+        turn(p, clock, at("2026-10-07T10:00"))
+        state = p.load()
+        self.assertEqual(state["nudges"], 0)
+        self.assertEqual(state["last_user_ts"], at("2026-10-07T10:00").timestamp())
+        self.assertEqual(state["last_activity_ts"], at("2026-10-07T10:00").timestamp())
+
+    def test_own_check_in_turn_is_activity_not_the_user(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        state = p.load()
+        state["nudges"] = 1
+        p.save(state)
+        turn(p, clock, at("2026-10-07T11:00"), text=P.MARKER + " It has been 2 hours")
+        state = p.load()
+        self.assertEqual(state["nudges"], 1)
+        self.assertNotIn("last_user_ts", state)
+        self.assertEqual(state["last_activity_ts"], at("2026-10-07T11:00").timestamp())
+
+    def test_other_sessions_are_ignored(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), key="agent:main:telegram:dm:7")
+        self.assertNotIn("last_activity_ts", p.load())
+
+    def test_without_a_session_var_the_dm_sender_id_matches(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), key="")
+        self.assertIn("last_user_ts", p.load())
+        clock.now = at("2026-10-07T10:30")
+        with patch.object(P, "caller_session_key", return_value=""):
+            p.on_turn_start(user_message="hi", platform="telegram", sender_id="7")
+        self.assertEqual(p.load()["last_user_ts"], at("2026-10-07T10:00").timestamp())
+
+    def test_busy_between_turn_start_and_end(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), finish=False)
+        self.assertEqual(p.busy_since, at("2026-10-07T10:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            p.on_turn_end(platform="telegram", sender_id="42")
+        self.assertIsNone(p.busy_since)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tests.test_proactivity -v`
-Expected: `ActivityTests` and `StateTests` ERROR with `AttributeError: module ... has no attribute 'read_activity'` (or `'Proactivity'`).
+Expected: `StateTests` and `HookTests` ERROR with `AttributeError: module ... has no attribute 'Proactivity'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -441,74 +492,44 @@ from pathlib import Path
 import json
 import sqlite3
 import threading
-
-from .gateway_guard import write_private_json
 ```
 
 Append:
 
 ```python
-def read_activity(home, session_key):
-    """(newest real message from either side, newest real user message) in epoch
-    seconds. Real user turns carry the platform's message id; the plugin's own
-    injected check-ins and compaction summaries don't, so they never count as
-    the user talking."""
-    path = Path(home) / "state.db"
-    if not path.is_file():
-        return None, None
-    db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=5)
-    try:
-        return tuple(db.execute(
-            "SELECT MAX(m.timestamp), MAX(CASE WHEN m.role = 'user' THEN m.timestamp END)"
-            " FROM messages m JOIN sessions s ON s.id = m.session_id"
-            " WHERE s.session_key = ? AND (m.role = 'assistant'"
-            " OR (m.role = 'user' AND m.platform_message_id IS NOT NULL))",
-            (session_key,)).fetchone())
-    finally:
-        db.close()
+MARKER = "[Proactive check-in]"
+STATE_KEY = "idle"
 
 
-def is_dm_route(entry, session_key):
-    return (type(entry) is dict and entry.get("session_key") == session_key
-            and entry.get("platform") == "telegram" and entry.get("chat_type") == "dm"
-            and type(entry.get("session_id")) is str and bool(entry["session_id"])
-            and entry.get("suspended") is not True)
-```
-
-Then copy `_routing_entry` from `alans-way/proactive_operator.py:17-58` **verbatim**, renamed `routing_entry`. Same body: `gateway_routing` first, scoped by the resolved sessions dir, then the `sessions/sessions.json` mirror, read-only. Then append:
-
-```python
 def caller_session_key():
-    """The route Hermes bound around this tool call, or "" outside one."""
+    """The session Hermes bound around this hook or tool call, or "" outside one."""
     try:
         from gateway.session_context import get_session_env
         return get_session_env("HERMES_SESSION_KEY") or ""
     except Exception:
-        import os
-        return os.environ.get("HERMES_SESSION_KEY", "")
+        return ""
 
 
 class Proactivity:
-    def __init__(self, ctx, home, *, clock=None):
-        self.ctx, self.home = ctx, Path(home)
+    def __init__(self, ctx, *, clock=None, legacy_home=None):
+        self.ctx = ctx
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self.path = self.home / "companion" / "proactivity" / "state.json"
+        self.legacy_home = Path(legacy_home) if legacy_home else None
+        self.gateway = False   # set once Telegram connects inside the gateway process
+        self.busy_since = None
         self.error = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self.worker = None
 
     def load(self):
-        try:
-            state = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        state = self.ctx.state.get(STATE_KEY)
+        if state is None:
             return self._import_legacy()
-        except (OSError, ValueError):
-            return {}
         return state if type(state) is dict else {}
 
     def save(self, state):
-        write_private_json(self.path, state)
+        self.ctx.state.set(STATE_KEY, state)
 
     def settings(self, state):
         try:
@@ -523,17 +544,57 @@ class Proactivity:
             self.save(state)
 
     def bind(self, session_key):
-        if not session_key or not is_dm_route(routing_entry(self.home, session_key), session_key):
-            raise ValueError("bind only an existing direct Telegram chat in this profile")
+        # ponytail: shape check only; setup.sh lists real routes, and a wrong key
+        # just shows up as a refused check-in in status.
+        if type(session_key) is not str or ":telegram:dm:" not in session_key:
+            raise ValueError("bind a Telegram DM session key, such as agent:main:telegram:dm:<chat id>")
         with self._lock:
             state = self.load()
             state.update(session_key=session_key, bound_ts=self.clock().timestamp(), nudges=0)
             state.pop("last_nudge_ts", None)
             self.save(state)
 
+    def _is_bound_chat(self, state, kwargs):
+        bound = state.get("session_key")
+        if not bound:
+            return False
+        key = caller_session_key()
+        if key:
+            return key == bound
+        # In a Telegram DM the chat id is the sender's id.
+        return (kwargs.get("platform") == "telegram"
+                and str(kwargs.get("sender_id") or "") == bound.rsplit(":", 1)[-1])
+
+    def on_turn_start(self, user_message="", **kwargs):
+        """pre_llm_call. Always returns None: a value here would be injected as context."""
+        with self._lock:
+            state = self.load()
+            if not self._is_bound_chat(state, kwargs):
+                return None
+            now = self.clock()
+            self.busy_since = now
+            state["last_activity_ts"] = now.timestamp()
+            if not str(user_message or "").startswith(MARKER):
+                state.update(last_user_ts=now.timestamp(), nudges=0)
+            self.save(state)
+        return None
+
+    def on_turn_end(self, **kwargs):
+        """post_llm_call."""
+        with self._lock:
+            state = self.load()
+            if not self._is_bound_chat(state, kwargs):
+                return None
+            self.busy_since = None
+            state["last_activity_ts"] = self.clock().timestamp()
+            self.save(state)
+        return None
+
     def _import_legacy(self):
         """Carry an upgrader's bound chat, timezone and pause over from the 0.6 store."""
-        old = self.path.parent / "proactivity.sqlite3"
+        if self.legacy_home is None:
+            return {}
+        old = self.legacy_home / "companion" / "proactivity" / "proactivity.sqlite3"
         if not old.is_file():
             return {}
         try:
@@ -569,7 +630,7 @@ Expected: all PASS.
 
 ```bash
 git add alans-way/proactivity.py tests/test_proactivity.py
-git commit -m "Read real chat activity from state.db and keep idle-nudge state in one JSON file.
+git commit -m "Track the bound chat's activity through the turn hooks and keep idle-nudge state in ctx.state.
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
@@ -581,9 +642,9 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `alans-way/proactivity.py` (append)
 - Rewrite: `alans-way/__init__.py`
-- Trim: `alans-way/gateway_guard.py`
 - Delete:
   - `alans-way/proactive_*.py` (every file matching)
+  - `alans-way/gateway_guard.py`
   - `alans-way/gateway-hook/`
   - `alans-way/skills/proactive-primary/`
   - `tests/test_proactive_*.py`, `tests/test_board.py`, `tests/test_identity.py`
@@ -592,225 +653,219 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: everything from Tasks 1 and 2.
 - Produces:
-  - `Proactivity.in_gateway() -> bool`
+  - `BUSY_CAP = timedelta(hours=3)`
   - `Proactivity.tick() -> bool|None`, where `None` means no nudge was due and a bool is the inject result
   - `Proactivity.prompt(s, elapsed: timedelta, now) -> str`
-  - `Proactivity.status() -> dict` with keys `bound`, `settings`, `level`, `timezone_known`, `paused`, `nudges_since_reply`, `next_check_in`, `in_gateway`, `last_result`, `last_error`
+  - `Proactivity.status() -> dict` with keys `bound`, `settings`, `level`, `timezone_known`, `paused`, `busy`, `nudges_since_reply`, `next_check_in`, `in_gateway`, `last_result`, `last_error`
   - `Proactivity.tool(args, **kw) -> str` (JSON)
+  - `Proactivity.on_telegram_connect(native=None, adapter=None, **kw)`, the platform-handler factory
   - `Proactivity.start(interval=60.0)`, `Proactivity.close()`
   - `SCHEMA` (dict)
   - `cli_setup(parser)`, `cli_run(runtime, args) -> int`
-  - `register(ctx, *, home=None, background=True) -> Proactivity|None`
+  - `register(ctx, *, legacy_home=None, background=True) -> Proactivity|None`
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-class FakeCtx(SimpleNamespace):
-    def __init__(self, gateway=True, cli=None, accept=True):
-        super().__init__(_manager=SimpleNamespace(_cli_ref=cli, has_gateway_message_injector=gateway),
-                         sent=[], accept=accept)
-
-    def inject_message(self, content, role="user", *, session_key=None):
-        if isinstance(self.accept, Exception):
-            raise self.accept
-        self.sent.append((content, session_key))
-        return self.accept
-
-
-KEY = "agent:main:telegram:dm:1"
-
-
-def runtime(home, ctx, now, rows=(), **settings):
-    make_db(home, rows)
-    clock = SimpleNamespace(now=now)
-    p = P.Proactivity(ctx, home, clock=lambda: clock.now)
-    p.bind(KEY)
-    p.update({"timezone": "UTC", **settings}, min_base=1)
-    return p, clock
-
-
 class TickTests(unittest.TestCase):
     def test_quiet_chat_gets_one_nudge_then_doubles(self):
-        with tempfile.TemporaryDirectory() as d:
-            ctx = FakeCtx()
-            last = at("2026-10-07T09:00").timestamp()
-            p, clock = runtime(Path(d), ctx, at("2026-10-07T10:59"), [("user", last, "1")])
-            self.assertIsNone(p.tick())
-            clock.now = at("2026-10-07T11:00")
-            self.assertTrue(p.tick())
-            self.assertEqual(len(ctx.sent), 1)
-            self.assertEqual(ctx.sent[0][1], KEY)
-            self.assertIn("[SILENT]", ctx.sent[0][0])
-            clock.now = at("2026-10-07T14:59")   # 4h after the nudge not yet reached
-            self.assertIsNone(p.tick())
-            clock.now = at("2026-10-07T15:00")
-            self.assertTrue(p.tick())
-            self.assertEqual(p.load()["nudges"], 2)
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T10:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T11:00")
+        self.assertTrue(p.tick())
+        self.assertEqual(ctx.sent[0][1], KEY)
+        self.assertTrue(ctx.sent[0][0].startswith(P.MARKER))
+        self.assertIn("[SILENT]", ctx.sent[0][0])
+        clock.now = at("2026-10-07T14:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T15:00")
+        self.assertTrue(p.tick())
+        self.assertEqual(p.load()["nudges"], 2)
+
+    def test_bot_reply_to_a_check_in_moves_the_anchor_not_the_count(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T11:00")
+        p.tick()
+        turn(p, clock, at("2026-10-07T11:01"), text=ctx.sent[0][0])
+        clock.now = at("2026-10-07T15:00")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T15:01")
+        self.assertTrue(p.tick())
 
     def test_user_reply_resets_the_backoff(self):
-        with tempfile.TemporaryDirectory() as d:
-            home, ctx = Path(d), FakeCtx()
-            p, clock = runtime(home, ctx, at("2026-10-07T11:00"), [("user", at("2026-10-07T09:00").timestamp(), "1")])
-            p.tick()
-            db = sqlite3.connect(home / "state.db")
-            db.execute("INSERT INTO messages (session_id, role, content, timestamp, platform_message_id)"
-                       " VALUES ('s1', 'user', 'hi', ?, '2')", (at("2026-10-07T12:00").timestamp(),))
-            db.commit()
-            db.close()
-            clock.now = at("2026-10-07T13:59")
-            self.assertIsNone(p.tick())
-            self.assertEqual(p.load()["nudges"], 0)
-            clock.now = at("2026-10-07T14:00")
-            self.assertTrue(p.tick())
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T11:00")
+        p.tick()
+        turn(p, clock, at("2026-10-07T12:00"))
+        clock.now = at("2026-10-07T13:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T14:00")
+        self.assertTrue(p.tick())
 
     def test_nothing_outside_the_users_window(self):
-        with tempfile.TemporaryDirectory() as d:
-            ctx = FakeCtx()
-            p, clock = runtime(Path(d), ctx, at("2026-10-07T23:30", "Asia/Tokyo"),
-                               [("user", at("2026-10-07T12:00", "Asia/Tokyo").timestamp(), "1")],
-                               timezone="Asia/Tokyo")
-            self.assertIsNone(p.tick())
-            self.assertEqual(ctx.sent, [])
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T11:00", "Asia/Tokyo"), timezone="Asia/Tokyo")
+        turn(p, clock, at("2026-10-07T12:00", "Asia/Tokyo"))
+        clock.now = at("2026-10-07T23:30", "Asia/Tokyo")
+        self.assertIsNone(p.tick())
+        self.assertEqual(ctx.sent, [])
 
     def test_long_outage_sends_one_nudge_at_the_window_start(self):
-        with tempfile.TemporaryDirectory() as d:
-            ctx = FakeCtx()
-            p, clock = runtime(Path(d), ctx, at("2026-10-10T03:00"), [("user", at("2026-10-07T09:00").timestamp(), "1")])
-            self.assertIsNone(p.tick())
-            clock.now = at("2026-10-10T08:00")
-            self.assertTrue(p.tick())
-            clock.now = at("2026-10-10T08:01")
-            self.assertIsNone(p.tick())
-            self.assertEqual(len(ctx.sent), 1)
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-10T03:00")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-10T08:00")
+        self.assertTrue(p.tick())
+        clock.now = at("2026-10-10T08:01")
+        self.assertIsNone(p.tick())
+        self.assertEqual(len(ctx.sent), 1)
 
     def test_never_chatted_anchors_at_bind_time(self):
-        with tempfile.TemporaryDirectory() as d:
-            ctx = FakeCtx()
-            p, clock = runtime(Path(d), ctx, at("2026-10-07T09:00"))
-            clock.now = at("2026-10-07T10:59")
-            self.assertIsNone(p.tick())
-            clock.now = at("2026-10-07T11:00")
-            self.assertTrue(p.tick())
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T10:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T11:00")
+        self.assertTrue(p.tick())
 
     def test_refused_or_failing_injection_still_backs_off(self):
         for accept in (False, RuntimeError("boom")):
-            with self.subTest(accept=accept), tempfile.TemporaryDirectory() as d:
-                ctx = FakeCtx(accept=accept)
-                p, clock = runtime(Path(d), ctx, at("2026-10-07T11:00"), [("user", at("2026-10-07T09:00").timestamp(), "1")])
-                p.tick()
+            with self.subTest(accept=accept):
+                p, clock = runtime(FakeCtx(accept=accept), at("2026-10-07T09:00"))
+                clock.now = at("2026-10-07T11:00")
+                self.assertFalse(p.tick())
                 self.assertEqual(p.load()["nudges"], 1)
                 self.assertNotEqual(p.status()["last_result"], "accepted")
                 clock.now = at("2026-10-07T11:01")
                 self.assertIsNone(p.tick())
 
-    def test_cli_tui_or_paused_never_inject(self):
-        for ctx, settings in ((FakeCtx(gateway=False), {}), (FakeCtx(cli=object()), {}),
-                              (FakeCtx(), {"paused_until": "off"})):
-            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as d:
-                p, clock = runtime(Path(d), ctx, at("2026-10-08T11:00"),
-                                   [("user", at("2026-10-07T09:00").timestamp(), "1")], **settings)
-                self.assertIsNone(p.tick())
-                self.assertEqual(ctx.sent, [])
+    def test_outside_the_gateway_or_paused_never_injects(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T12:00")
+        p.gateway = False
+        self.assertIsNone(p.tick())
+        p.gateway = True
+        p.update({"paused_until": "off"})
+        self.assertIsNone(p.tick())
+        self.assertEqual(ctx.sent, [])
+
+    def test_busy_turn_blocks_until_it_ends_or_goes_stale(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:00"))
+        turn(p, clock, at("2026-10-07T09:00"), finish=False)
+        clock.now = at("2026-10-07T11:30")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T12:01")   # turn started over 3h ago: treat as dead
+        self.assertTrue(p.tick())
 
     def test_unknown_timezone_prompt_asks_the_bot_to_learn_it(self):
-        p = P.Proactivity(FakeCtx(), Path("/nonexistent"))
+        p = P.Proactivity(FakeCtx())
         text = p.prompt(P.Settings(), timedelta(hours=3), at("2026-10-07T11:00"))
         self.assertIn("timezone", text)
         self.assertIn("3 hours", text)
-        self.assertNotIn("timezone yet", p.prompt(P.Settings(timezone="UTC"), timedelta(hours=3), at("2026-10-07T11:00")))
+        known = p.prompt(P.Settings(timezone="UTC"), timedelta(hours=3), at("2026-10-07T11:00"))
+        self.assertNotIn("timezone yet", known)
 
 
 class ToolTests(unittest.TestCase):
     def test_only_the_bound_chat_can_change_settings(self):
-        with tempfile.TemporaryDirectory() as d:
-            p, _ = runtime(Path(d), FakeCtx(), at("2026-10-07T11:00"))
-            with unittest.mock.patch.object(P, "caller_session_key", return_value="agent:main:telegram:dm:2"):
-                out = json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))
-            self.assertFalse(out["ok"])
-            with unittest.mock.patch.object(P, "caller_session_key", return_value=KEY):
-                out = json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))
-            self.assertTrue(out["ok"])
-            self.assertEqual(out["level"], "less")
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value="agent:main:telegram:dm:7"):
+            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))["ok"])
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["level"], "less")
 
     def test_chat_cannot_go_below_15_minutes(self):
-        with tempfile.TemporaryDirectory() as d:
-            p, _ = runtime(Path(d), FakeCtx(), at("2026-10-07T11:00"))
-            with unittest.mock.patch.object(P, "caller_session_key", return_value=KEY):
-                out = json.loads(p.tool({"action": "set", "settings": {"base_minutes": 2}}))
-            self.assertFalse(out["ok"])
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"base_minutes": 2}}))["ok"])
 
     def test_status_reports_next_check_in_in_user_time(self):
-        with tempfile.TemporaryDirectory() as d:
-            p, _ = runtime(Path(d), FakeCtx(), at("2026-10-07T11:00"),
-                           [("user", at("2026-10-07T10:00").timestamp(), "1")], timezone="Asia/Tokyo")
-            status = json.loads(p.tool({"action": "status"}))
-            self.assertTrue(status["bound"])
-            self.assertTrue(status["next_check_in"].endswith("+09:00"))
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"), timezone="Asia/Tokyo")
+        turn(p, clock, at("2026-10-07T10:00"))
+        status = json.loads(p.tool({"action": "status"}))
+        self.assertTrue(status["bound"])
+        self.assertTrue(status["next_check_in"].endswith("+09:00"))
 
 
 class RegisterTests(unittest.TestCase):
-    def test_register_wires_tool_cli_and_skills_without_starting_in_tests(self):
-        calls = []
-        ctx = SimpleNamespace(profile_name="default",
-                              register_tool=lambda **kw: calls.append(("tool", kw["name"], kw["toolset"])),
-                              register_skill=lambda name, path: calls.append(("skill", name)),
-                              register_cli_command=lambda name, *a: calls.append(("cli", name)),
-                              on_unload=lambda fn: calls.append(("unload",)))
+    def test_register_wires_public_surfaces_only(self):
+        calls, factories = [], {}
+        ctx = SimpleNamespace(
+            profile_name="default", state=FakeState(),
+            register_tool=lambda **kw: calls.append(("tool", kw["name"], kw["toolset"])),
+            register_hook=lambda name, fn: calls.append(("hook", name)),
+            register_platform_handler=lambda platform, fn: factories.__setitem__(platform, fn),
+            register_skill=lambda name, path: calls.append(("skill", name)),
+            register_cli_command=lambda name, *a: calls.append(("cli", name)),
+            on_unload=lambda fn: calls.append(("unload",)))
         package = sys.modules["alans_way_idle_test"]
         with tempfile.TemporaryDirectory() as d:
-            package.register(ctx, home=d, background=False)
-        self.assertIn(("tool", "proactivity", "proactivity"), calls)
-        self.assertIn(("cli", "proactivity"), calls)
-        self.assertIn(("skill", "workspace-operations"), calls)
-        self.assertIn(("skill", "workspace-setup"), calls)
+            runtime_ = package.register(ctx, legacy_home=d)
+        for expected in (("tool", "proactivity", "proactivity"), ("hook", "pre_llm_call"),
+                         ("hook", "post_llm_call"), ("cli", "proactivity"),
+                         ("skill", "workspace-operations"), ("skill", "workspace-setup")):
+            self.assertIn(expected, calls)
         self.assertNotIn(("skill", "proactive-primary"), calls)
+        self.assertFalse(runtime_.gateway)
+        self.assertIsNone(runtime_.worker)
+        factories["telegram"](None, None)
+        try:
+            self.assertTrue(runtime_.gateway)
+            self.assertTrue(runtime_.worker.is_alive())
+        finally:
+            runtime_.close()
+
+    def test_manifest_declares_what_register_registers(self):
+        text = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
+        for name in ("proactivity", "pre_llm_call", "post_llm_call"):
+            self.assertIn(f"- {name}", text)
+        self.assertNotIn("proactive_control", text)
 ```
 
-Also add `import unittest.mock` to the test file's imports.
+`test_manifest_declares_what_register_registers` stays red until Task 4 updates `plugin.yaml`. That's expected at the end of this task.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tests.test_proactivity -v`
-Expected: the new classes ERROR with `AttributeError` (`tick`, `tool`, ...). `RegisterTests` fails on `proactive-primary` or the missing `proactivity` tool.
+Expected: the new classes ERROR with `AttributeError` (`tick`, `tool`, ...). `RegisterTests` fails.
 
 - [ ] **Step 3: Append the loop, prompt, status, tool and CLI to `proactivity.py`**
 
-Add these methods to `class Proactivity`:
+Module-level constant: `BUSY_CAP = timedelta(hours=3)`. Add these methods to `class Proactivity`:
 
 ```python
-    def in_gateway(self):
-        """Only a live messaging gateway may nudge. CLI, doctor and TUI loads run
-        register() too; Hermes sets the manager's gateway injector only in a
-        gateway. These are private host attributes, so any surprise fails closed."""
-        manager = getattr(self.ctx, "_manager", None)
-        return (manager is not None and getattr(manager, "_cli_ref", None) is None
-                and getattr(manager, "has_gateway_message_injector", False) is True)
+    def _anchor(self, state):
+        ts = max(state.get("last_activity_ts") or 0, state.get("last_nudge_ts") or 0,
+                 state.get("bound_ts") or 0)
+        return datetime.fromtimestamp(ts, timezone.utc)
 
-    def _schedule(self, state):
-        """(anchor datetime or None, nudges) after folding in any new user reply."""
-        last_any, last_user = read_activity(self.home, state["session_key"])
-        if last_user and last_user > state.get("last_user_ts", 0):
-            state.update(last_user_ts=last_user, nudges=0)
-        anchor = max([t for t in (last_any, state.get("last_nudge_ts"), state.get("bound_ts")) if t],
-                     default=None)
-        return (datetime.fromtimestamp(anchor, timezone.utc) if anchor else None,
-                state.get("nudges", 0))
+    def _busy(self, now):
+        # ponytail: post_llm_call never fires for a crashed or stopped turn, so a
+        # turn older than BUSY_CAP is treated as over.
+        return self.busy_since is not None and now - self.busy_since < BUSY_CAP
 
     def tick(self):
-        if not self.in_gateway():
+        if not self.gateway:
             return None
         with self._lock:
             state = self.load()
             s, now = self.settings(state), self.clock()
-            if not state.get("session_key") or is_paused(s, now):
+            if not state.get("session_key") or is_paused(s, now) or self._busy(now):
                 return None
-            before = dict(state)
-            anchor, nudges = self._schedule(state)
-            if anchor is None:
-                state["bound_ts"] = now.timestamp()
-            if anchor is None or now < due_at(s, anchor, nudges) or not in_window(s, now):
-                if state != before:
-                    self.save(state)
+            anchor, nudges = self._anchor(state), state.get("nudges", 0)
+            if now < due_at(s, anchor, nudges) or not in_window(s, now):
                 return None
             try:
                 accepted = self.ctx.inject_message(self.prompt(s, now - anchor, now),
@@ -818,7 +873,7 @@ Add these methods to `class Proactivity`:
                 result = "accepted" if accepted is True else "refused"
             except Exception as exc:
                 accepted, result = False, f"failed: {type(exc).__name__}"
-            # ponytail: a refused nudge still advances the back-off, so a missing
+            # ponytail: a refused check-in still advances the back-off, so a missing
             # injection permission costs one attempt per wait, not one per minute.
             state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result=result)
             self.save(state)
@@ -832,7 +887,7 @@ Add these methods to `class Proactivity`:
         learn = ("" if s.timezone else
                  " You don't know their timezone yet: ask for it when it fits naturally and save it"
                  " with the proactivity tool.")
-        return (f"[Proactive check-in] It has been {ago} since your last exchange with the user;"
+        return (f"{MARKER} It has been {ago} since your last exchange with the user;"
                 f" it is {local:%A %H:%M} for them.{learn} Like a thoughtful employee, pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then report briefly;"
                 " (b) suggest something specific you could do for them; or (c) ask one useful question."
@@ -848,30 +903,31 @@ Add these methods to `class Proactivity`:
             out = {"bound": bool(state.get("session_key")), "settings": asdict(s),
                    "level": next((k for k, v in LEVELS.items() if v == s.base_minutes), "custom"),
                    "timezone_known": bool(s.timezone), "paused": is_paused(s, now),
-                   "nudges_since_reply": state.get("nudges", 0), "next_check_in": None,
-                   "in_gateway": self.in_gateway(), "last_result": state.get("last_result"),
-                   "last_error": self.error}
+                   "busy": self._busy(now), "nudges_since_reply": state.get("nudges", 0),
+                   "next_check_in": None, "in_gateway": self.gateway,
+                   "last_result": state.get("last_result"), "last_error": self.error}
             if out["bound"] and not out["paused"]:
-                try:
-                    anchor, nudges = self._schedule(state)
-                    out["nudges_since_reply"] = nudges
-                    if anchor:
-                        out["next_check_in"] = due_at(s, anchor, nudges).astimezone(zone(s)).isoformat(timespec="minutes")
-                except (OSError, sqlite3.Error):
-                    pass
+                due = due_at(s, self._anchor(state), out["nudges_since_reply"])
+                out["next_check_in"] = due.astimezone(zone(s)).isoformat(timespec="minutes")
             return out
 
     def tool(self, args, **kwargs):
         args = args if isinstance(args, dict) else {}
-        if args.get("action") == "set":
-            bound = self.load().get("session_key")
-            if not bound or caller_session_key() != bound:
-                return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
-            try:
+        try:
+            if args.get("action") == "set":
+                bound = self.load().get("session_key")
+                if not bound or caller_session_key() != bound:
+                    return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
                 self.update(args.get("settings") or {})
-            except ValueError as exc:
-                return json.dumps({"ok": False, "error": str(exc)})
-        return json.dumps({"ok": True, **self.status()})
+            return json.dumps({"ok": True, **self.status()})
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+
+    def on_telegram_connect(self, native=None, adapter=None, **kwargs):
+        """register_platform_handler factory. Hermes calls it only when the gateway
+        connects Telegram, so CLI, doctor and TUI loads never start the loop."""
+        self.gateway = True
+        self.start()
 
     def start(self, interval=60.0):
         if self.worker and self.worker.is_alive():
@@ -890,7 +946,7 @@ Add these methods to `class Proactivity`:
         self._stop.set()
 ```
 
-Append these module-level definitions:
+Append the module-level `SCHEMA`, `cli_setup` and `cli_run` **exactly** as below:
 
 ```python
 SCHEMA = {
@@ -925,7 +981,7 @@ SCHEMA = {
 
 def cli_setup(parser):
     parser.add_argument("action", nargs="?", default="status", choices=["status", "bind", "set"])
-    parser.add_argument("--session-key", help="Existing Telegram DM route to check in on (bind only)")
+    parser.add_argument("--session-key", help="Existing Telegram DM session key to check in on (bind only)")
     parser.add_argument("--timezone", help="The user's IANA timezone, such as America/Chicago")
     parser.add_argument("--settings", help='JSON such as {"level": "less"} or {"paused_until": "off"}')
 
@@ -950,60 +1006,76 @@ Before relying on `print` plus a return code, check how the current `proactive_o
 
 - [ ] **Step 4: Rewrite `alans-way/__init__.py`**
 
+The whole file:
+
 ```python
 """Hermes plugin entry point: idle check-ins from the primary bot, plus the workspace skills."""
 from pathlib import Path
+import os
+import sys
 
-from .gateway_guard import hermes_home
 from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
+
+
+def _owning_home() -> Path:
+    """The home Hermes bound for this plugin load, never the launch env.
+
+    Under gateway multiplex one process serves every profile, and
+    os.environ['HERMES_HOME'] keeps the launch profile's home. register() runs
+    inside Hermes' plugin-load home scope, which get_hermes_home() reads."""
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()).expanduser().absolute()
+    except Exception:
+        default = (Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "hermes"
+                   if sys.platform == "win32" else Path.home() / ".hermes")
+        return Path(os.environ.get("HERMES_HOME") or default).expanduser().absolute()
 ```
 
-Then copy `_owning_home()` and `_primary_profile(ctx)` **verbatim** from the current file (`alans-way/__init__.py:966-995`), and finish with:
+Then copy `_primary_profile(ctx)` **verbatim** from the current file (`alans-way/__init__.py:983-995`) and finish with:
 
 ```python
-def register(ctx, *, home=None, background=True):
+def register(ctx, *, legacy_home=None, background=True):
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
     if not _primary_profile(ctx):
         return None
-    runtime = Proactivity(ctx, Path(home) if home is not None else _owning_home())
+    runtime = Proactivity(ctx, legacy_home=legacy_home or _owning_home())
     ctx.register_tool(name="proactivity", toolset="proactivity", schema=SCHEMA,
                       handler=runtime.tool, check_fn=lambda: True)
+    ctx.register_hook("pre_llm_call", runtime.on_turn_start)
+    ctx.register_hook("post_llm_call", runtime.on_turn_end)
+    if background:
+        ctx.register_platform_handler("telegram", runtime.on_telegram_connect)
     if hasattr(ctx, "register_cli_command"):
         ctx.register_cli_command("proactivity", "Idle check-ins from the primary bot", cli_setup,
                                  lambda args: cli_run(runtime, args))
     ctx.on_unload(runtime.close)
-    if background:
-        runtime.start()
     return runtime
 ```
 
-- [ ] **Step 5: Delete the old stack and trim the guard**
+- [ ] **Step 5: Delete the old stack**
 
 ```bash
-git rm -q alans-way/proactive_*.py
+git rm -q alans-way/proactive_*.py alans-way/gateway_guard.py
 git rm -rq alans-way/gateway-hook alans-way/skills/proactive-primary
 git rm -q tests/test_proactive_*.py tests/test_board.py tests/test_identity.py
-grep -rn "gateway_guard\|proactive_" alans-way alans-way-computer scripts tests --include=*.py --include=*.cjs
+grep -rn "gateway_guard\|proactive_\|_manager" alans-way alans-way-computer scripts tests --include=*.py --include=*.cjs
 ```
 
-In `alans-way/gateway_guard.py`, keep `default_hermes_home`, `hermes_home`, `write_private_json` and whatever imports they need. Delete `_process_started_at`, `mark_gateway_ready`, `gateway_ready`, the tolerance constants and the file-lock helpers, unless the grep above shows another user. Update its module docstring to say it holds the home and private-write helpers.
+Expected: the grep shows only hits in `tests/test_setup_sh.py` and `tests/test_workspace_mac.py`. Delete `MacStateReaderTests` from `tests/test_workspace_mac.py` (about lines 44-124; it tested the deleted observer). `test_setup_sh` is Task 4.
 
 - [ ] **Step 6: Run the full suite**
 
 Run: `python3 -m unittest discover -s tests 2>&1 | tail -30`
-Expected:
-- `tests.test_proactivity` passes.
-- `tests/test_setup_sh.py` (hook and guard tests at about lines 980-1110, and the probe and pause binding tests) and `tests/test_workspace_mac.py:44-124` (`MacStateReaderTests`, which imports `proactive_observe`) fail. Task 4 handles `test_setup_sh`.
-- In this task, delete `MacStateReaderTests` from `tests/test_workspace_mac.py` (it tested the deleted observer), then re-run.
-- Only `test_setup_sh` failures should remain.
+Expected: only `test_setup_sh` failures (hook, guard, probe and pause tests) and `test_manifest_declares_what_register_registers` remain. Task 4 fixes both.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add -A alans-way tests
-git commit -m "Replace the proactivity stack with the idle nudge: one loop, one tool, one CLI.
+git commit -m "Replace the proactivity stack with the idle nudge: one loop, two hooks, one tool, one CLI.
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1104,6 +1176,9 @@ tags:
   - workspace
 provides_tools:
   - proactivity
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
 ```
 
 Rewrite `docs/proactivity.md`:
@@ -1160,12 +1235,12 @@ arrive two minutes after you stop chatting. Set it back with
 
 ## How it works
 
-A 60-second timer inside the gateway reads the bound chat's last real message
-from Hermes' `state.db` (your messages carry a Telegram id; the plugin's own
-prompts don't). When a check-in is due it injects one internal prompt into that
-chat; the bot decides what to do with its own memory and tools. A `[SILENT]`
-reply is never delivered. State lives in
-`$HERMES_HOME/companion/proactivity/state.json`.
+The plugin's `pre_llm_call` and `post_llm_call` hooks note when the bound chat
+was last active and whether the bot is mid-turn. A 60-second timer, started
+only when the gateway connects Telegram, checks whether a check-in is due. When
+one is, it injects one internal prompt into that chat, and the bot decides what
+to do with its own memory and tools. A `[SILENT]` reply is never delivered.
+State lives in Hermes' plugin state (`ctx.state`).
 
 Upgrading from 0.6 keeps your bound chat, timezone and pause. Watches, sweeps
 and `/watch` are gone.
@@ -1176,11 +1251,43 @@ Other docs:
 - **`workspace-setup/SKILL.md`:** replace the binding and `/watch` instructions (about lines 3, 31-44 and 103-115) with the three commands from the Setup section above. Keep `--bind --proactive yes|no`.
 - **`workspace-operations/SKILL.md`:** delete the sentences at about lines 130-134 about the observer's offline-to-online event.
 - **`tests/test_workspace_setup_skill.py:59`:** update to match.
+- **`alans-way/README.md`:** add this section (catalog rule 13). It renders as
+  the plugin's catalog page:
+
+```markdown
+## Disclosures
+
+- **Background thread:** once the gateway connects Telegram, a daemon thread
+  wakes every 60 seconds to check whether a check-in is due. It makes no
+  network calls of its own.
+- **Injected prompts:** a due check-in injects one internal prompt into the
+  bound Telegram chat (needs `plugins.entries.alans-way.allow_gateway_injection: true`).
+  The bot's reply is a normal turn, and `[SILENT]` replies are not delivered.
+- **Reads outside plugin data:** on first load after upgrading from 0.6, it reads
+  `$HERMES_HOME/companion/proactivity/proactivity.sqlite3` once, read-only, to
+  keep your bound chat, timezone and pause.
+- **Shell commands:** the plugin's Python runs none. The `workspace-setup` skill
+  guides the agent through running `setup.sh`, which installs the workspace
+  browser router and services over ssh on your own machines.
+- No telemetry, no stored credentials.
+```
 
 - [ ] **Step 4: Run everything**
 
 Run: `python3 -m unittest discover -s tests 2>&1 | tail -5 && python3 scripts/check_publication.py && grep -rn -i "proactive_control\|proactive-primary\|/watch\|gateway-hook" --include=*.md --include=*.py --include=*.sh --include=*.yaml . | grep -v docs/superpowers`
 Expected: `OK`, the publication check passes, and the grep prints nothing.
+
+Then run Hermes' own catalog validator on the author's Hermes:
+
+```bash
+ssh clawbot-root 'rm -rf /tmp/aw-validate && mkdir -p /tmp/aw-validate'
+rsync -a --exclude __pycache__ alans-way/ clawbot-root:/tmp/aw-validate/alans-way/
+ssh clawbot-root 'export PATH=$HOME/.local/bin:$PATH && hermes plugins validate /tmp/aw-validate/alans-way --install-deps'
+```
+
+Expected: every check passes. `security scan` has no `dangerous` findings,
+`no core override` passes, and the declared tools and hooks match. Fix any
+finding and re-run before committing.
 
 - [ ] **Step 5: Commit**
 
@@ -1216,6 +1323,7 @@ Expected:
 - `timezone_known: true`
 - after restart, a gateway log line showing no plugin load errors (`hermes logs` or `journalctl`, whichever the install uses)
 - `in_gateway` in CLI status reads `false`. That's correct: the CLI isn't the gateway.
+- A real Telegram message moves `next_check_in` to about `base_minutes` after it. That proves `pre_llm_call` sees `HERMES_SESSION_KEY`, or the sender-id fallback, on the live gateway. If it doesn't move, stop and debug before step 3.
 
 - [ ] **Step 3: Acceptance checks** (spec items 1-7)
 
@@ -1226,6 +1334,7 @@ Expected:
 5. Set the timezone to one where it's currently night. Confirm nothing is sent for 5+ minutes, then restore the real timezone.
 6. Check that a `[SILENT]` choice, if one happens, isn't delivered and still raises `nudges`. Look in `state.db` for an assistant `[SILENT]` row with no Telegram message.
 7. Run `hermes proactivity status` and `hermes doctor`, and confirm neither injects (no new injected user rows).
+8. Ask the bot for a task that runs longer than `base_minutes`, for example the browser benchmark. Confirm no check-in lands while it works, and the next one is about `base_minutes` after it finishes.
 
 - [ ] **Step 4: Restore real settings**
 

@@ -50,9 +50,13 @@ due_at        = last_activity + wait, moved forward to the next active window
 - **Not mid-task:** any recent message from the user or the bot pushes
   `last_activity` forward, so an active conversation or a working bot never
   gets nudged.
-- "Real message" excludes the plugin's own injected prompts. Real Telegram
-  turns carry a `platform_message_id`; injected ones don't. Verify this on a
-  live gateway before relying on it.
+- Activity comes from the public `pre_llm_call` and `post_llm_call` hooks for
+  the bound session (`HERMES_SESSION_KEY`, falling back to the DM sender id). A
+  turn whose user message starts with the check-in marker is the bot's own
+  check-in: it counts as activity but doesn't reset the back-off. While a turn is
+  running (pre fired, post not yet, capped at 3h) no check-in is sent.
+- No reads of Hermes' `state.db`. `post_gateway_admission` would be exact, but
+  it is canary-only, newer than 0.21.5.
 - `paused_until` (an aware ISO timestamp, or `off` for indefinitely) suppresses
   nudges.
 
@@ -106,9 +110,8 @@ One tool, `proactivity`, in the `proactivity` toolset:
 - setup.sh keeps its existing timezone detection: ask the user's computer over
   the companion ssh link, else prompt the user. It no longer falls back to a
   default zone silently.
-- State (`session_key`, settings, `n`, `last_nudge_at`) lives in
-  `$HERMES_HOME/companion/proactivity/state.json` (profile-scoped, written with
-  the existing `write_private_json`).
+- State (`session_key`, settings, `n`, timestamps) lives in `ctx.state`
+  (Hermes' profile-scoped plugin state).
 - One-time import: if the old `companion/proactivity/proactivity.sqlite3` holds
   a bound key and timezone, copy them over so upgraders keep working. Leave the
   old file in place.
@@ -116,11 +119,17 @@ One tool, `proactivity`, in the `proactivity` toolset:
 ### Gateway-only execution
 
 `register()` also runs in CLI and doctor processes, and those must never send
-nudges. Every tick checks the plugin manager: no CLI REPL attached, and a live
-gateway injector published (`has_gateway_message_injector`). Only a gateway
-sets that, so the `gateway:startup` hook and its marker are deleted, and setup
-removes the old installed hook. These are private host attributes, so any
-surprise fails closed: no nudge.
+nudges. The loop starts from a `register_platform_handler("telegram", ...)`
+factory, which Hermes calls only when the gateway connects Telegram. The
+`gateway:startup` hook, its marker and `gateway_guard.py` are deleted, and setup
+removes the old installed hook.
+
+### Catalog compliance
+
+Public surfaces only (catalog rule 9). `provides_tools: [proactivity]` and
+`provides_hooks: [pre_llm_call, post_llm_call]` match `register()` (rule 6). The
+plugin README discloses the background thread, injected prompts and the one-time
+0.6 import (rule 13). `hermes plugins validate` passes before release (rule 7).
 
 ## Files (target)
 
