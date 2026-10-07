@@ -108,11 +108,15 @@ def _window_hours(s):
 
 
 def loosens(current, new, now):
-    """The /proactivity command for a change that makes check-ins reach further,
-    else None: the model tool may only make them quieter."""
+    """The operator command for a change that makes check-ins reach further,
+    else None: the model tool may only make them quieter. Never a no-op."""
     if new.base_minutes < current.base_minutes:
-        near = min(LEVELS, key=lambda k: (abs(LEVELS[k] - new.base_minutes), LEVELS[k]))
-        return f"/proactivity {near}"
+        below = {k: v for k, v in LEVELS.items() if v < current.base_minutes}
+        if below:
+            near = min(below, key=lambda k: (abs(below[k] - new.base_minutes), below[k]))
+            return f"/proactivity {near}"
+        return ("hermes proactivity set --settings "
+                f"'{json.dumps({'base_minutes': new.base_minutes})}'")
     if is_paused(current, now):
         if not is_paused(new, now):
             return "/proactivity resume"
@@ -165,7 +169,10 @@ class Proactivity:
 
     def settings(self, state):
         try:
-            return validate(Settings(), state.get("settings") or {}, min_base=1)
+            out = validate(Settings(), state.get("settings") or {}, min_base=1)
+            if self.error == "corrupt settings: using defaults":
+                self.error = None
+            return out
         except Exception:
             # ponytail: a corrupt blob must not silently revive check-ins, so an
             # individually valid paused_until still applies on top of defaults.
@@ -393,7 +400,7 @@ class Proactivity:
         """The settings dict for a slash verb, or None for a usage reply."""
         if verb in LEVELS:
             return {"level": verb}
-        if verb == "pause":
+        if verb == "pause" and len(rest) <= 1:
             return {"paused_until": rest[0] if rest else "off"}
         if verb == "resume":
             return {"paused_until": ""}
@@ -417,7 +424,16 @@ class Proactivity:
         if st["paused"]:
             until = s["paused_until"]
             return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."
-        return text + (f", next {st['next_check_in']}." if st["next_check_in"] else ".")
+        return text + (f", next {self._next_words(st['next_check_in'])}."
+                       if st["next_check_in"] else ".")
+
+    def _next_words(self, iso):
+        """'at 4:01 PM today' — tomorrow, a weekday two to six days out, else the date."""
+        due = datetime.fromisoformat(iso)
+        days = (due.date() - self.clock().astimezone(due.tzinfo).date()).days
+        when = ("today" if days <= 0 else "tomorrow" if days == 1 else
+                f"{due:%A}" if days <= 6 else f"{due:%B} {due.day}")
+        return f"at {due.hour % 12 or 12}:{due.minute:02d} {'AM' if due.hour < 12 else 'PM'} {when}"
 
     def on_telegram_connect(self, native=None, adapter=None, **kwargs):
         """register_platform_handler factory. Hermes calls it only when the gateway

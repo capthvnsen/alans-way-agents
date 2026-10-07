@@ -135,6 +135,21 @@ class LoosensTests(unittest.TestCase):
         self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(),
                                    self.NOW), "/proactivity normal")
 
+    def test_a_lower_base_never_suggests_a_no_op_level(self):
+        # 120->100: "normal" is already the level; the nearest preset strictly
+        # below the current base is "more".
+        self.assertEqual(P.loosens(P.Settings(), P.Settings(base_minutes=100),
+                                   self.NOW), "/proactivity more")
+        self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(base_minutes=200),
+                                   self.NOW), "/proactivity normal")
+        self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(base_minutes=60),
+                                   self.NOW), "/proactivity more")
+
+    def test_a_base_below_every_preset_suggests_the_operator_cli(self):
+        self.assertEqual(
+            P.loosens(P.Settings(base_minutes=60), P.Settings(base_minutes=30), self.NOW),
+            """hermes proactivity set --settings '{"base_minutes": 30}'""")
+
     def test_resume_and_earlier_resume_need_the_operator(self):
         off = P.Settings(paused_until="off")
         late = P.Settings(paused_until="2026-10-09T00:00:00+00:00")
@@ -251,6 +266,15 @@ class StateTests(unittest.TestCase):
         state["settings"] = {"active_start": {}, "paused_until": "never"}
         p.save(state)
         self.assertEqual(p.settings(p.load()), P.Settings())
+
+    def test_the_corrupt_settings_error_clears_once_settings_validate(self):
+        p = P.Proactivity(FakeCtx())
+        state = p.load()
+        state["settings"] = {"active_start": {}, "paused_until": "off"}
+        p.save(state)
+        self.assertEqual(p.status()["last_error"], "corrupt settings: using defaults")
+        p.update({"active_start": 8})
+        self.assertIsNone(p.status()["last_error"])
 
     def test_corrupt_state_reads_as_unbound(self):
         ctx = FakeCtx()
@@ -589,6 +613,37 @@ class CommandTests(unittest.TestCase):
         for args in ("fly me to the moon", "hours", "hours nine-ten", "tz"):
             with self.subTest(args=args):
                 self.assertIn("/proactivity", self.command(p, args))
+
+    def test_pause_with_trailing_tokens_is_a_usage_line(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        out = self.command(p, "pause 2026-10-08T09:00:00+00:00 plus stuff")
+        self.assertEqual(out, P.USAGE)
+        self.assertEqual(p.settings(p.load()).paused_until, "")
+
+    def test_status_says_the_next_check_in_in_plain_words(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T14:01", "America/Denver"),
+                       timezone="America/Denver")
+        out = self.command(p, "status")
+        self.assertIn("next at 4:01 PM today", out)
+        self.assertNotIn("2026-10-07", out)
+        # the change confirmations say it the same way
+        self.assertIn("next at 4:01 PM today", self.command(p, "hours 8-21"))
+
+    def test_next_check_in_wording_across_days(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T23:00", "America/Denver"),
+                       timezone="America/Denver")
+        self.assertIn("next at 8:00 AM tomorrow", self.command(p, "status"))
+
+        p, _ = runtime(FakeCtx(), at("2026-10-07T08:00", "America/Denver"),
+                       timezone="America/Denver")
+        state = p.load()
+        state["nudges"] = 5   # the 64-hour wait lands Saturday morning
+        p.save(state)
+        self.assertIn("next at 8:00 AM Saturday", self.command(p, "status"))
+
+        state["nudges"] = 8   # the 7-day cap lands the next Wednesday
+        p.save(state)
+        self.assertIn("next at 8:00 AM October 14", self.command(p, "status"))
 
     def test_bad_values_reply_with_the_error_and_change_nothing(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
