@@ -106,8 +106,9 @@ One tool, `proactivity`, in the `proactivity` toolset:
 - setup.sh keeps its existing timezone detection: ask the user's computer over
   the companion ssh link, else prompt the user. It no longer falls back to a
   default zone silently.
-- State (`session_key`, settings, `n`, `last_nudge_at`) lives in `ctx.state`
-  (profile-scoped).
+- State (`session_key`, settings, `n`, `last_nudge_at`) lives in
+  `$HERMES_HOME/companion/proactivity/state.json` (profile-scoped, written with
+  the existing `write_private_json`).
 - One-time import: if the old `companion/proactivity/proactivity.sqlite3` holds
   a bound key and timezone, copy them over so upgraders keep working. Leave the
   old file in place.
@@ -115,10 +116,11 @@ One tool, `proactivity`, in the `proactivity` toolset:
 ### Gateway-only execution
 
 `register()` also runs in CLI and doctor processes, and those must never send
-nudges. Start the loop only in the gateway: either via `spawn_task` when a
-running gateway loop is detected reliably, or by keeping the existing
-`gateway:startup` marker hook. Prefer whichever is simpler and proven on the
-live gateway. Delete the hook if it's no longer needed.
+nudges. Every tick checks the plugin manager: no CLI REPL attached, and a live
+gateway injector published (`has_gateway_message_injector`). Only a gateway
+sets that, so the `gateway:startup` hook and its marker are deleted, and setup
+removes the old installed hook. These are private host attributes, so any
+surprise fails closed: no nudge.
 
 ## Files (target)
 
