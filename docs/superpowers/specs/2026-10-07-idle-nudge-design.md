@@ -105,8 +105,8 @@ One tool, `proactivity`, in the `proactivity` toolset:
 
 - Keep the CLI shape setup.sh already drives: `hermes proactivity bind
   --session-key K --timezone TZ`, `status`, and `set`.
-- Binding still validates the key against `state.db` `gateway_routing` (or the
-  `sessions.json` mirror) as a Telegram DM. Reuse the existing helper logic.
+- Binding checks the key is a Telegram DM key. `setup.sh` still lists the real
+  routes from `state.db` for the operator to pick from (setup script, not plugin code).
 - setup.sh keeps its existing timezone detection: ask the user's computer over
   the companion ssh link, else prompt the user. It no longer falls back to a
   default zone silently.
@@ -137,7 +137,6 @@ plugin README discloses the background thread, injected prompts and the one-time
   injection, the tool and the CLI. About 250 lines.
 - `alans-way/__init__.py`: `register()` wires up proactivity and the two
   workspace skills.
-- `gateway_guard.py`: keep only what's still used.
 - `tests/test_proactivity.py`: the due-time math (doubling, 7-day cap, window
   deferral, user timezone different from the server, DST transitions, pause,
   reset on reply), tool permission (bound chat only), validation, the import.
