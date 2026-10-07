@@ -18,11 +18,22 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
+# The intensity dial: the four knobs a user feels. "normal" is the Policy default.
+LEVELS = {
+    "quiet": {"max_daily_wakes": 1, "max_low_purpose_wakes": 0,
+              "max_daily_watch_wakes": 4, "min_interval_seconds": 14400},
+    "normal": {"max_daily_wakes": 3, "max_low_purpose_wakes": 1,
+               "max_daily_watch_wakes": 8, "min_interval_seconds": 7200},
+    "eager": {"max_daily_wakes": 6, "max_low_purpose_wakes": 2,
+              "max_daily_watch_wakes": 16, "min_interval_seconds": 3600},
+}
+
+
 @dataclass(frozen=True)
 class Policy:
     """Immutable settings; unknown keys and coercions are rejected.
 
-    Caps can be lowered, never raised above three total/one low-purpose wake.
+    Caps are bounded by the eager level: six total and two low-purpose wakes.
     Equal quiet-hour endpoints disable the quiet window. Integer durations
     are bounded to one year and queues to 1024 to reject unreasonable inputs.
     A nonempty session_key must identify a route validated by the adapter.
@@ -55,6 +66,9 @@ class Policy:
     # Snooze support: "" or an aware ISO timestamp at which a paused policy
     # re-enables itself inside claim(). Never settable while enabled.
     resume_at: str = ""
+    # The preset the four wake knobs were last set from; "custom" once any of
+    # them is edited on its own.
+    level: str = "normal"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -72,7 +86,7 @@ class Policy:
             raise ValueError("timezone must be an available IANA timezone") from exc
         bounds = {
             "quiet_start": (0, 23), "quiet_end": (0, 23),
-            "max_daily_wakes": (0, 3), "max_low_purpose_wakes": (0, 1),
+            "max_daily_wakes": (0, 6), "max_low_purpose_wakes": (0, 2),
             "max_daily_watch_wakes": (0, 24),
             "min_interval_seconds": (0, 31536000),
             "min_watch_interval_seconds": (0, 31536000),
@@ -84,6 +98,8 @@ class Policy:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in [{low}, {high}]")
+        if self.level not in (*LEVELS, "custom"):
+            raise ValueError("level must be quiet, normal, eager or custom")
         if type(self.resume_at) is not str or len(self.resume_at) > 64:
             raise ValueError("resume_at must be an aware ISO timestamp")
         if self.resume_at:
@@ -121,6 +137,7 @@ class Store:
     # Headroom kept for scheduled watches so speculative context noise can
     # never crowd a due wake out of the pending queue entirely.
     _WATCH_RESERVE = 8
+    _WATCH_UNRESOLVED_TTL = 600
     _MAX_EVENTS = 4096
     # A terminal row is a dedupe tombstone for exactly as long as the re-fire
     # windows it guards can still name the same evidence: the due-review
@@ -138,9 +155,10 @@ class Store:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._db_path = self.state_dir / "proactivity.sqlite3"
-        descriptor = os.open(self._db_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        descriptor = os.open(self._db_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            os.fchmod(descriptor, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
         with self._transaction() as db:
@@ -152,6 +170,8 @@ class Store:
                 session_key TEXT NOT NULL, created_at REAL NOT NULL,
                 policy_revision INTEGER NOT NULL, status TEXT NOT NULL,
                 claimed_at REAL)""")
+            if "appraised_at" not in {row[1] for row in db.execute("PRAGMA table_info(events)")}:
+                db.execute("ALTER TABLE events ADD COLUMN appraised_at REAL")
             db.execute("""CREATE TABLE IF NOT EXISTS audit (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
                 policy_revision INTEGER NOT NULL, count INTEGER NOT NULL)""")
@@ -193,6 +213,13 @@ class Store:
             " ('dispatching','accepted_unverified','uncertain')"
             " AND COALESCE(claimed_at, created_at)<=?",
             (timestamp - policy.unresolved_ttl_seconds,)).rowcount
+        # A watch wake is short bounded work, and an unresolved one gates every
+        # other watch, so it ages out much sooner than a speculative review.
+        unresolved += db.execute(
+            "UPDATE events SET status='expired' WHERE kind='watch_due' AND status IN"
+            " ('dispatching','accepted_unverified','uncertain')"
+            " AND COALESCE(claimed_at, created_at)<=?",
+            (timestamp - min(policy.unresolved_ttl_seconds, self._WATCH_UNRESOLVED_TTL),)).rowcount
         self._audit(db, "expired_unresolved", revision, unresolved)
         # Spacing and budget reads lean on claimed_at history, so retention
         # never falls below a configured claim interval or a calendar week.
@@ -357,7 +384,7 @@ class Store:
                 quiet = hour >= policy.quiet_start or hour < policy.quiet_end
             if quiet:
                 return None
-            last_claim = db.execute("SELECT MAX(claimed_at) FROM events").fetchone()[0]
+            last_claim = db.execute("SELECT MAX(COALESCE(claimed_at, appraised_at)) FROM events").fetchone()[0]
             shared_open = last_claim is None or timestamp - last_claim >= policy.min_interval_seconds
             last_watch = db.execute("SELECT MAX(claimed_at) FROM events WHERE kind='watch_due'").fetchone()[0]
             watch_open = last_watch is None or timestamp - last_watch >= policy.min_watch_interval_seconds
@@ -374,7 +401,11 @@ class Store:
             # wakes still share the tighter cap. Either side may be open while
             # the other is spent.
             allow_watch = budget["watches"] < policy.max_daily_watch_wakes
-            allow_other = budget["total"] - budget["watches"] < policy.max_daily_wakes
+            appraised = db.execute("SELECT COUNT(*) FROM events WHERE appraised_at>=? AND appraised_at<?",
+                                   (midnight.timestamp(), next_midnight.timestamp())).fetchone()[0]
+            other = budget["total"] - budget["watches"]
+            allow_other = (other < policy.max_daily_wakes
+                           and other + appraised < 2 * policy.max_daily_wakes)
             if not allow_watch and not allow_other:
                 return None
             allow_low = budget["low"] < policy.max_low_purpose_wakes
@@ -409,8 +440,15 @@ class Store:
             self._audit(db, "coalesced", self._policy(db)[1], dropped)
             return dropped
 
-    def finish(self, event_id: str, status: str) -> None:
+    def finish(self, event_id: str, status: str, *, refund: bool = False,
+               appraised: bool = False) -> None:
         """Record a caller's explicit outcome, not an injection return value.
+
+        ``refund`` hands back the reservation of a claim that never injected a
+        turn, and only while the claim is still ``dispatching``: a wake that was
+        accepted is spent. ``appraised`` says the claim cost an LLM appraisal,
+        which keeps its spacing and counts against a separate daily appraisal
+        cap, so rejected noise cannot turn into unlimited model calls.
 
         Only the adapter can inspect injection acceptance (it must be ``is True``).
         An accepted queue request is never proof that the review completed.
@@ -428,6 +466,9 @@ class Store:
             if old not in {"dispatching", "uncertain"} and not (old == "accepted_unverified" and status == "resolved"):
                 raise ValueError("invalid dispatch status transition")
             db.execute("UPDATE events SET status=? WHERE id=?", (status, event_id))
+            if refund and old == "dispatching" and status in {"rejected", "resolved"}:
+                db.execute("UPDATE events SET appraised_at=CASE WHEN ? THEN claimed_at END, claimed_at=NULL"
+                           " WHERE id=?", (appraised, event_id))
             self._audit(db, status, self._policy(db)[1])
 
     def status(self) -> dict:

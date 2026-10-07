@@ -114,6 +114,16 @@ connector is already on that machine. A login wall means
 the VPS browser needs that site's login once; say so and stop only that
 page. Do not retry the Mac until status shows it online.
 
+The Mac can also drop in the middle of a call. The connector then moves the
+session to the VPS within about ten seconds, and the `[workspace]` notice
+says so. When it lists restored tabs, those tabs have the Mac tabs' cookies
+(where the Mac had any), scroll, and drafts: keep working in them by the VPS
+tab ids it names, and look at any it flags before acting. If it says the
+restore is still running, list tabs again in a few seconds. An
+action that was in flight when the Mac dropped is never retried for you and
+comes back as an error. It may have happened, so snapshot the VPS tab and
+check before repeating it.
+
 API, MCP, and connector calls that do not run on the Mac keep going. A
 closed laptop does not stop them.
 
@@ -177,6 +187,13 @@ app opens them for the user while the tab stays yours to keep working.
    express, `{action:"cdp", method:"...", params:{...}}` sends a raw Chrome
    DevTools Protocol command scoped to the tab — for example
    `Accessibility.getFullAXTree` or `Network.enable` interception.
+   Besides `click` and `type`, a tab takes `double_click`, `right_click`,
+   `drag` (from `ref`, `selector`, or `x,y` to `toRef`, `toSelector`, or
+   `toX,toY`) and `select` (an option by value or label). A batch's
+   `results[]` carry no url, title, generation, or tab: the tab appears once
+   in the response. A `navigate` can return elements with `loading:true`, so
+   snapshot again when the page matters. An element omits an empty name and
+   the default type. A failed navigation says "Navigation failed: ERR_X."
 4. On `human_has_control`, the tab is the human's — ask the user before
    taking it. Say what you need from it and claim only after they agree:
    `cua_alans_way_action` with `action:"claim"` returns a fresh epoch,
@@ -205,8 +222,8 @@ capability only when it advertises support. Backend checkpoints may contain a
 task note, source/destination IDs, verification and draft counts. Read that
 context, wait for authorized agent control, and verify the destination page
 and login before continuing. `review_required` means the page needs human
-review. Passwords, cookies, uploads and in-memory state stay on the source
-host. Keep Chromium profiles with their running browser.
+review. Cookies for agent tabs carry over to the VM over Tailscale; passwords,
+uploads and in-memory state stay on the source host. Keep Chromium profiles with their running browser.
 
 The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
@@ -233,16 +250,24 @@ Desktop apps, on the Mac and on the Linux machine, use `workspace_computer_apps`
 then `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
 `ref` from that snapshot. `type` replaces the text of a ref and does not send
 keystrokes. Pass `since=` the previous snapshot's generation
-for a cheap `{unchanged:true}` when that desktop tree is the same. The action
+for a cheap `{unchanged:true}` when that desktop tree is the same. Every ref action needs the `generation` of the latest snapshot; a stale one
+returns code `stale_ref`, so snapshot again. Besides `press`, `click`, `drag`
+and `type`, actions include `double_click`, `right_click`, `scroll`, `key`,
+`hotkey` and `menu`. `workspace_computer_menu` lists a menu bar, and the
+snapshot has a `menubar`. The action
 result includes `generation`. When it says `unchanged`, do not snapshot again.
 When it includes `elements`, that is the fresh tree. On a Mac,
 use `click` or `drag` with the snapshot's x,y only when the control has no name. A drag on a slider sets its value from the end point. On the Linux desktop, press a ref, click its snapshot x,y, or drag a slider or scroll bar to the end point. `workspace_computer_screenshot` captures that one window as a small
-jpeg, and only when the snapshot has no named control for what you need. On a
-Mac, scale image pixels by `window.width / imageWidth`. Do not screenshot a
+jpeg, and only when the snapshot has no named control for what you need. Image pixels map to screen
+coordinates as `window.x + px * window.width / imageWidth`. Do not screenshot a
 window you can already read as names and refs. A check box or radio name ends in on or off. A disabled control's name ends in disabled, so do not press it. These calls do not move the
 human's cursor. Skip the focused window, Keychain, and password fields. Do not open
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
+
+For any desktop app on the user's computer, use the `workspace_computer_*`
+tools (or the `computer_use` tool when that provider is selected), and never run screencapture, osascript or ssh scripts to drive the user's desktop.
+If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp) in System Settings, then retry.
 
 ## Preserve vanilla Hermes
 

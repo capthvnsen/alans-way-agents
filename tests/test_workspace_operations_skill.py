@@ -190,7 +190,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # The probe returns the resolved script path (macScript); a leftover
         # macUp reference crashes the router after spawn and kills the session.
         self.assertNotIn("macUp", self.source)
-        self.assertIn("macScript ? 'mac' : 'vps'", self.source)
+        self.assertIn("macCommand ? 'mac' : 'vps'", self.source)
 
     def test_probe_joins_items_with_separator(self):
         # join(' ') produces `fi if` — a bash syntax error that makes every
@@ -202,14 +202,15 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # File existence alone routes to a closed app — a dead host. The
         # probe must also prove the workspace API answers on the Mac.
         self.assertIn("connection.json", self.source)
-        self.assertIn("curl -s -m 4 -o /dev/null", self.source)
-        self.assertIn("/status", self.source)
+        self.assertIn("curl -sf -m 4 -o /dev/null", self.source)
+        self.assertIn("/v1/status", self.source)
+        self.assertIn("Authorization: Bearer", self.source)
 
     def test_candidate_failure_falls_through(self):
         # A candidate bundle that exists but is not live must skip to the
-        # next candidate, not abort the whole probe — liveness is a { … }
-        # group inside the if condition, not an early exit.
-        self.assertIn("{ conn=", self.source)
+        # next candidate, not abort the whole probe — liveness is the
+        # wsr_alive function inside the if condition, not an early exit.
+        self.assertIn("&& wsr_alive; then", self.source)
         self.assertNotIn("|| exit 1", self.source)
 
     def test_annotation_failure_degrades_to_passthrough(self):
@@ -223,7 +224,7 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # exit once mac-watch reports the Mac online — Hermes lazy-respawns
         # the connector and the respawn re-probes, converging on the Mac
         # without any manual process surgery.
-        self.assertIn("activeHost !== 'mac' && macSsh", self.source)
+        self.assertIn("if (activeHost === 'mac') {", self.source)
         self.assertIn("freshMacState(macStateFile)", self.source)
         self.assertIn("pendingRequests.size", self.source)
         self.assertIn("re-probes and routes to it", self.source)
@@ -241,8 +242,9 @@ class WorkspaceRouterRegressionTests(unittest.TestCase):
         # ~4.5s of warmup on every lazy respawn. A shared ControlMaster
         # socket makes the spawn's handshake nearly free.
         self.assertIn("ControlMaster=auto", self.source)
-        self.assertIn("ControlPersist=120", self.source)
-        self.assertIn("wsr-%C", self.source)
+        self.assertIn("ControlPersist=600", self.source)
+        self.assertIn("/tmp/wsr-", self.source)
+        self.assertIn("ServerAliveInterval=5", self.source)
         self.assertGreaterEqual(self.source.count("...sshControlArgs"), 2)
 
     def test_fresh_offline_state_skips_the_probe(self):
@@ -275,6 +277,20 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
         ]:
             with self.subTest(forbidden=forbidden):
                 self.assertIn(forbidden, self.normalized)
+
+
+class DesktopAppsSkillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.normalized = _normalized(SKILL_PATH.read_text(encoding="utf-8"))
+
+    def test_desktop_apps_go_through_the_workspace_tools_only(self):
+        self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
+        self.assertIn("or the `computer_use` tool when that provider is selected", self.normalized)
+
+    def test_a_permission_error_names_the_app_and_both_switches(self):
+        self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)
+        self.assertIn("System Settings", self.normalized)
 
 
 if __name__ == "__main__":

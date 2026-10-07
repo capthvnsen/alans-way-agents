@@ -9,6 +9,37 @@ and `sweep` (a scheduled consolidated pass over permitted sources and loops).
 Native memory, schedules, tasks, sessions, delegation and approvals remain the
 foundation — not finished Mac/phone canonical handoff or guaranteed delivery.
 
+## The two knobs
+
+Most people only ever touch two settings, both in Telegram on the bound chat.
+
+**How active the bot is:** `/proactivity level quiet|normal|eager`. `quiet` is at most
+one check-in a day and half as often; `normal` is the default; `eager` is up to six a
+day (at most two of them low-purpose) and twice as often. The bot may lower the level on
+request. Only you can raise it. `hermes proactivity level eager` does the same from a
+shell.
+
+**When it leaves you alone:** `/proactivity quiet 22-8` sets quiet hours (hours in your
+timezone, `quiet off` removes them), and `/proactivity snooze 3d`, `snooze until
+2026-12-01 08:00` or `snooze off` pauses it for a while. Setup passes your machine's
+timezone; change it with `/proactivity timezone Europe/Berlin` or `hermes proactivity
+--timezone Europe/Berlin configure`.
+
+`/proactivity status` shows both, and `/proactivity log` lists the last ten wakes: time,
+kind, a one-line reason and the outcome (`queued`, `sent`, `ran`, `failed`,
+`proposed`, `approved`, `dismissed` or `rejected`). Everything else in this guide is advanced configuration.
+
+When the bot proposes a watch it also sends a message with **Approve** and **Dismiss**
+buttons. Your tap is the approval. Three dismissals of one kind of proposal (watch,
+loop or sweep) in two weeks pause proposals of that kind until you approve one.
+Without the buttons, send `/watch approve <id> <code>` or `/watch dismiss <id>`.
+
+Open-ended checks (reviews, the first-run orientation, sweeps and loops) run as
+one-shot Hermes cron jobs in a fresh session, so they never grow your main
+conversation. They deliver to your Telegram chat with the message attached to the
+conversation, so replying "yes" has context, and an idle run replies `[SILENT]` and
+sends nothing. Approved watch wakes that act for you still run in the main session.
+
 ## Review and enable
 
 Target the existing `default` primary profile; do not rename it or create
@@ -141,8 +172,9 @@ a cancelled task or renews stale permission.
 
 ## When it does something
 
-- Default quiet hours: **22:00–08:00, America/Denver**. At most **3 proactive
-  wakes per local day**, at most **1 low-purpose wake inside that total**.
+- Defaults (the `normal` level): quiet hours **22:00–08:00, America/Denver** until
+  setup passes your timezone. At most **3 proactive wakes per local day**, at most
+  **1 low-purpose wake inside that total**.
   These are upper limits, not quotas; a low-purpose allowance does not justify
   filler.
 - Automatic observations with no events use zero model turns; a relevant change
@@ -160,10 +192,15 @@ a cancelled task or renews stale permission.
   duplicate workers, wait after one unchanged approval/blocker question —
   no polling, delegation loops, raw specialist-chat mining, or
   other-profile memory.
-- `record_task` and `finish_task` maintain approved bookkeeping through the
+- `record_task` (propose only) and `finish_task` maintain watch bookkeeping through the
   tool's actual schema; native task state stays authoritative. Record real
   artifacts, verification and next actions; plugin ledger writes are not new
   opportunities to wake.
+- Every wake tells the bot to reply exactly `[SILENT]` when nothing is worth
+  your attention; the gateway drops that turn instead of messaging you. A
+  review the appraiser rejects hands its daily wake back but keeps its spacing
+  and counts toward an appraisal cap of twice the daily wakes; a stale or
+  rejected watch wake makes no model call and hands everything back.
 - Queued speculative wakes coalesce into one review — a burst of diffs never
   becomes a burst of turns — and a due `sweep` absorbs them into its report.
   A successful `bind` (or first `resume`, whichever comes first) admits one
@@ -175,16 +212,39 @@ The observer diffs `kanban_show` metadata only for fresh, approved watches
 with an exact `native_task_id`; a changed native status admits one
 deduplicated event. Missing native records block continuation; the ledger
 never overrides a native terminal state. It polls every 30 seconds without a
-model call when nothing changes; initial snapshots and the plugin's own
+model call when nothing changes (writing its heartbeat at most every 10
+minutes); schedule and memory digests ignore run bookkeeping and entry
+reordering; initial snapshots and the plugin's own
 bookkeeping do not create wakes. A blocked or waiting watch does not fire —
 re-activation refires whatever is overdue.
 
 ## Standing watches
 
+The bot can only propose a watch. Its `record_task` call saves the watch as
+`proposed`, which never fires, and the bot tells you what it would do and gives you
+an exact approve command with a short code (`/watch approve <id> <code>`; the CLI form
+is `hermes proactivity approve --watch-id <id> --hash <code>`). The code covers the
+text you read: if the proposal changed before you approved, nothing is approved and
+the current text is shown. Approving echoes the scope and next action that went
+live. Approval is operator-only through Hermes's command surfaces (the slash command,
+the CLI or your button tap); this is a policy boundary, not a sandbox, because a
+model that has a terminal tool could run the CLI itself. On an approved watch the
+bot may slow it, pause it or finish it. Anything wider (a new action, a changed
+report rule, a faster schedule, reactivation) is stored as a pending revision: the
+approved watch keeps running unchanged until you approve the revision, and a revision
+you dismiss or ignore for seven days is discarded without touching the watch. A
+proposal that was never approved expires after seven days. At most eight proposals
+wait at once, and finished watches are cleared after 14 days and never count toward
+the 64-watch cap.
+
+Approvals last 30 days. A watch approved longer ago stops firing and the bot asks
+you to approve it again with an Approve button (or `/watch approve <id> <code>`);
+`/watch resume` also renews it, and dismissing the request retires the watch.
+
 An approved watch can carry a schedule: `next_review_at` fires a `watch_due`
 wake; `cadence_seconds` re-arms on a fixed grid at dispatch, so missed slots
 neither strand the watch nor replay a backlog; `due_at` escalates through
-bounded deadline windows and re-surfaces while overdue. `notify_when` is the
+bounded deadline windows and re-surfaces for about a week while overdue. `notify_when` is the
 user's report condition — a filter, never new scope. `report_signal` persists
 a bounded observation the observer diffs durably, waking on change; identical
 signals stay silent, the first write baselines. The collector recipe: a Hermes
@@ -195,7 +255,7 @@ hours, a separate daily budget (`max_daily_watch_wakes`, default 8) and
 tighter spacing (`min_watch_interval_seconds`, default 300); the pending
 queue reserves headroom so speculative noise cannot starve them. A re-armed
 instance retires as stale; a finished watch's queued wake is rejected.
-`/watch list|show|add {json}|pause|resume|done|cancel|signal` is the
+`/watch list|show|approve|dismiss|add {json}|pause|resume|done|cancel|signal` is the
 operator's direct ledger surface; like mutating `/proactivity` actions and
 `proactive_control`, it answers only on the bound conversation; status stays
 open.

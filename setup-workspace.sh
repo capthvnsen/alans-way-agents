@@ -14,7 +14,7 @@
 # block (markers below) or inserts one under the selected profile's existing
 # mcp_servers key; everything else is untouched.
 # --verify checks the install instead of writing: router script, node, the
-# Mac ssh hop and app API, the local VPS browser host, and the managed block.
+# host ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
@@ -37,18 +37,41 @@ if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
   echo "setup-workspace: --profile and --config are mutually exclusive" >&2
   exit 2
 fi
-case "${HOST_OS:-mac}" in mac|windows) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac or windows" >&2; exit 2;; esac
+case "${HOST_OS:-mac}" in mac|windows|linux) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac, windows or linux" >&2; exit 2;; esac
+# --mac-ssh reaches ssh as an argument: user@host or host, plain characters, never a leading '-'.
+if [ -n "$MAC_SSH" ]; then
+  _user=""; _host="$MAC_SSH"
+  case "$MAC_SSH" in *@*) _user="${MAC_SSH%%@*}"; _host="${MAC_SSH#*@}";; esac
+  _bad=0
+  case "$MAC_SSH" in *@*@*) _bad=1;; esac
+  case "$MAC_SSH" in *@*) [ -n "$_user" ] || _bad=1;; esac
+  case "$_user" in -*|*[!A-Za-z0-9._-]*) _bad=1;; esac
+  case "$_host" in ''|-*|.*|*[!A-Za-z0-9.:-]*) _bad=1;; esac
+  [ "$_bad" = 0 ] || { echo "setup-workspace: invalid --mac-ssh '$MAC_SSH' (use user@host or host; no spaces, nothing may start with '-')" >&2; exit 2; }
+fi
+
+[ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
+# Git Bash on native Windows: the router path goes into config.yaml for Hermes
+# and node, which want C:/ paths, and ssh is the native OpenSSH the router uses.
+SSH=ssh HERMES_HOME_DEFAULT="$HOME/.hermes"
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    ROUTER="$(cygpath -m "$ROUTER")"
+    HERMES_HOME_DEFAULT="$(cygpath -m "${LOCALAPPDATA:-$HOME/AppData/Local}")/hermes"
+    _native="$(cygpath -u "${SYSTEMROOT:-${WINDIR:-C:/Windows}}")/System32/OpenSSH/ssh.exe"
+    [ ! -x "$_native" ] || SSH="$_native";;
+esac
+# setup.sh hands over the Python it chose: Windows has python.exe, and python3 may be a Store stub.
+if [ -n "${ALANS_WAY_PYTHON:-}" ]; then python3() { "$ALANS_WAY_PYTHON" "$@"; }; fi
+command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
     *[!0-9A-Za-z_.-]*)
       echo "setup-workspace: bad --profile" >&2
       exit 2;;
   esac
-  CONFIG="${HERMES_HOME:-$HOME/.hermes}/profiles/$PROFILE/config.yaml"
+  CONFIG="${HERMES_HOME:-$HERMES_HOME_DEFAULT}/profiles/$PROFILE/config.yaml"
 fi
-
-[ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
-command -v python3 >/dev/null || { echo "setup-workspace: python3 is required" >&2; exit 1; }
 
 ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
@@ -69,18 +92,18 @@ if [ "$VERIFY" = 1 ]; then
     bad "node not on PATH (router is a node script)"
   fi
   if [ -n "$MAC_SSH" ]; then
-    if ssh -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes "$MAC_SSH" echo ok 2>/dev/null; then
+    if "$SSH" -T -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=yes -- "$MAC_SSH" echo ok 2>/dev/null; then
       ok "host ssh reachable: $MAC_SSH"
       # Run the router's own probe — the exact code path connections take —
       # so a broken probe fails here at verify time, not mid-session.
       decision=$(HERMES_WORKSPACE_MAC_SSH="$MAC_SSH" HERMES_WORKSPACE_HOST_OS="$HOST_OS" node "$ROUTER" --probe 2>/dev/null || true)
       case "$decision" in
-        "mac: "*|"windows: "*) ok "router probe → $decision";;
+        "mac: "*|"windows: "*|"linux: "*) ok "router probe → $decision";;
         "vps ("*) warn "router probe → $decision (ok only if the host app is asleep/closed right now)";;
         *) bad "router probe returned no decision";;
       esac
     else
-      bad "host ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the host is asleep — this is only a failure if the host should be up)"
+      bad "host ssh unreachable: $MAC_SSH (browser falls back to the VPS host when the host is asleep: this is only a failure if the host should be up)"
     fi
   else
     skip "host check (no --mac-ssh given; VPS-only routing)"
@@ -103,8 +126,8 @@ if [ "$VERIFY" = 1 ]; then
   if [ -n "$CONFIG" ]; then
     if [ -f "$CONFIG" ] && grep -q '>>> alans-way workspace_browser managed block >>>' "$CONFIG"; then
       ok "managed workspace_browser block present in $CONFIG"
-    elif [ -f "$CONFIG" ] && grep -q '^  workspace_browser:' "$CONFIG"; then
-      ok "workspace_browser entry present in $CONFIG (unmanaged — re-run setup to manage it)"
+    elif [ -f "$CONFIG" ] && grep -q '^ \+workspace_browser:' "$CONFIG"; then
+      ok "workspace_browser entry present in $CONFIG (unmanaged: re-run setup to manage it)"
     else
       bad "no workspace_browser block in $CONFIG"
     fi
@@ -124,7 +147,7 @@ PY
     if [ -z "$timeout" ]; then
       skip "workspace_browser timeout not set (Hermes default applies; ${TOOL_TIMEOUT}s recommended)"
     elif [ "$timeout" -lt "$TOOL_TIMEOUT" ]; then
-      bad "workspace_browser timeout ${timeout}s is below ${TOOL_TIMEOUT}s — long browser actions get cut off; re-run setup or set timeout: $TOOL_TIMEOUT"
+      bad "workspace_browser timeout ${timeout}s is below ${TOOL_TIMEOUT}s: long browser actions get cut off; re-run setup or set timeout: $TOOL_TIMEOUT"
     else
       ok "workspace_browser timeout ${timeout}s"
     fi
@@ -182,50 +205,170 @@ if [ ! -f "$CONFIG" ]; then
   chmod 600 "$CONFIG"
 fi
 
-cp "$CONFIG" "$CONFIG.bak-alans-way"
 MARK_BEGIN="$MARK_BEGIN" MARK_END="$MARK_END" BLOCK="$(block)" python3 - "$CONFIG" <<'PY'
-import os, sys
+import os, re, shutil, sys, time
 path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ["MARK_END"], os.environ["BLOCK"]
-lines = open(path).read().splitlines(keepends=True)
-has_managed = any(l.rstrip("\n") == mark_b for l in lines)
-out, skipping, inserted = [], False, False
-in_servers, adopting = False, False
+original = open(path, encoding="utf-8", newline="").read()
+nl = "\r\n" if "\r\n" in original else "\n"
+lines = re.findall(r"[^\n]*\n|[^\n]+", original)
+text = lambda l: l.rstrip("\r\n")
+indent = lambda l: len(l) - len(l.lstrip(" "))
+
+def refuse(why):
+    sys.stderr.write(f"setup-workspace: cannot tell how mcp_servers is indented in {path} ({why}); "
+                     "nothing was changed. Add the block by hand: run this script without --config to print it.\n")
+    sys.exit(3)
+
+ROOT_KEY = re.compile(r"mcp_servers:(.*)$")
+EMPTY_VALUES = ("{}", "[]", "null", "~", "Null", "NULL")
+head, head_empty, head_comment = None, False, ""
+for n, l in enumerate(lines):
+    m = ROOT_KEY.match(text(l))
+    if m:
+        value = re.sub(r"(^|\s)#.*$", "", m.group(1)).strip()
+        comment = re.search(r"(^|\s)(#.*)$", m.group(1))
+        head, head_empty, head_comment = n, value in EMPTY_VALUES, (" " + comment.group(2)) if comment else ""
+        if value and not head_empty:
+            refuse("its value is written inline")
+        break
+
+# Children of mcp_servers keep the indent the file already uses (2 when there are none).
+child = 2
+if head is not None and not head_empty:
+    for l in lines[head + 1:]:
+        t = text(l)
+        if not t.strip() or t.lstrip().startswith("#"):
+            continue
+        if not t.startswith(" "):
+            if t.startswith("-"):
+                refuse("it holds a list")
+            break
+        if not re.match(r" +[\w.\"'-]+:(\s|$)", t):
+            refuse("the first entry is not a plain key")
+        child = indent(t)
+        break
+shift = child - 2
+reindent = lambda l: l if not l.startswith("  ") else (" " * shift + l if shift >= 0 else l[-shift:])
+block = nl.join(reindent(l) for l in block.split("\n"))
+
+# Earlier installs left a second router behind: a legacy managed block, or a
+# hand-written mcp_servers entry that runs this plugin's router or browser-mcp
+# under node. Either duplicates the tools, so each profile keeps exactly one
+# workspace_browser.
+LEGACY_B = "# >>> alans-way cua_alans_way managed block >>>"
+LEGACY_E = "# <<< alans-way cua_alans_way managed block <<<"
+OURS = ("workspace-router.cjs", "browser-mcp.cjs")
+base = lambda value: re.split(r"[\\/]", value.strip().strip("\"'"))[-1]
+
+def runs_our_script(entry):
+    body = "".join(l for l in entry if not l.lstrip().startswith("#"))
+    cmd = re.search(r"(?:^|[{,\s])command:\s*(\"[^\"]*\"|'[^']*'|[^\s,}#]+)", body)
+    if not cmd or base(cmd.group(1)).lower() not in ("node", "node.exe"):
+        return False
+    flow = re.search(r"args:\s*\[(.*?)\]", body, re.S)
+    if flow:
+        items = re.findall(r"\"[^\"]*\"|'[^']*'|[^\s,]+", flow.group(1))
+    else:
+        items, args_indent = [], None
+        for l in entry:
+            t = text(l)
+            if args_indent is None:
+                m = re.match(r"( *)args:\s*$", t)
+                args_indent = len(m.group(1)) if m else None
+            elif t.strip() and not t.lstrip().startswith("-") and indent(t) <= args_indent:
+                break
+            elif t.lstrip().startswith("-"):
+                items.append(t.lstrip()[1:].strip())
+    return any(base(i) in OURS for i in items)
+
+kept, removed, i, in_servers, in_managed = [], [], 0, False, False
+while i < len(lines):
+    line, t = lines[i], text(lines[i])
+    if t == LEGACY_B:
+        j = i
+        while j < len(lines) and text(lines[j]) != LEGACY_E:
+            j += 1
+        if j < len(lines):
+            removed.append("legacy managed block cua_alans_way")
+            i = j + 1
+            continue
+    if t == mark_b:
+        in_managed = True
+    elif t == mark_e:
+        in_managed = False
+    if t and not t.startswith((" ", "#")):
+        in_servers = bool(ROOT_KEY.match(t))
+    elif in_servers and not in_managed and indent(t) == child and t.strip() and not t.lstrip().startswith("#"):
+        name = re.match(r" *([\w.-]+|\"[^\"]+\"|'[^']+'):(\s.*)?$", t)
+        if name and name.group(1) != "workspace_browser":
+            j = i + 1
+            while j < len(lines) and (not text(lines[j]).strip() or indent(text(lines[j])) > child):
+                j += 1
+            while not text(lines[j - 1]).strip():
+                j -= 1
+            if runs_our_script(lines[i:j]):
+                removed.append("unmanaged mcp_servers entry " + name.group(1).strip("\"'"))
+                i = j
+                continue
+    kept.append(line)
+    i += 1
+lines = kept
+has_managed = any(text(l) == mark_b for l in lines)
+out, skipping, inserted, adopting, blanks = [], False, False, False, []
+in_servers = False
 # Insert under the profile's own top-level mcp_servers key, never a nested or
-# commented one. A top-level key has no leading whitespace and no trailing text.
+# commented one. A top-level key has no leading whitespace.
 for line in lines:
-    if line.rstrip("\n") == mark_b:
+    stripped = text(line)
+    if stripped == mark_b:
         skipping = True
-        out.append(block + "\n")
+        out.append(block + nl)
         continue
     if skipping:
-        if line.rstrip("\n") == mark_e:
+        if stripped == mark_e:
             skipping = False
         continue
-    stripped = line.rstrip("\n")
     if stripped and not stripped.startswith((" ", "#")):
-        in_servers = stripped == "mcp_servers:"
+        in_servers = bool(ROOT_KEY.match(stripped))
     # A hand-pasted, unmarked entry is replaced in place; a second
     # workspace_browser key would leave Hermes silently using one of them.
     if adopting:
-        if not stripped or stripped.startswith("   "):
+        if not stripped:
+            blanks.append(line)
+            continue
+        if indent(stripped) > child:
+            blanks = []
             continue
         adopting = False
-    if not has_managed and in_servers and stripped == "  workspace_browser:":
+        out.extend(blanks)
+        blanks = []
+    if not has_managed and in_servers and indent(stripped) == child and re.match(r" *workspace_browser:", stripped):
         if not inserted:
-            out.append(block + "\n")
+            out.append(block + nl)
             inserted = True
         adopting = True
         continue
+    if not has_managed and not inserted and ROOT_KEY.match(stripped):
+        out.append("mcp_servers:" + head_comment + nl if head_empty else line)
+        out.append(block + nl)
+        inserted = True
+        continue
     out.append(line)
-    if not has_managed and not inserted:
-        stripped = line.rstrip("\n")
-        if stripped == "mcp_servers:":
-            out.append(block + "\n")
-            inserted = True
+out.extend(blanks)
 if not has_managed and not inserted:
-    out.append("\nmcp_servers:\n" + block + "\n")
-open(path, "w").writelines(out)
+    out.append(nl + "mcp_servers:" + nl + block + nl)
+result = "".join(out)
+for what in removed:
+    print("setup-workspace: removed " + what)
+if result != original:
+    if original:
+        backup = path + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+        while os.path.exists(backup):
+            backup += "x"
+        shutil.copy2(path, backup)
+        print("setup-workspace: backup: " + backup)
+    open(path, "w", encoding="utf-8", newline="").write(result)
 PY
 
-echo "setup-workspace: wrote managed workspace_browser block to $CONFIG (backup: $CONFIG.bak-alans-way)"
+echo "setup-workspace: wrote managed workspace_browser block to $CONFIG"
 echo "setup-workspace: restart the gateway to load it."
