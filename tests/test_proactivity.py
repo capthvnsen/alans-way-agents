@@ -256,5 +256,172 @@ class HookTests(unittest.TestCase):
         self.assertIsNone(p.busy_since)
 
 
+class TickTests(unittest.TestCase):
+    def test_quiet_chat_gets_one_nudge_then_doubles(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T10:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T11:00")
+        self.assertTrue(p.tick())
+        self.assertEqual(ctx.sent[0][1], KEY)
+        self.assertTrue(ctx.sent[0][0].startswith(P.MARKER))
+        self.assertIn("[SILENT]", ctx.sent[0][0])
+        clock.now = at("2026-10-07T14:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T15:00")
+        self.assertTrue(p.tick())
+        self.assertEqual(p.load()["nudges"], 2)
+
+    def test_bot_reply_to_a_check_in_moves_the_anchor_not_the_count(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T11:00")
+        p.tick()
+        turn(p, clock, at("2026-10-07T11:01"), text=ctx.sent[0][0])
+        clock.now = at("2026-10-07T15:00")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T15:01")
+        self.assertTrue(p.tick())
+
+    def test_user_reply_resets_the_backoff(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T11:00")
+        p.tick()
+        turn(p, clock, at("2026-10-07T12:00"))
+        clock.now = at("2026-10-07T13:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T14:00")
+        self.assertTrue(p.tick())
+
+    def test_nothing_outside_the_users_window(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T11:00", "Asia/Tokyo"), timezone="Asia/Tokyo")
+        turn(p, clock, at("2026-10-07T12:00", "Asia/Tokyo"))
+        clock.now = at("2026-10-07T23:30", "Asia/Tokyo")
+        self.assertIsNone(p.tick())
+        self.assertEqual(ctx.sent, [])
+
+    def test_long_outage_sends_one_nudge_at_the_window_start(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-10T03:00")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-10T08:00")
+        self.assertTrue(p.tick())
+        clock.now = at("2026-10-10T08:01")
+        self.assertIsNone(p.tick())
+        self.assertEqual(len(ctx.sent), 1)
+
+    def test_never_chatted_anchors_at_bind_time(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T10:59")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T11:00")
+        self.assertTrue(p.tick())
+
+    def test_refused_or_failing_injection_still_backs_off(self):
+        for accept in (False, RuntimeError("boom")):
+            with self.subTest(accept=accept):
+                p, clock = runtime(FakeCtx(accept=accept), at("2026-10-07T09:00"))
+                clock.now = at("2026-10-07T11:00")
+                self.assertFalse(p.tick())
+                self.assertEqual(p.load()["nudges"], 1)
+                self.assertNotEqual(p.status()["last_result"], "accepted")
+                clock.now = at("2026-10-07T11:01")
+                self.assertIsNone(p.tick())
+
+    def test_outside_the_gateway_or_paused_never_injects(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T12:00")
+        p.gateway = False
+        self.assertIsNone(p.tick())
+        p.gateway = True
+        p.update({"paused_until": "off"})
+        self.assertIsNone(p.tick())
+        self.assertEqual(ctx.sent, [])
+
+    def test_busy_turn_blocks_until_it_ends_or_goes_stale(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:00"))
+        turn(p, clock, at("2026-10-07T09:00"), finish=False)
+        clock.now = at("2026-10-07T11:30")
+        self.assertIsNone(p.tick())
+        clock.now = at("2026-10-07T12:01")   # turn started over 3h ago: treat as dead
+        self.assertTrue(p.tick())
+
+    def test_unknown_timezone_prompt_asks_the_bot_to_learn_it(self):
+        p = P.Proactivity(FakeCtx())
+        text = p.prompt(P.Settings(), timedelta(hours=3), at("2026-10-07T11:00"))
+        self.assertIn("timezone", text)
+        self.assertIn("3 hours", text)
+        known = p.prompt(P.Settings(timezone="UTC"), timedelta(hours=3), at("2026-10-07T11:00"))
+        self.assertNotIn("timezone yet", known)
+
+
+class ToolTests(unittest.TestCase):
+    def test_only_the_bound_chat_can_change_settings(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value="agent:main:telegram:dm:7"):
+            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))["ok"])
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["level"], "less")
+
+    def test_chat_cannot_go_below_15_minutes(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"base_minutes": 2}}))["ok"])
+
+    def test_status_reports_next_check_in_in_user_time(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"), timezone="Asia/Tokyo")
+        turn(p, clock, at("2026-10-07T10:00"))
+        status = json.loads(p.tool({"action": "status"}))
+        self.assertTrue(status["bound"])
+        self.assertTrue(status["next_check_in"].endswith("+09:00"))
+
+
+class RegisterTests(unittest.TestCase):
+    def test_register_wires_public_surfaces_only(self):
+        calls, factories = [], {}
+        ctx = SimpleNamespace(
+            profile_name="default", state=FakeState(),
+            register_tool=lambda **kw: calls.append(("tool", kw["name"], kw["toolset"])),
+            register_hook=lambda name, fn: calls.append(("hook", name)),
+            register_platform_handler=lambda platform, fn: factories.__setitem__(platform, fn),
+            register_skill=lambda name, path: calls.append(("skill", name)),
+            register_cli_command=lambda name, *a: calls.append(("cli", name)),
+            on_unload=lambda fn: calls.append(("unload",)))
+        package = sys.modules["alans_way_idle_test"]
+        with tempfile.TemporaryDirectory() as d:
+            runtime_ = package.register(ctx, legacy_home=d)
+        for expected in (("tool", "proactivity", "proactivity"), ("hook", "pre_llm_call"),
+                         ("hook", "post_llm_call"), ("cli", "proactivity"),
+                         ("skill", "workspace-operations"), ("skill", "workspace-setup")):
+            self.assertIn(expected, calls)
+        self.assertNotIn(("skill", "proactive-primary"), calls)
+        self.assertFalse(runtime_.gateway)
+        self.assertIsNone(runtime_.worker)
+        factories["telegram"](None, None)
+        try:
+            self.assertTrue(runtime_.gateway)
+            self.assertTrue(runtime_.worker.is_alive())
+        finally:
+            runtime_.close()
+
+    def test_manifest_declares_what_register_registers(self):
+        text = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
+        for name in ("proactivity", "pre_llm_call", "post_llm_call"):
+            self.assertIn(f"- {name}", text)
+        self.assertNotIn("proactive_control", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ import threading
 
 LEVELS = {"less": 240, "normal": 120, "more": 60}
 MAX_WAIT = timedelta(days=7)
+BUSY_CAP = timedelta(hours=3)
 
 
 @dataclass(frozen=True)
@@ -218,3 +219,155 @@ class Proactivity:
                  "settings": asdict(settings)}
         self.save(state)
         return state
+
+    def _anchor(self, state):
+        ts = max(state.get("last_activity_ts") or 0, state.get("last_nudge_ts") or 0,
+                 state.get("bound_ts") or 0)
+        return datetime.fromtimestamp(ts, timezone.utc)
+
+    def _busy(self, now):
+        # ponytail: post_llm_call never fires for a crashed or stopped turn, so a
+        # turn older than BUSY_CAP is treated as over.
+        return self.busy_since is not None and now - self.busy_since < BUSY_CAP
+
+    def tick(self):
+        if not self.gateway:
+            return None
+        with self._lock:
+            state = self.load()
+            s, now = self.settings(state), self.clock()
+            if not state.get("session_key") or is_paused(s, now) or self._busy(now):
+                return None
+            anchor, nudges = self._anchor(state), state.get("nudges", 0)
+            if now < due_at(s, anchor, nudges) or not in_window(s, now):
+                return None
+            try:
+                accepted = self.ctx.inject_message(self.prompt(s, now - anchor, now),
+                                                   role="user", session_key=state["session_key"])
+                result = "accepted" if accepted is True else "refused"
+            except Exception as exc:
+                accepted, result = False, f"failed: {type(exc).__name__}"
+            # ponytail: a refused check-in still advances the back-off, so a missing
+            # injection permission costs one attempt per wait, not one per minute.
+            state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result=result)
+            self.save(state)
+            return accepted is True
+
+    def prompt(self, s, elapsed, now):
+        hours = elapsed.total_seconds() / 3600
+        ago = (f"{round(hours * 60)} minutes" if hours < 1.5 else
+               f"{round(hours)} hours" if hours < 48 else f"{round(hours / 24)} days")
+        local = now.astimezone(zone(s))
+        learn = ("" if s.timezone else
+                 " You don't know their timezone yet: ask for it when it fits naturally and save it"
+                 " with the proactivity tool.")
+        return (f"{MARKER} It has been {ago} since your last exchange with the user;"
+                f" it is {local:%A %H:%M} for them.{learn} Like a thoughtful employee, pick exactly one:"
+                " (a) do one safe, reversible thing that moves their goals forward, then report briefly;"
+                " (b) suggest something specific you could do for them; or (c) ask one useful question."
+                " Draw on your memory of their goals and open threads, and don't repeat a recent check-in."
+                " This is not new authorization: never send external messages, spend money, change"
+                " credentials or permissions, touch production, or delete anything without asking first."
+                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
+
+    def status(self):
+        with self._lock:
+            state = self.load()
+            s, now = self.settings(state), self.clock()
+            out = {"bound": bool(state.get("session_key")), "settings": asdict(s),
+                   "level": next((k for k, v in LEVELS.items() if v == s.base_minutes), "custom"),
+                   "timezone_known": bool(s.timezone), "paused": is_paused(s, now),
+                   "busy": self._busy(now), "nudges_since_reply": state.get("nudges", 0),
+                   "next_check_in": None, "in_gateway": self.gateway,
+                   "last_result": state.get("last_result"), "last_error": self.error}
+            if out["bound"] and not out["paused"]:
+                due = due_at(s, self._anchor(state), out["nudges_since_reply"])
+                out["next_check_in"] = due.astimezone(zone(s)).isoformat(timespec="minutes")
+            return out
+
+    def tool(self, args, **kwargs):
+        args = args if isinstance(args, dict) else {}
+        try:
+            if args.get("action") == "set":
+                bound = self.load().get("session_key")
+                if not bound or caller_session_key() != bound:
+                    return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
+                self.update(args.get("settings") or {})
+            return json.dumps({"ok": True, **self.status()})
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+
+    def on_telegram_connect(self, native=None, adapter=None, **kwargs):
+        """register_platform_handler factory. Hermes calls it only when the gateway
+        connects Telegram, so CLI, doctor and TUI loads never start the loop."""
+        self.gateway = True
+        self.start()
+
+    def start(self, interval=60.0):
+        if self.worker and self.worker.is_alive():
+            return
+        def run():
+            while not self._stop.wait(interval):
+                try:
+                    self.tick()
+                    self.error = None
+                except Exception as exc:
+                    self.error = type(exc).__name__
+        self.worker = threading.Thread(target=run, name="alans-way-idle-nudge", daemon=True)
+        self.worker.start()
+
+    def close(self):
+        self._stop.set()
+
+
+SCHEMA = {
+    "name": "proactivity",
+    "description": (
+        "Read or change how you proactively check in with the user. You check in after the chat has"
+        " been quiet for base_minutes, doubling the wait after each check-in they don't answer (capped"
+        " at a week), and only between active_start and active_end in the USER's timezone. Map requests:"
+        " 'check in less/more' -> level less|more (normal is the default); 'quiet until Monday' ->"
+        " paused_until as ISO with their UTC offset; 'stop checking in' -> paused_until 'off';"
+        " 'start again' -> paused_until ''; 'I'm in Tokyo' -> timezone 'Asia/Tokyo'; 'not before 9am'"
+        " -> active_start 9. After set, confirm the change from the returned status in plain words."),
+    "parameters": {
+        "type": "object", "additionalProperties": False, "required": ["action"],
+        "properties": {
+            "action": {"type": "string", "enum": ["status", "set"]},
+            "settings": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "level": {"type": "string", "enum": list(LEVELS)},
+                    "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
+                    "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
+                    "active_end": {"type": "integer", "minimum": 0, "maximum": 23},
+                    "timezone": {"type": "string"},
+                    "paused_until": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+def cli_setup(parser):
+    parser.add_argument("action", nargs="?", default="status", choices=["status", "bind", "set"])
+    parser.add_argument("--session-key", help="Existing Telegram DM session key to check in on (bind only)")
+    parser.add_argument("--timezone", help="The user's IANA timezone, such as America/Chicago")
+    parser.add_argument("--settings", help='JSON such as {"level": "less"} or {"paused_until": "off"}')
+
+
+def cli_run(runtime, args):
+    try:
+        changes = json.loads(args.settings) if args.settings else {}
+        if args.timezone:
+            changes["timezone"] = args.timezone
+        if changes:
+            runtime.update(changes, min_base=1)
+        if args.action == "bind":
+            runtime.bind(args.session_key or "")
+        print(json.dumps(runtime.status(), indent=2))
+        return 0
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
