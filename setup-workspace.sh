@@ -4,7 +4,7 @@
 #
 #   ./setup-workspace.sh --bot-id 123456789 --bot-name Scout \
 #       --mac-ssh me@mymac --router /opt/alans-way/alans-way/scripts/workspace-router.cjs \
-#       [--profile alan-local | --config ~/.hermes/config.yaml]
+#       [--profile alan-local | --config ~/.hermes/config.yaml] [--allow-desktop-actions]
 #
 #   ./setup-workspace.sh --verify --mac-ssh me@mymac [--router PATH] [--profile NAME] [--config CFG]
 #
@@ -13,11 +13,15 @@
 # --config edits an explicit file directly. The script replaces a previous managed
 # block (markers below) or inserts one under the selected profile's existing
 # mcp_servers key; everything else is untouched.
+# The block always excludes the ungated workspace_computer_action tool, so
+# desktop input only goes through Hermes's approval-gated computer_use.
+# --allow-desktop-actions is the manual opt-out: it instead writes the env
+# marker that lets the router expose and serve that tool.
 # --verify checks the install instead of writing: router script, node, the
 # host ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0
+BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0 ALLOW_DESKTOP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
@@ -28,7 +32,8 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --verify) VERIFY=1; shift;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --allow-desktop-actions) ALLOW_DESKTOP=1; shift;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -77,6 +82,81 @@ ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS + 1)); }
 warn() { echo "  warn $1"; }
 skip() { echo "  skip $1"; }
+
+# The state of the workspace_browser block's desktop-input gate in config $1:
+#   opt-in    the --allow-desktop-actions marker env is present
+#   excluded  workspace_computer_action sits under the block's tools.exclude
+#   exposed   a workspace_browser block exists without either
+#   absent    no workspace_browser block at all
+# Anchored on the managed markers when they exist (a bare grep would accept the
+# tool name in a comment or under another server's exclude); without markers
+# the bare workspace_browser entry is audited instead.
+workspace_block_state() {
+  [ -f "$1" ] || { echo absent; return 0; }
+  python3 - "$1" <<'PY'
+import re, sys
+MARK_B = "# >>> alans-way workspace_browser managed block >>>"
+MARK_E = "# <<< alans-way workspace_browser managed block <<<"
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    print("absent")
+    sys.exit(0)
+lines, inside, saw = [], False, False
+for line in raw:
+    text = line.strip()
+    if text == MARK_B:
+        inside, saw = True, True
+        continue
+    if text == MARK_E:
+        inside = False
+        continue
+    if inside:
+        lines.append(line)
+if not saw:
+    lines = raw
+if not any(not l.lstrip().startswith("#") and re.match(r"\s*workspace_browser\s*:", l) for l in lines):
+    print("absent")
+    sys.exit(0)
+if any(not l.lstrip().startswith("#") and re.match(
+        r"\s*HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS\s*:", l) for l in lines):
+    print("opt-in")
+    sys.exit(0)
+stack, excl = [], None
+for line in lines:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        continue
+    item = re.match(r"^(\s*)-\s+(\S+)", line)
+    if excl is not None:
+        if item and len(item.group(1)) > excl:
+            if item.group(2).strip("\"'").rstrip(",") == "workspace_computer_action":
+                print("excluded")
+                sys.exit(0)
+            continue
+        excl = None
+    key = re.match(r"^(\s*)([\w.\"'-]+):\s*(.*?)\s*$", line)
+    if not key:
+        continue
+    depth = len(key.group(1))
+    while stack and stack[-1][0] >= depth:
+        stack.pop()
+    stack.append((depth, key.group(2).strip("\"'")))
+    keys = [k for _, k in stack]
+    value = key.group(3)
+    if keys[-3:] == ["workspace_browser", "tools", "exclude"]:
+        if re.search(r"\bworkspace_computer_action\b", value):
+            print("excluded")
+            sys.exit(0)
+        if not value:
+            excl = depth
+    elif keys[-2:] == ["workspace_browser", "tools"] and re.search(
+            r"exclude[^\n]*\bworkspace_computer_action\b", value):
+        print("excluded")
+        sys.exit(0)
+print("exposed")
+PY
+}
 
 # browser-mcp gives a browser action up to 90s; Hermes must wait longer or it
 # abandons a batch that is still running and the agent retries on top of it.
@@ -151,6 +231,11 @@ PY
     else
       ok "workspace_browser timeout ${timeout}s"
     fi
+    case "$(workspace_block_state "$CONFIG")" in
+      opt-in) ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)";;
+      excluded) ok "ungated desktop input excluded from workspace_browser";;
+      exposed) warn "workspace_browser does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately";;
+    esac
   else
     skip "config check (no --config given)"
   fi
@@ -175,6 +260,16 @@ block() {
   if [ -n "$BOT_NAME" ]; then
     BOT_NAME_BLOCK="$(printf '\n      - --bot-name\n      - %s' "$(yaml_quote "$BOT_NAME")")"
   fi
+  # MCP has no approval gate of its own, so the desktop-input tool is excluded
+  # by default. The opt-in instead writes the marker env that lets the router
+  # serve it; read-only computer tools stay exposed either way.
+  DESKTOP_TOOLS_BLOCK=""
+  DESKTOP_ALLOW_ENV=""
+  if [ "$ALLOW_DESKTOP" = 1 ]; then
+    DESKTOP_ALLOW_ENV="$(printf '\n      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"')"
+  else
+    DESKTOP_TOOLS_BLOCK="$(printf '\n    tools:\n      exclude:\n        - workspace_computer_action')"
+  fi
   cat <<EOF
 $MARK_BEGIN
   workspace_browser:
@@ -185,10 +280,10 @@ $MARK_BEGIN
       - $(yaml_quote "$BOT_ID")$BOT_NAME_BLOCK
     lazy: true
     connect_timeout: 12
-    timeout: $TOOL_TIMEOUT
+    timeout: $TOOL_TIMEOUT$DESKTOP_TOOLS_BLOCK
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
-      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")
+      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")$DESKTOP_ALLOW_ENV
 $MARK_END
 EOF
 }

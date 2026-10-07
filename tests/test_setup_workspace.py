@@ -44,6 +44,31 @@ class PrintModeTests(unittest.TestCase):
         self.assertNotIn("--bot-name", result.stdout)
 
 
+class DesktopInputGateTests(unittest.TestCase):
+    """The managed block excludes the ungated workspace_computer_action tool:
+    desktop input must go through Hermes's approval-gated computer_use. Only
+    the explicit --allow-desktop-actions opt-in writes the router's marker env."""
+
+    def test_the_block_excludes_the_ungated_desktop_input_tool(self):
+        out = run("--bot-id", "bot_123").stdout
+        self.assertIn("    tools:\n      exclude:\n        - workspace_computer_action\n", out)
+        self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", out)
+
+    def test_the_written_config_carries_the_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text("", encoding="utf-8")
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("tools:\n      exclude:\n        - workspace_computer_action", text)
+            self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", text)
+
+    def test_allow_desktop_actions_writes_the_router_marker_instead(self):
+        out = run("--bot-id", "bot_123", "--allow-desktop-actions").stdout
+        self.assertNotIn("exclude", out)
+        self.assertIn('HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"', out)
+
+
 class ConfigEditTests(unittest.TestCase):
     def test_creates_managed_block_when_config_file_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -404,6 +429,61 @@ class VerifyTests(unittest.TestCase):
             config.write_text(config.read_text().replace("timeout: 30", "timeout: 120"), encoding="utf-8")
             result = run("--verify", "--config", str(config))
             self.assertIn("workspace_browser timeout 120s", result.stdout)
+
+    def test_verify_reports_the_desktop_input_exclusion_and_the_opt_in(self):
+        for block, want in (
+            ("    timeout: 120\n    tools:\n      exclude:\n        - workspace_computer_action\n",
+             "ungated desktop input excluded from workspace_browser"),
+            ('    timeout: 120\n    env:\n      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"\n',
+             "workspace_computer_action exposed by explicit opt-in"),
+        ):
+            with self.subTest(want=want), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                config.write_text(
+                    "mcp_servers:\n  workspace_browser:\n    command: node\n" + block,
+                    encoding="utf-8")
+                result = run("--verify", "--config", str(config), check=False)
+                self.assertIn(want, result.stdout)
+
+    def test_verify_warns_when_desktop_input_is_not_excluded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "mcp_servers:\n  workspace_browser:\n    command: node\n    timeout: 120\n",
+                encoding="utf-8")
+            result = run("--verify", "--config", str(config), check=False)
+            self.assertIn("does not exclude workspace_computer_action", result.stdout)
+
+    def test_verify_counts_only_the_exclusion_under_the_blocks_own_tools_exclude(self):
+        # The tool name appearing anywhere else in the file is not an
+        # exclusion: a comment, or another server's tools.exclude.
+        for extra in (
+            "    # workspace_computer_action is not excluded here\n",
+            "  other_server:\n    command: x\n    tools:\n      exclude:\n        - workspace_computer_action\n",
+        ):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                config.write_text(
+                    "# >>> alans-way workspace_browser managed block >>>\n"
+                    "  workspace_browser:\n    command: node\n    timeout: 120\n" + extra +
+                    "# <<< alans-way workspace_browser managed block <<<\n",
+                    encoding="utf-8")
+                result = run("--verify", "--config", str(config), check=False)
+                self.assertIn("does not exclude workspace_computer_action", result.stdout)
+                self.assertNotIn("ungated desktop input excluded", result.stdout)
+
+    def test_verify_reads_the_exclusion_inside_the_managed_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "# >>> alans-way workspace_browser managed block >>>\n"
+                "  workspace_browser:\n    command: node\n    timeout: 120\n"
+                "    tools:\n      exclude:\n        - workspace_computer_action\n"
+                "# <<< alans-way workspace_browser managed block <<<\n"
+                "  other_server:\n    command: x\n",
+                encoding="utf-8")
+            result = run("--verify", "--config", str(config), check=False)
+            self.assertIn("ungated desktop input excluded from workspace_browser", result.stdout)
 
 
 class HostOsFlagTests(unittest.TestCase):

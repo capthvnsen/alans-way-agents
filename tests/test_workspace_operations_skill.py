@@ -65,13 +65,13 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("workspace_computer_snapshot", self.normalized)
         self.assertIn("{unchanged:true}", self.normalized)
         self.assertIn("since=", self.normalized)
-        self.assertIn("desktop tree is the same", self.normalized)
-        self.assertIn("When it says `unchanged`, do not snapshot again.", self.normalized)
+        self.assertIn("approval gate is the only desktop-input path", self.normalized)
+        self.assertIn("it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
-        self.assertIn("drag a slider or scroll bar to the end point", self.normalized)
-        self.assertIn("A drag on a slider sets its value from the end point.", self.normalized)
-        self.assertIn("A check box or radio name ends in on or off.", self.normalized)
-        self.assertIn("A disabled control's name ends in disabled, so do not press it.", self.normalized)
+        self.assertIn("capture` with `app` returns one app's numbered element list", self.normalized)
+        self.assertIn("A stale element number comes back `stale_ref`", self.normalized)
+        self.assertIn("A check box or radio name ends in on or off", self.normalized)
+        self.assertIn("a disabled control's name ends in disabled", self.normalized)
         self.assertIn("a select name includes the chosen option", self.normalized)
         self.assertIn("a section name ends in open or closed", self.normalized)
         self.assertIn("a selected tab's name ends in selected", self.normalized)
@@ -81,10 +81,10 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable.", self.normalized)
         self.assertIn("A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label.", self.normalized)
         self.assertIn("A pressed toggle's name ends in on or off, so do not screenshot it to see the state.", self.normalized)
-        self.assertIn("A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text.", self.normalized)
+        self.assertIn("An action or batch result also includes elements for up to 40 controls; use those refs.", self.normalized)
         self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
-        self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
-        self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
+        self.assertIn("`set_value` replaces a field's text", self.normalized)
+        self.assertIn("Skip the focused window, Keychain, and password fields.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
         self.assertIn("do not move the human's cursor", self.normalized)
 
@@ -111,10 +111,20 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                 self.assertNotIn(stale, self.text)
         desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
         self.assertIn("cua_alans_way_snapshot", desktop)
-        self.assertIn("workspace_computer_action", desktop)
+        self.assertIn("computer_use", desktop)
         self.assertIn("does not move the pointer", desktop)
         self.assertNotIn("workspace_vps_browser", desktop)
         self.assertNotIn("Cua Driver", desktop)
+
+    def test_the_ungated_desktop_input_tool_is_never_named_as_callable(self):
+        # Desktop input goes through Hermes' approval-gated computer_use tool.
+        # The raw MCP action must not appear in any skill or reference as
+        # something the agent can call.
+        for path in [SKILL_PATH] + list((SKILL_PATH.parent / "references").glob("*.md")):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("workspace_computer_action", text, path)
+        self.assertIn("computer_use", self.normalized)
 
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
@@ -124,14 +134,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
 
     def test_no_alternate_browser_paths_when_mac_reachable(self):
         for forbidden in [
-            'host:"vps"',
             "browser_exec",
             "personal browser",
         ]:
             with self.subTest(forbidden=forbidden):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
-        self.assertIn("Do not pass `host`.", self.normalized)
         self.assertIn("A snapshot defaults to 2000 characters of page text.", self.normalized)
         self.assertIn("Do not screenshot only because the text was cut.", self.normalized)
         self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
@@ -161,6 +169,50 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         # and not to reuse a login that only exists there.
         self.assertNotIn("do not wait, ask, or describe a handoff", self.normalized)
         self.assertNotIn("only exists there", self.normalized)
+
+    def test_one_turn_rules_replaced_the_extra_round_trips(self):
+        # The action reply's effect is the observation, so a turn ends with
+        # the action instead of a snapshot-and-check.
+        self.assertIn("Every action reply carries `effect`, the page's new state: `effect.text` is its new visible text.", self.normalized)
+        self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
+        self.assertIn("Do multi-step work as one batch", self.normalized)
+        self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
+        self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
+        self.assertIn('{action:"read"}', self.normalized)
+        self.assertIn("write no chat text between tool calls and send one short message when it is done", self.normalized)
+        self.assertIn("Skip status and tabs unless a call fails", self.normalized)
+
+    def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
+        # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
+        # tokens of pure overhead per turn. The router injects both, so the
+        # skill tells the agent to leave them out.
+        self.assertIn("omit `tabId` and `epoch`", self.normalized)
+        self.assertIn("they default to the tab you last used", self.normalized)
+        self.assertIn(
+            "you add `wait` or `read` steps only when you need something `effect` does not show",
+            self.normalized,
+        )
+
+    def test_host_arg_routes_to_the_named_machine(self):
+        self.assertIn('`host:"vm"` to use the VM\'s own browser even while the user\'s computer is online', self.normalized)
+        self.assertIn('`host:"computer"` to force the user\'s computer', self.normalized)
+        self.assertIn("Omit it for the default", self.normalized)
+
+    def test_select_accepts_any_option_handle(self):
+        self.assertIn("`select` (an option by value, label, option, text or choice)", self.normalized)
+
+    def test_the_extra_turn_rules_are_gone(self):
+        for removed in [
+            "Begin with status and your owned tabs",
+            "Confirm the reported host",
+            "Read a fresh snapshot",
+            "then inspect the result",
+            "Completion requires observed page state",
+            "Do not pass `host`",
+            'host:"vps"',
+        ]:
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, self.normalized)
 
     def test_bounded_snapshot_and_screenshot_params_documented(self):
         # Snapshots must stay cheap: bound the payload, re-check by
@@ -286,7 +338,7 @@ class DesktopAppsSkillTests(unittest.TestCase):
 
     def test_desktop_apps_go_through_the_workspace_tools_only(self):
         self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
-        self.assertIn("or the `computer_use` tool when that provider is selected", self.normalized)
+        self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
     def test_a_permission_error_names_the_app_and_both_switches(self):
         self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)

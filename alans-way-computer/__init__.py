@@ -145,6 +145,11 @@ class _Router:
                 raise _Unavailable("this profile has no mcp_servers.workspace_browser block; run setup-workspace.sh")
             try:
                 argv, env = _launch(block)
+                # The provider is the approval-gated desktop path (Hermes asks
+                # before every action), so its private router child may still
+                # serve workspace_computer_action; the agent-facing managed
+                # block excludes it unless the operator opted in.
+                env["HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS"] = "1"
                 proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         env=env, text=True, encoding="utf-8", errors="replace")
             except (OSError, RuntimeError) as e:

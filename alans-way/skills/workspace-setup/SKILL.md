@@ -19,7 +19,15 @@ and `connect-linux.sh` on Linux; everything else in this skill is the same.
 
 Fetch this page and follow it for Tailscale, the Mac app, and SSH keys. Both
 remotes stay pinned to the commits the catalog submission was reviewed
-against: do not substitute `main` or a newer tip:
+against: do not substitute `main` or a newer tip. This repo's clone is pinned
+to the commit this install was reviewed and checked out at. A catalog install
+records that sha in the profile's `plugins/.install-metadata.json`; read it,
+check it out and hand it to `setup.sh` as `--repo-ref`, which hard-stops if
+the clone is not at that commit: fix the checkout, never drop the flag. Only
+when there is no catalog record (a manual or developer install) is the pin the
+release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
+version): the tag must exist, and if the clone cannot resolve it the release
+was never tagged, so stop and report instead of checking out `main`.
 
 https://raw.githubusercontent.com/capthvnsen/alans-way/07ff00787bb9246a689a7f6656bf2cd682474fb3/docs/setup-prompt.md
 
@@ -35,8 +43,25 @@ refuses anything else.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
-git -C ~/alans-way-agents checkout a47a613aa09c36b4925e7a3c0997087d6962d0e8
+# The commit this install was reviewed and checked out at, from Hermes' own
+# install record (empty when the plugin was not installed from the catalog).
+# Inside a profile's gateway HERMES_HOME already points at that profile's home;
+# outside it, for --profile <name> read profiles/<name>/plugins/ instead.
+PIN=$(python3 -c 'import json, os, re
+home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+try:
+    row = json.load(open(os.path.join(home, "plugins", ".install-metadata.json"))).get("alans-way", {})
+except Exception:
+    row = {}
+cat = row.get("catalog") if isinstance(row, dict) else {}
+sha = str((cat or {}).get("sha") or (cat or {}).get("pin") or "")
+print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
+# No catalog record: the release tag is the pin. It must exist; if the checkout
+# below cannot resolve it the tag was never pushed, so stop and report.
+[ -n "$PIN" ] || PIN=v0.7.0
+git -C ~/alans-way-agents checkout "$PIN"
 ~/alans-way-agents/setup.sh --skip-plugin \
+    --repo-ref "$PIN" \
     --desktop-ref 07ff00787bb9246a689a7f6656bf2cd682474fb3 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
@@ -116,10 +141,11 @@ restarted (the next time the user writes to you), run `setup.sh --verify` for a
 full audit of the running install. Remind the user that check-ins are on once bound and are
 tuned by talking to the bot ("stop checking in" pauses them), and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
-(offer that, never add it yourself). Tell the user that setup turned off Hermes'
-built-in browser toolset for Telegram so you use their workspace browser, and
-that `--keep-browser` undoes that. Likewise, when this Hermes has no pluggable
-computer-use provider API, setup turns off the built-in `computer_use` toolset so
-you use the workspace computer tools; `--keep-computer-use` undoes that. If setup
+(offer that, never add it yourself: on a Hermes without the computer-use
+provider API it also exposes a desktop-input tool that runs with no approval
+at all). Tell the user that setup turned off Hermes'
+built-in browser toolset for Telegram and cron so you use their workspace
+browser, and that `--keep-browser` undoes that. Setup never turns off the
+built-in `computer_use` toolset: desktop input always goes through it. If setup
 warns about a `cua-driver` MCP server the user added, leave it and tell them the
 `hermes -p <profile> mcp remove <name>` command from the warning.
