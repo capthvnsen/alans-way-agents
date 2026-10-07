@@ -1255,7 +1255,10 @@ class FakeVmHost:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def do_GET(self):
                 outer.requests.append({"path": self.path, "method": "GET"})
