@@ -92,7 +92,8 @@ One tool, `proactivity`, in the `proactivity` toolset:
   `level=less`, "quiet till Monday" sets `paused_until`, "stop checking in" sets
   `paused_until=off`, "I'm in Tokyo this week" sets `timezone=Asia/Tokyo`.
 - `set` validates every field (IANA timezone, hours 0-23, base 15 to 1440
-  minutes) and works only from the bound conversation. Other sessions get
+  minutes from chat; the operator CLI `set` accepts down to 1 minute for
+  testing) and works only from the bound conversation. Other sessions get
   `status` only.
 - The bot reads `status` back before confirming a change to the user.
 
@@ -137,7 +138,7 @@ live gateway. Delete the hook if it's no longer needed.
 
 ## Acceptance (live on the author's VPS Hermes)
 
-1. With `base_minutes` set temporarily to 2 (test override), a real nudge
+1. With `base_minutes` set temporarily to 2 via the operator CLI, a real nudge
    reaches the bound Telegram chat within about 3 minutes of silence.
 2. Ignored, the next nudge waits about twice as long.
 3. A user reply resets the back-off.
