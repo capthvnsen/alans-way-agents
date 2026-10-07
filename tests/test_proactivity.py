@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import importlib.util
 import json
@@ -109,6 +110,150 @@ class ValidateTests(unittest.TestCase):
         s = P.validate(P.Settings(), {"timezone": "Europe/Berlin", "active_start": 9,
                                       "paused_until": "2026-10-12T08:00:00+02:00"})
         self.assertEqual((s.timezone, s.active_start), ("Europe/Berlin", 9))
+
+
+class FakeState:
+    """ctx.state stand-in: JSON round-trips like Hermes' file-backed facade."""
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key, default=None):
+        return json.loads(json.dumps(self.data.get(key, default)))
+
+    def set(self, key, value):
+        self.data[key] = json.loads(json.dumps(value))
+
+
+class FakeCtx(SimpleNamespace):
+    def __init__(self, accept=True):
+        super().__init__(state=FakeState(), sent=[], accept=accept)
+
+    def inject_message(self, content, role="user", *, session_key=None):
+        if isinstance(self.accept, Exception):
+            raise self.accept
+        self.sent.append((content, session_key))
+        return self.accept
+
+
+KEY = "agent:main:telegram:dm:42"
+
+
+def runtime(ctx, now, **settings):
+    clock = SimpleNamespace(now=now)
+    p = P.Proactivity(ctx, clock=lambda: clock.now)
+    p.gateway = True
+    p.bind(KEY)
+    p.update({"timezone": "UTC", **settings}, min_base=1)
+    return p, clock
+
+
+def turn(p, clock, when, text="hi", key=KEY, finish=True):
+    """One agent turn in session `key`, as Hermes' pre/post_llm_call hooks see it."""
+    clock.now = when
+    with patch.object(P, "caller_session_key", return_value=key):
+        assert p.on_turn_start(user_message=text, platform="telegram", sender_id="42") is None
+        if finish:
+            assert p.on_turn_end(platform="telegram", sender_id="42") is None
+
+
+def write_legacy(home, policy):
+    old = home / "companion" / "proactivity" / "proactivity.sqlite3"
+    old.parent.mkdir(parents=True)
+    db = sqlite3.connect(old)
+    db.execute("CREATE TABLE policy (singleton INTEGER PRIMARY KEY, settings TEXT, revision INTEGER)")
+    db.execute("INSERT INTO policy VALUES (1, ?, 3)", (json.dumps(policy),))
+    db.commit()
+    db.close()
+    return old
+
+
+class StateTests(unittest.TestCase):
+    def test_bind_takes_only_a_telegram_dm_key(self):
+        p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
+        for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1", None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                p.bind(bad)
+        p.bind(KEY)
+        state = p.load()
+        self.assertEqual((state["session_key"], state["nudges"]), (KEY, 0))
+        self.assertEqual(state["bound_ts"], at("2026-10-07T09:00").timestamp())
+
+    def test_update_validates_and_persists(self):
+        p = P.Proactivity(FakeCtx())
+        p.update({"level": "less", "timezone": "Asia/Tokyo"})
+        self.assertEqual(p.settings(p.load()), P.Settings(timezone="Asia/Tokyo", base_minutes=240))
+        with self.assertRaises(ValueError):
+            p.update({"base_minutes": 2})
+        p.update({"base_minutes": 2}, min_base=1)
+        self.assertEqual(p.settings(p.load()).base_minutes, 2)
+
+    def test_corrupt_state_reads_as_unbound(self):
+        ctx = FakeCtx()
+        ctx.state.data[P.STATE_KEY] = "junk"
+        self.assertEqual(P.Proactivity(ctx).load(), {})
+
+    def test_imports_an_upgraders_binding_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = write_legacy(Path(d), {"session_key": KEY, "timezone": "Europe/Berlin", "enabled": True})
+            ctx = FakeCtx()
+            p = P.Proactivity(ctx, legacy_home=Path(d))
+            state = p.load()
+            self.assertEqual(state["session_key"], KEY)
+            self.assertEqual(p.settings(state).timezone, "Europe/Berlin")
+            self.assertIn(P.STATE_KEY, ctx.state.data)
+            self.assertTrue(old.exists())
+
+    def test_imported_pause_stays_paused(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_legacy(Path(d), {"session_key": KEY, "timezone": "UTC", "enabled": False})
+            p = P.Proactivity(FakeCtx(), legacy_home=Path(d))
+            self.assertEqual(p.settings(p.load()).paused_until, "off")
+
+
+class HookTests(unittest.TestCase):
+    def test_real_user_message_resets_backoff(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        state = p.load()
+        state["nudges"] = 3
+        p.save(state)
+        turn(p, clock, at("2026-10-07T10:00"))
+        state = p.load()
+        self.assertEqual(state["nudges"], 0)
+        self.assertEqual(state["last_user_ts"], at("2026-10-07T10:00").timestamp())
+        self.assertEqual(state["last_activity_ts"], at("2026-10-07T10:00").timestamp())
+
+    def test_own_check_in_turn_is_activity_not_the_user(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        state = p.load()
+        state["nudges"] = 1
+        p.save(state)
+        turn(p, clock, at("2026-10-07T11:00"), text=P.MARKER + " It has been 2 hours")
+        state = p.load()
+        self.assertEqual(state["nudges"], 1)
+        self.assertNotIn("last_user_ts", state)
+        self.assertEqual(state["last_activity_ts"], at("2026-10-07T11:00").timestamp())
+
+    def test_other_sessions_are_ignored(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), key="agent:main:telegram:dm:7")
+        self.assertNotIn("last_activity_ts", p.load())
+
+    def test_without_a_session_var_the_dm_sender_id_matches(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), key="")
+        self.assertIn("last_user_ts", p.load())
+        clock.now = at("2026-10-07T10:30")
+        with patch.object(P, "caller_session_key", return_value=""):
+            p.on_turn_start(user_message="hi", platform="telegram", sender_id="7")
+        self.assertEqual(p.load()["last_user_ts"], at("2026-10-07T10:00").timestamp())
+
+    def test_busy_between_turn_start_and_end(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"))
+        turn(p, clock, at("2026-10-07T10:00"), finish=False)
+        self.assertEqual(p.busy_since, at("2026-10-07T10:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            p.on_turn_end(platform="telegram", sender_id="42")
+        self.assertIsNone(p.busy_since)
 
 
 if __name__ == "__main__":
