@@ -11,7 +11,7 @@
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
-#        --skip-browser --skip-plugin --skip-services --keep-browser --allow-desktop-actions
+#        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
 #        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
@@ -22,7 +22,7 @@ PLUGIN_NAME="alans-way"
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
-SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
+SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
 MIN_HERMES="0.21.5"
 
 while [ $# -gt 0 ]; do
@@ -43,6 +43,7 @@ while [ $# -gt 0 ]; do
     --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
     --keep-browser) KEEP_BROWSER=1; shift;;
+    --keep-computer-use) KEEP_COMPUTER=1; shift;;
     --allow-desktop-actions) ALLOW_DESKTOP=1; shift;;
     --bind) DO_BIND=1; shift;;
     --proactive) PROACTIVE="$2"; shift 2;;
@@ -75,6 +76,9 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
                    for Telegram once the workspace browser is configured)
+  --keep-computer-use  leave Hermes' built-in computer_use toolset on when this Hermes has
+                   no pluggable provider API (setup turns it off for Telegram so the
+                   agent uses the workspace_computer_* tools)
   --allow-desktop-actions  stop Telegram approval prompts for desktop control (click, type,
                    key, scroll...) by adding them to command_allowlist; off unless you ask
   --skip-browser / --skip-services / --non-interactive for constrained runs
@@ -191,7 +195,16 @@ write_if_changed() {
 # When the computer-use provider is the selected backend, its own doctor decides.
 check_computer_provider() {
   have hermes || return 0
-  [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = alans-way-computer ] || return 0
+  if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
+    if [ "$KEEP_COMPUTER" = 1 ]; then
+      skip "built-in computer_use toolset check${PROFILE:+ for profile $PROFILE} (--keep-computer-use)"
+    elif hermes_p tools list --platform telegram 2>/dev/null | grep -Eq "enabled[[:space:]]+computer_use([[:space:]]|$)"; then
+      warn "built-in 'computer_use' toolset still enabled for telegram${PROFILE:+ in profile $PROFILE}: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform telegram)"
+    else
+      ok "built-in computer_use toolset disabled for telegram${PROFILE:+ in profile $PROFILE}"
+    fi
+    return 0
+  fi
   if hermes_p computer-use doctor >/dev/null 2>&1; then
     ok "computer-use provider passes hermes computer-use doctor"
   else
@@ -769,9 +782,10 @@ fi
 # drops a .hermes-catalog.json convenience copy inside the plugin. Either
 # marker means the catalog pin is the install's only legitimate source.
 plugin_is_catalog_installed() {
-  [ -f "$PROFILE_HOME/plugins/$PLUGIN_NAME/.hermes-catalog.json" ] && return 0
+  _cat_name="${1:-$PLUGIN_NAME}"
+  [ -f "$PROFILE_HOME/plugins/$_cat_name/.hermes-catalog.json" ] && return 0
   [ -f "$PROFILE_HOME/plugins/.install-metadata.json" ] || return 1
-  python3 - "$PROFILE_HOME" "$PLUGIN_NAME" <<'PY'
+  python3 - "$PROFILE_HOME" "$_cat_name" <<'PY'
 import json, sys
 try:
     rows = json.load(open(sys.argv[1] + "/plugins/.install-metadata.json"))
@@ -868,10 +882,10 @@ except subprocess.TimeoutExpired:
 fi
 ensure_computer_provider() {
   COMPUTER_READY=0
-  if plugin_listed "$COMPUTER_PLUGIN"; then
+  if plugin_listed "$COMPUTER_PLUGIN" || plugin_is_catalog_installed "$COMPUTER_PLUGIN"; then
     ok "computer-use provider already installed; leaving it as it is"
     COMPUTER_READY=1
-  elif hermes_p plugins install "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+  elif hermes_p plugins install --force "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
     hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
     ok "computer-use provider installed"
     COMPUTER_READY=1
@@ -1442,6 +1456,41 @@ fi
 
 # ------------------------------------------------------------- workspace config
 step "Workspace browser config"
+# A user-added cua-driver MCP server (named so, or a command/args mentioning it)
+# is the user's to keep, but it is a second computer-use path next to ours.
+warn_user_cua_driver() {
+  if [ -n "$PROFILE" ]; then _cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+  else _cfg="${CONFIG:-$HERMES_HOME/config.yaml}"; fi
+  [ -f "$_cfg" ] || return 0
+  _name="$(python3 - "$_cfg" <<'PY'
+import re, sys
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except Exception:
+    sys.exit(0)
+inside, indent, name = False, None, None
+for line in lines:
+    if not inside:
+        inside = line.startswith("mcp_servers:")
+        continue
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    depth = len(line) - len(line.lstrip())
+    if depth == 0:
+        break
+    indent = depth if indent is None else indent
+    if depth == indent:
+        entry = re.match(r"\s*([^\s#:][^:]*):", line)
+        name = entry.group(1).strip("\"'") if entry else None
+    if name and "cua-driver" in line:
+        print(name)
+        break
+PY
+)"
+  [ -n "$_name" ] || return 0
+  warn "profile ${PROFILE:-default} has a cua-driver MCP server of its own: the agent sees two computer-use paths (it was left in place). To remove it: hermes${PROFILE:+ -p $PROFILE} mcp remove $_name"
+}
+
 # One profile: its workspace_browser block under its own bot id, then the
 # per-profile switches that go with it.
 workspace_for_profile() {
@@ -1459,6 +1508,18 @@ workspace_for_profile() {
         && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
         || warn "could not select the computer-use provider: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
     fi
+    # Without a provider the stock CuaDriver toolset would compete with the
+    # workspace_computer_* tools, just as the stock browser would.
+    if [ "$COMPUTER_READY" != 1 ]; then
+      if [ "$KEEP_COMPUTER" = 1 ]; then
+        say "  keeping the built-in computer_use toolset on (--keep-computer-use); the agent may pick it instead of your workspace computer tools"
+      else
+        hermes_p tools disable computer_use --platform telegram >/dev/null 2>&1 \
+          && ok "built-in computer_use toolset disabled for telegram so the agent uses your workspace computer tools. To keep it on, re-run with --keep-computer-use or run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform telegram" \
+          || warn "could not disable the built-in computer_use toolset for telegram: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform telegram)"
+      fi
+    fi
+    warn_user_cua_driver
     # The workspace browser replaces Hermes' built-in browser tool: leaving both
     # enabled lets the agent pick a different browser than the user's app.
     if [ "$KEEP_BROWSER" = 1 ]; then

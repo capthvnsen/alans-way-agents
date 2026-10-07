@@ -115,4 +115,8 @@ Telegram button or `/watch approve <id> <code>`, and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
 (offer that, never add it yourself). Tell the user that setup turned off Hermes'
 built-in browser toolset for Telegram so you use their workspace browser, and
-that `--keep-browser` undoes that.
+that `--keep-browser` undoes that. Likewise, when this Hermes has no pluggable
+computer-use provider API, setup turns off the built-in `computer_use` toolset so
+you use the workspace computer tools; `--keep-computer-use` undoes that. If setup
+warns about a `cua-driver` MCP server the user added, leave it and tell them the
+`hermes -p <profile> mcp remove <name>` command from the warning.

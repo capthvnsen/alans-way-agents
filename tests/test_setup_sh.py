@@ -1770,7 +1770,7 @@ class ComputerProbeShimTests(unittest.TestCase):
         result, agent = self.run_shim()
         self.assertIn(str(agent / "venv" / "bin" / "python"), self.probe_log)
         self.assertNotIn("import", self.probe_log)
-        self.assertRegex(read_log(self.log), r"plugins install file://\S+#alans-way-computer")
+        self.assertRegex(read_log(self.log), r"plugins install --force file://\S+#alans-way-computer")
 
     def test_no_python_to_be_found_skips_the_provider_without_running_the_shell(self):
         result, _ = self.run_shim(shim_dir_exists=False)
@@ -1788,10 +1788,26 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
     def test_installed_per_profile_and_selected_when_hermes_has_the_provider_api(self):
         self.run_setup("--profile", "work", python_ok=True)
         calls = read_log(self.log)
-        self.assertRegex(calls, r"-p work plugins install file://\S+#alans-way-computer")
+        self.assertRegex(calls, r"-p work plugins install --force file://\S+#alans-way-computer")
         self.assertIn("-p work plugins enable alans-way-computer", calls)
         self.assertIn("-p work config set computer_use.backend alans-way-computer", calls)
         self.assertLess(calls.index("plugins install"), calls.index("computer_use.backend"))
+
+    def test_without_the_provider_api_the_stock_computer_use_toolset_is_turned_off(self):
+        result = self.run_setup(python_ok=False)
+        calls = read_log(self.log)
+        self.assertIn("-p default tools disable computer_use --platform telegram\n", calls)
+        self.assertIn("--keep-computer-use", result.stdout)
+        self.assertIn("tools enable computer_use --platform telegram", result.stdout)
+
+    def test_with_the_provider_api_the_toolset_is_left_to_the_provider(self):
+        self.run_setup(python_ok=True)
+        self.assertNotIn("tools disable computer_use", read_log(self.log))
+
+    def test_keep_computer_use_leaves_the_stock_toolset_on(self):
+        result = self.run_setup("--keep-computer-use", python_ok=False)
+        self.assertNotIn("tools disable computer_use", read_log(self.log))
+        self.assertIn("--keep-computer-use", result.stdout)
 
     def test_skipped_without_the_provider_api(self):
         result = self.run_setup(python_ok=False)
@@ -1870,7 +1886,7 @@ class AllProfilesHarness(IntegrationBase):
         config = (home / "profiles" / name / "config.yaml") if name else home / "config.yaml"
         return re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8"))
 
-    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra=""):
+    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra="", python_ok=True):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -1881,8 +1897,8 @@ class AllProfilesHarness(IntegrationBase):
         bin_dir = tooling(root, log)
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\nP=default; [ "$1" = -p ] && { P="$2"; shift 2; }\ncase "$1" in\n'
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };\n'
-             '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *--force*|*-computer) ;; *) echo BLOCKED community source >&2; exit 1;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
-        fake(bin_dir, "hermes-python", "exit 0\n")
+             '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *--force*) ;; *) echo BLOCKED community source >&2; exit 1;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
+        fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
         env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         self.env, self.root = env, root
         self.script = repo_with_computer_plugin(root)
@@ -1931,7 +1947,7 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
         result, home, calls = self.run_all(listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
         self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
         self.assertIn("hermes -p manda plugins update alans-way", result.stdout)
-        self.assertNotRegex(calls, r"-p manda plugins install --force")
+        self.assertNotRegex(calls, r"-p manda plugins install --force \S+#alans-way\n")
 
     def test_a_catalog_install_in_a_bot_profile_is_never_replaced(self):
         def layout(home):
@@ -1942,7 +1958,43 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
                 '{"alans-way": {"catalog": {"name": "alans-way", "sha": "3a74614"}}}', encoding="utf-8")
         result, home, calls = self.run_all(layout=layout, listed='[ "$P" = default ] || [ "$P" = manda ] && echo alans-way')
         self.assertNotRegex(calls, r"-p manda plugins install \S+#alans-way\n")
-        self.assertNotRegex(calls, r"-p manda plugins install --force")
+        self.assertNotRegex(calls, r"-p manda plugins install --force \S+#alans-way\n")
+
+    def test_a_provider_install_is_forced_unless_the_profile_has_a_catalog_install(self):
+        def layout(home):
+            self.layout(home)
+            plugins = home / "profiles" / "manda" / "plugins"
+            plugins.mkdir(parents=True)
+            (plugins / ".install-metadata.json").write_text(
+                '{"alans-way-computer": {"catalog": {"name": "alans-way-computer", "sha": "3a74614"}}}', encoding="utf-8")
+        result, home, calls = self.run_all(layout=layout)
+        self.assertRegex(calls, r"-p familydental plugins install --force file://\S+#alans-way-computer\n")
+        self.assertIn("-p familydental config set computer_use.backend alans-way-computer", calls)
+        self.assertNotRegex(calls, r"-p manda plugins install [^\n]*alans-way-computer")
+
+    def test_without_the_provider_api_every_profile_loses_the_stock_computer_use_toolset(self):
+        result, home, calls = self.run_all(python_ok=False)
+        for name in ("default", "familydental", "manda", "f4f", "quoted"):
+            self.assertIn("-p %s tools disable computer_use --platform telegram\n" % name, calls, name)
+        self.assertNotIn("-p botless tools disable computer_use", calls)
+        self.assertNotIn("config set computer_use.backend", calls)
+        _, _, kept = self.run_all("--keep-computer-use", python_ok=False)
+        self.assertNotIn("tools disable computer_use", kept)
+
+    def test_a_users_cua_driver_server_is_kept_and_warned_about_once_per_profile(self):
+        def layout(home):
+            self.layout(home)
+            manda = home / "profiles" / "manda" / "config.yaml"
+            manda.write_text("mcp_servers:\n  cua-driver:\n    command: cua-driver\n    args: [mcp]\n", encoding="utf-8")
+            quoted = home / "profiles" / "quoted" / "config.yaml"
+            quoted.write_text(quoted.read_text() + "mcp_servers:\n  desk:\n    command: npx\n    args: [-y, cua-driver, mcp]\n", encoding="utf-8")
+        result, home, calls = self.run_all(layout=layout)
+        self.assertEqual(result.stdout.count("hermes -p manda mcp remove cua-driver"), 1)
+        self.assertEqual(result.stdout.count("hermes -p quoted mcp remove desk"), 1)
+        self.assertNotIn("mcp remove cua-driver", result.stdout.replace("hermes -p manda mcp remove cua-driver", ""))
+        self.assertIn("two computer-use paths", result.stdout)
+        self.assertIn("cua-driver:", (home / "profiles" / "manda" / "config.yaml").read_text())
+        self.assertNotIn("mcp remove", calls)
 
     def test_keep_browser_applies_to_every_profile(self):
         _, _, calls = self.run_all("--keep-browser")
@@ -2050,6 +2102,17 @@ class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertNotRegex(out, r"FAIL .*-p manda computer-use")
         keep = run("--verify", "--keep-browser", "--hermes-home", str(self.root / "home"), env=self.env, check=False, script=self.script)
         self.assertNotIn("still enabled for telegram in profile", keep.stdout)
+
+    def test_verify_checks_the_stock_computer_use_toolset_when_the_provider_is_not_selected(self):
+        extra = ('  tools) [ "$2" = list ] && { [ "$P" = manda ] && echo "enabled computer_use"; echo "enabled proactivity"; };;\n'
+                 '  config) [ "$2" = get ] && echo "";;')
+        self.run_all(hermes_extra=extra)
+        verify = lambda *flags: run("--verify", *flags, "--hermes-home", str(self.root / "home"),
+                                   env=self.env, check=False, script=self.script).stdout
+        out = verify()
+        self.assertIn("computer_use' toolset still enabled for telegram in profile manda", out)
+        self.assertRegex(out, r"ok   .*computer_use toolset disabled for telegram in profile familydental")
+        self.assertNotIn("computer_use' toolset still enabled", verify("--keep-computer-use"))
 
 
 class AgentSshReuseTests(unittest.TestCase):

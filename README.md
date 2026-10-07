@@ -140,7 +140,11 @@ without changing anything, `--non-interactive` for scripted runs,
 `--mac-host-key` to add your computer's pasted SSH key and host key after
 checking their format. When Hermes has the pluggable computer-use API, setup
 also installs the `alans-way-computer` provider for the profile and selects it
-once the workspace browser is configured. Desktop control asks for approval in
+once the workspace browser is configured. Without that API, setup turns off
+Hermes' built-in `computer_use` toolset for Telegram so the agent uses the
+workspace computer tools (`--keep-computer-use` leaves it on). A `cua-driver`
+MCP server you added yourself is kept, and setup warns that the agent then sees
+two computer-use paths and prints the `hermes mcp remove` command. Desktop control asks for approval in
 Telegram for each action; `--allow-desktop-actions` adds click, type, key,
 scroll and the like (background only) to `command_allowlist` if you would
 rather not be asked. The proactivity toolset is enabled for Telegram and for
