@@ -29,7 +29,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/07ff00787bb9246a689a7f6656bf2cd682474fb3/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/9bcce44224b9f478282209c32ea8eb87aba189f3/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -62,7 +62,7 @@ print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
 git -C ~/alans-way-agents checkout "$PIN"
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref 07ff00787bb9246a689a7f6656bf2cd682474fb3 \
+    --desktop-ref 9bcce44224b9f478282209c32ea8eb87aba189f3 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
