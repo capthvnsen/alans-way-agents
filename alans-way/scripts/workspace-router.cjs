@@ -1327,6 +1327,32 @@ async function main() {
   // on the client's id: origId -> merge state, merge.vmId -> origId.
   const tabMerges = new Map();
 
+  // A call the router answered itself (hard deadline, connector death) can
+  // still have a copy running on the VM connector. Its late reply must never
+  // reach the client as a second response for the same id.
+  const deadIds = new Set();
+  const deadOrder = [];
+  function noteDead(id) {
+    if (id == null || deadIds.has(id)) return;
+    deadIds.add(id);
+    deadOrder.push(id);
+    if (deadOrder.length > 200) deadIds.delete(deadOrder.shift());
+  }
+  function deadReplyLine(line) {
+    let id;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+    } else {
+      try {
+        const msg = JSON.parse(line);
+        id = msg && msg.id;
+      } catch {
+        return false;
+      }
+    }
+    return id !== undefined && deadIds.has(id);
+  }
+
   function emitToolError(id, text, note = annotate) {
     const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
     let out;
@@ -1366,6 +1392,23 @@ async function main() {
     return Boolean(vmChild && vmChild.exitCode === null);
   }
 
+  // A tab a backend closed on its own (the VM reaper reports them under
+  // closedTabs on open replies) is forgotten everywhere, so a defaulted call
+  // never injects a dead tab and an id is never routed to a tab that is gone.
+  function forgetTab(id) {
+    if (typeof id !== 'string') return;
+    knownTabs.delete(id);
+    vmTabs.delete(id);
+    if (currentTabId === id) currentTabId = '';
+  }
+
+  function forgetClosedTabs(data) {
+    if (!data || !Array.isArray(data.closedTabs)) return;
+    for (const tab of data.closedTabs) {
+      forgetTab(typeof tab === 'string' ? tab : tab && (tab.tabId || tab.id));
+    }
+  }
+
   // A tab id the VM browser is known to own: learned from the VM connector's
   // open results and from tab-list entries that carry a VM host.
   function learnVmTabData(data, assumeVm) {
@@ -1375,6 +1418,7 @@ async function main() {
       if (!tab || typeof tab.id !== 'string' || !/^[\w-]{1,100}$/.test(tab.id)) continue;
       if (assumeVm || normalizeHost(tab.host) === 'vm') vmTabs.add(tab.id);
     }
+    forgetClosedTabs(data);
   }
 
   function learnVmTabs(line, assumeVm) {
@@ -1445,6 +1489,7 @@ async function main() {
     }
     noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend);
     if (typeof data.continuedTab === 'string') noteKnownTab(data.continuedTab, data.continuedEpoch, 'vm');
+    forgetClosedTabs(data);
   }
 
   // The pending request a reply line answers, without consuming it — big
@@ -1484,9 +1529,7 @@ async function main() {
     }
     learnTabData(data, backend);
     if (req.name === 'cua_alans_way_close' && data && data.closed) {
-      const closed = argsTabId(req);
-      knownTabs.delete(closed);
-      if (currentTabId === closed) currentTabId = '';
+      forgetTab(argsTabId(req));
       return;
     }
     if (!CURRENT_TAB_TOOLS.has(req.name)) return;
@@ -1659,6 +1702,7 @@ async function main() {
         if (c !== vmChild) return;
         touchActivity();
         if (swallowLine(line)) return;
+        if (deadReplyLine(line)) return;
         const seenReq = pendingRequestFor(line);
         const callMs = noteServerRpc(line, pendingRequests);
         if (mergeVmLine(line)) return;
@@ -1684,6 +1728,7 @@ async function main() {
       for (const [id, req] of pendingRequests) {
         if (req.via !== 'vm') continue;
         pendingRequests.delete(id);
+        noteDead(id);
         emitToolError(id, 'The VM browser connector stopped. Retry the call.');
       }
     };
@@ -1715,6 +1760,12 @@ async function main() {
     }
     const args = (msg.params && msg.params.arguments) || {};
     const host = normalizeHost(args.host);
+    if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(msg.id, 'Use host "computer" or "vm", or omit it.');
+      return null;
+    }
     if (host === 'computer') {
       if (activeHost !== 'vps') return out;
       pendingRequests.delete(msg.id);
@@ -1895,6 +1946,7 @@ async function main() {
           // answers gets a tool error at the hard deadline, not a failover.
           if (age > hard) {
             pendingRequests.delete(id);
+            noteDead(id);
             emitToolError(id, 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
           }
           continue;

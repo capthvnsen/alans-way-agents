@@ -86,6 +86,9 @@ fs.appendFileSync(process.env.VPS_LOG, 'ARGV ' + JSON.stringify(process.argv.sli
 const mode = process.env.VM_MODE || 'ok';
 const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
   result: { content: [{ type: 'text', text }] } }) + '\n');
+let opened = 0;
+let prevId = null;
+const closedTabs = () => (mode === 'reap' && prevId ? { closedTabs: [{ tabId: prevId, url: 'https://vm.example/reaped' }] } : {});
 require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
   fs.appendFileSync(process.env.VPS_LOG, 'LINE ' + line + '\n');
   const m = JSON.parse(line);
@@ -107,12 +110,19 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       const tabs = [];
       for (let i = 1; i <= n; i++)
         tabs.push({ id: 'vm-tab-' + i, url: 'https://vm.example/' + 'x'.repeat(80) + i, host: 'vps' });
-      return reply(m.id, JSON.stringify({ tabs }));
+      return reply(m.id, JSON.stringify({ tabs, ...closedTabs() }));
     }
-    if (m.params.name === 'cua_alans_way_open')
-      return reply(m.id, JSON.stringify({ id: 'vm-tab-1', url: (m.params.arguments || {}).url || 'https://vm.example/', host: 'vps', epoch: 1 }));
+    if (m.params.name === 'cua_alans_way_open') {
+      opened += 1;
+      const id = mode === 'reap' ? 'vm-tab-' + opened : 'vm-tab-1';
+      const out = { id, url: (m.params.arguments || {}).url || 'https://vm.example/', host: 'vps', epoch: 1, ...closedTabs() };
+      prevId = id;
+      return reply(m.id, JSON.stringify(out));
+    }
     if (m.params.name === 'cua_alans_way_action') {
       if (mode === 'hang') return;
+      if (mode === 'slow')
+        return setTimeout(() => reply(m.id, 'vm-action'), Number(process.env.VM_DELAY_MS || 2000));
       return reply(m.id, 'vm-action');
     }
   }
@@ -427,6 +437,66 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.recv()
         args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
         self.assertEqual((args["tabId"], args["epoch"]), ("mac-tab-1", 1))
+
+    def test_an_unrecognized_host_is_a_tool_error_not_a_silent_default(self):
+        self.start()
+        self.handshake()
+        opened = self.call("cua_alans_way_open", {"url": "https://x.example/", "host": "remotevm"})
+        msg = self.recv()
+        self.assertEqual(msg["id"], opened)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertIn('Use host "computer" or "vm", or omit it.', self.text(msg))
+        self.assertNotIn("cua_alans_way_open", self.log("mac.log"))
+        self.assertNotIn("cua_alans_way_open", self.log("vm.log"))
+        ok = self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        answered = self.recv()
+        self.assertEqual(answered["id"], ok)
+        self.assertIn("mac-tab-1", self.text(answered))
+
+    def test_a_late_vm_reply_after_the_deadline_is_dropped(self):
+        self.start(vm_mode="slow", VM_DELAY_MS="3000", HERMES_ROUTER_CALL_HARD_MS="1000")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r1"})
+        msg = self.recv(timeout=10)
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertIn("VM browser", self.text(msg))
+        # The stub answers ~3s after the call, past the error the client got.
+        time.sleep(3)
+        status = self.call("cua_alans_way_status", {})
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served(answered)), (status, "mac"))
+        self.assertIsNone(self.recv(timeout=2, required=False))
+
+    def test_a_reaped_tab_is_pruned_from_the_routers_tab_maps(self):
+        self.start(vm_mode="reap")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/1", "host": "vm"})
+        first = json.loads(self.text(self.recv()))
+        self.assertEqual(first["id"], "vm-tab-1")
+        self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        self.recv()
+        self.assertEqual(
+            self.backend_calls("vm.log", "cua_alans_way_action")[-1].get("tabId"), "vm-tab-1")
+        self.call("cua_alans_way_open", {"url": "https://vm.example/2", "host": "vm"})
+        second = json.loads(self.text(self.recv()))
+        self.assertEqual(second["id"], "vm-tab-2")
+        self.assertEqual([t["tabId"] for t in second["closedTabs"]], ["vm-tab-1"])
+        # The reaped id no longer routes calls to the VM backend.
+        self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r2"})
+        self.recv()
+        self.assertEqual(
+            self.backend_calls("mac.log", "cua_alans_way_action")[-1].get("tabId"), "vm-tab-1")
+        # A reply that reports the current tab reaped clears it: a defaulted
+        # call goes out with no tabId instead of the dead one.
+        self.call("cua_alans_way_tabs")
+        self.recv()
+        self.call("cua_alans_way_action", {"action": "click", "ref": "r3"})
+        self.recv()
+        args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
+        self.assertNotIn("tabId", args)
 
     def test_an_injected_vm_tab_routes_to_the_vm_backend(self):
         self.start()
