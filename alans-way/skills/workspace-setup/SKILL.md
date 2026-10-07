@@ -21,7 +21,7 @@ Fetch this page and follow it for Tailscale, the Mac app, and SSH keys. Both
 remotes stay pinned to the commits the catalog submission was reviewed
 against: do not substitute `main` or a newer tip:
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/09bf788e207d0e78d287cd03703217d0f88c39da/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/07ff00787bb9246a689a7f6656bf2cd682474fb3/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -37,7 +37,7 @@ refuses anything else.
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
 git -C ~/alans-way-agents checkout 9e2b928241364fb23becea0419d9eb0db2e97fb6
 ~/alans-way-agents/setup.sh --skip-plugin \
-    --desktop-ref 09bf788e207d0e78d287cd03703217d0f88c39da \
+    --desktop-ref 07ff00787bb9246a689a7f6656bf2cd682474fb3 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
