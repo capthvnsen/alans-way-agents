@@ -511,7 +511,7 @@ except Exception: s={}
 print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on")' 2>/dev/null)"
     case "$PSTATE" in
       "bound on") ok "proactivity on for the bound primary route";;
-      "bound paused") warn "proactivity bound but paused: the bot never messages first (say \"start checking in\" in the bound chat)";;
+      "bound paused") warn "proactivity bound but paused: the bot never messages first (send /proactivity resume in the bound chat)";;
       *) warn "no primary route bound: proactivity is off (run: setup.sh --bind)";;
     esac
     [ "$(hermes_p config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
@@ -1891,7 +1891,7 @@ for i, line in enumerate(sys.stdin, 1):
            fi
            if [ "${PROACTIVE:-yes}" = no ]; then
              hermes -p "$BIND_PROF" proactivity set --settings '{"paused_until": "off"}' >/dev/null 2>&1 \
-               && say "  check-ins bound but paused: tell your bot \"start checking in\" to turn them on" \
+               && say "  check-ins bound but paused: send /proactivity resume to turn them on" \
                || warn "could not pause: check-ins stay on"
            else
              ok "proactivity on by default: tell your bot \"stop checking in\" to pause"

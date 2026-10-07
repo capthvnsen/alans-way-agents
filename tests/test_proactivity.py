@@ -112,6 +112,40 @@ class ValidateTests(unittest.TestCase):
         self.assertEqual((s.timezone, s.active_start), ("Europe/Berlin", 9))
 
 
+class LoosensTests(unittest.TestCase):
+    """Pure check: which changes only the operator may make, and the command for each."""
+    NOW = at("2026-10-07T12:00")
+
+    def test_table(self):
+        s = P.Settings()
+        for new, expected in (
+            (P.Settings(base_minutes=60), "/proactivity more"),
+            (P.Settings(base_minutes=240), None),
+            (P.Settings(paused_until="off"), None),
+            (P.Settings(paused_until="2026-10-09T00:00:00+00:00"), None),
+            (P.Settings(timezone="Asia/Tokyo"), None),
+            (P.Settings(active_start=9, active_end=21), None),
+            (P.Settings(active_start=7), "/proactivity hours 7-22"),
+            (P.Settings(active_end=23), "/proactivity hours 8-23"),
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(P.loosens(s, new, self.NOW), expected)
+
+    def test_a_lower_base_suggests_the_nearest_level(self):
+        self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(),
+                                   self.NOW), "/proactivity normal")
+
+    def test_resume_and_earlier_resume_need_the_operator(self):
+        off = P.Settings(paused_until="off")
+        late = P.Settings(paused_until="2026-10-09T00:00:00+00:00")
+        early = P.Settings(paused_until="2026-10-08T00:00:00+00:00")
+        self.assertEqual(P.loosens(off, P.Settings(), self.NOW), "/proactivity resume")
+        self.assertEqual(P.loosens(off, early, self.NOW), "/proactivity resume")
+        self.assertEqual(P.loosens(late, early, self.NOW), "/proactivity resume")
+        self.assertIsNone(P.loosens(early, late, self.NOW))
+        self.assertIsNone(P.loosens(early, off, self.NOW))
+
+
 class FakeState:
     """ctx.state stand-in: JSON round-trips like Hermes' file-backed facade."""
     def __init__(self):
@@ -207,6 +241,17 @@ class StateTests(unittest.TestCase):
                 p.save(state)
                 self.assertEqual(p.settings(p.load()), P.Settings())
 
+    def test_corrupt_settings_still_honour_a_valid_pause(self):
+        p = P.Proactivity(FakeCtx())
+        state = p.load()
+        state["settings"] = {"active_start": {}, "paused_until": "off"}
+        p.save(state)
+        self.assertEqual(p.settings(p.load()), P.Settings(paused_until="off"))
+        self.assertEqual(p.error, "corrupt settings: using defaults")
+        state["settings"] = {"active_start": {}, "paused_until": "never"}
+        p.save(state)
+        self.assertEqual(p.settings(p.load()), P.Settings())
+
     def test_corrupt_state_reads_as_unbound(self):
         ctx = FakeCtx()
         ctx.state.data[P.STATE_KEY] = "junk"
@@ -228,6 +273,13 @@ class StateTests(unittest.TestCase):
             write_legacy(Path(d), {"session_key": KEY, "timezone": "UTC", "enabled": False})
             p = P.Proactivity(FakeCtx(), legacy_home=Path(d))
             self.assertEqual(p.settings(p.load()).paused_until, "off")
+
+    def test_legacy_import_skips_a_non_dm_key(self):
+        for bad in ("agent:main:telegram:group:1", "agent:main:telegram:dm:", "nonsense"):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as d:
+                write_legacy(Path(d), {"session_key": bad, "timezone": "UTC", "enabled": True})
+                p = P.Proactivity(FakeCtx(), legacy_home=Path(d))
+                self.assertEqual(p.load(), {})
 
 
 class HookTests(unittest.TestCase):
@@ -356,6 +408,20 @@ class TickTests(unittest.TestCase):
                 clock.now = at("2026-10-07T11:01")
                 self.assertIsNone(p.tick())
 
+    def test_the_backoff_is_saved_before_inject_and_the_result_after(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T09:00"))
+        seen = {}
+        inject = ctx.inject_message
+        def spy(content, role="user", *, session_key=None):
+            seen.update(p.load())
+            return inject(content, role=role, session_key=session_key)
+        ctx.inject_message = spy
+        clock.now = at("2026-10-07T11:00")
+        self.assertTrue(p.tick())
+        self.assertEqual((seen["nudges"], seen["last_result"]), (1, "pending"))
+        self.assertEqual(p.load()["last_result"], "accepted")
+
     def test_outside_the_gateway_or_paused_never_injects(self):
         ctx = FakeCtx()
         p, clock = runtime(ctx, at("2026-10-07T09:00"))
@@ -398,11 +464,11 @@ class ToolTests(unittest.TestCase):
     def test_set_takes_flat_fields_beside_action(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
         with patch.object(P, "caller_session_key", return_value=KEY):
-            out = json.loads(p.tool({"action": "set", "level": "more", "timezone": "Asia/Tokyo",
+            out = json.loads(p.tool({"action": "set", "level": "less", "timezone": "Asia/Tokyo",
                                      "active_start": 9}))
         self.assertTrue(out["ok"])
         s = p.settings(p.load())
-        self.assertEqual((s.base_minutes, s.timezone, s.active_start), (60, "Asia/Tokyo", 9))
+        self.assertEqual((s.base_minutes, s.timezone, s.active_start), (240, "Asia/Tokyo", 9))
 
     def test_a_set_with_no_fields_is_refused(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
@@ -434,9 +500,105 @@ class ToolTests(unittest.TestCase):
     def test_status_reports_next_check_in_in_user_time(self):
         p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"), timezone="Asia/Tokyo")
         turn(p, clock, at("2026-10-07T10:00"))
-        status = json.loads(p.tool({"action": "status"}))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            status = json.loads(p.tool({"action": "status"}))
         self.assertTrue(status["bound"])
         self.assertTrue(status["next_check_in"].endswith("+09:00"))
+
+    def test_status_is_full_only_in_the_bound_chat(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            full = json.loads(p.tool({"action": "status"}))
+        self.assertIn("settings", full)
+        for other in ("agent:main:telegram:dm:7", ""):
+            with self.subTest(other=other), patch.object(P, "caller_session_key", return_value=other):
+                self.assertEqual(json.loads(p.tool({"action": "status"})), {"ok": True, "bound": True})
+
+    def test_set_that_loosens_is_refused_and_asks_the_user(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "level": "more"}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["ask_user_to_send"], "/proactivity more")
+        self.assertEqual(p.settings(p.load()).base_minutes, 120)
+
+    def test_set_cannot_widen_the_active_window(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "active_start": 7}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["ask_user_to_send"], "/proactivity hours 7-22")
+        self.assertEqual(p.settings(p.load()).active_start, 8)
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "active_start": 9}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(p.settings(p.load()).active_start, 9)
+
+    def test_set_cannot_resume_but_can_pause(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "paused_until": "off"}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(p.settings(p.load()).paused_until, "off")
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "paused_until": ""}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["ask_user_to_send"], "/proactivity resume")
+        self.assertEqual(p.settings(p.load()).paused_until, "off")
+
+
+class CommandTests(unittest.TestCase):
+    """`/proactivity ...`: the operator path inside the chat. Plain text, never raises."""
+    OTHER = "agent:main:telegram:dm:7"
+
+    def command(self, p, args, key=KEY):
+        with patch.object(P, "caller_session_key", return_value=key):
+            return p.command(args)
+
+    def test_status_is_full_in_the_bound_chat_and_vague_elsewhere(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        full = self.command(p, "status")
+        self.assertIn("8:00-22:00", full)
+        for args in ("", "status"):
+            out = self.command(p, args, key=self.OTHER)
+            self.assertIn("bound chat", out)
+            self.assertNotIn("22:00", out)
+
+    def test_changes_apply_from_the_bound_chat_only(self):
+        for args, prep, check in (
+            ("more", {}, lambda s: s.base_minutes == 60),
+            ("resume", {"paused_until": "off"}, lambda s: s.paused_until == ""),
+            ("hours 9-21", {}, lambda s: (s.active_start, s.active_end) == (9, 21)),
+            ("tz Asia/Tokyo", {}, lambda s: s.timezone == "Asia/Tokyo"),
+            ("pause", {}, lambda s: s.paused_until == "off"),
+        ):
+            with self.subTest(args=args):
+                p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+                if prep:
+                    p.update(prep)
+                before = p.settings(p.load())
+                out = self.command(p, args, key=self.OTHER)
+                self.assertEqual(out, "Check-in settings can only be changed from the bound chat.")
+                self.assertEqual(p.settings(p.load()), before)
+                out = self.command(p, args)
+                self.assertTrue(out.startswith("Done."), out)
+                self.assertTrue(check(p.settings(p.load())))
+
+    def test_garbage_is_a_usage_line(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        for args in ("fly me to the moon", "hours", "hours nine-ten", "tz"):
+            with self.subTest(args=args):
+                self.assertIn("/proactivity", self.command(p, args))
+
+    def test_bad_values_reply_with_the_error_and_change_nothing(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        out = self.command(p, "tz Mars/Base")
+        self.assertIn("unknown timezone", out)
+        self.assertEqual(p.settings(p.load()).timezone, "UTC")
+        out = self.command(p, "pause tomorrow")
+        self.assertIn("paused_until", out)
+        out = self.command(p, "hours 9-9")
+        self.assertIn("differ", out)
 
 
 class RegisterTests(unittest.TestCase):
@@ -449,12 +611,14 @@ class RegisterTests(unittest.TestCase):
             register_platform_handler=lambda platform, fn: factories.__setitem__(platform, fn),
             register_skill=lambda name, path: calls.append(("skill", name)),
             register_cli_command=lambda name, *a: calls.append(("cli", name)),
+            register_command=lambda name, fn, **kw: calls.append(("command", name)),
             on_unload=lambda fn: calls.append(("unload",)))
         package = sys.modules["alans_way_idle_test"]
         with tempfile.TemporaryDirectory() as d:
             runtime_ = package.register(ctx, legacy_home=d)
         for expected in (("tool", "proactivity", "proactivity"), ("hook", "pre_llm_call"),
                          ("hook", "post_llm_call"), ("cli", "proactivity"),
+                         ("command", "proactivity"),
                          ("skill", "workspace-operations"), ("skill", "workspace-setup")):
             self.assertIn(expected, calls)
         self.assertNotIn(("skill", "proactive-primary"), calls)

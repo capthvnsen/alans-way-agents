@@ -11,7 +11,7 @@ could do, or asks a good question. If nothing is worth saying it stays silent.
   days, 2.6 days, 5.3 days, 10.6 days, then roughly weekly. Replying resets it.
 - Only between **8:00 and 22:00 in your timezone**, not the server's. Setup reads
   your timezone from your computer; if it can't, the bot asks you.
-- Never mid-conversation or while the bot is working.
+- Never mid-conversation or while the bot is working in the bound chat.
 
 It never sends external messages, spends money, changes credentials or
 permissions, touches production, or deletes anything without asking.
@@ -20,14 +20,17 @@ permissions, touches production, or deletes anything without asking.
 
 | Say | Effect |
 | --- | --- |
-| "Check in less" / "more" | Wait 4h / 1h instead of 2h |
+| "Check in less" | Wait 4h instead of 2h |
 | "Quiet until Monday" | Pause until then |
-| "Stop checking in" / "Start again" | Pause / resume |
+| "Stop checking in" | Pause |
 | "I'm in Tokyo this week" | Use Asia/Tokyo for check-in hours |
 | "Not before 9am" | Start the day at 9:00 |
 | "When will you check in next?" | Shows the next check-in time |
 
-Only the bound chat can change these.
+To check in more, start again or widen the hours, send `/proactivity more`,
+`/proactivity resume` or `/proactivity hours 9-21` yourself: the bot's tool can
+only make check-ins quieter, because anything the model reads can be
+prompt-injected. Only the bound chat can change these.
 
 ## Setup
 

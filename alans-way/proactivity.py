@@ -100,8 +100,37 @@ def validate(s, changes, *, min_base=15):
     return out
 
 
+def _window_hours(s):
+    """The local hours a check-in may fire in, as a set: 8-22 -> {8..21}."""
+    if s.active_start < s.active_end:
+        return set(range(s.active_start, s.active_end))
+    return set(range(s.active_start, 24)) | set(range(s.active_end))
+
+
+def loosens(current, new, now):
+    """The /proactivity command for a change that makes check-ins reach further,
+    else None: the model tool may only make them quieter."""
+    if new.base_minutes < current.base_minutes:
+        near = min(LEVELS, key=lambda k: (abs(LEVELS[k] - new.base_minutes), LEVELS[k]))
+        return f"/proactivity {near}"
+    if is_paused(current, now):
+        if not is_paused(new, now):
+            return "/proactivity resume"
+        if new.paused_until not in ("", "off"):
+            earlier = (current.paused_until == "off" or
+                       datetime.fromisoformat(new.paused_until)
+                       < datetime.fromisoformat(current.paused_until))
+            if earlier:
+                return "/proactivity resume"
+    if _window_hours(new) - _window_hours(current):
+        return f"/proactivity hours {new.active_start}-{new.active_end}"
+    return None
+
+
 MARKER = "[Proactive check-in]"
 STATE_KEY = "idle"
+USAGE = ("usage: /proactivity [status|less|normal|more|pause [until]|resume|"
+         "hours <start>-<end>|tz <IANA zone>]")
 
 
 def caller_session_key():
@@ -138,7 +167,16 @@ class Proactivity:
         try:
             return validate(Settings(), state.get("settings") or {}, min_base=1)
         except Exception:
-            return Settings()
+            # ponytail: a corrupt blob must not silently revive check-ins, so an
+            # individually valid paused_until still applies on top of defaults.
+            self.error = "corrupt settings: using defaults"
+            blob = state.get("settings")
+            try:
+                return Settings(paused_until=validate(
+                    Settings(), {"paused_until": blob.get("paused_until") if type(blob) is dict
+                                 else None}).paused_until)
+            except ValueError:
+                return Settings()
 
     def update(self, changes, *, min_base=15):
         with self._lock:
@@ -212,7 +250,7 @@ class Proactivity:
         except Exception:
             return {}
         key = policy.get("session_key") if type(policy) is dict else None
-        if type(key) is not str or not key:
+        if type(key) is not str or ":telegram:dm:" not in key or key.endswith(":"):
             return {}
         changes = {"paused_until": "off"} if policy.get("enabled") is False else {}
         if type(policy.get("timezone")) is str:
@@ -247,17 +285,23 @@ class Proactivity:
             anchor, nudges = self._anchor(state), state.get("nudges", 0)
             if now < due_at(s, anchor, nudges) or not in_window(s, now):
                 return None
-            try:
-                accepted = self.ctx.inject_message(self.prompt(s, now - anchor, now),
-                                                   role="user", session_key=state["session_key"])
-                result = "accepted" if accepted is True else "refused"
-            except Exception as exc:
-                accepted, result = False, f"failed: {type(exc).__name__}"
             # ponytail: a refused check-in still advances the back-off, so a missing
             # injection permission costs one attempt per wait, not one per minute.
-            state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result=result)
+            # Decide and persist before calling into Hermes: inject_message can run
+            # the injected turn's hooks on another thread, so it must run unlocked.
+            state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result="pending")
             self.save(state)
-            return accepted is True
+            text, session_key = self.prompt(s, now - anchor, now), state["session_key"]
+        try:
+            accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
+            result = "accepted" if accepted is True else "refused"
+        except Exception as exc:
+            accepted, result = False, f"failed: {type(exc).__name__}"
+        with self._lock:
+            state = self.load()
+            state["last_result"] = result
+            self.save(state)
+        return accepted is True
 
     def prompt(self, s, elapsed, now):
         hours = elapsed.total_seconds() / 3600
@@ -294,19 +338,86 @@ class Proactivity:
     def tool(self, args, **kwargs):
         args = args if isinstance(args, dict) else {}
         try:
-            if args.get("action") == "set":
-                bound = self.load().get("session_key")
-                if not bound or caller_session_key() != bound:
+            bound = self.load().get("session_key")
+            own = bool(bound) and caller_session_key() == bound
+            action = args.get("action")
+            if action == "set":
+                if not own:
                     return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
                 changes = {k: v for k, v in args.items() if k != "action"}
                 if not changes:
                     return json.dumps({"ok": False, "error": "set needs at least one setting"})
-                self.update(changes)
-            elif args.get("action") != "status":
-                return json.dumps({"ok": False, "error": f"unknown action {args.get('action')!r}"})
+                with self._lock:
+                    state = self.load()
+                    current = self.settings(state)
+                    new = validate(current, changes, min_base=15)
+                    hint = loosens(current, new, self.clock())
+                    if hint:
+                        return json.dumps({"ok": False,
+                                           "error": "That change would make check-ins reach further; the tool can only make them quieter.",
+                                           "ask_user_to_send": hint})
+                    state["settings"] = asdict(new)
+                    self.save(state)
+            elif action == "status":
+                if not own:
+                    return json.dumps({"ok": True, "bound": bool(bound)})
+            else:
+                return json.dumps({"ok": False, "error": f"unknown action {action!r}"})
             return json.dumps({"ok": True, **self.status()})
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+
+    def command(self, raw_args=""):
+        """`/proactivity ...`: the operator path inside the chat. Plain text, never raises."""
+        try:
+            words = str(raw_args or "").split()
+            verb, rest = (words[0].lower(), words[1:]) if words else ("status", [])
+            bound = self.load().get("session_key")
+            own = bool(bound) and caller_session_key() == bound
+            if verb == "status":
+                return self._status_text() if own else "Check-ins are configured from the bound chat."
+            changes = self._changes(verb, rest)
+            if changes is None:
+                return USAGE
+            if not own:
+                return "Check-in settings can only be changed from the bound chat."
+            self.update(changes, min_base=15)
+            return self._status_text(prefix="Done. ")
+        except ValueError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"proactivity: {type(exc).__name__}"
+
+    @staticmethod
+    def _changes(verb, rest):
+        """The settings dict for a slash verb, or None for a usage reply."""
+        if verb in LEVELS:
+            return {"level": verb}
+        if verb == "pause":
+            return {"paused_until": rest[0] if rest else "off"}
+        if verb == "resume":
+            return {"paused_until": ""}
+        if verb == "hours" and len(rest) == 1:
+            start, dash, end = rest[0].partition("-")
+            if dash and start.isdigit() and end.isdigit():
+                return {"active_start": int(start), "active_end": int(end)}
+        if verb == "tz" and len(rest) == 1:
+            return {"timezone": rest[0]}
+        return None
+
+    def _status_text(self, prefix=""):
+        """One plain sentence: wait and level, hours and zone, pause and next check-in."""
+        st = self.status()
+        s = st["settings"]
+        mins = s["base_minutes"]
+        wait = (f"{mins} minutes" if mins % 60 else
+                f"{mins // 60} hour" + ("s" if mins > 60 else ""))
+        text = (f"{prefix}Check-ins after {wait} of quiet (level {st['level']}), "
+                f"{s['active_start']}:00-{s['active_end']}:00 {s['timezone'] or 'UTC (timezone not set)'}")
+        if st["paused"]:
+            until = s["paused_until"]
+            return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."
+        return text + (f", next {st['next_check_in']}." if st["next_check_in"] else ".")
 
     def on_telegram_connect(self, native=None, adapter=None, **kwargs):
         """register_platform_handler factory. Hermes calls it only when the gateway
@@ -315,17 +426,18 @@ class Proactivity:
         self.start()
 
     def start(self, interval=60.0):
-        if self.worker and self.worker.is_alive():
-            return
         def run():
             while not self._stop.wait(interval):
+                self.error = None
                 try:
                     self.tick()
-                    self.error = None
                 except Exception as exc:
                     self.error = type(exc).__name__
-        self.worker = threading.Thread(target=run, name="alans-way-idle-nudge", daemon=True)
-        self.worker.start()
+        with self._lock:
+            if self.worker and self.worker.is_alive():
+                return
+            self.worker = threading.Thread(target=run, name="alans-way-idle-nudge", daemon=True)
+            self.worker.start()
 
     def close(self):
         self._stop.set()
@@ -336,11 +448,15 @@ SCHEMA = {
     "description": (
         "Read or change how you proactively check in with the user. You check in after the chat has"
         " been quiet for base_minutes, doubling the wait after each check-in they don't answer (capped"
-        " at a week), and only between active_start and active_end in the USER's timezone. Map requests:"
-        " 'check in less/more' -> level less|more (normal is the default); 'quiet until Monday' ->"
-        " paused_until as ISO with their UTC offset; 'stop checking in' -> paused_until 'off';"
-        " 'start again' -> paused_until ''; 'I'm in Tokyo' -> timezone 'Asia/Tokyo'; 'not before 9am'"
-        " -> active_start 9. After set, confirm the change from the returned status in plain words."),
+        " at a week), and only between active_start and active_end in the USER's timezone. This tool"
+        " can only make check-ins quieter: level 'less', a higher base_minutes, paused_until 'off' or"
+        " a future ISO time, a later active_start or earlier active_end, or a new timezone. Anything"
+        " that makes check-ins reach further — checking in more, resuming or wider hours — is refused"
+        " with an ask_user_to_send command: tell the user to send that exact command. Map requests:"
+        " 'check in less' -> level less; 'quiet until Monday' -> paused_until as ISO with their UTC"
+        " offset; 'stop checking in' -> paused_until 'off'; 'I'm in Tokyo' -> timezone 'Asia/Tokyo';"
+        " 'not before 9am' -> active_start 9. After set, confirm the change from the returned status"
+        " in plain words."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {

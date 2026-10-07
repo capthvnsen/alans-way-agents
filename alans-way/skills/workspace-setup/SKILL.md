@@ -139,7 +139,8 @@ browser host state, and any FAIL lines. "Installed" means the verify output
 says so, not that the commands ran without visible errors. After the gateway has
 restarted (the next time the user writes to you), run `setup.sh --verify` for a
 full audit of the running install. Remind the user that check-ins are on once bound and are
-tuned by talking to the bot ("stop checking in" pauses them), and that desktop control asks
+tuned by talking to the bot ("stop checking in" pauses them; `/proactivity resume` starts them
+again), and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
 (offer that, never add it yourself: on a Hermes without the computer-use
 provider API it also exposes a desktop-input tool that runs with no approval

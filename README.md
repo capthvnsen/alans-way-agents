@@ -197,7 +197,7 @@ ordinary Telegram reply and one bounded browser action before relying on it.
 
 | Piece | Effect |
 |---|---|
-| `proactivity` tool + `hermes proactivity` CLI | bind the chat, tune the wait, level, timezone and pause — bound to one designated chat |
+| `proactivity` tool + `/proactivity` + `hermes proactivity` CLI | bind the chat, tune the wait, level, timezone and pause — bound to one designated chat |
 | Idle-nudge loop | a 60-second daemon started when Telegram connects; injects one internal prompt when a check-in is due |
 | Turn hooks | `pre_llm_call`/`post_llm_call` note when the bound chat was last active and whether the bot is mid-turn |
 | `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
