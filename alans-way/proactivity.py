@@ -77,8 +77,11 @@ def validate(s, changes, *, min_base=15):
             ZoneInfo(out.timezone)
         except Exception:
             raise ValueError(f"unknown timezone: {out.timezone}") from None
-    if type(out.base_minutes) is not int or not min_base <= out.base_minutes <= 1440:
-        raise ValueError(f"base_minutes must be a whole number from {min_base} to 1440")
+    # ponytail: the caller's floor only applies when this change sets the base;
+    # a stored sub-15 base (the operator CLI allows 1) needs the 1-1440 check.
+    floor = min_base if "base_minutes" in changes else 1
+    if type(out.base_minutes) is not int or not floor <= out.base_minutes <= 1440:
+        raise ValueError(f"base_minutes must be a whole number from {floor} to 1440")
     for name in ("active_start", "active_end"):
         value = getattr(out, name)
         if type(value) is not int or not 0 <= value <= 23:
@@ -134,7 +137,7 @@ class Proactivity:
     def settings(self, state):
         try:
             return validate(Settings(), state.get("settings") or {}, min_base=1)
-        except ValueError:
+        except Exception:
             return Settings()
 
     def update(self, changes, *, min_base=15):
@@ -146,7 +149,8 @@ class Proactivity:
     def bind(self, session_key):
         # ponytail: shape check only; setup.sh lists real routes, and a wrong key
         # just shows up as a refused check-in in status.
-        if type(session_key) is not str or ":telegram:dm:" not in session_key:
+        if (type(session_key) is not str or ":telegram:dm:" not in session_key
+                or session_key.endswith(":")):
             raise ValueError("bind a Telegram DM session key, such as agent:main:telegram:dm:<chat id>")
         with self._lock:
             state = self.load()
@@ -161,7 +165,9 @@ class Proactivity:
         key = caller_session_key()
         if key:
             return key == bound
-        # In a Telegram DM the chat id is the sender's id.
+        # In a Telegram DM the chat id is the sender's id. post_llm_call carries
+        # no sender_id, so this fallback only matters for pre_llm_call;
+        # HERMES_SESSION_KEY covers both hooks in the gateway.
         return (kwargs.get("platform") == "telegram"
                 and str(kwargs.get("sender_id") or "") == bound.rsplit(":", 1)[-1])
 
@@ -293,6 +299,8 @@ class Proactivity:
                 if not bound or caller_session_key() != bound:
                     return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
                 self.update(args.get("settings") or {})
+            elif args.get("action") != "status":
+                return json.dumps({"ok": False, "error": f"unknown action {args.get('action')!r}"})
             return json.dumps({"ok": True, **self.status()})
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})

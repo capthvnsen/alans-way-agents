@@ -140,6 +140,33 @@ class StaleHookTests(unittest.TestCase):
             self.assertFalse(stale.exists())
             self.assertTrue((other / "HOOK.yaml").exists())
 
+    def test_a_stale_hook_that_cannot_be_removed_warns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            hooks = home / "hooks"
+            stale = hooks / "alans-way"
+            stale.mkdir(parents=True)
+            (stale / "HOOK.yaml").write_text("name: alans-way-gateway\n", encoding="utf-8")
+            (stale / "handler.py").write_text("# 0.6 hook\n", encoding="utf-8")
+            hooks.chmod(0o555)
+            bin_dir = fake_hermes_bin(
+                Path(directory),
+                plugins="alans-way",
+                tools="enabled proactivity",
+            )
+            env = dict(os.environ)
+            env["HERMES_HOME"] = str(home)
+            env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+            try:
+                result = run(
+                    "--skip-browser", "--skip-services", "--non-interactive",
+                    "--hermes-home", str(home), env=env, check=False,
+                )
+            finally:
+                hooks.chmod(0o755)
+            self.assertIn("could not remove the old proactivity hook", result.stdout)
+            self.assertTrue(stale.exists())
+
 
 class BotIdDerivationTests(unittest.TestCase):
     def test_derives_bot_id_from_profile_env_without_printing_token(self):

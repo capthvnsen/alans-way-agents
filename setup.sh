@@ -896,8 +896,10 @@ fi
 # 0.6 armed proactivity with a gateway:startup hook; the idle nudge detects the
 # gateway itself, so remove only the hook this plugin installed.
 for hook_dir in "$HERMES_HOME/hooks/$PLUGIN_NAME" "$HERMES_HOME"/profiles/*/hooks/"$PLUGIN_NAME"; do
-  [ -f "$hook_dir/HOOK.yaml" ] && grep -q "alans-way-gateway" "$hook_dir/HOOK.yaml" \
-    && rm -rf "$hook_dir" && ok "removed the old proactivity hook from $hook_dir"
+  if [ -f "$hook_dir/HOOK.yaml" ] && grep -q "alans-way-gateway" "$hook_dir/HOOK.yaml"; then
+    rm -rf "$hook_dir" && ok "removed the old proactivity hook from $hook_dir" \
+      || warn "could not remove the old proactivity hook at $hook_dir"
+  fi
 done
 
 # --------------------------------------------- Windows services (Scheduled Tasks)

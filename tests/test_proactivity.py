@@ -170,7 +170,8 @@ def write_legacy(home, policy):
 class StateTests(unittest.TestCase):
     def test_bind_takes_only_a_telegram_dm_key(self):
         p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
-        for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1", None):
+        for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1",
+                    "agent:main:telegram:dm:", None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 p.bind(bad)
         p.bind(KEY)
@@ -186,6 +187,25 @@ class StateTests(unittest.TestCase):
             p.update({"base_minutes": 2})
         p.update({"base_minutes": 2}, min_base=1)
         self.assertEqual(p.settings(p.load()).base_minutes, 2)
+
+    def test_a_stored_test_sized_base_does_not_block_unrelated_chat_sets(self):
+        p = P.Proactivity(FakeCtx())
+        p.update({"base_minutes": 2}, min_base=1)
+        p.update({"paused_until": "off"})
+        self.assertEqual(p.settings(p.load()).base_minutes, 2)
+        with self.assertRaises(ValueError):
+            p.update({"base_minutes": 5})
+        p.update({"level": "less"})
+        self.assertEqual(p.settings(p.load()).base_minutes, 240)
+
+    def test_corrupt_stored_settings_fall_back_to_defaults(self):
+        p = P.Proactivity(FakeCtx())
+        for corrupt in ({"active_start": {}}, {"level": {}}, {"level": []}):
+            with self.subTest(corrupt=corrupt):
+                state = p.load()
+                state["settings"] = corrupt
+                p.save(state)
+                self.assertEqual(p.settings(p.load()), P.Settings())
 
     def test_corrupt_state_reads_as_unbound(self):
         ctx = FakeCtx()
@@ -379,6 +399,12 @@ class ToolTests(unittest.TestCase):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
         with patch.object(P, "caller_session_key", return_value=KEY):
             self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"base_minutes": 2}}))["ok"])
+
+    def test_an_unknown_action_is_an_error_not_a_status(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        out = json.loads(p.tool({"action": "pause"}))
+        self.assertFalse(out["ok"])
+        self.assertIn("unknown action", out["error"])
 
     def test_status_reports_next_check_in_in_user_time(self):
         p, clock = runtime(FakeCtx(), at("2026-10-07T09:00"), timezone="Asia/Tokyo")
