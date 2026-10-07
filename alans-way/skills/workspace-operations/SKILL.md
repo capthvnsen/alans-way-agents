@@ -128,9 +128,7 @@ API, MCP, and connector calls that do not run on the Mac keep going. A
 closed laptop does not stop them.
 
 Stop with a "needs Mac" note only for something that exists only on that
-Mac: a local file, or a Mac app that is not a website. The Mac
-availability watcher turns the next offline→online flip into a context event
-for the lead bot's review. When the Mac is back, start the next web task in
+Mac: a local file, or a Mac app that is not a website. When the Mac is back, start the next web task in
 the in-app Mac browser. Finish the current VPS step first.
 
 ## Shared links

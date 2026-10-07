@@ -65,7 +65,7 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
   --proactive yes|no  keep proactivity on (default) or pause it after binding
-  --timezone IANA  your local zone for proactivity quiet hours, e.g. Europe/Berlin
+  --timezone IANA  your local zone for check-in hours, e.g. Europe/Berlin
   --restart        restart the gateway last, detached, once setup has finished
   --verify         check an existing install without changing anything
   --config FILE    edit this Hermes config.yaml instead of the profile's
@@ -402,7 +402,7 @@ if [ "$VERIFY" = 1 ]; then
     if printf '%s\n' "$TOOLS" | grep -Eq "enabled[[:space:]]+proactivity([[:space:]]|$)"; then
       ok "proactivity toolset enabled for telegram"
     else
-      bad "proactivity toolset not enabled for telegram: proactive wakes would fire but proactive_control won't be callable (run: hermes tools enable proactivity --platform telegram)"
+      bad "proactivity toolset not enabled for telegram: the proactivity tool won't be callable in those sessions (run: hermes tools enable proactivity --platform telegram)"
     fi
     if [ "$KEEP_BROWSER" = 1 ]; then
       skip "built-in browser toolset check (--keep-browser)"
@@ -416,24 +416,16 @@ if [ "$VERIFY" = 1 ]; then
     PSTATE="$(hermes_p proactivity status 2>/dev/null | python3 -c 'import json,sys
 try: s=json.load(sys.stdin)
 except Exception: s={}
-print("bound" if s.get("route_bound") else "unbound", "on" if s.get("enabled") is True else "paused")' 2>/dev/null)"
+print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on")' 2>/dev/null)"
     case "$PSTATE" in
       "bound on") ok "proactivity on for the bound primary route";;
-      "bound paused") warn "proactivity bound but paused: the bot never messages first (run: hermes proactivity probe, then hermes proactivity resume)";;
+      "bound paused") warn "proactivity bound but paused: the bot never messages first (say \"start checking in\" in the bound chat)";;
       *) warn "no primary route bound: proactivity is off (run: setup.sh --bind)";;
     esac
     [ "$(hermes_p config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
       && ok "gateway injection allowed for $PLUGIN_NAME" \
-      || warn "gateway injection not allowed: proactive turns are dropped (run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true)"
+      || warn "gateway injection not allowed: check-in prompts are dropped (run: hermes config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true)"
   fi
-  [ -f "$HERMES_HOME/hooks/$PLUGIN_NAME/handler.py" ] \
-    && ok "gateway hook present" || bad "gateway hook missing at $HERMES_HOME/hooks/$PLUGIN_NAME/"
-  for profile_home in "$HERMES_HOME"/profiles/*/; do
-    [ -d "$profile_home" ] || continue
-    [ -f "$profile_home/hooks/$PLUGIN_NAME/handler.py" ] \
-      && ok "gateway hook present for $(basename "$profile_home")" \
-      || warn "gateway hook missing for profile $(basename "$profile_home"): a profile-scoped startup emit cannot arm the gateway"
-  done
   case "$(uname -s 2>/dev/null)" in
     Darwin) CONN_DIR="$HOME/Library/Application Support/hermes-alans-way/browser";;
     *) CONN_DIR="$BROWSER_HOME/.local/share/hermes-alans-way/browser";;
@@ -748,11 +740,11 @@ detect_host_timezone() {
     return 0
   fi
   TIMEZONE="$_tz"
-  ok "using timezone $TIMEZONE from your computer ($HOST_OS) for quiet hours"
+  ok "using timezone $TIMEZONE from your computer ($HOST_OS) for check-in hours"
 }
 ask_timezone() {
   [ -z "$TIMEZONE" ] && has_tty || return 0
-  _tz="$(ask "  Your timezone for quiet hours (IANA, e.g. Europe/Berlin; empty to skip)" "")"
+  _tz="$(ask "  Your timezone for check-in hours (IANA, e.g. Europe/Berlin; empty to skip)" "")"
   valid_iana "$_tz" || return 0
   TIMEZONE="$_tz"
 }
@@ -827,15 +819,14 @@ hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
 hermes_p config set "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" true >/dev/null 2>&1 \
   && ok "gateway injection allowed for $PLUGIN_NAME" \
   || warn "could not allow gateway injection: run: hermes${PROFILE:+ -p $PROFILE} config set plugins.entries.$PLUGIN_NAME.allow_gateway_injection true"
-# The control tool must be loaded into each messaging session's platform —
+# The tool must be loaded into each messaging session's platform —
 # plugin toolsets are skipped when the platform's saved list predates the
 # plugin (recorded under known_plugin_toolsets). Enabling is idempotent.
-# Isolated wakes run as cron jobs, which need report_signal and finish_task too.
 enable_proactivity_toolsets() {
-  for platform in telegram cron; do
+  for platform in telegram; do
     hermes_p tools enable proactivity --platform "$platform" >/dev/null 2>&1 \
       && ok "proactivity toolset enabled for $platform" \
-      || warn "could not enable the proactivity toolset for $platform: proactive_control will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
+      || warn "could not enable the proactivity toolset for $platform: the proactivity tool will not be callable in those sessions (run: hermes${PROFILE:+ -p $PROFILE} tools enable proactivity --platform $platform)"
   done
 }
 enable_proactivity_toolsets
@@ -901,36 +892,12 @@ else
   skip "computer-use provider (this Hermes has no pluggable computer-use API yet)"
 fi
 
-# ---------------------------------------------------------------- hook
-step "Gateway hook"
-mkdir -p "$HERMES_HOME/hooks"
-# The hook ships inside the plugin so a catalogue install contains it. With
-# --skip-plugin or a catalog-installed plugin, copy that reviewed tree, not
-# a newer clone of this repo.
-HOOK_SRC="$REPO_DIR/$PLUGIN_NAME/gateway-hook"
-if { [ "$SKIP_PLUGIN" = 1 ] || plugin_is_catalog_installed; } \
-    && [ -f "$PROFILE_HOME/plugins/$PLUGIN_NAME/gateway-hook/handler.py" ]; then
-  HOOK_SRC="$PROFILE_HOME/plugins/$PLUGIN_NAME/gateway-hook"
-fi
-install_hook() {
-  local target="$1"
-  mkdir -p "$target"
-  if [ -f "$target/handler.py" ] && cmp -s "$HOOK_SRC/handler.py" "$target/handler.py" \
-      && cmp -s "$HOOK_SRC/HOOK.yaml" "$target/HOOK.yaml"; then
-    ok "hook current in $target"
-  else
-    cp -r "$HOOK_SRC/." "$target/" && ok "hook installed to $target" \
-      || bad "hook copy failed"
-  fi
-}
-install_hook "$HERMES_HOME/hooks/$PLUGIN_NAME"
-# Under gateway.multiplex_profiles the single gateway:startup emit can resolve
-# a served profile's hooks dir instead of the launch home's — an empty profile
-# hooks dir silently leaves the gateway unarmed. Seed every profile so any
-# scope the emit lands in still stamps the owner marker.
-for profile_home in "$HERMES_HOME"/profiles/*/; do
-  [ -d "$profile_home" ] || continue
-  install_hook "$profile_home/hooks/$PLUGIN_NAME"
+# ---------------------------------------------------------------- old hook
+# 0.6 armed proactivity with a gateway:startup hook; the idle nudge detects the
+# gateway itself, so remove only the hook this plugin installed.
+for hook_dir in "$HERMES_HOME/hooks/$PLUGIN_NAME" "$HERMES_HOME"/profiles/*/hooks/"$PLUGIN_NAME"; do
+  [ -f "$hook_dir/HOOK.yaml" ] && grep -q "alans-way-gateway" "$hook_dir/HOOK.yaml" \
+    && rm -rf "$hook_dir" && ok "removed the old proactivity hook from $hook_dir"
 done
 
 # --------------------------------------------- Windows services (Scheduled Tasks)
@@ -1002,7 +969,7 @@ install_windows_tasks() {
     say "  browser settings changed: restart the AlansWay_Chromium task to apply them (open tabs close)"
   fi
   if [ -n "$MAC_SSH" ]; then
-    # The router's default state file on Windows is the one the observer reads.
+    # The router's default state file on Windows is the one the watcher writes.
     win_service AlansWay_MacWatch "$REPO_DIR/alans-way/scripts/workspace-router.cjs" \
       --watch --interval 10 --mac-ssh "$(psq "$MAC_SSH")" --host-os "$(psq "$HOST_OS")"
   fi
@@ -1338,7 +1305,7 @@ EOF
         *) say "  browser settings changed: restart hermes-alans-way-chromium.service to apply them (open tabs close)";;
       esac
     fi
-    # The observer and router read the watcher's default state file under
+    # The router reads the watcher's default state file under
     # /var/lib, which only a root system unit's StateDirectory provides.
     if [ -n "$MAC_SSH" ] && [ "$SYSCTL" = "systemctl" ] && [ "$(id -u)" = 0 ]; then
       WATCH_ENV_DIR="${ALANS_WAY_ENV_DIR:-/etc/hermes-alans-way}"
@@ -1736,26 +1703,20 @@ for i, line in enumerate(sys.stdin, 1):
          if [ "$BOUND" = 1 ]; then
            ok "bound primary route: $SEL_AGENT"
            if [ -z "$TIMEZONE" ]; then
-             warn "no timezone known: quiet hours use the default zone (America/Denver). Set it with: hermes -p $BIND_PROF proactivity timezone <IANA zone>"
-           elif [ "$TZ_SET" = 1 ]; then
-             ok "quiet hours use $TIMEZONE"
+             warn "no timezone known: the bot will ask you for it. Or set it with: hermes -p $BIND_PROF proactivity set --timezone <IANA zone>"
+           elif [ "$TZ_SET" != 1 ]; then
+             hermes -p "$BIND_PROF" proactivity set --timezone "$TIMEZONE" >/dev/null 2>&1 \
+               && ok "check-in hours use $TIMEZONE" \
+               || warn "could not set timezone $TIMEZONE"
            else
-             hermes -p "$BIND_PROF" proactivity configure --settings "{\"timezone\": \"$TIMEZONE\"}" >/dev/null 2>&1 \
-               && ok "quiet hours use $TIMEZONE" \
-               || warn "could not set timezone $TIMEZONE: quiet hours stay on the default zone"
+             ok "check-in hours use $TIMEZONE"
            fi
-           # Binding IS the consent to be messaged first; proactivity is on
-           # by default once bound. --proactive no keeps it bound but paused,
-           # and pauses first so the probe's model call never races a first message.
            if [ "${PROACTIVE:-yes}" = no ]; then
-             hermes -p "$BIND_PROF" proactivity pause >/dev/null 2>&1 \
-               && say "  proactivity bound but paused: turn it on later with /proactivity resume" \
-               || warn "could not pause: it stays on by default"
-           fi
-           if hermes -p "$BIND_PROF" proactivity probe >/dev/null 2>&1; then
-             [ "${PROACTIVE:-yes}" = no ] || ok "proactivity on by default: pause anytime with /proactivity pause"
+             hermes -p "$BIND_PROF" proactivity set --settings '{"paused_until": "off"}' >/dev/null 2>&1 \
+               && say "  check-ins bound but paused: tell your bot \"start checking in\" to turn them on" \
+               || warn "could not pause: check-ins stay on"
            else
-             warn "probe failed: the appraisal path needs a model check: hermes -p "$BIND_PROF" proactivity probe"
+             ok "proactivity on by default: tell your bot \"stop checking in\" to pause"
            fi
          else
            bad "bind failed: run manually: hermes -p "$BIND_PROF" proactivity bind --session-key <key>"
@@ -1846,11 +1807,9 @@ cat <<EOF
   Next:
   • On your computer: open Hermes: Alan's Way → Settings → Agent setup → save this
     machine's SSH address → Test agent path.
-  • In Telegram: message your primary bot: proactivity is on once bound
-    (/proactivity status shows it; /proactivity pause quiets it).
+  • In Telegram: message your primary bot: check-ins are on once bound, and are
+    tuned by talking to the bot ("stop checking in" pauses them).
   • Browser work routes to your ${HOST_OS} computer while it's reachable, else this host.
-  • Proposed watches never run on their own: approve one with the Telegram button on the
-    proposal, or send /watch approve <id> <code>.
 EOF
 [ "$GUEST_OS" != Windows ] || say "  • This PC: keep it awake and signed in; the browser and watcher start at logon. Automatic sign-in (netplwiz) brings them back after a reboot."
 if [ "$FAILS" != 0 ]; then

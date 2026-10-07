@@ -25,9 +25,9 @@ def _primary_profile(ctx) -> bool:
     """Only the launch (default/custom) profile's runtime may observe.
 
     A named secondary profile registers the same tools and commands against
-    its own home, but proactivity belongs to the default primary — Policy
-    already refuses any other ``primary_profile``. A ctx without profile
-    information (tests, non-gateway hosts) counts as primary.
+    its own home, but proactivity belongs to the default/launch profile. A
+    ctx without profile information (tests, non-gateway hosts) counts as
+    primary.
     """
     try:
         name = getattr(ctx, "profile_name", None)

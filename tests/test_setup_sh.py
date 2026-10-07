@@ -7,13 +7,9 @@ import shutil
 import stat
 import subprocess
 import signal
-import sys
 import tempfile
 import time
-import types
 import unittest
-from unittest.mock import patch
-import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "setup.sh"
@@ -64,8 +60,6 @@ class SetupVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes_home"
             home.mkdir()
-            (home / "hooks" / "alans-way").mkdir(parents=True)
-            (home / "hooks" / "alans-way" / "handler.py").write_text("# stub\n", encoding="utf-8")
             bin_dir = fake_hermes_bin(
                 Path(directory),
                 plugins="alans-way",
@@ -91,8 +85,6 @@ class SetupVerifyTests(unittest.TestCase):
                 "# <<< alans-way workspace_browser managed block <<<\n",
                 encoding="utf-8",
             )
-            (home / "hooks" / "alans-way").mkdir(parents=True)
-            (home / "hooks" / "alans-way" / "handler.py").write_text("# stub\n", encoding="utf-8")
             bin_dir = fake_hermes_bin(Path(directory), plugins="alans-way", tools="")
             env = dict(os.environ)
             env["HERMES_HOME"] = str(home)
@@ -105,8 +97,6 @@ class SetupVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes_home"
             home.mkdir()
-            (home / "hooks" / "alans-way").mkdir(parents=True)
-            (home / "hooks" / "alans-way" / "handler.py").write_text("# stub\n", encoding="utf-8")
             bin_dir = fake_hermes_bin(
                 Path(directory),
                 plugins="alans-way",
@@ -121,6 +111,34 @@ class SetupVerifyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn("skip workspace_browser block", result.stdout)
             self.assertIn("all required checks passed", result.stdout)
+
+
+class StaleHookTests(unittest.TestCase):
+    def test_a_stale_gateway_hook_is_removed_and_other_hooks_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            stale = home / "hooks" / "alans-way"
+            stale.mkdir(parents=True)
+            (stale / "HOOK.yaml").write_text("name: alans-way-gateway\n", encoding="utf-8")
+            (stale / "handler.py").write_text("# 0.6 hook\n", encoding="utf-8")
+            other = home / "hooks" / "other"
+            other.mkdir(parents=True)
+            (other / "HOOK.yaml").write_text("name: other\n", encoding="utf-8")
+            bin_dir = fake_hermes_bin(
+                Path(directory),
+                plugins="alans-way",
+                tools="enabled proactivity",
+            )
+            env = dict(os.environ)
+            env["HERMES_HOME"] = str(home)
+            env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+            result = run(
+                "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home), env=env, check=False,
+            )
+            self.assertIn("removed the old proactivity hook", result.stdout)
+            self.assertFalse(stale.exists())
+            self.assertTrue((other / "HOOK.yaml").exists())
 
 
 class BotIdDerivationTests(unittest.TestCase):
@@ -358,10 +376,10 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn("bound primary route: delta", result.stdout)
             self.assertIn("-p delta proactivity bind --session-key agent:delta:telegram:dm:1", calls)
             self.assertIn("-p delta config set plugins.entries.alans-way.allow_gateway_injection true", calls)
-            self.assertIn("-p delta proactivity probe", calls)
+            self.assertNotIn("proactivity probe", calls)
             self.assertIn("proactivity on by default", result.stdout)
 
-    def test_proactive_no_pauses_before_the_probe(self):
+    def test_proactive_no_binds_paused(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes_home"
             (home / "sessions").mkdir(parents=True)
@@ -373,8 +391,8 @@ class AgentShellTests(unittest.TestCase):
             run("--bind", "--proactive", "no", "--non-interactive", "--skip-browser", "--skip-services",
                 "--hermes-home", str(home), env=env, check=False)
             calls = log.read_text(encoding="utf-8")
-            self.assertIn("proactivity pause", calls)
-            self.assertLess(calls.index("proactivity pause"), calls.index("proactivity probe"))
+            self.assertIn('proactivity set --settings {"paused_until": "off"}', calls)
+            self.assertNotIn("proactivity probe", calls)
 
     def test_proactive_must_be_yes_or_no(self):
         result = run("--proactive", "maybe", "--verify", check=False)
@@ -977,175 +995,6 @@ class ReadmeTests(unittest.TestCase):
         self.assertNotIn("Node 18", readme)
         self.assertIn("Node 22", readme)
         self.assertIn("0.21.5", readme)
-        self.assertNotRegex(readme, r"(?m)^hooks/")
-        self.assertTrue((ROOT / "alans-way" / "gateway-hook").is_dir())
-
-
-class GatewayGuardPortabilityTests(unittest.TestCase):
-    def test_private_state_writes_where_os_fchmod_is_missing(self):
-        spec = importlib.util.spec_from_file_location("guard_without_fchmod", ROOT / "alans-way" / "gateway_guard.py")
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        saved = os.fchmod
-        del os.fchmod
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                target = Path(directory) / "state" / "value.json"
-                guard.write_private_json(target, {"ok": True})
-                self.assertEqual(json.loads(target.read_text()), {"ok": True})
-        finally:
-            os.fchmod = saved
-
-
-class WindowsGuestPluginTests(unittest.TestCase):
-    """Native Windows has no fcntl, O_NOFOLLOW, fchmod, /proc or ps, and its default home is %LOCALAPPDATA%\\hermes."""
-
-    def load(self, name):
-        path = ROOT / "alans-way"
-        spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        self.addCleanup(lambda: [sys.modules.pop(k) for k in [k for k in sys.modules if k == name or k.startswith(name + ".")]])
-        spec.loader.exec_module(module)
-        return module
-
-    def test_state_and_observation_work_without_the_posix_only_apis(self):
-        calls = []
-        fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=lambda fd, mode, size: calls.append(mode))
-        saved = {name: getattr(os, name) for name in ("fchmod", "O_NOFOLLOW")}
-        for name in saved:
-            delattr(os, name)
-        try:
-            with patch.dict(sys.modules, {"fcntl": None, "msvcrt": fake_msvcrt}):
-                plugin = self.load("windows_guest_plugin_test")
-                context, core, observe = (importlib.import_module(plugin.__name__ + "." + name)
-                                          for name in ("proactive_context", "proactive_core", "proactive_observe"))
-                with tempfile.TemporaryDirectory() as directory:
-                    home = Path(directory)
-                    with context.Ledger(home / "ledger").transaction() as data:
-                        data["tasks"]["a"] = {"id": "a"}
-                    core.Store(home / "store")
-                    (home / "SOUL.md").write_text("be kind\r\n", encoding="utf-8")
-                    seen = observe.read_source(home, "SOUL.md")
-                    self.assertEqual(seen["text"], "be kind\r\n")
-        finally:
-            for name, value in saved.items():
-                setattr(os, name, value)
-        self.assertEqual(calls, [1, 0])
-
-    def test_sqlite_is_opened_by_file_uri_not_a_pasted_path(self):
-        for name in ("proactive_operator.py", "proactive_board.py"):
-            source = (ROOT / "alans-way" / name).read_text(encoding="utf-8")
-            self.assertNotIn('f"file:{', source, name)
-            self.assertIn(".as_uri()", source, name)
-
-    def test_the_default_home_is_localappdata_on_native_windows(self):
-        spec = importlib.util.spec_from_file_location("guard_on_windows", ROOT / "alans-way" / "gateway_guard.py")
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        with tempfile.TemporaryDirectory() as directory:
-            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
-            env["LOCALAPPDATA"] = directory
-            with patch.dict(os.environ, env, clear=True), patch.object(guard.sys, "platform", "win32"):
-                self.assertEqual(guard.hermes_home(), (Path(directory) / "hermes").absolute())
-            with patch.dict(os.environ, env, clear=True):
-                self.assertEqual(guard.hermes_home(), (Path.home() / ".hermes").absolute())
-
-    def test_the_startup_hook_arms_the_windows_default_home(self):
-        with tempfile.TemporaryDirectory() as directory:
-            local = Path(directory).resolve()
-            home = local / "hermes"
-            hook = home / "hooks" / "alans-way"
-            hook.mkdir(parents=True)
-            shutil.copy(ROOT / "alans-way" / "gateway-hook" / "handler.py", hook / "handler.py")
-            (home / "plugins" / "alans-way").mkdir(parents=True)
-            shutil.copy(ROOT / "alans-way" / "gateway_guard.py", home / "plugins" / "alans-way" / "gateway_guard.py")
-            spec = importlib.util.spec_from_file_location("hook_on_windows", hook / "handler.py")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
-            env["LOCALAPPDATA"] = str(local)
-            with patch.dict(os.environ, env, clear=True), patch.object(module.sys, "platform", "win32"):
-                module.handle("gateway:startup", {})
-            self.assertTrue((home / "companion" / "proactivity" / "gateway-owner.json").exists())
-
-    def test_process_start_comes_from_psutil_where_there_is_no_proc_or_ps(self):
-        spec = importlib.util.spec_from_file_location("guard_psutil", ROOT / "alans-way" / "gateway_guard.py")
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        begun = time.time() - 300
-        fake_psutil = types.SimpleNamespace(Process=lambda pid=None: types.SimpleNamespace(create_time=lambda: begun))
-        with patch.dict(sys.modules, {"psutil": fake_psutil}):
-            started = guard._process_started_at()
-        self.assertAlmostEqual(started.timestamp(), begun, delta=1)
-
-    def test_a_host_with_no_psutil_and_no_ps_degrades_to_the_registration_window(self):
-        spec = importlib.util.spec_from_file_location("guard_blind", ROOT / "alans-way" / "gateway_guard.py")
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        with patch.dict(sys.modules, {"psutil": None}), patch("subprocess.check_output", side_effect=FileNotFoundError("ps")):
-            started = guard._process_started_at()
-        self.assertTrue(started is None or started.tzinfo is not None)
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            guard.mark_gateway_ready(home)
-            with patch.object(guard, "_process_started_at", return_value=None):
-                self.assertTrue(guard.gateway_ready(home, guard.datetime.now(guard.timezone.utc)))
-
-
-class GatewayHookProfileTests(unittest.TestCase):
-    """The handler copy under <home>/profiles/<name>/hooks must still arm the launch home."""
-
-    def install(self, plugin_home: Path, where: Path):
-        hook = where / "hooks" / "alans-way"
-        hook.mkdir(parents=True)
-        shutil.copy(ROOT / "alans-way" / "gateway-hook" / "handler.py", hook / "handler.py")
-        plugin = plugin_home / "plugins" / "alans-way"
-        if not plugin.exists():
-            plugin.mkdir(parents=True)
-            shutil.copy(ROOT / "alans-way" / "gateway_guard.py", plugin / "gateway_guard.py")
-        spec = importlib.util.spec_from_file_location("hook_under_test_%d" % id(hook), hook / "handler.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def marker(self, home: Path) -> Path:
-        return home / "companion" / "proactivity" / "gateway-owner.json"
-
-    def test_profile_copy_arms_the_profile_and_the_launch_home(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            profile = root / "profiles" / "delta"
-            profile.mkdir(parents=True)
-            module = self.install(root, profile)
-            with patch.dict(os.environ, {"HERMES_HOME": str(root)}):
-                module.handle("gateway:startup", {})
-            self.assertTrue(self.marker(profile).exists())
-            self.assertTrue(self.marker(root).exists())
-
-    def test_profile_copy_for_a_profile_gateway_does_not_touch_the_root_marker(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            profile = root / "profiles" / "delta"
-            profile.mkdir(parents=True)
-            module = self.install(profile, profile)
-            with patch.dict(os.environ, {"HERMES_HOME": str(profile)}):
-                module.handle("gateway:startup", {})
-            self.assertTrue(self.marker(profile).exists())
-            self.assertFalse(self.marker(root).exists())
-
-    def test_a_copy_under_an_unrelated_home_stays_inert(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            other = root / "elsewhere"
-            profile = root / "profiles" / "delta"
-            profile.mkdir(parents=True)
-            other.mkdir()
-            module = self.install(root, profile)
-            with patch.dict(os.environ, {"HERMES_HOME": str(other)}):
-                module.handle("gateway:startup", {})
-            self.assertFalse(self.marker(profile).exists())
-            self.assertFalse(self.marker(other).exists())
 
 
 class HostTimezoneTests(unittest.TestCase):
@@ -1514,7 +1363,6 @@ class ProfileLayoutTests(unittest.TestCase):
             self.assertFalse(any("plugins install" in line for line in calls), calls)
             for line in calls:
                 self.assertTrue(line.startswith("-p work "), line)
-            self.assertTrue((root / "hermes" / "hooks" / "alans-way" / "handler.py").exists())
             self.assertFalse((home / "profiles").exists())
 
     def test_an_explicit_profile_wins_over_a_profile_shaped_home(self):
@@ -1702,18 +1550,13 @@ class IntegrationBase:
 
 
 class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
-    def test_the_proactivity_toolset_is_enabled_for_cron_wakes_too(self):
+    def test_the_proactivity_toolset_is_enabled_for_telegram_only(self):
         self.run_setup()
         calls = read_log(self.log)
         self.assertIn("tools enable proactivity --platform telegram", calls)
-        self.assertIn("tools enable proactivity --platform cron", calls)
+        self.assertNotIn("tools enable proactivity --platform cron", calls)
 
-    def test_summary_names_the_two_ways_to_approve_a_watch(self):
-        result = self.run_setup()
-        self.assertIn("/watch approve", result.stdout)
-        self.assertIn("button", result.stdout)
-
-    def test_bind_falls_back_to_configure_when_bind_rejects_the_timezone_flag(self):
+    def test_bind_falls_back_to_set_when_bind_rejects_the_timezone_flag(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -1730,7 +1573,7 @@ class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
             "--hermes-home", str(home), env=env_for(root, bin_dir, home), check=False)
         calls = read_log(log)
         self.assertIn("proactivity bind --session-key agent:main:telegram:dm:1\n", calls)
-        self.assertIn("proactivity configure", calls)
+        self.assertIn("proactivity set --timezone Europe/Berlin", calls)
 
 
 class ComputerProbeShimTests(unittest.TestCase):
@@ -1932,7 +1775,7 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
         for name in ("default", "alpha", "beta", "gamma", "quoted"):
             for needed in ("tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
                 self.assertIn("-p %s %s" % (name, needed), calls, (name, needed))
-        self.assertIn("-p default tools enable proactivity --platform cron", calls)
+        self.assertIn("-p default tools enable proactivity --platform telegram", calls)
         self.assertNotIn("proactivity --platform", calls.replace("-p default tools enable proactivity", ""))
         self.assertNotIn("-p botless tools disable browser", calls)
         self.assertNotIn("proactivity bind", calls)

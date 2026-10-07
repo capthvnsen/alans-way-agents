@@ -1,13 +1,15 @@
 name: alans-way
-version: "0.6.0"
-description: "Proactive primary bot for Hermes. The Mac app and machine setup are a separate repo; the workspace-setup skill walks the agent through them."
+version: "0.7.0"
+description: "Idle check-ins from your primary Hermes bot, plus the workspace browser skills. The desktop app is a separate repo; the workspace-setup skill walks the agent through it."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"
 requires_hermes: ">=0.21.5"
 tags:
   - proactivity
-  - orchestrator
   - workspace
 provides_tools:
-  - proactive_control
+  - proactivity
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call

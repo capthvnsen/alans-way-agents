@@ -101,7 +101,10 @@ different bot's route silently.
    restart`, or the supervisor that owns it), so never kill -9 a gateway
    mid-message. If the restart was skipped, a check failed: say which one.
 7. **Bind only after a real DM route exists.** If no routes are listed, the
-   user messages the bot once, then `setup.sh --bind`.
+   user messages the bot once, then `setup.sh --bind`. By hand:
+   `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
+   tune with `hermes proactivity set --settings '<json>'`, and check with
+   `hermes proactivity status`.
 
 ## Report, don't claim
 
@@ -110,8 +113,8 @@ output verbatim in your final message: plugin enabled, workspace browser block,
 browser host state, and any FAIL lines. "Installed" means the verify output
 says so, not that the commands ran without visible errors. After the gateway has
 restarted (the next time the user writes to you), run `setup.sh --verify` for a
-full audit of the running install. Remind the user that a proposed watch only runs once they approve it with the
-Telegram button or `/watch approve <id> <code>`, and that desktop control asks
+full audit of the running install. Remind the user that check-ins are on once bound and are
+tuned by talking to the bot ("stop checking in" pauses them), and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
 (offer that, never add it yourself). Tell the user that setup turned off Hermes'
 built-in browser toolset for Telegram so you use their workspace browser, and
