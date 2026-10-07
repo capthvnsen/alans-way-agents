@@ -389,16 +389,41 @@ class ToolTests(unittest.TestCase):
     def test_only_the_bound_chat_can_change_settings(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
         with patch.object(P, "caller_session_key", return_value="agent:main:telegram:dm:7"):
-            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))["ok"])
+            self.assertFalse(json.loads(p.tool({"action": "set", "level": "less"}))["ok"])
         with patch.object(P, "caller_session_key", return_value=KEY):
-            out = json.loads(p.tool({"action": "set", "settings": {"level": "less"}}))
+            out = json.loads(p.tool({"action": "set", "level": "less"}))
         self.assertTrue(out["ok"])
         self.assertEqual(out["level"], "less")
+
+    def test_set_takes_flat_fields_beside_action(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "level": "more", "timezone": "Asia/Tokyo",
+                                     "active_start": 9}))
+        self.assertTrue(out["ok"])
+        s = p.settings(p.load())
+        self.assertEqual((s.base_minutes, s.timezone, s.active_start), (60, "Asia/Tokyo", 9))
+
+    def test_a_set_with_no_fields_is_refused(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set"}))
+        self.assertEqual(out, {"ok": False, "error": "set needs at least one setting"})
+
+    def test_schema_exposes_the_six_fields_beside_action(self):
+        props = P.SCHEMA["parameters"]["properties"]
+        self.assertNotIn("settings", props)
+        for name in ("level", "base_minutes", "active_start", "active_end", "timezone", "paused_until"):
+            self.assertIn(name, props)
+        self.assertEqual(props["level"]["enum"], list(P.LEVELS))
+        self.assertEqual((props["base_minutes"]["minimum"], props["base_minutes"]["maximum"]), (15, 1440))
+        self.assertEqual(P.SCHEMA["parameters"]["required"], ["action"])
+        self.assertFalse(P.SCHEMA["parameters"]["additionalProperties"])
 
     def test_chat_cannot_go_below_15_minutes(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
         with patch.object(P, "caller_session_key", return_value=KEY):
-            self.assertFalse(json.loads(p.tool({"action": "set", "settings": {"base_minutes": 2}}))["ok"])
+            self.assertFalse(json.loads(p.tool({"action": "set", "base_minutes": 2}))["ok"])
 
     def test_an_unknown_action_is_an_error_not_a_status(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))

@@ -298,7 +298,10 @@ class Proactivity:
                 bound = self.load().get("session_key")
                 if not bound or caller_session_key() != bound:
                     return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
-                self.update(args.get("settings") or {})
+                changes = {k: v for k, v in args.items() if k != "action"}
+                if not changes:
+                    return json.dumps({"ok": False, "error": "set needs at least one setting"})
+                self.update(changes)
             elif args.get("action") != "status":
                 return json.dumps({"ok": False, "error": f"unknown action {args.get('action')!r}"})
             return json.dumps({"ok": True, **self.status()})
@@ -342,17 +345,12 @@ SCHEMA = {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {
             "action": {"type": "string", "enum": ["status", "set"]},
-            "settings": {
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    "level": {"type": "string", "enum": list(LEVELS)},
-                    "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
-                    "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
-                    "active_end": {"type": "integer", "minimum": 0, "maximum": 23},
-                    "timezone": {"type": "string"},
-                    "paused_until": {"type": "string"},
-                },
-            },
+            "level": {"type": "string", "enum": list(LEVELS)},
+            "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
+            "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
+            "active_end": {"type": "integer", "minimum": 0, "maximum": 23},
+            "timezone": {"type": "string"},
+            "paused_until": {"type": "string"},
         },
     },
 }
