@@ -35,7 +35,7 @@ refuses anything else.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
-git -C ~/alans-way-agents checkout 9e2b928241364fb23becea0419d9eb0db2e97fb6
+git -C ~/alans-way-agents checkout a47a613aa09c36b4925e7a3c0997087d6962d0e8
 ~/alans-way-agents/setup.sh --skip-plugin \
     --desktop-ref 07ff00787bb9246a689a7f6656bf2cd682474fb3 \
     --bot-id <numeric-telegram-bot-id> \
