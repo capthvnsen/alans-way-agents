@@ -1692,6 +1692,31 @@ workspace_for_profile() {
           && ok "computer_use toolset enabled for $platform (approval-gated; actions run through $COMPUTER_PLUGIN)" \
           || warn "could not enable computer_use for $platform: desktop input stays unavailable there (run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform)"
       done
+    else
+      # No provider to select (this Hermes lacks the pluggable API, or the
+      # install was skipped): the built-in computer_use toolset is the desktop
+      # input path and stays approval-gated, so it should be on. Setup <=0.6.0
+      # disabled it for every configured profile, and nothing records whose
+      # disable it was, so a profile carrying our workspace block gets it back
+      # exactly once per platform; the ledger keeps a user's later disable from
+      # being fought on every rerun.
+      if [ -n "$PROFILE" ]; then _cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+      else _cfg="${CONFIG:-$HERMES_HOME/config.yaml}"; fi
+      if [ "$(workspace_block_state "$_cfg")" != absent ]; then
+        _restored="$PROFILE_HOME/.alans-way-computer-use-restored"
+        for platform in telegram cron; do
+          if ! grep -qx "$platform" "$_restored" 2>/dev/null \
+              && hermes_p tools list --platform "$platform" 2>/dev/null \
+                 | grep -Eq "disabled[[:space:]]+computer_use([[:space:]]|$)"; then
+            if hermes_p tools enable computer_use --platform "$platform" >/dev/null 2>&1; then
+              printf '%s\n' "$platform" >> "$_restored" 2>/dev/null || true
+              ok "re-enabled computer_use for $platform (turn it off with: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform $platform)"
+            else
+              warn "computer_use is disabled for $platform but could not be re-enabled (run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform)"
+            fi
+          fi
+        done
+      fi
     fi
     warn_user_cua_driver
     # The workspace browser replaces Hermes' built-in browser tool: leaving both

@@ -58,7 +58,7 @@ sha = str((cat or {}).get("sha") or (cat or {}).get("pin") or "")
 print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
 # No catalog record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.6.1
+[ -n "$PIN" ] || PIN=v0.6.2
 git -C ~/alans-way-agents checkout "$PIN"
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
