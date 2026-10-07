@@ -1701,7 +1701,7 @@ def repo_with_computer_plugin(root: Path) -> Path:
 
 
 class IntegrationBase:
-    def run_setup(self, *flags, tools_fake=None, python_ok=True, config_get=""):
+    def run_setup(self, *flags, tools_fake=None, python_ok=True, config_get="", tools_list=""):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -1712,7 +1712,8 @@ class IntegrationBase:
         bin_dir = tooling(self.root, self.log)
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\n'
-             '  config) [ "$2" = get ] && { echo \'%s\'; };;\nesac\nexit 0\n' % (self.log, config_get))
+             '  tools) [ "$2" = list ] && { echo \'%s\'; };;\n'
+             '  config) [ "$2" = get ] && { echo \'%s\'; };;\nesac\nexit 0\n' % (self.log, tools_list, config_get))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
         self.env = env_for(self.root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         return run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
@@ -1863,6 +1864,45 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         result = self.run_setup("--keep-computer-use", python_ok=False)
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("tools disable computer_use", read_log(self.log))
+
+    def test_an_older_setups_disabled_computer_use_is_reenabled_without_the_provider_api(self):
+        result = self.run_setup(python_ok=False, tools_list="disabled computer_use")
+        calls = read_log(self.log)
+        self.assertIn("tools enable computer_use --platform telegram\n", calls)
+        self.assertIn("tools enable computer_use --platform cron\n", calls)
+        self.assertIn("re-enabled computer_use for telegram (turn it off with:"
+                      " hermes tools disable computer_use --platform telegram)", result.stdout)
+        self.assertIn("re-enabled computer_use for cron", result.stdout)
+
+    def test_an_enabled_computer_use_is_left_alone_without_the_provider_api(self):
+        self.run_setup(python_ok=False, tools_list="enabled computer_use")
+        self.assertNotIn("tools enable computer_use", read_log(self.log))
+        self.assertFalse((self.home / ".alans-way-computer-use-restored").exists())
+
+    def test_the_reenable_runs_once_so_a_users_later_disable_sticks(self):
+        # Nothing records whose `tools disable` it was, so the repair fires once
+        # per platform and is journaled: a disable that is still there on rerun
+        # is the user's choice after seeing the re-enabled line.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\n'
+             '  tools) [ "$2" = list ] && echo "disabled computer_use";;\nesac\nexit 0\n' % log)
+        fake(bin_dir, "hermes-python", "exit 1\n")
+        env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        script = repo_with_computer_plugin(root)
+        args = ["--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
+                "--hermes-home", str(home)]
+        run(*args, env=env, check=False, script=script)
+        run(*args, env=env, check=False, script=script)
+        calls = read_log(log)
+        self.assertEqual(calls.count("tools enable computer_use --platform telegram"), 1)
+        self.assertEqual(calls.count("tools enable computer_use --platform cron"), 1)
 
     def test_skipped_without_the_provider_api(self):
         result = self.run_setup(python_ok=False)
@@ -2072,6 +2112,16 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
             self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", text, name)
         _, _, kept = self.run_all("--keep-computer-use", python_ok=False)
         self.assertNotIn("tools disable computer_use", kept)
+
+    def test_an_older_setups_disabled_computer_use_is_reenabled_per_profile(self):
+        extra = ('  tools) [ "$2" = list ] && case "$P" in default|alpha) echo "disabled computer_use";; esac;;\n')
+        result, home, calls = self.run_all(python_ok=False, hermes_extra=extra)
+        for name in ("default", "alpha"):
+            for platform in ("telegram", "cron"):
+                self.assertIn("-p %s tools enable computer_use --platform %s\n" % (name, platform), calls)
+        self.assertNotIn("-p beta tools enable computer_use", calls)
+        self.assertIn("re-enabled computer_use for telegram (turn it off with:"
+                      " hermes -p alpha tools disable computer_use --platform telegram)", result.stdout)
 
     def test_allow_desktop_actions_opts_every_profile_in_only_without_the_provider_api(self):
         result, home, calls = self.run_all("--allow-desktop-actions", python_ok=False)
