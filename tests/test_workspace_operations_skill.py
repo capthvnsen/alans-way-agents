@@ -167,6 +167,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
         self.assertIn("Do multi-step work as one batch", self.normalized)
         self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
+        self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)
         self.assertIn("write no chat text between tool calls and send one short message when it is done", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
@@ -177,7 +178,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("Omit it for the default", self.normalized)
 
     def test_select_accepts_any_option_handle(self):
-        self.assertIn("`select` (an option by value, label, option or text)", self.normalized)
+        self.assertIn("`select` (an option by value, label, option, text or choice)", self.normalized)
 
     def test_the_extra_turn_rules_are_gone(self):
         for removed in [

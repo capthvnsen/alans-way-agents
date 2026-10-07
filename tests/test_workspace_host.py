@@ -47,8 +47,11 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
   if (m.method === 'tools/call') {
     calls += 1;
     if (mode === 'die-on-call' && calls >= 2) process.exit(1);
-    if (m.params.name === 'cua_alans_way_tabs')
-      return reply(m.id, JSON.stringify({ tabs: [{ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac' }] }));
+    if (m.params.name === 'cua_alans_way_tabs') {
+      const tabs = [{ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac' }];
+      if (process.env.MAC_PROXY_VM) tabs.push({ id: 'vm-tab-1', url: 'https://vm.example/proxied', host: 'vps' });
+      return reply(m.id, JSON.stringify({ tabs }));
+    }
     if (m.params.name === 'cua_alans_way_open')
       return reply(m.id, JSON.stringify({ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac' }));
   }
@@ -60,6 +63,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
 VM_STUB = r"""
 const fs = require('fs');
 fs.appendFileSync(process.env.VPS_LOG, 'ARGV ' + JSON.stringify(process.argv.slice(2)) + '\n');
+const mode = process.env.VM_MODE || 'ok';
 const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
   result: { content: [{ type: 'text', text }] } }) + '\n');
 require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
@@ -76,11 +80,21 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
     ] } }) + '\n');
   }
   if (m.method === 'tools/call') {
-    if (m.params.name === 'cua_alans_way_tabs')
-      return reply(m.id, JSON.stringify({ tabs: [{ id: 'vm-tab-1', url: 'https://vm.example/', host: 'vps' }] }));
+    if (mode === 'die') process.exit(1);
+    if (m.params.name === 'cua_alans_way_tabs') {
+      if (mode === 'hang-tabs') return;
+      const n = Number(process.env.VM_TABCOUNT || 1);
+      const tabs = [];
+      for (let i = 1; i <= n; i++)
+        tabs.push({ id: 'vm-tab-' + i, url: 'https://vm.example/' + 'x'.repeat(80) + i, host: 'vps' });
+      return reply(m.id, JSON.stringify({ tabs }));
+    }
     if (m.params.name === 'cua_alans_way_open')
       return reply(m.id, JSON.stringify({ id: 'vm-tab-1', url: (m.params.arguments || {}).url || 'https://vm.example/', host: 'vps' }));
-    if (m.params.name === 'cua_alans_way_action') return reply(m.id, 'vm-action');
+    if (m.params.name === 'cua_alans_way_action') {
+      if (mode === 'hang') return;
+      return reply(m.id, 'vm-action');
+    }
   }
   reply(m.id, 'vps');
 });
@@ -112,7 +126,8 @@ class ExplicitHostRoutingTests(unittest.TestCase):
             self.proc.communicate()
         self.tmp.cleanup()
 
-    def start(self, mac=True, mac_mode="ok"):
+    def start(self, mac=True, mac_mode="ok", vm_mode="ok", vm_tabs=1,
+              mac_proxy_vm=False, **extra_env):
         argv = [NODE, str(ROUTER), "--bot-id", "bot1",
                 "--vps-script", str(self.dir / "vm-stub.cjs"),
                 "--vps-connection", str(self.dir / "conn.json"),
@@ -122,7 +137,10 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         env = dict(os.environ, PATH=str(self.dir / "bin") + os.pathsep + os.environ["PATH"],
                    MAC_STUB=str(self.dir / "mac-stub.cjs"), MAC_MODE=mac_mode,
                    MAC_LOG=str(self.dir / "mac.log"), VPS_LOG=str(self.dir / "vm.log"),
-                   PROBE_DOWN=str(self.dir / "probe-down"))
+                   PROBE_DOWN=str(self.dir / "probe-down"),
+                   VM_MODE=vm_mode, VM_TABCOUNT=str(vm_tabs),
+                   MAC_PROXY_VM="1" if mac_proxy_vm else "")
+        env.update(extra_env)
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env)
@@ -136,9 +154,11 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.proc.stdin.flush()
         return msg.get("id")
 
-    def recv(self, timeout=15):
+    def recv(self, timeout=15, required=True):
         if not select.select([self.proc.stdout], [], [], timeout)[0]:
-            self.fail("no response within %ss" % timeout)
+            if required:
+                self.fail("no response within %ss" % timeout)
+            return None
         return json.loads(self.proc.stdout.readline())
 
     def text(self, msg):
@@ -209,6 +229,70 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         solo = self.call("cua_alans_way_tabs", {"host": "computer"})
         only = json.loads(self.text(self.recv()))
         self.assertEqual([t["id"] for t in only["tabs"]], ["mac-tab-1"])
+
+    def test_a_large_vm_tab_list_is_merged_not_leaked(self):
+        # 60 padded tabs put the VM connector's reply over the old 4000-byte
+        # gate: the internal wsr-tabs answer reached the client and the real
+        # request stalled until the call hard deadline failed the session over.
+        self.start(vm_tabs=60)
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        listing = self.call("cua_alans_way_tabs")
+        first = self.recv()
+        self.assertEqual(first["id"], listing)
+        self.assertNotIn("wsr-tabs-", str(first["id"]))
+        merged = json.loads(self.text(first))["tabs"]
+        hosts = {}
+        for tab in merged:
+            hosts.setdefault(tab["host"], []).append(tab["id"])
+        self.assertEqual(hosts.get("computer"), ["mac-tab-1"])
+        self.assertEqual(len(hosts.get("vm", [])), 60)
+        self.assertIsNone(self.recv(timeout=2, required=False))
+        self.assertIn('"wsr-tabs-%d"' % listing, self.log("vm.log"))
+
+    def test_tabs_merge_dedupes_vm_tabs_the_computer_app_proxies(self):
+        # The app lists its proxied VM tabs in /v1/tabs marked host:"vps"; the
+        # merged list must show such a tab once, under the VM backend's record.
+        self.start(mac_proxy_vm=True)
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        self.call("cua_alans_way_tabs")
+        merged = json.loads(self.text(self.recv()))["tabs"]
+        self.assertEqual(sorted(t["id"] for t in merged), ["mac-tab-1", "vm-tab-1"])
+        vm_tab = next(t for t in merged if t["id"] == "vm-tab-1")
+        self.assertEqual(vm_tab["host"], "vm")
+        self.assertNotIn("proxied", vm_tab["url"])
+
+    def test_a_wedged_vm_call_errors_at_the_hard_deadline(self):
+        self.start(vm_mode="hang", HERMES_ROUTER_CALL_HARD_MS="1500")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r1"})
+        msg = self.recv(timeout=10)
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertIn("VM browser", self.text(msg))
+        self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "vm")
+        status = self.call("cua_alans_way_status", {})
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served(answered)), (status, "mac"))
+
+    def test_a_merged_tabs_call_completes_when_the_vm_half_hangs(self):
+        self.start(vm_mode="hang-tabs", HERMES_ROUTER_CALL_HARD_MS="1500")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        listing = self.call("cua_alans_way_tabs")
+        merged = self.recv(timeout=10)
+        self.assertEqual(merged["id"], listing)
+        tabs = json.loads(self.text(merged))["tabs"]
+        self.assertEqual([(t["id"], t["host"]) for t in tabs], [("mac-tab-1", "computer")])
+        status = self.call("cua_alans_way_status", {})
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served(answered)), (status, "mac"))
 
     def test_host_computer_while_offline_is_a_clear_error(self):
         self.start(mac=False)

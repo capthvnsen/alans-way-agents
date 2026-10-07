@@ -169,7 +169,8 @@ the tab stays yours to keep working.
 3. Do multi-step work as one batch: `action=batch` runs up to 25 steps in
    order in a single call, stopping at the first error. Act, `wait` for the
    text or selector you expect (`{action:"wait", text:"Done", timeout:8000}`;
-   `selector`, `url`, and `visible:true` conditions also work), then finish
+   `selector`, `url`, and `visible:true` conditions also work, and
+   `gone:true` waits for the text or selector to disappear), then finish
    with `{action:"read"}` for the page text. The batch reply's `effect` is
    the state after the last step, so the whole run answers in one call. For
    a multi-step browser run, write no chat text between tool calls and send
@@ -193,7 +194,7 @@ the tab stays yours to keep working.
    `Accessibility.getFullAXTree` or `Network.enable` interception.
    Besides `click` and `type`, a tab takes `double_click`, `right_click`,
    `drag` (from `ref`, `selector`, or `x,y` to `toRef`, `toSelector`, or
-   `toX,toY`) and `select` (an option by value, label, option or text). A batch's
+   `toX,toY`) and `select` (an option by value, label, option, text or choice). A batch's
    `results[]` carry no url, title, generation, or tab: the tab appears once
    in the response. An element omits an empty name and
    the default type. A failed navigation says "Navigation failed: ERR_X."

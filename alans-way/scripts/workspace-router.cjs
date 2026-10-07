@@ -1301,11 +1301,11 @@ async function main() {
   // on the client's id: origId -> merge state, merge.vmId -> origId.
   const tabMerges = new Map();
 
-  function emitToolError(id, text) {
+  function emitToolError(id, text, note = annotate) {
     const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
     let out;
     try {
-      out = annotate(JSON.stringify(msg));
+      out = note(JSON.stringify(msg));
     } catch {
       out = JSON.stringify(msg);
     }
@@ -1316,6 +1316,24 @@ async function main() {
   function unbuffer(line) {
     const at = bufferedStdin.lastIndexOf(line);
     if (at >= 0) bufferedStdin.splice(at, 1);
+  }
+
+  // Initialize replies the router asked a backend for itself are matched by
+  // exact id, so a large response line is swallowed rather than leaked.
+  function swallowLine(line) {
+    if (!swallowIds.size) return false;
+    let id;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (id === undefined) return false;
+    } else {
+      try {
+        id = JSON.parse(line).id;
+      } catch {
+        return false;
+      }
+    }
+    return swallowIds.has(id);
   }
 
   function vmAlive() {
@@ -1374,11 +1392,29 @@ async function main() {
     if (!merge.mac || !merge.mac.result || merge.mac.result.isError || !Array.isArray((macData || {}).tabs)) {
       return merge.mac;
     }
-    const mark = (host) => (tab) => (tab && typeof tab === 'object' ? { ...tab, host } : tab);
-    const tabs = [
-      ...macData.tabs.map(mark('computer')),
-      ...((vmData && Array.isArray(vmData.tabs) ? vmData.tabs : [])).map(mark('vm')),
-    ];
+    // The computer app already lists the VM tabs it proxies (a VM host on the
+    // entry); the VM backend's own record wins and the tab lists once as "vm".
+    const vmList = vmData && Array.isArray(vmData.tabs) ? vmData.tabs : [];
+    const vmIds = new Set(vmList.map((tab) => tab && tab.id).filter((id) => typeof id === 'string'));
+    const seen = new Set();
+    const tabs = [];
+    const push = (tab, host) => {
+      if (!tab || typeof tab !== 'object') {
+        tabs.push(tab);
+        return;
+      }
+      if (typeof tab.id === 'string') {
+        if (seen.has(tab.id)) return;
+        seen.add(tab.id);
+      }
+      tabs.push({ ...tab, host });
+    };
+    for (const tab of macData.tabs) {
+      const proxied = tab && typeof tab === 'object' && normalizeHost(tab.host) === 'vm';
+      if (proxied && vmIds.has(tab.id)) continue;
+      push(tab, proxied ? 'vm' : 'computer');
+    }
+    for (const tab of vmList) push(tab, 'vm');
     return {
       jsonrpc: '2.0',
       id: origId,
@@ -1400,37 +1436,67 @@ async function main() {
   }
 
   // Both halves of a merged tabs call are held until the other backend
-  // answers.
+  // answers. The internal reply is matched by its exact id, so a VM tab list
+  // of any size reaches the merge and its wsr-tabs id never reaches the client.
   function mergeVmLine(line) {
-    if (line.length > 4000 || !line.includes('wsr-tabs-')) return false;
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return true;
+    let id;
+    let msg = null;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (typeof id !== 'string') return false;
+    } else {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      id = msg && msg.id;
+      if (typeof id !== 'string') return false;
     }
-    if (!msg || typeof msg.id !== 'string' || !msg.id.startsWith('wsr-tabs-')) return false;
-    const merge = tabMerges.get(tabMerges.get(msg.id));
+    if (!id.startsWith('wsr-tabs-')) return false;
+    const origId = tabMerges.get(id);
+    const merge = tabMerges.get(origId);
     // Cleared by a failover mid-merge: the replayed call answers on its own.
-    if (!merge) return true;
+    if (!merge || typeof merge !== 'object') return true;
+    if (!msg) {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        msg = {};
+      }
+    }
     merge.vm = msg;
-    if (merge.mac) emitTabsMerge(tabMerges.get(msg.id), merge);
+    if (merge.mac) emitTabsMerge(origId, merge);
     return true;
   }
 
   function mergeMacLine(line, callMs) {
-    if (!tabMerges.size || line.length > BIG_LINE) return false;
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return false;
+    if (!tabMerges.size) return false;
+    let id;
+    let msg = null;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (id === undefined || !tabMerges.has(id)) return false;
+    } else {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      id = msg && msg.id;
     }
-    const merge = msg && tabMerges.get(msg.id);
+    const merge = id != null && tabMerges.get(id);
     if (!merge || typeof merge !== 'object') return false;
+    if (!msg) {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        msg = {};
+      }
+    }
     merge.mac = msg;
     merge.ms = callMs;
-    if (merge.vm) emitTabsMerge(msg.id, merge);
+    if (merge.vm) emitTabsMerge(id, merge);
     return true;
   }
 
@@ -1448,7 +1514,7 @@ async function main() {
       .on('line', (line) => {
         if (c !== vmChild) return;
         touchActivity();
-        if (swallowIds.size && line.length < 4000 && line.includes('"id":"wsr-init-')) return;
+        if (swallowLine(line)) return;
         const callMs = noteServerRpc(line, pendingRequests);
         if (mergeVmLine(line)) return;
         learnVmTabs(line, true);
@@ -1508,7 +1574,7 @@ async function main() {
       || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
     if (!wantsVm && msg.params && msg.params.name === 'cua_alans_way_tabs' && activeHost !== 'vps' && vmAlive()) {
       unbuffer(line);
-      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined };
+      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now() };
       tabMerges.set(msg.id, merge);
       tabMerges.set(merge.vmId, msg.id);
       writeToChild(line);
@@ -1544,7 +1610,7 @@ async function main() {
       .on('line', (line) => {
         if (c !== activeChild) return;
         touchActivity();
-        if (swallowIds.size && line.length < 4000 && line.includes('"id":"wsr-init-')) return;
+        if (swallowLine(line)) return;
         if (host === 'mac') {
           // ssh is up but the app behind it is gone: the backend answers
           // every call with "browser unavailable". The first such error is the
@@ -1661,9 +1727,18 @@ async function main() {
       if (activeHost !== 'mac' || fellBack || shuttingDown) return;
       const now = Date.now();
       for (const [id, req] of pendingRequests) {
-        if (req.method !== 'tools/call' || req.via === 'vm') continue;
+        if (req.method !== 'tools/call') continue;
         const age = now - req.at;
         const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
+        if (req.via === 'vm') {
+          // There is no second fallback for the VM connector: a call it never
+          // answers gets a tool error at the hard deadline, not a failover.
+          if (age > hard) {
+            pendingRequests.delete(id);
+            emitToolError(id, 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
+          }
+          continue;
+        }
         if (age > hard) {
           failOver(`${hostName} call exceeded ${hard}ms`);
           return;
@@ -1677,6 +1752,13 @@ async function main() {
             else failOver(`${hostName} call open ${Date.now() - req.at}ms and the probe failed`);
           });
         }
+      }
+      // A merged tabs call whose VM half never arrived answers with the
+      // computer half alone rather than waiting out the client's timeout.
+      for (const [id, merge] of [...tabMerges]) {
+        if (typeof merge !== 'object' || merge.vm || !merge.mac || now - merge.at <= CALL_HARD_MS) continue;
+        merge.vm = {};
+        emitTabsMerge(id, merge);
       }
       const mac = freshMacState(macStateFile);
       if (mac && mac.state === 'offline' && Date.parse(mac.since) >= hostStartedAt - (hostStartedAt % 1000)) {
