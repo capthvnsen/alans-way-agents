@@ -19,7 +19,7 @@
 
 ## Global Constraints
 
-- Work in `/Users/alex/orca/workspaces/alans-way-agents/idle-nudge` on branch `capthvnsen/idle-nudge`.
+- Work in the `idle-nudge` worktree on branch `capthvnsen/idle-nudge`.
 - Stdlib only. No new dependencies. `requires_hermes: ">=0.21.5"` is unchanged. Every Hermes surface used below exists in the 0.21.5 release (`v2026.9.24`); verified on 2026-10-07. Do NOT use `post_gateway_admission` (canary only).
 - **Hermes plugin catalog rules** (https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission):
   - Public surfaces only: `register_*`, hooks, `ctx.state`, `ctx.inject_message`, and `gateway.session_context.get_session_env` (read only).
