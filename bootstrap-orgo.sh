@@ -203,23 +203,213 @@ EOF
     log "wrote $SUPERVISOR_CONF_DIR/hermes-gateway.conf"
 }
 
-# --- later steps ---------------------------------------------------------
+# --- step: alans-way -----------------------------------------------------
 
 step_alans_way() {
-    log "(alans-way install not yet implemented)"
+    # setup.sh only knows systemd units, LaunchAgents and Scheduled Tasks for
+    # the browser services; on Orgo (supervisord) we run it with
+    # --skip-services and install the same programs as supervisord confs.
+    local needs_supervisor=1
+    have systemctl && needs_supervisor=0
+    if [ -d "$HERMES_HOME/plugins/alans-way" ] \
+        && { [ "$needs_supervisor" = 0 ] \
+             || [ -f "$SUPERVISOR_CONF_DIR/alans-way.conf" ]; }; then
+        log "alans-way already installed"
+        return 0
+    fi
+    local flags="--non-interactive --repo-ref '$REPO_REF'"
+    if [ "$needs_supervisor" = 1 ]; then
+        flags="--non-interactive --skip-services --repo-ref '$REPO_REF'"
+    fi
+    run_sh "curl -fsSL '$SETUP_URL_BASE/$REPO_REF/setup.sh' | bash -s -- $flags"
+    if [ "$needs_supervisor" = 1 ]; then
+        alans_way_conf
+        run supervisorctl reread
+        run supervisorctl update
+    fi
 }
 
-step_tailscale() {
-    log "(tailscale install not yet implemented)"
+# Mirrors /etc/supervisor/conf.d/alans-way.conf on Alex's Orgo computer: the
+# two browser services setup.sh would install as systemd units on a normal
+# VPS. mac-watch is left out — there is no user computer to watch yet.
+alans_way_conf() {
+    local conf="$SUPERVISOR_CONF_DIR/alans-way.conf"
+    if [ -f "$conf" ]; then
+        log "alans-way.conf already exists"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would write $conf"
+        return 0
+    fi
+    local node desktop_dir
+    node="$(command -v node || echo /usr/bin/node)"
+    if [ "$(id -u)" = 0 ]; then
+        desktop_dir="/opt/hermes-alans-way/browser"
+    else
+        desktop_dir="$HOME/.local/share/hermes-alans-way/app"
+    fi
+    cat >"$conf" <<EOF
+; Written by bootstrap-orgo.sh — Orgo has supervisord, not systemd, so the
+; browser services setup.sh --skip-services skipped live here.
+[program:alans-way-chromium]
+command=$node $desktop_dir/desktop/scripts/vps-chromium-host.cjs
+environment=HOME="$HOME",DISPLAY=":99",HERMES_VPS_BROWSER_DATA="$HOME/.local/share/hermes-alans-way/browser"
+priority=40
+autorestart=unexpected
+redirect_stderr=true
+stdout_logfile=/var/log/alan-alans-way-chromium.log
+stdout_logfile_maxbytes=10MB
+
+[program:alans-way-browser]
+command=$node $desktop_dir/desktop/scripts/vps-browser-host.cjs serve
+environment=HOME="$HOME",DISPLAY=":99",HERMES_VPS_BROWSER_DATA="$HOME/.local/share/hermes-alans-way/browser"
+priority=41
+autorestart=unexpected
+exitcodes=78
+redirect_stderr=true
+stdout_logfile=/var/log/alan-alans-way-browser.log
+stdout_logfile_maxbytes=10MB
+EOF
+    log "wrote $conf"
 }
+
+# --- step: tailscale -----------------------------------------------------
+
+step_tailscale() {
+    if have tailscale; then
+        log "tailscale already installed: $(command -v tailscale)"
+    else
+        run_sh "curl -fsSL '$TAILSCALE_INSTALL_URL' | sh"
+    fi
+    tailscaled_conf
+    if have supervisorctl; then
+        run supervisorctl reread
+        run supervisorctl update
+    fi
+    if tailscale_backend_running; then
+        log "tailscale already connected"
+        return 0
+    fi
+    capture_login_url
+}
+
+tailscaled_conf() {
+    if grep -rl '^\[program:tailscaled\]' "$SUPERVISOR_CONF_DIR" >/dev/null 2>&1; then
+        log "tailscaled already defined under $SUPERVISOR_CONF_DIR"
+        return 0
+    fi
+    # Orgo VMs have no /dev/net/tun, so the daemon must run userspace.
+    local tun=""
+    [ -e /dev/net/tun ] || tun=" --tun=userspace-networking"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would write $SUPERVISOR_CONF_DIR/tailscaled.conf (tailscaled --state=$TAILSCALE_STATE_DIR/tailscaled.state$tun)"
+        return 0
+    fi
+    mkdir -p "$TAILSCALE_STATE_DIR"
+    cat >"$SUPERVISOR_CONF_DIR/tailscaled.conf" <<EOF
+; Written by bootstrap-orgo.sh — Orgo has no systemd unit for tailscaled.
+[program:tailscaled]
+command=tailscaled --state=$TAILSCALE_STATE_DIR/tailscaled.state$tun
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/alan-tailscaled.log
+stdout_logfile_maxbytes=10MB
+EOF
+    log "wrote $SUPERVISOR_CONF_DIR/tailscaled.conf"
+}
+
+tailscale_backend_running() {
+    tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("BackendState") == "Running" else 1)
+except Exception:
+    sys.exit(1)'
+}
+
+# `tailscale up` prints the login URL on stderr — sometimes only after a
+# delay — and then blocks until the computer is paired. Run it in the
+# background and grep its output for up to TAILSCALE_URL_TIMEOUT seconds.
+capture_login_url() {
+    local host="$ID"
+    [ -n "$host" ] || host="$(hostname 2>/dev/null || echo orgo)"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would run: tailscale up --hostname alan-$host --timeout=0 (background, poll ${TAILSCALE_URL_TIMEOUT}s for a login URL)"
+        if [ -n "$CALLBACK" ]; then
+            log "would POST {id, secret, url} to $CALLBACK"
+        else
+            log "would print the login URL"
+        fi
+        return 0
+    fi
+    local up_log="$STATE_DIR/.tailscale-up.$$.log"
+    tailscale up --hostname "alan-$host" --timeout=0 >"$up_log" 2>&1 &
+    local pid=$! deadline=$(( $(date +%s) + TAILSCALE_URL_TIMEOUT )) url=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        url="$(grep -oE "$LOGIN_URL_RE" "$up_log" 2>/dev/null | head -n 1 || true)"
+        [ -n "$url" ] && break
+        if ! kill -0 "$pid" 2>/dev/null; then
+            sleep 1
+            url="$(grep -oE "$LOGIN_URL_RE" "$up_log" 2>/dev/null | head -n 1 || true)"
+            [ -n "$url" ] && break
+            log "tailscale up exited without printing a login URL"
+            return 1
+        fi
+        sleep 1
+    done
+    if [ -z "$url" ]; then
+        kill "$pid" 2>/dev/null || true
+        log "no Tailscale login URL within ${TAILSCALE_URL_TIMEOUT}s"
+        return 1
+    fi
+    log "tailscale login URL: $url"
+    if [ -n "$CALLBACK" ]; then
+        local payload
+        payload="$(python3 - "$ID" "$SECRET" "$url" <<'PY'
+import json, sys
+print(json.dumps({"id": sys.argv[1], "secret": sys.argv[2], "url": sys.argv[3]}))
+PY
+)"
+        run_sh "curl -fsSL -X POST -H 'Content-Type: application/json' -d '$payload' '$CALLBACK'"
+        log "posted the login URL to the callback"
+    else
+        printf '%s\n' "$url"
+    fi
+}
+
+# --- step: ready ---------------------------------------------------------
 
 step_ready() {
     state ready waiting_for_pairing
 }
 
+# --wait-paired: poll until the tailnet reports BackendState=Running, then
+# record {state: ready, step: paired}.
 wait_paired() {
     CURRENT_STEP="wait_paired"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would poll tailscale status --json until BackendState=Running"
+        return 0
+    fi
     log "waiting for tailscale pairing"
+    local deadline=0 now
+    if [ "$WAIT_PAIRED_TIMEOUT" -gt 0 ]; then
+        deadline=$(( $(date +%s) + WAIT_PAIRED_TIMEOUT ))
+    fi
+    while :; do
+        if tailscale_backend_running; then
+            state ready paired
+            log "paired"
+            return 0
+        fi
+        now="$(date +%s)"
+        if [ "$deadline" -gt 0 ] && [ "$now" -ge "$deadline" ]; then
+            log "timed out waiting for tailscale pairing"
+            return 1
+        fi
+        sleep "$WAIT_PAIRED_INTERVAL"
+    done
 }
 
 main() {

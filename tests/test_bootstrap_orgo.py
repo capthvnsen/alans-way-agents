@@ -45,6 +45,7 @@ def fixture(directory: Path):
         "ALAN_STATE_DIR": str(directory / "state"),
         "ALAN_BIN_DIR": str(bin_dest),
         "SUPERVISOR_CONF_DIR": str(svconf),
+        "TAILSCALE_STATE_DIR": str(directory / "tailscale-state"),
         # System dirs only: the real hermes/curl/tailscale on this machine
         # must not leak into the script's view of the world.
         "PATH": os.pathsep.join([str(stub_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
@@ -75,7 +76,8 @@ EOF
     ;;
   *setup.sh*)
     mkdir -p "$HERMES_HOME/plugins/alans-way"
-    printf ':\\n'
+    # The piped script records the flags bash -s hands it.
+    printf 'echo "setup.sh: $*" >> "$STUB_LOG"\\n'
     ;;
   *) printf ':\\n';;
 esac
@@ -144,6 +146,142 @@ class StateFileTests(unittest.TestCase):
             self.assertEqual(order, sorted(order))
             self.assertIn("would run", out)
             self.assertFalse((directory / "state" / "state.json").exists())
+
+
+class InstallStepTests(unittest.TestCase):
+    def test_login_url_on_stderr_is_captured_and_posted_to_the_callback(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(
+                stub_bin, url="https://login.tailscale.com/a/abc123", url_stream="stderr")
+            result = run(
+                "--callback", "https://example.test/api/computer/tailscale-url",
+                "--secret", "s3cret", "--id", "c-42",
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0)
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("https://example.test/api/computer/tailscale-url", calls)
+            self.assertIn("https://login.tailscale.com/a/abc123", calls)
+            self.assertIn("s3cret", calls)
+            self.assertIn("c-42", calls)
+            self.assertIn("tailscale up --hostname alan-c-42", calls)
+
+    def test_login_url_printed_after_a_delay_on_stdout(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(
+                stub_bin, url="https://login.tailscale.com/a/zz99",
+                url_stream="stdout", up_extra="sleep 2")
+            result = run(env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("https://login.tailscale.com/a/zz99", result.stdout)
+
+    def test_no_login_url_within_the_timeout_marks_the_run_failed(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_TAILSCALE_URL_TIMEOUT"] = "2"
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="", up_extra="sleep 30")
+            result = run(env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "tailscale")
+            self.assertIn("login URL", doc["error"])
+
+    def test_tailscale_up_exiting_without_a_url_fails_fast(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_TAILSCALE_URL_TIMEOUT"] = "60"
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="")
+            result = run(env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "tailscale")
+
+    def test_rerun_does_not_reinstall_or_duplicate_supervisord_entries(self):
+        """A re-run after a tailscale-step failure resumes: hermes and
+        alans-way are not reinstalled and no conf file is written twice."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_TAILSCALE_URL_TIMEOUT"] = "2"
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="", up_extra="sleep 30")
+            first = run(env=env, check=False)
+            self.assertNotEqual(first.returncode, 0)
+            del env["ALAN_TAILSCALE_URL_TIMEOUT"]
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/re2")
+            second = run(env=env)
+            self.assertEqual(second.returncode, 0)
+            calls = log.read_text(encoding="utf-8")
+            self.assertEqual(calls.count("hermes-agent.nousresearch.com/install.sh"), 1)
+            setup_calls = [l for l in calls.splitlines()
+                           if l.startswith("curl ") and "setup.sh" in l]
+            self.assertEqual(len(setup_calls), 1)
+            confs = list((directory / "svconf").glob("*.conf"))
+            programs = "".join(c.read_text(encoding="utf-8") for c in confs)
+            self.assertEqual(programs.count("[program:hermes-gateway]"), 1)
+            self.assertEqual(programs.count("[program:tailscaled]"), 1)
+            self.assertEqual(programs.count("[program:alans-way-browser]"), 1)
+            self.assertIn("--skip-services", calls)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+
+    def test_orgos_own_gateway_program_is_reused_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            (directory / "svconf" / "orgo.conf").write_text(
+                "; orgo-generated — do not edit\n"
+                "[program:hermes-gateway]\n"
+                "command=/usr/local/bin/orgo-hermes-gateway\n",
+                encoding="utf-8",
+            )
+            bin_dest = directory / "sbin"
+            (bin_dest / "orgo-hermes-gateway").write_text("#!/bin/sh\n", encoding="utf-8")
+            (bin_dest / "orgo-hermes-gateway").chmod(0o755)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/x1")
+            result = run(env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
+            self.assertFalse((bin_dest / "alan-hermes-gateway").exists())
+            programs = "".join(
+                c.read_text(encoding="utf-8")
+                for c in (directory / "svconf").glob("*.conf"))
+            self.assertEqual(programs.count("[program:hermes-gateway]"), 1)
+
+    def test_tailscaled_uses_userspace_networking_without_dev_net_tun(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/x2")
+            run(env=env)
+            conf = (directory / "svconf" / "tailscaled.conf").read_text(encoding="utf-8")
+            self.assertIn("--tun=userspace-networking", conf)
+            self.assertIn("--state=", conf)
+
+    def test_wait_paired_writes_ready_paired(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            tailscale_stub(stub_bin, backend="Running")
+            result = run("--wait-paired", env=env)
+            self.assertEqual(result.returncode, 0)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+            self.assertEqual(doc["step"], "paired")
 
 
 if __name__ == "__main__":
