@@ -702,7 +702,7 @@ class WindowsGuestRouterTests(unittest.TestCase):
 
     def test_children_never_pop_a_console_window(self):
         source = ROUTER.read_text(encoding="utf-8")
-        self.assertEqual(source.count("windowsHide: true"), 3)
+        self.assertEqual(source.count("windowsHide: true"), 4)
 
     def test_the_watcher_probes_with_the_native_ssh_and_writes_state_under_the_profile(self):
         self.native_ssh.parent.mkdir(parents=True)

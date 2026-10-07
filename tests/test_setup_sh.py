@@ -278,9 +278,13 @@ class SkipPluginTests(unittest.TestCase):
             home = Path(directory) / "hermes_home"
             plugin_dir = home / "plugins" / "alans-way"
             plugin_dir.mkdir(parents=True)
+            # The recorded sha pins the clone too: record this checkout's HEAD.
+            head = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
             (home / "plugins" / ".install-metadata.json").write_text(
                 '{"alans-way": {"source": "catalog", "catalog": {"name": "alans-way", '
-                '"sha": "3a74614aa6ef43353500553526325c2fc33da9e5"}, "pinned": true}}',
+                '"sha": "%s"}, "pinned": true}}' % head,
                 encoding="utf-8",
             )
             log = Path(directory) / "log"
@@ -462,6 +466,95 @@ class PinAndListTests(unittest.TestCase):
         flags = ("--repo-ref", head, *flags[2:])
         result = run(*flags, env=env, check=False, script=script)
         self.assertIn("is at %s" % head, result.stdout)
+
+    def test_repo_ref_tag_must_resolve_to_the_checkout_commit(self):
+        env = self.setup_env()
+        repo = self.root / "repo"
+        shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
+        script = repo / "setup.sh"
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "x"], check=True)
+        subprocess.run([*git, "tag", "v9.9.9"], check=True)
+        subprocess.run([*git, "commit", "-qm", "unreviewed change", "--allow-empty"], check=True)
+        flags = ("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                 "--hermes-home", str(self.home))
+        # A clone that drifted past the tag's commit hard-stops.
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is not at --repo-ref v9.9.9", result.stdout)
+        # Back at the tag, the pin holds.
+        subprocess.run([*git, "checkout", "-q", "v9.9.9"], check=True)
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertIn("is at v9.9.9", result.stdout)
+        self.assertNotIn("is not at --repo-ref", result.stdout)
+
+    def make_git_repo(self):
+        repo = self.root / "repo"
+        shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "x"], check=True)
+        return repo / "setup.sh", git
+
+    def write_catalog_record(self, sha):
+        plugins = self.home / "plugins"
+        plugins.mkdir(parents=True, exist_ok=True)
+        (plugins / "alans-way").mkdir(exist_ok=True)
+        (plugins / ".install-metadata.json").write_text(
+            json.dumps({"alans-way": {"pinned": True, "revision": sha, "source": "catalog",
+                                      "catalog": {"name": "alans-way", "sha": sha}}}),
+            encoding="utf-8")
+
+    def test_a_catalog_record_pins_the_clone_to_the_reviewed_sha(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        self.write_catalog_record(head)
+        flags = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(self.home))
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertIn("is at %s" % head, result.stdout)
+        # Once the clone drifts off the recorded commit, setup hard-stops.
+        subprocess.run([*git, "commit", "-qm", "unreviewed change", "--allow-empty"], check=True)
+        result = run(*flags, env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is not at --repo-ref %s" % head, result.stdout)
+
+    def test_a_moved_tag_cannot_override_the_recorded_sha(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run([*git, "commit", "-qm", "moved", "--allow-empty"], check=True)
+        subprocess.run([*git, "tag", "v9.9.9"], check=True)  # the tag now sits past the pin
+        subprocess.run([*git, "checkout", "-q", head], check=True)
+        self.write_catalog_record(head)
+        # Passing the moved tag still resolves to the recorded sha, not the tag.
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertIn("--repo-ref v9.9.9 ignored", result.stdout)
+        self.assertIn("is at %s" % head, result.stdout)
+        self.assertNotIn("is not at --repo-ref", result.stdout)
+
+    def test_without_a_catalog_record_the_release_tag_is_the_pin(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        subprocess.run([*git, "tag", "v9.9.9"], check=True)
+        subprocess.run([*git, "commit", "-qm", "unreviewed change", "--allow-empty"], check=True)
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is not at --repo-ref v9.9.9", result.stdout)
+        self.assertNotIn("ignored", result.stdout)
+
+    def test_a_ref_that_cannot_be_resolved_stops_with_a_clear_error(self):
+        env = self.setup_env()
+        script, git = self.make_git_repo()
+        result = run("--repo-ref", "v9.9.9", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False, script=script)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot resolve --repo-ref v9.9.9", result.stdout)
 
 
 class DocFlagTests(unittest.TestCase):
@@ -671,7 +764,9 @@ class StockBrowserTests(unittest.TestCase):
     def test_disables_the_stock_browser_and_says_so(self):
         result, calls = self.setup_run()
         self.assertIn("tools disable browser --platform telegram", calls)
-        self.assertIn("built-in browser toolset disabled", result.stdout)
+        self.assertIn("tools disable browser --platform cron", calls)
+        self.assertIn("built-in browser toolset disabled for telegram", result.stdout)
+        self.assertIn("built-in browser toolset disabled for cron", result.stdout)
         self.assertIn("--keep-browser", result.stdout)
 
     def test_keep_browser_opts_out(self):
@@ -701,6 +796,26 @@ class StockBrowserTests(unittest.TestCase):
             self.assertNotIn("built-in 'browser' toolset still enabled", kept.stdout)
             plain = run("--verify", env=env_for(root, bin_dir, home), check=False)
             self.assertIn("built-in 'browser' toolset still enabled", plain.stdout)
+
+    def test_verify_checks_cron_for_the_stock_browser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            (home / "hooks" / "alans-way").mkdir(parents=True)
+            (home / "hooks" / "alans-way" / "handler.py").write_text("# stub\n", encoding="utf-8")
+            bin_dir = tooling(root, root / "log")
+            fake(bin_dir, "hermes", '[ "$1" = -p ] && shift 2\ncase "$1" in\n'
+                 '  --version) echo "hermes 0.21.5";;\n'
+                 '  plugins) [ "$2" = list ] && echo alans-way;;\n'
+                 '  tools) [ "$2" = list ] && case "$4" in\n'
+                 '    cron) echo "enabled browser"; echo "enabled proactivity";;\n'
+                 '    *) echo "enabled proactivity";;\n'
+                 '  esac;;\n'
+                 'esac\n')
+            result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+            self.assertIn("browser' toolset still enabled for cron", result.stdout)
+            self.assertIn("browser toolset disabled for telegram", result.stdout)
 
 
 class HostAddressTests(unittest.TestCase):
@@ -1255,6 +1370,35 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
 
+    def test_the_watcher_and_the_managed_block_run_the_installed_plugin_copy(self):
+        # With a catalog install the router Hermes loaded lives in the
+        # profile's plugins dir, not in this clone: services and the managed
+        # block must point there so the reviewed pin stays the only code that
+        # runs. The same holds under --skip-plugin.
+        plugins = self.home / "plugins"
+        catalog = plugins / "alans-way" / "scripts"
+        catalog.mkdir(parents=True)
+        router = catalog / "workspace-router.cjs"
+        router.write_text("// catalog copy\n", encoding="utf-8")
+        (plugins / ".install-metadata.json").write_text(
+            '{"alans-way": {"catalog": {"name": "alans-way", "sha": "3a74614"}}}', encoding="utf-8")
+        clone_router = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        env = env_for(self.root, self.bin_dir, self.home, **self.linux_root())
+        self.assertEqual(
+            run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net",
+                "--host-os", "linux", "--desktop-dir", str(self.app), "--non-interactive",
+                "--hermes-home", str(self.home), env=env, check=False).returncode, 0)
+        self.assertIn(str(router), (self.units / "mac-watch.service").read_text())
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn(str(router), block)
+        self.assertNotIn(str(clone_router), block)
+
+    def test_the_watcher_falls_back_to_the_clone_when_no_catalog_copy_exists(self):
+        self.run_setup("Linux", **self.linux_root())
+        watch = (self.units / "mac-watch.service").read_text()
+        self.assertIn(str(ROOT / "alans-way" / "scripts" / "workspace-router.cjs"), watch)
+
 
 FAKE_POWERSHELL = r"""script="$(cat)"
 printf '%s\n----\n' "$script" >> "$PS_LOG"
@@ -1773,7 +1917,10 @@ class ComputerProbeShimTests(unittest.TestCase):
         result, agent = self.run_shim()
         self.assertIn(str(agent / "venv" / "bin" / "python"), self.probe_log)
         self.assertNotIn("import", self.probe_log)
-        self.assertRegex(read_log(self.log), r"plugins install --force file://\S+#alans-way-computer")
+        calls = read_log(self.log)
+        self.assertRegex(calls, r"plugins install alans-way-computer\n")
+        self.assertNotRegex(calls, r"plugins install[^\n]*file://[^\n]*alans-way-computer")
+        self.assertNotRegex(calls, r"plugins install[^\n]*--force[^\n]*alans-way-computer")
 
     def test_no_python_to_be_found_skips_the_provider_without_running_the_shell(self):
         result, _ = self.run_shim(shim_dir_exists=False)
@@ -1791,26 +1938,61 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
     def test_installed_per_profile_and_selected_when_hermes_has_the_provider_api(self):
         self.run_setup("--profile", "work", python_ok=True)
         calls = read_log(self.log)
-        self.assertRegex(calls, r"-p work plugins install --force file://\S+#alans-way-computer")
+        self.assertIn("-p work plugins install alans-way-computer\n", calls)
+        self.assertNotRegex(calls, r"plugins install[^\n]*alans-way-computer[^\n]*--force")
+        self.assertNotRegex(calls, r"plugins install[^\n]*file://[^\n]*alans-way-computer")
         self.assertIn("-p work plugins enable alans-way-computer", calls)
         self.assertIn("-p work config set computer_use.backend alans-way-computer", calls)
-        self.assertLess(calls.index("plugins install"), calls.index("computer_use.backend"))
+        self.assertLess(calls.index("plugins install alans-way-computer"), calls.index("computer_use.backend"))
 
-    def test_without_the_provider_api_the_stock_computer_use_toolset_is_turned_off(self):
+    def test_the_dev_flag_installs_the_provider_from_the_clone(self):
+        result = self.run_setup("--dev-plugin-install", python_ok=True)
+        calls = read_log(self.log)
+        self.assertRegex(calls, r"-p default plugins install --force file://\S+#alans-way-computer\n")
+        self.assertIn("computer-use provider installed from", result.stdout)
+
+    def test_skip_plugin_skips_the_provider_install_entirely(self):
+        result = self.run_setup("--skip-plugin", python_ok=True)
+        calls = read_log(self.log)
+        self.assertNotIn("alans-way-computer", calls)
+        self.assertIn("computer-use provider (--skip-plugin", result.stdout)
+        self.assertNotIn("config set computer_use.backend", calls)
+
+    def test_without_the_provider_api_the_stock_computer_use_toolset_is_left_on(self):
         result = self.run_setup(python_ok=False)
         calls = read_log(self.log)
-        self.assertIn("-p default tools disable computer_use --platform telegram\n", calls)
-        self.assertIn("--keep-computer-use", result.stdout)
-        self.assertIn("tools enable computer_use --platform telegram", result.stdout)
+        self.assertNotIn("tools disable computer_use", calls)
+        # The managed block keeps the ungated desktop-input tool out.
+        config = (self.home / "config.yaml").read_text()
+        self.assertIn("- workspace_computer_action", config)
+        self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", config)
+
+    def test_allow_desktop_actions_opts_in_the_raw_tool_only_without_the_provider_api(self):
+        result = self.run_setup("--allow-desktop-actions", python_ok=False)
+        config = (self.home / "config.yaml").read_text()
+        self.assertNotIn("exclude:\n        - workspace_computer_action", config)
+        self.assertIn('HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"', config)
+        self.assertIn("command_allowlist", read_log(self.log))
+        # With the provider API the flag only seeds the allowlist: the
+        # ungated tool stays excluded.
+        result = self.run_setup("--allow-desktop-actions", python_ok=True)
+        config = (self.home / "config.yaml").read_text()
+        self.assertIn("- workspace_computer_action", config)
+        self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", config)
 
     def test_with_the_provider_api_the_toolset_is_left_to_the_provider(self):
         self.run_setup(python_ok=True)
-        self.assertNotIn("tools disable computer_use", read_log(self.log))
+        calls = read_log(self.log)
+        self.assertNotIn("tools disable computer_use", calls)
+        # An older setup that disabled the gated toolset is repaired so the
+        # provider's desktop input path is live.
+        self.assertIn("-p default tools enable computer_use --platform telegram\n", calls)
+        self.assertIn("-p default tools enable computer_use --platform cron\n", calls)
 
-    def test_keep_computer_use_leaves_the_stock_toolset_on(self):
+    def test_keep_computer_use_is_a_deprecated_noop(self):
         result = self.run_setup("--keep-computer-use", python_ok=False)
+        self.assertEqual(result.returncode, 0)
         self.assertNotIn("tools disable computer_use", read_log(self.log))
-        self.assertIn("--keep-computer-use", result.stdout)
 
     def test_skipped_without_the_provider_api(self):
         result = self.run_setup(python_ok=False)
@@ -1850,6 +2032,35 @@ class ComputerProviderTests(IntegrationBase, unittest.TestCase):
         result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
         self.assertIn("computer-use doctor", read_log(log))
         self.assertRegex(result.stdout, r"FAIL .*computer")
+
+    def test_verify_audits_the_block_exclusion_even_when_the_provider_is_selected(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$*" in\n'
+             '  "--version") echo "hermes 0.21.5";;\n  "config get computer_use.backend") echo alans-way-computer;;\n'
+             '  "computer-use doctor") exit 0;;\nesac\nexit 0\n' % log)
+        # A managed block that predates the exclusion must be flagged even with
+        # the provider backend selected; only a block-scoped exclusion counts.
+        (home / "config.yaml").write_text(
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    # workspace_computer_action mentioned in a comment\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+        self.assertIn("does not exclude workspace_computer_action", result.stdout)
+        self.assertIn("computer-use doctor", read_log(log))
+        (home / "config.yaml").write_text(
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    tools:\n      exclude:\n        - workspace_computer_action\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        result = run("--verify", "--skip-browser", env=env_for(root, bin_dir, home), check=False)
+        self.assertIn("ungated desktop input excluded from workspace_browser", result.stdout)
 
     def test_the_approval_allowlist_is_only_seeded_on_request(self):
         result = self.run_setup()
@@ -1900,7 +2111,7 @@ class AllProfilesHarness(IntegrationBase):
         bin_dir = tooling(root, log)
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\nP=default; [ "$1" = -p ] && { P="$2"; shift 2; }\ncase "$1" in\n'
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };\n'
-             '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *--force*) ;; *) echo BLOCKED community source >&2; exit 1;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
+             '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *file://*) case "$*" in *--force*) ;; *) echo BLOCKED community source >&2; exit 1;; esac;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
         env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         self.env, self.root = env, root
@@ -1930,7 +2141,8 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
     def test_each_profile_gets_the_per_profile_work_but_only_the_primary_is_bound(self):
         result, home, calls = self.run_all()
         for name in ("default", "alpha", "beta", "gamma", "quoted"):
-            for needed in ("tools disable browser --platform telegram", "config set computer_use.backend alans-way-computer"):
+            for needed in ("tools disable browser --platform telegram", "tools disable browser --platform cron",
+                           "config set computer_use.backend alans-way-computer"):
                 self.assertIn("-p %s %s" % (name, needed), calls, (name, needed))
         self.assertIn("-p default tools enable proactivity --platform cron", calls)
         self.assertNotIn("proactivity --platform", calls.replace("-p default tools enable proactivity", ""))
@@ -1963,7 +2175,7 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertNotRegex(calls, r"-p beta plugins install \S+#alans-way\n")
         self.assertNotRegex(calls, r"-p beta plugins install --force \S+#alans-way\n")
 
-    def test_a_provider_install_is_forced_unless_the_profile_has_a_catalog_install(self):
+    def test_the_provider_installs_by_catalog_name_and_respects_catalog_installs(self):
         def layout(home):
             self.layout(home)
             plugins = home / "profiles" / "beta" / "plugins"
@@ -1971,18 +2183,38 @@ class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
             (plugins / ".install-metadata.json").write_text(
                 '{"alans-way-computer": {"catalog": {"name": "alans-way-computer", "sha": "3a74614"}}}', encoding="utf-8")
         result, home, calls = self.run_all(layout=layout)
-        self.assertRegex(calls, r"-p alpha plugins install --force file://\S+#alans-way-computer\n")
+        self.assertIn("-p alpha plugins install alans-way-computer\n", calls)
+        self.assertNotRegex(calls, r"plugins install[^\n]*alans-way-computer[^\n]*--force")
+        self.assertNotRegex(calls, r"plugins install[^\n]*file://[^\n]*alans-way-computer")
         self.assertIn("-p alpha config set computer_use.backend alans-way-computer", calls)
-        self.assertNotRegex(calls, r"-p beta plugins install [^\n]*alans-way-computer")
+        # beta's provider is a catalog install: never installed over, still selected.
+        self.assertNotRegex(calls, r"-p beta plugins install[^\n]*alans-way-computer")
+        self.assertIn("-p beta config set computer_use.backend alans-way-computer", calls)
 
-    def test_without_the_provider_api_every_profile_loses_the_stock_computer_use_toolset(self):
+    def test_without_the_provider_api_computer_use_stays_on_and_input_stays_gated(self):
         result, home, calls = self.run_all(python_ok=False)
-        for name in ("default", "alpha", "beta", "gamma", "quoted"):
-            self.assertIn("-p %s tools disable computer_use --platform telegram\n" % name, calls, name)
-        self.assertNotIn("-p botless tools disable computer_use", calls)
+        self.assertNotIn("tools disable computer_use", calls)
         self.assertNotIn("config set computer_use.backend", calls)
+        for name in (None, "alpha", "beta", "gamma", "quoted"):
+            config = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("- workspace_computer_action", text, name)
+            self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", text, name)
         _, _, kept = self.run_all("--keep-computer-use", python_ok=False)
         self.assertNotIn("tools disable computer_use", kept)
+
+    def test_allow_desktop_actions_opts_every_profile_in_only_without_the_provider_api(self):
+        result, home, calls = self.run_all("--allow-desktop-actions", python_ok=False)
+        for name in ("alpha", "beta", "gamma", "quoted"):
+            text = (home / "profiles" / name / "config.yaml").read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"', text, name)
+        self.assertNotIn("tools disable computer_use", calls)
+        # With the provider API the flag only seeds the allowlist.
+        result, home, calls = self.run_all("--allow-desktop-actions")
+        text = (home / "config.yaml").read_text(encoding="utf-8")
+        self.assertIn("- workspace_computer_action", text)
+        self.assertNotIn("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", text)
+        self.assertIn("command_allowlist", calls)
 
     def test_a_users_cua_driver_server_is_kept_and_warned_about_once_per_profile(self):
         def layout(home):
@@ -2101,21 +2333,37 @@ class VerifyAllProfilesTests(AllProfilesHarness, unittest.TestCase):
         self.assertIn("profile botless has no Telegram bot of its own", out)
         self.assertIn("profile aaa-bad was not checked: config.yaml is not valid UTF-8 text", out)
         self.assertIn("browser' toolset still enabled for telegram in profile beta", out)
+        self.assertIn("browser' toolset still enabled for cron in profile beta", out)
         self.assertRegex(out, r"FAIL .*hermes -p alpha computer-use doctor")
         self.assertNotRegex(out, r"FAIL .*-p beta computer-use")
         keep = run("--verify", "--keep-browser", "--hermes-home", str(self.root / "home"), env=self.env, check=False, script=self.script)
         self.assertNotIn("still enabled for telegram in profile", keep.stdout)
 
-    def test_verify_checks_the_stock_computer_use_toolset_when_the_provider_is_not_selected(self):
-        extra = ('  tools) [ "$2" = list ] && { [ "$P" = beta ] && echo "enabled computer_use"; echo "enabled proactivity"; };;\n'
-                 '  config) [ "$2" = get ] && echo "";;')
-        self.run_all(hermes_extra=extra)
+    def test_verify_flags_a_workspace_block_that_still_exposes_desktop_input(self):
+        # The provider backend is not selected, so verify inspects each
+        # profile's managed block for the desktop-input exclusion instead.
+        extra = '  config) [ "$2" = get ] && echo "";;'
+        self.run_all(python_ok=False, hermes_extra=extra)
         verify = lambda *flags: run("--verify", *flags, "--hermes-home", str(self.root / "home"),
                                    env=self.env, check=False, script=self.script).stdout
         out = verify()
-        self.assertIn("computer_use' toolset still enabled for telegram in profile beta", out)
-        self.assertRegex(out, r"ok   .*computer_use toolset disabled for telegram in profile alpha")
-        self.assertNotIn("computer_use' toolset still enabled", verify("--keep-computer-use"))
+        # run_all wrote the managed block with the exclusion everywhere.
+        for name in ("alpha", "beta", "gamma", "quoted"):
+            self.assertIn("ungated desktop input excluded from workspace_browser in profile %s" % name, out)
+        self.assertNotIn("does not exclude workspace_computer_action", out)
+        # Strip the exclusion from one profile and verify flags it.
+        beta = self.root / "home" / "profiles" / "beta" / "config.yaml"
+        beta.write_text(beta.read_text().replace(
+            "    tools:\n      exclude:\n        - workspace_computer_action\n", ""), encoding="utf-8")
+        self.assertIn("does not exclude workspace_computer_action", verify())
+        # The explicit opt-in marker is reported as deliberate, not an error.
+        gamma = self.root / "home" / "profiles" / "gamma" / "config.yaml"
+        gamma.write_text(gamma.read_text().replace(
+            "# <<< alans-way workspace_browser managed block <<<",
+            '      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"\n'
+            "# <<< alans-way workspace_browser managed block <<<"), encoding="utf-8")
+        self.assertIn("workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions) in profile gamma",
+                      verify())
 
 
 class AgentSshReuseTests(unittest.TestCase):

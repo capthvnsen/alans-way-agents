@@ -42,7 +42,9 @@
 //   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_HOST_OS,
 //   HERMES_WORKSPACE_MAC_NODE, HERMES_WORKSPACE_MAC_MCP,
 //   HERMES_WORKSPACE_VPS_MCP, HERMES_WORKSPACE_CONNECTION,
-//   HERMES_MAC_STATE_FILE.
+//   HERMES_MAC_STATE_FILE, HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS
+//   (exposes workspace_computer_action again: only setup-workspace.sh
+//   --allow-desktop-actions or the alans-way-computer provider sets it).
 // With no Mac ssh configured the router always serves the local VPS host.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -292,11 +294,33 @@ const READ_ONLY_TOOLS = new Set([
   'workspace_computer_menu',
 ]);
 
+// Desktop input is ungated at the MCP layer (this server carries no trust
+// key), so workspace_computer_action is hidden from tools/list and refused
+// unless the operator opted in: setup-workspace.sh --allow-desktop-actions
+// writes HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS into the managed block, and
+// the alans-way-computer provider sets it on its own private router child
+// (Hermes's computer_use approval gate sits above that path). The read-only
+// computer tools above stay exposed either way.
+const DESKTOP_INPUT_TOOL = 'workspace_computer_action';
+const desktopActionsAllowed = !['', '0', 'false', 'no'].includes(
+  (process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '').trim().toLowerCase());
+
 function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
   return Boolean(
     mac && mac.state === 'online' && onlineStreak >= 2 && pendingSize === 0
       && now - lastActivity > idleMs,
   );
+}
+
+// cua_alans_way_open's host: the shared alias table (the app keeps the same
+// list in desktop/src/core.cjs). Anything unrecognized means "no host asked".
+function normalizeHost(value) {
+  if (typeof value !== 'string') return undefined;
+  const host = value.trim().toLowerCase();
+  if (host === 'computer' || host === 'mac' || host === 'windows' || host === 'linux'
+    || host === 'local' || host === 'pc') return 'computer';
+  if (host === 'vm' || host === 'vps' || host === 'remote' || host === 'server') return 'vm';
+  return undefined;
 }
 
 // Non-interactive ssh never loads Homebrew's PATH, so a bare `node` is
@@ -789,11 +813,53 @@ function continuationNotice(c, label = 'Mac') {
 
 const workspaceMeta = (host, mac, ms) => (ms === undefined ? { host, mac } : { host, mac, ms });
 
+// Older connectors still declare open's `host` as Ignored; the router routes
+// it now, so the advertised schema says what it does.
+function rewriteOpenHost(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    const props = tool && tool.name === 'cua_alans_way_open' && tool.inputSchema && tool.inputSchema.properties;
+    if (props && typeof props === 'object') {
+      props.host = { type: 'string', description: '"computer" or "vm"; omit for the default.' };
+    }
+  }
+}
+
+// action and snapshot no longer demand tabId and epoch on every call: the
+// router fills in the tab the agent last used and the epoch that backend last
+// returned. Older connectors still require both, so the advertised schema is
+// rewritten here the same way open's host is.
+function rewriteTabDefaults(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    if (!tool || (tool.name !== 'cua_alans_way_action' && tool.name !== 'cua_alans_way_snapshot')) continue;
+    const schema = tool.inputSchema;
+    if (schema && Array.isArray(schema.required)) {
+      schema.required = schema.required.filter((key) => key !== 'tabId' && key !== 'epoch');
+    }
+    const props = schema && schema.properties;
+    if (!props || typeof props !== 'object') continue;
+    for (const key of ['tabId', 'epoch']) {
+      const prop = props[key];
+      if (prop && typeof prop === 'object') {
+        prop.description = `${prop.description ? `${prop.description} ` : ''}Optional: defaults to the tab you last used.`;
+      }
+    }
+  }
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
 function annotateResult(msg, host, mac, notice, ms) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
+  rewriteOpenHost(msg.result);
+  rewriteTabDefaults(msg.result);
+  if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
+    msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
+  }
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
@@ -1104,7 +1170,9 @@ async function main() {
     const lost = [];
     const replay = [];
     const reads = [];
+    tabMerges.clear();
     for (const [id, req] of pendingRequests) {
+      if (req.via === 'vm') continue;
       if (req.method !== 'tools/call') replay.push(req);
       else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
       else lost.push({ id, at: req.at });
@@ -1228,7 +1296,10 @@ async function main() {
         else answerLost(notice);
       }
       holdCalls = false;
-      for (const line of heldCalls.splice(0)) writeToChild(line);
+      for (const line of heldCalls.splice(0)) {
+        const forwarded = routeToolCall(line);
+        if (forwarded !== null) writeToChild(forwarded);
+      }
     };
     if (lost.length) {
       const wait = Math.max(1000, Math.min(...lost.map((l) => l.at)) + 105000 - Date.now());
@@ -1259,6 +1330,502 @@ async function main() {
     } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
   }
 
+  // A second, lazily started connector to this machine's own browser host —
+  // the same script and connection as the failover backend — serves explicit
+  // host:"vm" work while the computer backend stays the default. VM work
+  // never travels through the user's computer. Once a session has failed
+  // over, the active backend already is the VM browser and no second
+  // connector is spawned.
+  let vmChild = null;
+  const vmAnnotate = safeAnnotator('vm');
+  const vmTabs = new Set();
+  // cua_alans_way_tabs while both backends run is answered by each and merged
+  // on the client's id: origId -> merge state, merge.vmId -> origId.
+  const tabMerges = new Map();
+
+  // A call the router answered itself (hard deadline, connector death) can
+  // still have a copy running on the VM connector. Its late reply must never
+  // reach the client as a second response for the same id.
+  const deadIds = new Set();
+  const deadOrder = [];
+  function noteDead(id) {
+    if (id == null || deadIds.has(id)) return;
+    deadIds.add(id);
+    deadOrder.push(id);
+    if (deadOrder.length > 200) deadIds.delete(deadOrder.shift());
+  }
+  function deadReplyLine(line) {
+    let id;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+    } else {
+      try {
+        const msg = JSON.parse(line);
+        id = msg && msg.id;
+      } catch {
+        return false;
+      }
+    }
+    return id !== undefined && deadIds.has(id);
+  }
+
+  function emitToolError(id, text, note = annotate) {
+    const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
+    let out;
+    try {
+      out = note(JSON.stringify(msg));
+    } catch {
+      out = JSON.stringify(msg);
+    }
+    process.stdout.write(`${out}\n`);
+  }
+
+  // A consumed line must not also replay onto the failover backend.
+  function unbuffer(line) {
+    const at = bufferedStdin.lastIndexOf(line);
+    if (at >= 0) bufferedStdin.splice(at, 1);
+  }
+
+  // Initialize replies the router asked a backend for itself are matched by
+  // exact id, so a large response line is swallowed rather than leaked.
+  function swallowLine(line) {
+    if (!swallowIds.size) return false;
+    let id;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (id === undefined) return false;
+    } else {
+      try {
+        id = JSON.parse(line).id;
+      } catch {
+        return false;
+      }
+    }
+    return swallowIds.has(id);
+  }
+
+  function vmAlive() {
+    return Boolean(vmChild && vmChild.exitCode === null);
+  }
+
+  // A tab a backend closed on its own (the VM reaper reports them under
+  // closedTabs on open replies) is forgotten everywhere, so a defaulted call
+  // never injects a dead tab and an id is never routed to a tab that is gone.
+  function forgetTab(id) {
+    if (typeof id !== 'string') return;
+    knownTabs.delete(id);
+    vmTabs.delete(id);
+    if (currentTabId === id) currentTabId = '';
+  }
+
+  function forgetClosedTabs(data) {
+    if (!data || !Array.isArray(data.closedTabs)) return;
+    for (const tab of data.closedTabs) {
+      forgetTab(typeof tab === 'string' ? tab : tab && (tab.tabId || tab.id));
+    }
+  }
+
+  // A tab id the VM browser is known to own: learned from the VM connector's
+  // open results and from tab-list entries that carry a VM host.
+  function learnVmTabData(data, assumeVm) {
+    if (!data || typeof data !== 'object') return;
+    const listed = Array.isArray(data.tabs) ? data.tabs : data.id !== undefined ? [data] : [];
+    for (const tab of listed) {
+      if (!tab || typeof tab.id !== 'string' || !/^[\w-]{1,100}$/.test(tab.id)) continue;
+      if (assumeVm || normalizeHost(tab.host) === 'vm') vmTabs.add(tab.id);
+    }
+    forgetClosedTabs(data);
+  }
+
+  function learnVmTabs(line, assumeVm) {
+    if (line.length > BIG_LINE) return;
+    // Keys inside a text part arrive escaped (\"host\"), so match bare words.
+    if (!line.includes('tabs') && !line.includes('host')) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const parts = msg && msg.result && msg.result.content;
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      if (!part || part.type !== 'text' || typeof part.text !== 'string' || !part.text.includes('"id"')) continue;
+      try {
+        learnVmTabData(JSON.parse(part.text), assumeVm);
+      } catch { /* a result that is not JSON teaches nothing */ }
+    }
+  }
+
+  function textResultData(msg) {
+    const parts = msg && msg.result && msg.result.content;
+    const part = Array.isArray(parts) && parts.find((p) => p && p.type === 'text');
+    try {
+      return part ? JSON.parse(part.text) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The tab the agent last worked in, and the newest epoch each backend
+  // itself returned for every tab it has named. Action and snapshot calls
+  // that leave out tabId or epoch get these values injected, which is what
+  // lets the advertised schema mark them optional. An epoch is never
+  // invented or bumped: a stale one still fails at the backend after a human
+  // takeover instead of being silently repaired.
+  const knownTabs = new Map(); // tabId -> { backend: 'computer'|'vm', epoch?: number }
+  let currentTabId = '';
+  const CURRENT_TAB_TOOLS = new Set([
+    'cua_alans_way_open',
+    'cua_alans_way_snapshot',
+    'cua_alans_way_action',
+  ]);
+  const TAB_DEFAULTED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_snapshot']);
+  const TAB_ID = /^[\w-]{1,100}$/;
+
+  function noteKnownTab(id, epoch, backend) {
+    if (typeof id !== 'string' || !TAB_ID.test(id)) return;
+    if (backend === 'vm') vmTabs.add(id);
+    const prev = knownTabs.get(id);
+    knownTabs.set(id, { backend, epoch: Number.isInteger(epoch) ? epoch : prev && prev.epoch });
+  }
+
+  // Every reply shape that names a tab: open and claim answers carry it at
+  // top level, snapshot/action answers under `tab`, a tabs list has an entry
+  // per tab, and a call retargeted onto a VPS tab names it in continuedTab.
+  function learnTabData(data, backend) {
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.tabs)) {
+      for (const tab of data.tabs) {
+        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend);
+      }
+    }
+    if (data.tab && typeof data.tab === 'object') {
+      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend);
+    }
+    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend);
+    if (typeof data.continuedTab === 'string') noteKnownTab(data.continuedTab, data.continuedEpoch, 'vm');
+    forgetClosedTabs(data);
+  }
+
+  // The pending request a reply line answers, without consuming it — big
+  // replies get their id from the fast scanner, like noteServerRpc.
+  function pendingRequestFor(line) {
+    if (line.length > BIG_LINE) {
+      const id = bigLineId(line);
+      return id === undefined ? undefined : pendingRequests.get(id);
+    }
+    try {
+      return pendingRequests.get(JSON.parse(line).id);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function argsTabId(req) {
+    try {
+      return (JSON.parse(req.line).params.arguments || {}).tabId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // A successful open, snapshot or action makes its tab the current one; the
+  // reply's own id wins, then a retargeted continued tab, then the id the
+  // call named. A successful close forgets its tab entirely.
+  function learnTabUse(line, req, backend) {
+    if (line.length > BIG_LINE || !req || req.method !== 'tools/call') return;
+    let data;
+    try {
+      const msg = JSON.parse(line);
+      if (!msg || msg.id == null || !msg.result || msg.result.isError) return;
+      data = textResultData(msg);
+    } catch {
+      return;
+    }
+    learnTabData(data, backend);
+    if (req.name === 'cua_alans_way_close' && data && data.closed) {
+      forgetTab(argsTabId(req));
+      return;
+    }
+    if (!CURRENT_TAB_TOOLS.has(req.name)) return;
+    const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
+    if (typeof used === 'string' && TAB_ID.test(used)) {
+      noteKnownTab(used, undefined, backend);
+      currentTabId = used;
+    }
+  }
+
+  // Fill in what the agent may omit: the current tab (which routes the call
+  // to whichever backend owns it) and that tab's latest backend-reported
+  // epoch. Supplied values are never overwritten; with no known tab the call
+  // passes through unchanged so the backend answers its own error.
+  function injectTabDefaults(msg) {
+    const params = msg && msg.params;
+    if (!params || !TAB_DEFAULTED_TOOLS.has(params.name)) return false;
+    if (params.arguments === undefined) params.arguments = {};
+    const args = params.arguments;
+    if (typeof args !== 'object' || args === null) return false;
+    let changed = false;
+    if (typeof args.tabId !== 'string' || !args.tabId) {
+      if (!currentTabId) return false;
+      args.tabId = currentTabId;
+      changed = true;
+    }
+    if (args.epoch === undefined) {
+      const known = knownTabs.get(args.tabId);
+      if (known && Number.isInteger(known.epoch)) {
+        args.epoch = known.epoch;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  // The merged tabs answer keeps the computer's result shape and marks each
+  // tab's host. A VM half that never arrived (or errored) simply contributes
+  // no tabs.
+  function mergedTabsResult(origId, merge) {
+    const macData = textResultData(merge.mac);
+    const vmData = textResultData(merge.vm);
+    learnVmTabData(macData, false);
+    learnVmTabData(vmData, true);
+    learnTabData(macData, 'computer');
+    learnTabData(vmData, 'vm');
+    if (!merge.mac || !merge.mac.result || merge.mac.result.isError || !Array.isArray((macData || {}).tabs)) {
+      return merge.mac;
+    }
+    // The computer app already lists the VM tabs it proxies (a VM host on the
+    // entry); the VM backend's own record wins and the tab lists once as "vm".
+    const vmList = vmData && Array.isArray(vmData.tabs) ? vmData.tabs : [];
+    const vmIds = new Set(vmList.map((tab) => tab && tab.id).filter((id) => typeof id === 'string'));
+    const seen = new Set();
+    const tabs = [];
+    const push = (tab, host) => {
+      if (!tab || typeof tab !== 'object') {
+        tabs.push(tab);
+        return;
+      }
+      if (typeof tab.id === 'string') {
+        if (seen.has(tab.id)) return;
+        seen.add(tab.id);
+      }
+      tabs.push({ ...tab, host });
+    };
+    for (const tab of macData.tabs) {
+      const proxied = tab && typeof tab === 'object' && normalizeHost(tab.host) === 'vm';
+      if (proxied && vmIds.has(tab.id)) continue;
+      push(tab, proxied ? 'vm' : 'computer');
+    }
+    for (const tab of vmList) push(tab, 'vm');
+    return {
+      jsonrpc: '2.0',
+      id: origId,
+      result: { ...merge.mac.result, content: [{ type: 'text', text: JSON.stringify({ ...macData, tabs }) }] },
+    };
+  }
+
+  function emitTabsMerge(origId, merge) {
+    tabMerges.delete(origId);
+    tabMerges.delete(merge.vmId);
+    const merged = mergedTabsResult(origId, merge);
+    let out;
+    try {
+      out = annotate(JSON.stringify(merged), merge.ms);
+    } catch {
+      out = JSON.stringify(merged);
+    }
+    process.stdout.write(`${out}\n`);
+  }
+
+  // Both halves of a merged tabs call are held until the other backend
+  // answers. The internal reply is matched by its exact id, so a VM tab list
+  // of any size reaches the merge and its wsr-tabs id never reaches the client.
+  function mergeVmLine(line) {
+    let id;
+    let msg = null;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (typeof id !== 'string') return false;
+    } else {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      id = msg && msg.id;
+      if (typeof id !== 'string') return false;
+    }
+    if (!id.startsWith('wsr-tabs-')) return false;
+    const origId = tabMerges.get(id);
+    const merge = tabMerges.get(origId);
+    // Cleared by a failover mid-merge: the replayed call answers on its own.
+    if (!merge || typeof merge !== 'object') return true;
+    if (!msg) {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        msg = {};
+      }
+    }
+    merge.vm = msg;
+    if (merge.mac) emitTabsMerge(origId, merge);
+    return true;
+  }
+
+  function mergeMacLine(line, callMs) {
+    if (!tabMerges.size) return false;
+    let id;
+    let msg = null;
+    if (line.length > BIG_LINE) {
+      id = bigLineId(line);
+      if (id === undefined || !tabMerges.has(id)) return false;
+    } else {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      id = msg && msg.id;
+    }
+    const merge = id != null && tabMerges.get(id);
+    if (!merge || typeof merge !== 'object') return false;
+    if (!msg) {
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        msg = {};
+      }
+    }
+    merge.mac = msg;
+    merge.ms = callMs;
+    if (merge.vm) emitTabsMerge(id, merge);
+    return true;
+  }
+
+  // Same spawn as the failover backend; the replayed handshake's initialize
+  // response is swallowed so the client never sees a second answer.
+  function spawnVmBackend() {
+    const args = [vpsScript, '--bot-id', botId];
+    if (botName) args.push('--bot-name', botName);
+    args.push('--connection', vpsConnection);
+    const c = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+    vmChild = c;
+    c.stdin.on('error', () => {});
+    readline
+      .createInterface({ input: c.stdout, crlfDelay: Infinity })
+      .on('line', (line) => {
+        if (c !== vmChild) return;
+        touchActivity();
+        if (swallowLine(line)) return;
+        if (deadReplyLine(line)) return;
+        const seenReq = pendingRequestFor(line);
+        const callMs = noteServerRpc(line, pendingRequests);
+        if (mergeVmLine(line)) return;
+        learnVmTabs(line, true);
+        learnTabUse(line, seenReq, 'vm');
+        let out;
+        try {
+          out = vmAnnotate(line, callMs);
+        } catch {
+          out = line;
+        }
+        if (out === null) return;
+        process.stdout.write(`${out}\n`);
+      });
+    const drop = () => {
+      if (c !== vmChild) return;
+      vmChild = null;
+      for (const [id, merge] of [...tabMerges]) {
+        if (typeof merge !== 'object' || merge.vm) continue;
+        merge.vm = {};
+        if (merge.mac) emitTabsMerge(id, merge);
+      }
+      for (const [id, req] of pendingRequests) {
+        if (req.via !== 'vm') continue;
+        pendingRequests.delete(id);
+        noteDead(id);
+        emitToolError(id, 'The VM browser connector stopped. Retry the call.');
+      }
+    };
+    c.on('error', drop);
+    c.on('exit', drop);
+    replayHandshake(c, []);
+    process.stderr.write('workspace-router: started the VM browser connector\n');
+  }
+
+  // A tools/call the router answers or diverts itself. host:"computer" while
+  // the session already runs on the VM is a clear error; host:"vm" and calls
+  // aimed at a known VM tab go to the VM connector; a tabs call while it runs
+  // merges both lists. Anything else falls through to the active backend.
+  // Returns the line to forward (rewritten when defaults were injected) or
+  // null when the call was answered or sent on internally.
+  function routeToolCall(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    const rawArgs = msg && msg.params && msg.params.arguments;
+    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null)) return line;
+    const out = injectTabDefaults(msg) ? JSON.stringify(msg) : line;
+    if (out !== line) {
+      const req = pendingRequests.get(msg.id);
+      if (req) req.line = out;
+    }
+    if (!desktopActionsAllowed && msg.params && msg.params.name === DESKTOP_INPUT_TOOL) {
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(
+        msg.id,
+        'workspace_computer_action is not exposed by this server. Desktop input goes through the approval-gated computer_use tool.',
+      );
+      return null;
+    }
+    const args = (msg.params && msg.params.arguments) || {};
+    const host = normalizeHost(args.host);
+    if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(msg.id, 'Use host "computer" or "vm", or omit it.');
+      return null;
+    }
+    if (host === 'computer') {
+      if (activeHost !== 'vps') return out;
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(msg.id, 'Your computer is offline. Omit host to use the VM browser, or pass host: "vm".');
+      return null;
+    }
+    const wantsVm = host === 'vm'
+      || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
+      || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
+    if (!wantsVm && msg.params && msg.params.name === 'cua_alans_way_tabs' && activeHost !== 'vps' && vmAlive()) {
+      unbuffer(line);
+      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now() };
+      tabMerges.set(msg.id, merge);
+      tabMerges.set(merge.vmId, msg.id);
+      writeToChild(out);
+      try {
+        vmChild.stdin.write(`${JSON.stringify({ ...msg, id: merge.vmId })}\n`);
+      } catch { /* the merge completes with whatever the computer side answered */ }
+      return null;
+    }
+    if (!wantsVm) return out;
+    if (!vmAlive()) {
+      if (activeHost === 'vps') return out; // the active backend already is the VM browser
+      spawnVmBackend();
+    }
+    const req = pendingRequests.get(msg.id);
+    if (req) req.via = 'vm';
+    unbuffer(line);
+    try {
+      vmChild.stdin.write(`${out}\n`);
+    } catch { /* a dead connector fails the call from its exit handler */ }
+    return null;
+  }
+
   function bindChild(c, host) {
     activeChild = c;
     activeHost = host;
@@ -1272,7 +1839,7 @@ async function main() {
       .on('line', (line) => {
         if (c !== activeChild) return;
         touchActivity();
-        if (swallowIds.size && line.length < 4000 && line.includes('"id":"wsr-init-')) return;
+        if (swallowLine(line)) return;
         if (host === 'mac') {
           // ssh is up but the app behind it is gone: the backend answers
           // every call with "browser unavailable". The first such error is the
@@ -1287,7 +1854,11 @@ async function main() {
             unavailableStreak = 0;
           }
         }
+        const seenReq = pendingRequestFor(line);
         const callMs = noteServerRpc(line, pendingRequests);
+        if (mergeMacLine(line, callMs)) return;
+        learnVmTabs(line, false);
+        learnTabUse(line, seenReq, host === 'mac' ? 'computer' : 'vm');
         provedAlive = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
         bufferedStdin.length = 0;
@@ -1339,7 +1910,12 @@ async function main() {
         heldCalls.push(line);
         return;
       }
-      writeToChild(line);
+      if (method !== 'tools/call') {
+        writeToChild(line);
+      } else {
+        const forwarded = routeToolCall(line);
+        if (forwarded !== null) writeToChild(forwarded);
+      }
       armWatchdog();
     });
 
@@ -1390,6 +1966,16 @@ async function main() {
         if (req.method !== 'tools/call') continue;
         const age = now - req.at;
         const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
+        if (req.via === 'vm') {
+          // There is no second fallback for the VM connector: a call it never
+          // answers gets a tool error at the hard deadline, not a failover.
+          if (age > hard) {
+            pendingRequests.delete(id);
+            noteDead(id);
+            emitToolError(id, 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
+          }
+          continue;
+        }
         if (age > hard) {
           failOver(`${hostName} call exceeded ${hard}ms`);
           return;
@@ -1403,6 +1989,13 @@ async function main() {
             else failOver(`${hostName} call open ${Date.now() - req.at}ms and the probe failed`);
           });
         }
+      }
+      // A merged tabs call whose VM half never arrived answers with the
+      // computer half alone rather than waiting out the client's timeout.
+      for (const [id, merge] of [...tabMerges]) {
+        if (typeof merge !== 'object' || merge.vm || !merge.mac || now - merge.at <= CALL_HARD_MS) continue;
+        merge.vm = {};
+        emitTabsMerge(id, merge);
       }
       const mac = freshMacState(macStateFile);
       if (mac && mac.state === 'offline' && Date.parse(mac.since) >= hostStartedAt - (hostStartedAt % 1000)) {
@@ -1422,6 +2015,7 @@ async function main() {
     process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
     shuttingDown = true;
     try { if (activeChild) activeChild.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
+    try { if (vmChild) vmChild.kill('SIGTERM'); } catch {}
     process.exit(0);
   }, 5000);
   reloadTimer.unref();
@@ -1430,6 +2024,7 @@ async function main() {
       shuttingDown = true;
       try {
         if (activeChild) activeChild.kill(s);
+        if (vmChild) vmChild.kill(s);
       } catch {}
     });
   }
@@ -1464,6 +2059,7 @@ async function main() {
         shuttingDown = true;
         try {
           if (activeChild) activeChild.kill('SIGTERM');
+          if (vmChild) vmChild.kill('SIGTERM');
         } catch {}
         process.exit(0);
       }
@@ -1501,6 +2097,7 @@ module.exports = {
   noteClientRpc,
   noteServerRpc,
   mayReconverge,
+  normalizeHost,
   sshControlArgs,
   muxTrouble,
   sshBinary,

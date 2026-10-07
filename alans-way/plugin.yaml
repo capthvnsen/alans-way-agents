@@ -1,5 +1,5 @@
 name: alans-way
-version: "0.6.0"
+version: "0.6.1"
 description: "Proactive primary bot for Hermes. The Mac app and machine setup are a separate repo; the workspace-setup skill walks the agent through them."
 author: "capthvnsen, Hermes Agent"
 license: MIT
