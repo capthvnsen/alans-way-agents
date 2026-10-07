@@ -1,13 +1,11 @@
 """Mac availability state: watcher file parsing, observer signatures, router notices."""
 from pathlib import Path
-import importlib.util
 import json
 import os
 import re
 import select
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -20,16 +18,6 @@ NODE = shutil.which("node")
 SH = shutil.which("sh")
 
 
-def plugin():
-    name = "companion_workspace_mac_test"
-    path = ROOT / "alans-way"
-    spec = importlib.util.spec_from_file_location(name, path / "__init__.py", submodule_search_locations=[str(path)])
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 class MacStateEnvTest(unittest.TestCase):
     def setUp(self):
         self._saved = os.environ.get("HERMES_MAC_STATE_FILE")
@@ -39,65 +27,6 @@ class MacStateEnvTest(unittest.TestCase):
             os.environ.pop("HERMES_MAC_STATE_FILE", None)
         else:
             os.environ["HERMES_MAC_STATE_FILE"] = self._saved
-
-
-class MacStateReaderTests(MacStateEnvTest):
-    def test_missing_malformed_and_wrong_shape_are_tolerated(self):
-        module = plugin()
-        observe = __import__(module.__name__ + ".proactive_observe", fromlist=["mac_state"])
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "mac-state.json"
-            os.environ["HERMES_MAC_STATE_FILE"] = str(path)
-            self.assertIsNone(observe.mac_state())
-            path.write_text("not json{", encoding="utf-8")
-            self.assertIsNone(observe.mac_state())
-            path.write_text(json.dumps({"state": "sideways"}), encoding="utf-8")
-            self.assertIsNone(observe.mac_state())
-            path.write_text(json.dumps(["offline"]), encoding="utf-8")
-            self.assertIsNone(observe.mac_state())
-            path.write_text(" " * 5000, encoding="utf-8")
-            self.assertIsNone(observe.mac_state())
-            path.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z",
-                                        "lastSeenOnline": "2026-02-01T09:59:00Z", "extra": [1]}),
-                            encoding="utf-8")
-            self.assertEqual(observe.mac_state(), {"state": "offline",
-                                                   "since": "2026-02-01T10:00:00Z",
-                                                   "lastSeenOnline": "2026-02-01T09:59:00Z"})
-            real = Path(directory) / "real.json"
-            real.write_text(json.dumps({"state": "online"}), encoding="utf-8")
-            path.unlink()
-            path.symlink_to(real)
-            self.assertIsNone(observe.mac_state())
-
-    def test_offline_online_flip_records_one_context_change(self):
-        module = plugin()
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            path = home / "mac-state.json"
-            os.environ["HERMES_MAC_STATE_FILE"] = str(path)
-            runtime = module.Runtime(None, home)
-            runtime.store.update_policy({"session_key": "agent:main:telegram:dm:123456789"})
-            self.assertIsNone(runtime.review_context()["preferences"]["workspace_mac"])
-            self.assertEqual(runtime.observe(), 0)
-            path.write_text(json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z"}),
-                            encoding="utf-8")
-            self.assertEqual(runtime.observe(), 0)
-            self.assertEqual(runtime.review_context()["preferences"]["workspace_mac"]["state"], "offline")
-            path.write_text(json.dumps({"state": "online", "since": "2026-02-01T10:30:00Z"}),
-                            encoding="utf-8")
-            self.assertEqual(runtime.observe(), 1)
-            self.assertEqual(runtime.observe(), 0)
-            path.write_text(json.dumps({"state": "offline", "since": "2026-02-01T11:00:00Z"}),
-                            encoding="utf-8")
-            self.assertEqual(runtime.observe(), 1)
-            self.assertEqual(runtime.store.status()["counts"], {"pending": 2})
-            restarted = module.Runtime(None, home)
-            self.assertEqual(restarted.observe(), 0)
-            path.write_text(json.dumps({"state": "online", "since": "2026-02-01T12:00:00Z"}),
-                            encoding="utf-8")
-            self.assertEqual(restarted.observe(), 1)
-            runtime.close()
-            restarted.close()
 
 
 TOOL_RESULT = json.dumps({"jsonrpc": "2.0", "id": 1,

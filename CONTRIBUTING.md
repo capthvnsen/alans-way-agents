@@ -15,6 +15,6 @@ CI runs those two commands on every push and pull request. To try a change again
 - Keep Hermes authoritative. Use documented plugin, hook and MCP interfaces; no forks, runtime monkey-patches, direct session/database writes or private Hermes imports.
 - Preserve one conversation owner. The plugin adds tools and a review loop inside the existing gateway; it never starts a second one.
 - Write a failing regression test before new behavior, then implement the smallest fix. Changes to `setup-workspace.sh` need a case in `tests/test_setup_workspace.py`.
-- Keep host keys checked (`StrictHostKeyChecking=yes`), timeouts bounded, and proactivity budgets and quiet hours enforced.
+- Keep host keys checked (`StrictHostKeyChecking=yes`), timeouts bounded, and check-ins inside the user's waking hours.
 - Never commit personal paths, machine IPs, Telegram IDs, credentials, transcripts or unredacted logs. Use generic placeholders; `check_publication.py` enforces the common cases.
 - Pull requests must not deploy, restart gateways, or install services on anyone's host.

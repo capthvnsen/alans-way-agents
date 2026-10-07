@@ -76,6 +76,8 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
 
     def test_primary_binding_not_silent(self):
         self.assertIn("do not bind a different bot's route silently", self.normalized)
+        self.assertIn("proactivity bind --session-key", self.normalized)
+        self.assertIn("proactivity status", self.normalized)
 
     def test_restart_comes_last_and_the_agent_answers_first(self):
         self.assertIn("comes last", self.normalized)

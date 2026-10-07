@@ -29,7 +29,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/07ff00787bb9246a689a7f6656bf2cd682474fb3/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/9bcce44224b9f478282209c32ea8eb87aba189f3/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -58,11 +58,11 @@ sha = str((cat or {}).get("sha") or (cat or {}).get("pin") or "")
 print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
 # No catalog record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.6.2
+[ -n "$PIN" ] || PIN=v0.7.0
 git -C ~/alans-way-agents checkout "$PIN"
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref 07ff00787bb9246a689a7f6656bf2cd682474fb3 \
+    --desktop-ref 9bcce44224b9f478282209c32ea8eb87aba189f3 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
@@ -126,7 +126,10 @@ different bot's route silently.
    restart`, or the supervisor that owns it), so never kill -9 a gateway
    mid-message. If the restart was skipped, a check failed: say which one.
 7. **Bind only after a real DM route exists.** If no routes are listed, the
-   user messages the bot once, then `setup.sh --bind`.
+   user messages the bot once, then `setup.sh --bind`. By hand:
+   `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
+   tune with `hermes proactivity set --settings '<json>'`, and check with
+   `hermes proactivity status`.
 
 ## Report, don't claim
 
@@ -135,8 +138,9 @@ output verbatim in your final message: plugin enabled, workspace browser block,
 browser host state, and any FAIL lines. "Installed" means the verify output
 says so, not that the commands ran without visible errors. After the gateway has
 restarted (the next time the user writes to you), run `setup.sh --verify` for a
-full audit of the running install. Remind the user that a proposed watch only runs once they approve it with the
-Telegram button or `/watch approve <id> <code>`, and that desktop control asks
+full audit of the running install. Remind the user that check-ins are on once bound and are
+tuned by talking to the bot ("stop checking in" pauses them; `/proactivity resume` starts them
+again), and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
 (offer that, never add it yourself: on a Hermes without the computer-use
 provider API it also exposes a desktop-input tool that runs with no approval

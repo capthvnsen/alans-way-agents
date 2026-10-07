@@ -6,23 +6,20 @@ This repo is what you install *on the machine running your Hermes agents*
 user's computer (macOS or Windows) — this one holds
 what your agents need to think and act:
 
-- **`alans-way/`** — a native Hermes plugin: one designated primary bot
-  gets bounded, event-driven proactivity — reviewing its own work, watching
-  approved tasks, and surfacing useful things to do, on a schedule you control.
-- **`alans-way/gateway-hook/`** — the gateway startup hook. `setup.sh` copies
-  it to `$HERMES_HOME/hooks/alans-way/` so proactivity arms only inside the
-  real gateway process. A catalogue install includes this hook.
+- **`alans-way/`** — a native Hermes plugin: your primary Telegram bot checks
+  in on its own when you've gone quiet — an idle nudge on a schedule you
+  control, tuned by talking to the bot.
 - **Workspace browser wiring** — `setup-workspace.sh` writes a managed
   `workspace_browser` block into your Hermes config pointing at
   `scripts/workspace-router.cjs`, which probes your computer first and falls
   back to the VPS browser when it is asleep. Pass `--host-os windows` or `--host-os linux`
   when the user's computer is not a Mac (default `mac`).
-- **`alans-way/skills/`** — the `proactive-primary` and `workspace-operations` skills ship
+- **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
-adds tools and an optional review loop inside it, it is not a second gateway.
+adds tools and a small check-in loop inside it, it is not a second gateway.
 
 ## What it does and does not do
 
@@ -35,12 +32,12 @@ adds tools and an optional review loop inside it, it is not a second gateway.
   inside the app additionally needs a VNC server and a noVNC viewer on the VPS
   (a macOS guest VM uses `tart --vnc-experimental` instead); see the app repo's
   [deployment guide](https://github.com/capthvnsen/alans-way/blob/main/docs/deployment.md).
-- **Proactivity is read/research/draft by default.** The designated primary may
-  read its own state, research, and draft proposals inside bounded budgets and
-  quiet hours. Consequential actions — sending external messages or posts,
-  purchases, credential or permission changes, production changes, destructive
-  operations, new scope — always ask first. Details in
-  [docs/proactivity.md](docs/proactivity.md).
+- **Check-ins are one internal prompt.** When the bound chat goes quiet past
+  its wait, the plugin injects one prompt and the bot decides what to do with
+  it — or replies `[SILENT]` and nothing is sent. Consequential actions —
+  sending external messages or posts, purchases, credential or permission
+  changes, production changes, destructive operations — always ask first.
+  Details in [docs/proactivity.md](docs/proactivity.md).
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.
@@ -97,9 +94,9 @@ The bootstrap runs every step in order and says what it did:
 - **Preflight**: hermes version (0.21.5 or newer, or setup stops), python3, Node 22+, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
-- **Plugin + gateway hook** — installs `alans-way`, arms the startup hook, and
-  enables the `proactivity` toolset for Telegram sessions (without it,
-  `proactive_control` never reaches the bound chat's tool list)
+- **Plugin** — installs `alans-way`, enables the `proactivity` toolset for
+  Telegram sessions (without it, the `proactivity` tool never reaches the bound
+  chat's tool list), and removes the stale 0.6 startup hook if one is installed
 - **VPS browser host** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
   systemd units on Linux (user units when you're not root; as root they run as
@@ -128,8 +125,7 @@ its own Telegram bot, each under that bot's id (a profile's `.env`
 `TELEGRAM_BOT_TOKEN` wins over `config.yaml`, as in Hermes), installs this plugin
 in each so every bot has the workspace skills (an existing or catalog install is
 left as it is), and removes any older router entries from them (the config is
-backed up first). Only the main profile gets the proactive tool, `/proactivity`,
-`/watch` and the proactive skill. It also adds a managed block
+backed up first). Only the launch profile's runtime runs the check-in loop. It also adds a managed block
 to the Hermes user's `~/.ssh/config` so the agent's own ssh commands to your
 computer share one connection.
 
@@ -153,9 +149,9 @@ MCP server you added yourself is kept, and setup warns that the agent then sees
 two computer-use paths and prints the `hermes mcp remove` command. Desktop control asks for approval in
 Telegram for each action; `--allow-desktop-actions` adds click, type, key,
 scroll and the like (background only) to `command_allowlist` if you would
-rather not be asked. The proactivity toolset is enabled for Telegram and for
-cron, so isolated wakes can report. A proposed watch never runs on its own:
-approve it with the Telegram button or `/watch approve <id> <code>`.
+rather not be asked. The proactivity toolset is enabled for Telegram. Once a
+route is bound, check-ins are on by default; `--proactive no` binds them
+paused, and the bot tunes them from the bound chat.
 
 ### Or let your agent do it
 
@@ -187,7 +183,7 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 ### 4. Verify it end to end
 
 - Desktop app: Test agent path → ✓ this host reaches your computer over ssh
-- Telegram: `/proactivity status` → route bound, gateway armed
+- Telegram: `hermes proactivity status` → route bound, check-ins on
 - Browser: ask the bot to open a page — a tab appears in the app (host)
   while your computer is awake, on the VPS host when it isn't
 
@@ -201,12 +197,12 @@ ordinary Telegram reply and one bounded browser action before relying on it.
 
 | Piece | Effect |
 |---|---|
-| `proactive_control` tool | `/proactivity` pause/resume/status, budgets, quiet hours — bound to one designated chat |
-| Observer | 30s check for approved watches, bounded automatic opportunities |
-| Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
+| `proactivity` tool + `/proactivity` + `hermes proactivity` CLI | bind the chat, tune the wait, level, timezone and pause — bound to one designated chat |
+| Idle-nudge loop | a 60-second daemon started when Telegram connects; injects one internal prompt when a check-in is due |
+| Turn hooks | `pre_llm_call`/`post_llm_call` note when the bound chat was last active and whether the bot is mid-turn |
 | `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
-| mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router and observer read |
+| mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
 
 ## The workspace_browser tools
 
@@ -230,27 +226,10 @@ missing/unreachable host and serves the local VPS browser host directly.
 `workspace-router.cjs --watch` (`alans-way/scripts/mac-watch.sh` is a thin wrapper
 around it) probes the Mac over ssh on an
 interval (10s in the units setup installs) and keeps a JSON state file —
-`{"state","since","lastSeenOnline","lastTransition"}` — that the router and
-the proactive observer read instead of probing themselves. The router adds
-the serving host and Mac state to `workspace_browser` results; the observer
-turns an offline→online flip into a context event for the lead bot's review,
-so kanban cards blocked on Mac-only work can resume. Transitions are logged
+`{"state","since","lastSeenOnline","lastTransition"}` — that the router reads
+instead of probing itself. The router adds
+the serving host and Mac state to `workspace_browser` results. Transitions are logged
 to `mac-events.log` beside the state file.
-
-The observer also sweeps the shared `kanban.db` read-only
-(`proactive_board.py`): open and recently-closed cards ride into the primary
-bot's review context, so a blocked or changed card from another agent can
-surface as one bounded opportunity — never a reason to touch someone else's
-card. Combined with the connector's overseer role (`HERMES_OVERSEER_BOTS` /
-`HERMES_OVERSEER_BOT_IDS`, see `integration.md` in the app repo), the primary
-can answer "who is working where" and release a runaway tab.
-
-Review context also carries `documents` — excerpts and modified times of the
-primary's own identity files (`SOUL.md`, `AGENTS.md`, `IDENTITY.md`) — and
-`capabilities`, the installed skill names. With `schedule` (enabled cron
-metadata) that lets the appraiser weigh the wider remit: an upcoming
-commitment worth surfacing, a capability gap worth one `ask` or a bounded
-skill-building proposal, or a stale identity document worth a draft update.
 
 ```sh
 sudo cp deploy/mac-watch.service /etc/systemd/system/
@@ -281,14 +260,14 @@ VPS browser owns.
 - Per-tab ownership is cooperative policy between bots sharing the connector —
   not a crypto boundary. See the [security note](https://github.com/capthvnsen/alans-way/blob/main/desktop/docs/integration.md)
   for the trust model before exposing a connector beyond `127.0.0.1`.
-- The proactivity observer is read-only about the world until an approved
-  opportunity fires inside its one bound conversation. Budgets and quiet
-  hours are in `docs/proactivity.md`.
+- Check-ins inject one internal prompt into the bound conversation, only
+  inside the user's waking hours, and a `[SILENT]` reply is never delivered.
+  The schedule is in `docs/proactivity.md`.
 
 ## Layout
 
 ```
-alans-way/            the plugin (plugin.yaml + tools + observer + skills + router + mac-watch + gateway-hook/)
+alans-way/            the plugin (plugin.yaml + tool + idle-nudge hooks + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 docs/                 proactivity guide, agent-driven setup prompt
 tests/                unittest suite — python3 -m unittest discover -s tests

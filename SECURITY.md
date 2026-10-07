@@ -4,10 +4,10 @@ This is an alpha. Review the plugin folder and `setup.sh` before running them on
 
 ## Scope
 
-The plugin runs inside your existing Hermes gateway. It adds workspace browser tools, a Mac/VPS router, a Mac availability watcher, and an optional proactivity observer. It stores no credentials and patches no Hermes source.
+The plugin runs inside your existing Hermes gateway. It adds workspace browser tools, a Mac/VPS router, a Mac availability watcher, and optional proactive check-ins. It stores no credentials and patches no Hermes source.
 
 - **Browser control.** Bots can drive tabs on your Mac and the VPS through the Alan's Way app. Human takeover always wins, but per-tab ownership between bots is cooperative policy, not a cryptographic boundary. Read the app's [trust model](https://github.com/capthvnsen/alans-way/blob/main/desktop/docs/integration.md) before exposing a connector beyond `127.0.0.1`.
-- **Proactivity.** The observer only reads until an approved opportunity fires inside its one bound conversation, and it is limited by budgets and quiet hours (`docs/proactivity.md`). It is off until you bind a route and enable it.
+- **Proactivity.** A due check-in injects one internal prompt into the one bound conversation — the reply is an ordinary bot turn, limited to your waking hours, and `[SILENT]` replies are never delivered (`docs/proactivity.md`). Check-ins are off until you bind a route.
 
 ## SSH and host identity
 
