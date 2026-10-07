@@ -81,7 +81,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable.", self.normalized)
         self.assertIn("A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label.", self.normalized)
         self.assertIn("A pressed toggle's name ends in on or off, so do not screenshot it to see the state.", self.normalized)
-        self.assertIn("A click, type, press, scroll, navigate, or batch result includes elements for up to 40 controls and no page text.", self.normalized)
+        self.assertIn("An action or batch result also includes elements for up to 40 controls; use those refs.", self.normalized)
         self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
         self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
@@ -124,14 +124,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
 
     def test_no_alternate_browser_paths_when_mac_reachable(self):
         for forbidden in [
-            'host:"vps"',
             "browser_exec",
             "personal browser",
         ]:
             with self.subTest(forbidden=forbidden):
                 self.assertIn(forbidden, self.normalized)
         self.assertIn("do not silently substitute another browser", self.normalized)
-        self.assertIn("Do not pass `host`.", self.normalized)
         self.assertIn("A snapshot defaults to 2000 characters of page text.", self.normalized)
         self.assertIn("Do not screenshot only because the text was cut.", self.normalized)
         self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
@@ -161,6 +159,38 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         # and not to reuse a login that only exists there.
         self.assertNotIn("do not wait, ask, or describe a handoff", self.normalized)
         self.assertNotIn("only exists there", self.normalized)
+
+    def test_one_turn_rules_replaced_the_extra_round_trips(self):
+        # The action reply's effect is the observation, so a turn ends with
+        # the action instead of a snapshot-and-check.
+        self.assertIn("Every action reply carries `effect`, the page's new state: `effect.text` is its new visible text.", self.normalized)
+        self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
+        self.assertIn("Do multi-step work as one batch", self.normalized)
+        self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
+        self.assertIn('{action:"read"}', self.normalized)
+        self.assertIn("write no chat text between tool calls and send one short message when it is done", self.normalized)
+        self.assertIn("Skip status and tabs unless a call fails", self.normalized)
+
+    def test_host_arg_routes_to_the_named_machine(self):
+        self.assertIn('`host:"vm"` to use the VM\'s own browser even while the user\'s computer is online', self.normalized)
+        self.assertIn('`host:"computer"` to force the user\'s computer', self.normalized)
+        self.assertIn("Omit it for the default", self.normalized)
+
+    def test_select_accepts_any_option_handle(self):
+        self.assertIn("`select` (an option by value, label, option or text)", self.normalized)
+
+    def test_the_extra_turn_rules_are_gone(self):
+        for removed in [
+            "Begin with status and your owned tabs",
+            "Confirm the reported host",
+            "Read a fresh snapshot",
+            "then inspect the result",
+            "Completion requires observed page state",
+            "Do not pass `host`",
+            'host:"vps"',
+        ]:
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, self.normalized)
 
     def test_bounded_snapshot_and_screenshot_params_documented(self):
         # Snapshots must stay cheap: bound the payload, re-check by

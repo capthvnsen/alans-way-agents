@@ -299,6 +299,17 @@ function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, n
   );
 }
 
+// cua_alans_way_open's host: the shared alias table (the app keeps the same
+// list in desktop/src/core.cjs). Anything unrecognized means "no host asked".
+function normalizeHost(value) {
+  if (typeof value !== 'string') return undefined;
+  const host = value.trim().toLowerCase();
+  if (host === 'computer' || host === 'mac' || host === 'windows' || host === 'linux'
+    || host === 'local' || host === 'pc') return 'computer';
+  if (host === 'vm' || host === 'vps' || host === 'remote' || host === 'server') return 'vm';
+  return undefined;
+}
+
 // Non-interactive ssh never loads Homebrew's PATH, so a bare `node` is
 // usually missing on the Mac. The app bundle already ships a Node runtime:
 // its own Electron binary with ELECTRON_RUN_AS_NODE. PATH node is only the
@@ -789,11 +800,25 @@ function continuationNotice(c, label = 'Mac') {
 
 const workspaceMeta = (host, mac, ms) => (ms === undefined ? { host, mac } : { host, mac, ms });
 
+// Older connectors still declare open's `host` as Ignored; the router routes
+// it now, so the advertised schema says what it does.
+function rewriteOpenHost(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    const props = tool && tool.name === 'cua_alans_way_open' && tool.inputSchema && tool.inputSchema.properties;
+    if (props && typeof props === 'object') {
+      props.host = { type: 'string', description: '"computer" or "vm"; omit for the default.' };
+    }
+  }
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
 function annotateResult(msg, host, mac, notice, ms) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
+  rewriteOpenHost(msg.result);
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
@@ -1104,7 +1129,9 @@ async function main() {
     const lost = [];
     const replay = [];
     const reads = [];
+    tabMerges.clear();
     for (const [id, req] of pendingRequests) {
+      if (req.via === 'vm') continue;
       if (req.method !== 'tools/call') replay.push(req);
       else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
       else lost.push({ id, at: req.at });
@@ -1228,7 +1255,9 @@ async function main() {
         else answerLost(notice);
       }
       holdCalls = false;
-      for (const line of heldCalls.splice(0)) writeToChild(line);
+      for (const line of heldCalls.splice(0)) {
+        if (!routeToolCall(line)) writeToChild(line);
+      }
     };
     if (lost.length) {
       const wait = Math.max(1000, Math.min(...lost.map((l) => l.at)) + 105000 - Date.now());
@@ -1257,6 +1286,249 @@ async function main() {
     try {
       if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
     } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
+  }
+
+  // A second, lazily started connector to this machine's own browser host —
+  // the same script and connection as the failover backend — serves explicit
+  // host:"vm" work while the computer backend stays the default. VM work
+  // never travels through the user's computer. Once a session has failed
+  // over, the active backend already is the VM browser and no second
+  // connector is spawned.
+  let vmChild = null;
+  const vmAnnotate = safeAnnotator('vm');
+  const vmTabs = new Set();
+  // cua_alans_way_tabs while both backends run is answered by each and merged
+  // on the client's id: origId -> merge state, merge.vmId -> origId.
+  const tabMerges = new Map();
+
+  function emitToolError(id, text) {
+    const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
+    let out;
+    try {
+      out = annotate(JSON.stringify(msg));
+    } catch {
+      out = JSON.stringify(msg);
+    }
+    process.stdout.write(`${out}\n`);
+  }
+
+  // A consumed line must not also replay onto the failover backend.
+  function unbuffer(line) {
+    const at = bufferedStdin.lastIndexOf(line);
+    if (at >= 0) bufferedStdin.splice(at, 1);
+  }
+
+  function vmAlive() {
+    return Boolean(vmChild && vmChild.exitCode === null);
+  }
+
+  // A tab id the VM browser is known to own: learned from the VM connector's
+  // open results and from tab-list entries that carry a VM host.
+  function learnVmTabData(data, assumeVm) {
+    if (!data || typeof data !== 'object') return;
+    const listed = Array.isArray(data.tabs) ? data.tabs : data.id !== undefined ? [data] : [];
+    for (const tab of listed) {
+      if (!tab || typeof tab.id !== 'string' || !/^[\w-]{1,100}$/.test(tab.id)) continue;
+      if (assumeVm || normalizeHost(tab.host) === 'vm') vmTabs.add(tab.id);
+    }
+  }
+
+  function learnVmTabs(line, assumeVm) {
+    if (line.length > BIG_LINE) return;
+    // Keys inside a text part arrive escaped (\"host\"), so match bare words.
+    if (!line.includes('tabs') && !line.includes('host')) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const parts = msg && msg.result && msg.result.content;
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      if (!part || part.type !== 'text' || typeof part.text !== 'string' || !part.text.includes('"id"')) continue;
+      try {
+        learnVmTabData(JSON.parse(part.text), assumeVm);
+      } catch { /* a result that is not JSON teaches nothing */ }
+    }
+  }
+
+  function textResultData(msg) {
+    const parts = msg && msg.result && msg.result.content;
+    const part = Array.isArray(parts) && parts.find((p) => p && p.type === 'text');
+    try {
+      return part ? JSON.parse(part.text) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The merged tabs answer keeps the computer's result shape and marks each
+  // tab's host. A VM half that never arrived (or errored) simply contributes
+  // no tabs.
+  function mergedTabsResult(origId, merge) {
+    const macData = textResultData(merge.mac);
+    const vmData = textResultData(merge.vm);
+    learnVmTabData(macData, false);
+    learnVmTabData(vmData, true);
+    if (!merge.mac || !merge.mac.result || merge.mac.result.isError || !Array.isArray((macData || {}).tabs)) {
+      return merge.mac;
+    }
+    const mark = (host) => (tab) => (tab && typeof tab === 'object' ? { ...tab, host } : tab);
+    const tabs = [
+      ...macData.tabs.map(mark('computer')),
+      ...((vmData && Array.isArray(vmData.tabs) ? vmData.tabs : [])).map(mark('vm')),
+    ];
+    return {
+      jsonrpc: '2.0',
+      id: origId,
+      result: { ...merge.mac.result, content: [{ type: 'text', text: JSON.stringify({ ...macData, tabs }) }] },
+    };
+  }
+
+  function emitTabsMerge(origId, merge) {
+    tabMerges.delete(origId);
+    tabMerges.delete(merge.vmId);
+    const merged = mergedTabsResult(origId, merge);
+    let out;
+    try {
+      out = annotate(JSON.stringify(merged), merge.ms);
+    } catch {
+      out = JSON.stringify(merged);
+    }
+    process.stdout.write(`${out}\n`);
+  }
+
+  // Both halves of a merged tabs call are held until the other backend
+  // answers.
+  function mergeVmLine(line) {
+    if (line.length > 4000 || !line.includes('wsr-tabs-')) return false;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return true;
+    }
+    if (!msg || typeof msg.id !== 'string' || !msg.id.startsWith('wsr-tabs-')) return false;
+    const merge = tabMerges.get(tabMerges.get(msg.id));
+    // Cleared by a failover mid-merge: the replayed call answers on its own.
+    if (!merge) return true;
+    merge.vm = msg;
+    if (merge.mac) emitTabsMerge(tabMerges.get(msg.id), merge);
+    return true;
+  }
+
+  function mergeMacLine(line, callMs) {
+    if (!tabMerges.size || line.length > BIG_LINE) return false;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const merge = msg && tabMerges.get(msg.id);
+    if (!merge || typeof merge !== 'object') return false;
+    merge.mac = msg;
+    merge.ms = callMs;
+    if (merge.vm) emitTabsMerge(msg.id, merge);
+    return true;
+  }
+
+  // Same spawn as the failover backend; the replayed handshake's initialize
+  // response is swallowed so the client never sees a second answer.
+  function spawnVmBackend() {
+    const args = [vpsScript, '--bot-id', botId];
+    if (botName) args.push('--bot-name', botName);
+    args.push('--connection', vpsConnection);
+    const c = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+    vmChild = c;
+    c.stdin.on('error', () => {});
+    readline
+      .createInterface({ input: c.stdout, crlfDelay: Infinity })
+      .on('line', (line) => {
+        if (c !== vmChild) return;
+        touchActivity();
+        if (swallowIds.size && line.length < 4000 && line.includes('"id":"wsr-init-')) return;
+        const callMs = noteServerRpc(line, pendingRequests);
+        if (mergeVmLine(line)) return;
+        learnVmTabs(line, true);
+        let out;
+        try {
+          out = vmAnnotate(line, callMs);
+        } catch {
+          out = line;
+        }
+        if (out === null) return;
+        process.stdout.write(`${out}\n`);
+      });
+    const drop = () => {
+      if (c !== vmChild) return;
+      vmChild = null;
+      for (const [id, merge] of [...tabMerges]) {
+        if (typeof merge !== 'object' || merge.vm) continue;
+        merge.vm = {};
+        if (merge.mac) emitTabsMerge(id, merge);
+      }
+      for (const [id, req] of pendingRequests) {
+        if (req.via !== 'vm') continue;
+        pendingRequests.delete(id);
+        emitToolError(id, 'The VM browser connector stopped. Retry the call.');
+      }
+    };
+    c.on('error', drop);
+    c.on('exit', drop);
+    replayHandshake(c, []);
+    process.stderr.write('workspace-router: started the VM browser connector\n');
+  }
+
+  // A tools/call the router answers or diverts itself. host:"computer" while
+  // the session already runs on the VM is a clear error; host:"vm" and calls
+  // aimed at a known VM tab go to the VM connector; a tabs call while it runs
+  // merges both lists. Anything else falls through to the active backend.
+  function routeToolCall(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const rawArgs = msg && msg.params && msg.params.arguments;
+    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null)) return false;
+    const args = rawArgs || {};
+    const host = normalizeHost(args.host);
+    if (host === 'computer') {
+      if (activeHost !== 'vps') return false;
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(msg.id, 'Your computer is offline. Omit host to use the VM browser, or pass host: "vm".');
+      return true;
+    }
+    const wantsVm = host === 'vm'
+      || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
+      || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
+    if (!wantsVm && msg.params && msg.params.name === 'cua_alans_way_tabs' && activeHost !== 'vps' && vmAlive()) {
+      unbuffer(line);
+      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined };
+      tabMerges.set(msg.id, merge);
+      tabMerges.set(merge.vmId, msg.id);
+      writeToChild(line);
+      try {
+        vmChild.stdin.write(`${JSON.stringify({ ...msg, id: merge.vmId })}\n`);
+      } catch { /* the merge completes with whatever the computer side answered */ }
+      return true;
+    }
+    if (!wantsVm) return false;
+    if (!vmAlive()) {
+      if (activeHost === 'vps') return false; // the active backend already is the VM browser
+      spawnVmBackend();
+    }
+    const req = pendingRequests.get(msg.id);
+    if (req) req.via = 'vm';
+    unbuffer(line);
+    try {
+      vmChild.stdin.write(`${line}\n`);
+    } catch { /* a dead connector fails the call from its exit handler */ }
+    return true;
   }
 
   function bindChild(c, host) {
@@ -1288,6 +1560,8 @@ async function main() {
           }
         }
         const callMs = noteServerRpc(line, pendingRequests);
+        if (mergeMacLine(line, callMs)) return;
+        learnVmTabs(line, false);
         provedAlive = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
         bufferedStdin.length = 0;
@@ -1339,7 +1613,7 @@ async function main() {
         heldCalls.push(line);
         return;
       }
-      writeToChild(line);
+      if (method !== 'tools/call' || !routeToolCall(line)) writeToChild(line);
       armWatchdog();
     });
 
@@ -1387,7 +1661,7 @@ async function main() {
       if (activeHost !== 'mac' || fellBack || shuttingDown) return;
       const now = Date.now();
       for (const [id, req] of pendingRequests) {
-        if (req.method !== 'tools/call') continue;
+        if (req.method !== 'tools/call' || req.via === 'vm') continue;
         const age = now - req.at;
         const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
         if (age > hard) {
@@ -1422,6 +1696,7 @@ async function main() {
     process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
     shuttingDown = true;
     try { if (activeChild) activeChild.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
+    try { if (vmChild) vmChild.kill('SIGTERM'); } catch {}
     process.exit(0);
   }, 5000);
   reloadTimer.unref();
@@ -1430,6 +1705,7 @@ async function main() {
       shuttingDown = true;
       try {
         if (activeChild) activeChild.kill(s);
+        if (vmChild) vmChild.kill(s);
       } catch {}
     });
   }
@@ -1464,6 +1740,7 @@ async function main() {
         shuttingDown = true;
         try {
           if (activeChild) activeChild.kill('SIGTERM');
+          if (vmChild) vmChild.kill('SIGTERM');
         } catch {}
         process.exit(0);
       }
@@ -1501,6 +1778,7 @@ module.exports = {
   noteClientRpc,
   noteServerRpc,
   mayReconverge,
+  normalizeHost,
   sshControlArgs,
   muxTrouble,
   sshBinary,
