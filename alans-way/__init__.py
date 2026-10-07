@@ -4,7 +4,14 @@ from pathlib import Path
 import json
 
 from .gateway_guard import gateway_ready, hermes_home
-from .proactive_context import TASK_KINDS
+from .proactive_context import (SourceSuppressed, StaleProposal, TASK_FIELDS, TASK_KINDS, approval_fresh,
+                                pending_view)
+
+
+# The gateway drops a turn whose whole reply is this marker, so a wake with
+# nothing to say costs the user no message.
+SILENT_LINE = ("Your final reply is delivered to the user. If nothing here is worth "
+               "their attention, reply with exactly [SILENT] and nothing else.")
 
 
 class Runtime:
@@ -21,6 +28,8 @@ class Runtime:
         self.worker = None
         self.observer_error = None
         self.appraisal_error = None
+        self.telegram = None
+        self.telegram_handler = False
 
     def _inject(self, message, session_key):
         """One injection attempt → tri-state outcome.
@@ -36,6 +45,38 @@ class Runtime:
                     else "rejected" if accepted is False else "uncertain")
         except Exception:
             return "uncertain"
+
+    def _context_block(self, task_id=None):
+        """What an isolated run cannot read for itself: it has no bound session, so
+        the plugin's status tool is stripped there."""
+        snapshot = self.ledger.snapshot()
+        prefs = snapshot["preferences"]
+        lines = ["[Live context from the plugin ledger]",
+                 f"Focus: {', '.join(prefs.get('focus', [])[:8]) or 'none'}. "
+                 f"Ignore: {', '.join(prefs.get('ignore', [])[:8]) or 'none'}. "
+                 f"Max work minutes: {prefs.get('max_work_minutes', 20)}."]
+        task = next((t for t in snapshot["tasks"] if t["id"] == task_id and t.get("approved") is True), None)
+        if task:
+            lines.append(f"Watch {task_id}: scope {task['scope'][:300]} Next action: {task['next_action'][:300]}")
+        return "\n".join(lines) + "\n"
+
+    def _send(self, event, message, *, isolate, kind, reason, task_id=None):
+        """Deliver one wake; returns (store status, result status).
+
+        Exploratory wakes try an isolated one-shot cron job first and fall
+        back to the main session when cron is unusable. An isolated wake never
+        holds the one-wake gate, so it is acknowledged here.
+        """
+        if isolate:
+            from .proactive_isolated import launch
+            job_id = launch(self.ctx, event["session_key"], event["id"], self._context_block(task_id) + message)
+            if job_id:
+                self.ledger.track_job(job_id, event["kind"])
+                self.ledger.log(kind, reason, "queued", job_id=job_id)
+                return "resolved", "isolated"
+        status = self._inject(message, event["session_key"])
+        self.ledger.log(kind, reason, "sent" if status == "accepted_unverified" else "rejected")
+        return status, status
 
     def _record_appraisal_error(self, exc=None):
         """Status records that appraisal failed, never why — provider details
@@ -84,7 +125,43 @@ class Runtime:
 
     def observe(self):
         from .proactive_observe import observe
-        return observe(self)
+        from .proactive_isolated import reap
+        admitted = observe(self)
+        reap(self)
+        self._ask_reapproval()
+        return admitted
+
+    def _ask_reapproval(self):
+        """Watches approved over 30 days ago stop firing until the user approves them again.
+
+        Every observer pass retries the ask until one channel takes it: buttons
+        once Telegram is connected, or the text command where buttons are impossible."""
+        from .proactive_telegram import offer
+        for task_id in self.ledger.flag_expired_approvals():
+            self.ledger.log("proposal", f"{task_id}: needs re-approval", "proposed")
+        with self.ledger.transaction() as data:
+            asked = dict(data["observations"].get("__reasked", {}))
+        for task in self.ledger.snapshot()["tasks"]:
+            if not (task.get("revision") or {}).get("reapproval"):
+                continue
+            view = pending_view(task)
+            code = self.ledger.proposal_hash(view)
+            if asked.get(task["id"]) == code:
+                continue
+            if offer(self, view, code, reapproval=True) or self._text_reapproval(view, code):
+                with self.ledger.transaction() as data:
+                    data["observations"].setdefault("__reasked", {})[task["id"]] = code
+
+    def _text_reapproval(self, view, code):
+        from .proactive_telegram import fits
+        key = self.store.load_policy().session_key
+        if not key or (self.telegram_handler and fits(view, code)):
+            return False  # buttons will work once Telegram is connected
+        message = (f"Tell the user: watch {view['id']} ({view.get('title') or view['scope'][:60]}) was last approved "
+                   f"over 30 days ago and stopped running. Scope: {view['scope'][:300]} Next action: "
+                   f"{view['next_action'][:200]} To keep it, they approve by sending exactly: "
+                   f"/watch approve {view['id']} {code}")
+        return self._inject(message, key) == "accepted_unverified"
 
     def review_context(self):
         from .proactive_observe import collect
@@ -135,7 +212,7 @@ class Runtime:
         event_id = event["id"]
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         if event["kind"] == "watch_due":
             return self._dispatch_watch_due(event)
@@ -155,11 +232,13 @@ class Runtime:
             self._record_appraisal_error()
             appraisal = {"useful": False}
         if not isinstance(appraisal, dict) or appraisal.get("useful") is not True:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
+            self.ledger.log("review", f"{event['kind']}: nothing useful", "rejected")
             return {"id": event_id, "status": "no_op"}
         action, task_id = appraisal.get("action", "ask"), appraisal.get("task_id")
         if action not in {"research", "draft", "continue_approved", "ask", "follow_up"}:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
+            self.ledger.log("review", f"{event['kind']}: {action} not allowed", "rejected")
             return {"id": event_id, "status": "rejected"}
         if task_id is not None:
             original = next((t for t in context["tasks"] if t["id"] == task_id), None)
@@ -167,14 +246,14 @@ class Runtime:
             if (not original or not current or current.get("approved") is not True
                     or current.get("status") != "active"
                     or any(original.get(k) != current.get(k) for k in ("scope", "owner", "execution_host"))):
-                self.store.finish(event_id, "rejected")
+                self.store.finish(event_id, "rejected", refund=True, appraised=True)
                 return {"id": event_id, "status": "rejected"}
         elif action in {"continue_approved", "follow_up"}:
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "rejected"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True, appraised=True)
             return {"id": event_id, "status": "rejected"}
         metadata = {"id": event_id, "kind": event["kind"], "purpose": event["purpose"] is True,
                     "recommended_action": action, "task_id": task_id}
@@ -195,16 +274,18 @@ class Runtime:
                    "Record verified results and acknowledge this event with proactive_control "
                    "resolve. If that tool is not available in this session, take no further "
                    "action — the event expires on its own and stays auditable. "
-                   "Caps are not quotas.\nEvent metadata: "
+                   "Caps are not quotas. " + SILENT_LINE + "\nEvent metadata: "
                    + json.dumps(metadata, sort_keys=True))
-        status = self._inject(message, event["session_key"])
+        status, shown = self._send(event, message, isolate=True, kind="review",
+                                   reason=f"{event['kind']}: {action}" + (f" ({task_id})" if task_id else ""),
+                                   task_id=task_id)
         self.store.finish(event_id, status)
-        if status == "accepted_unverified" and hasattr(self.store, "coalesce_pending"):
+        if shown in ("accepted_unverified", "isolated") and hasattr(self.store, "coalesce_pending"):
             # This wake re-reads live context, so any other queued speculative
             # diffs would fire the same turn's work as separate wakes. Fold
             # them now — after acceptance, never before.
             self.store.coalesce_pending()
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def _dispatch_first_run(self, event):
         """The one-time orientation wake after the operator's first resume.
@@ -224,12 +305,15 @@ class Runtime:
         if oriented:
             # A duplicate admission queued before an earlier wake landed —
             # orientation already happened; retire this one quietly.
-            self.store.finish(event_id, "resolved")
+            self.store.finish(event_id, "resolved", refund=True)
+            return {"id": event_id, "status": "stale"}
+        if any(info.get("kind") == "first_run" for info in self.ledger.tracked_jobs().values()):
+            self.store.finish(event_id, "resolved", refund=True)
             return {"id": event_id, "status": "stale"}
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key \
                 or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         metadata = {"id": event_id, "kind": "first_run", "purpose": True}
         message = "\n".join([
@@ -249,18 +333,19 @@ class Runtime:
             "useful source is reachable, say so plainly and suggest the",
             "smallest start. Resolve this event with proactive_control",
             "resolve when done; do not generate a second orientation wake.",
+            SILENT_LINE,
             "Event metadata: " + json.dumps(metadata, sort_keys=True),
         ])
-        status = self._inject(message, event["session_key"])
+        status, shown = self._send(event, message, isolate=True, kind="first-run", reason="orientation")
         self.store.finish(event_id, status)
-        if status == "accepted_unverified":
+        if shown == "accepted_unverified":
             try:
                 with self.ledger.transaction() as state:
                     state["observations"]["first_run_done"] = \
                         datetime.now(timezone.utc).isoformat()
             except Exception:
                 pass
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def _dispatch_watch_due(self, event):
         """Dispatch a user-approved scheduled watch without an LLM appraisal.
@@ -283,8 +368,10 @@ class Runtime:
             None,
         )
         if watch_id is None or epoch is None or watch is None \
-                or watch.get("approved") is not True or watch.get("status") != "active":
-            self.store.finish(event_id, "rejected")
+                or watch.get("approved") is not True or watch.get("status") != "active" \
+                or not approval_fresh(watch):
+            self.store.finish(event_id, "rejected", refund=True)
+            self.ledger.log("watch", f"{watch_id}: no longer active", "rejected")
             return {"id": event_id, "status": "rejected"}
         # Stale-instance check: the watch was re-armed or its deadline moved
         # since this event was admitted — the scheduled moment it names is
@@ -300,7 +387,8 @@ class Runtime:
         else:
             current = _parse_time(watch.get("due_at"))
         if current is None or int(current) != epoch:
-            self.store.finish(event_id, "resolved")
+            self.store.finish(event_id, "resolved", refund=True)
+            self.ledger.log("watch", f"{watch_id}: already handled", "rejected")
             return {"id": event_id, "status": "stale"}
         # A cadence watch re-arms on its fixed grid as it fires — whether or
         # not the wake succeeds — so one failed dispatch can never strand the
@@ -316,7 +404,7 @@ class Runtime:
         live = self.store.load_policy()
         if live.enabled is not True or event["session_key"] != live.session_key \
                 or not self.gateway_ready():
-            self.store.finish(event_id, "rejected")
+            self.store.finish(event_id, "rejected", refund=True)
             return {"id": event_id, "status": "rejected"}
         # Missing or hand-corrupted kinds fall back to the plain watch
         # contract — a bad label must never crash a scheduled wake.
@@ -355,7 +443,8 @@ class Runtime:
             lines.append(
                 "Run one bounded metadata-first pass over installed, reachable "
                 "read surfaces and open loops — load alans-way:proactive-primary "
-                "and follow its Source Sweeps procedure. Reachable surfaces "
+                "and follow its references/sweeps.md (skill_view with file_path). "
+                "Reachable surfaces "
                 "include the managed browser: workspace_browser serves the Mac "
                 "tab when it is online and its own browser when it is not, and "
                 "a logged-in page counts as a source. Missing connectors are "
@@ -368,6 +457,7 @@ class Runtime:
             )
         elif kind == "loop":
             lines.append(
+                "Follow references/watches.md of alans-way:proactive-primary. "
                 "Check the real signal now (inbox, thread, board) with real "
                 "tools — connector first, workspace_browser when no connector "
                 "is installed — honoring execution_host (web reads are never "
@@ -381,6 +471,7 @@ class Runtime:
             )
         else:
             lines.append(
+                "Follow references/watches.md of alans-way:proactive-primary. "
                 "Run the check now with real tools, honoring execution_host "
                 "(mac means work only the Mac can do — blocked while offline; "
                 "web reads go through workspace_browser, which serves the Mac "
@@ -395,17 +486,19 @@ class Runtime:
                 "via proactive_control resolve. Native approvals still gate "
                 "external or sensitive actions; unverified work is not complete."
             )
+        lines.append(SILENT_LINE)
         lines.append("Event metadata: " + json.dumps(metadata, sort_keys=True))
-        status = self._inject("\n".join(lines), event["session_key"])
+        status, shown = self._send(event, "\n".join(lines), isolate=kind in ("sweep", "loop"),
+                                   kind=kind, reason=f"{watch_id}: {watch.get('title', '')}"[:100])
         self.store.finish(event_id, status)
-        if status == "accepted_unverified" and kind == "sweep" \
+        if shown in ("accepted_unverified", "isolated") and kind == "sweep" \
                 and hasattr(self.store, "coalesce_pending"):
             # The sweep reads live context anyway, so queued speculative diffs
             # are its input — fold them into this one turn instead of
             # waking again. Only after acceptance; a failed dispatch loses
             # nothing.
             self.store.coalesce_pending()
-        return {"id": event_id, "status": status}
+        return {"id": event_id, "status": shown}
 
     def close(self):
         import threading
@@ -432,14 +525,20 @@ class Runtime:
         disclosure-free view: watch scopes and preferences stay bound.
         """
         action = args.get("action", "status") if isinstance(args, dict) else "status"
-        if action != "status" and not self._bound_route_only():
+        if action != "status" and not self._bound_route_only() and not self._cron_bookkeeping(action, kwargs.get("task_id")):
             return json.dumps({"ok": False, "error": "Proactivity controls are only available on the bound conversation."})
         if action == "resume":
-            return json.dumps({"ok": False, "error": "Resume is operator-only — the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
+            return json.dumps({"ok": False, "error": "Resume is operator-only: the user turns proactivity back on with /proactivity resume or hermes proactivity resume."})
         if action == "configure" and isinstance(args, dict):
             relaxed = self._loosening(args.get("changes", args.get("settings", {})))
             if relaxed:
-                return json.dumps({"ok": False, "error": f"That change widens {relaxed} — an operator applies it with /proactivity configure or hermes proactivity configure."})
+                return json.dumps({"ok": False, "error": f"That change widens {relaxed}: an operator applies it with /proactivity configure or hermes proactivity configure."})
+        if action == "level" and isinstance(args, dict):
+            from .proactive_core import LEVELS
+            level = args.get("level")
+            preset = LEVELS.get(level) if isinstance(level, str) else None
+            if preset is not None and self._loosening(preset):
+                return json.dumps({"ok": False, "error": "Raising the level is operator-only: the user applies it with /proactivity level or hermes proactivity level."})
         if action == "pause" and isinstance(args, dict) and args.get("resume_at") is not None:
             # A bound session may tighten an active snooze (lift lands later)
             # but never impose or hasten a lift over a paused policy — either
@@ -454,7 +553,9 @@ class Runtime:
                 except (TypeError, ValueError):
                     sooner = True
                 if sooner:
-                    return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only — the operator applies it with /proactivity pause <timestamp>."})
+                    return json.dumps({"ok": False, "error": "Adjusting a paused snooze is operator-only: the operator applies it with /proactivity pause <timestamp>."})
+        if action == "record_task" and isinstance(args, dict):
+            return self._propose(args.get("task"))
         result = self.control(args, **kwargs)
         if action == "status" and not self._bound_route_only():
             try:
@@ -465,6 +566,45 @@ class Runtime:
             except (ValueError, TypeError):
                 pass
         return result
+
+    def _cron_bookkeeping(self, action, task_id=None):
+        """An isolated wake runs in a cron session with no route: it may feed
+        signals and finish watches (both only tighten), nothing else. Only the
+        wake jobs this plugin created count: Hermes names that session's
+        task_id ``cron:<job id>:<run>``, and the job must still be tracked."""
+        if action not in ("report_signal", "finish_task"):
+            return False
+        try:
+            from gateway.session_context import get_session_env
+            from utils import is_truthy_value
+            cron = is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
+        except Exception:
+            import os
+            cron = os.environ.get("HERMES_CRON_SESSION", "").lower() in ("1", "true", "yes")
+        parts = str(task_id or "").split(":")
+        return cron and parts[0] == "cron" and len(parts) > 1 and parts[1] in self.ledger.tracked_jobs()
+
+    def _propose(self, task):
+        """The model may only propose a watch; the user approves it themselves."""
+        try:
+            pending = self.ledger.propose_task(task)
+        except SourceSuppressed as exc:
+            return json.dumps({"ok": False, "error": f"The user dismissed three {exc.args[0]} proposals "
+                               "in the last two weeks. Do not propose more of that kind unless they ask for one."})
+        except Exception:
+            return json.dumps({"ok": False, "error": "Invalid or unsupported watch; no success is claimed"})
+        result = {"ok": True, **self.store.status()}
+        if pending:
+            saved = pending_view(next(t for t in self.ledger.snapshot()["tasks"] if t["id"] == task["id"]))
+            code = self.ledger.proposal_hash(saved)
+            self.ledger.log("proposal", f"{task['id']}: {task.get('title', '')}", "proposed")
+            from .proactive_telegram import offer
+            offer(self, saved, code)
+            result["awaiting_approval"] = task["id"]
+            result["tell_user"] = (f"Watch {task['id']} is only proposed and will not run yet. In your reply, "
+                                   f"say what it will do and tell the user to approve it by sending exactly: "
+                                   f"/watch approve {task['id']} {code}")
+        return json.dumps(result)
 
     def _loosening(self, changes):
         """Name the first limit a configure call would loosen, or None.
@@ -485,6 +625,8 @@ class Runtime:
             value = changes.get(name)
             if type(value) is int and value < getattr(policy, name):
                 return name
+        if "timezone" in changes and changes["timezone"] != policy.timezone:
+            return "timezone"
         if "quiet_start" in changes or "quiet_end" in changes:
             start = changes.get("quiet_start", policy.quiet_start)
             end = changes.get("quiet_end", policy.quiet_end)
@@ -518,7 +660,12 @@ class Runtime:
                 if (not isinstance(changes, dict) or not changes
                         or {"primary_profile", "session_key", "enabled"}.intersection(changes)):
                     raise ValueError("binding is operator-only")
+                if "level" in changes:
+                    raise ValueError("set the level with the level action")
                 changes = dict(changes)
+                if {"max_daily_wakes", "max_low_purpose_wakes", "max_daily_watch_wakes",
+                        "min_interval_seconds"} & set(changes):
+                    changes["level"] = "custom"
                 preferences = changes.pop("preferences", None)
                 if preferences is not None:
                     if changes:
@@ -528,12 +675,13 @@ class Runtime:
                     if "resume_at" in changes:
                         raise ValueError("snooze through pause, not configure")
                     self.store.update_policy(changes)
-            elif action == "record_task":
-                self.ledger.record_task(args.get("task"))
+            elif action == "level":
+                from .proactive_core import LEVELS
+                self.store.update_policy({**LEVELS[args["level"]], "level": args["level"]})
             elif action == "report_signal":
                 self.ledger.report_signal(args.get("task_id", ""), args.get("signal", ""))
             elif action == "finish_task":
-                self.ledger.finish_task(args.get("task_id"), args.get("status", "done"),
+                self.ledger.finish_task(args.get("task_id"), args.get("status", "done"), by="model",
                                         artifact=args.get("artifact"), verification=args.get("verification"))
             elif action == "pause":
                 # resume_at turns a pause into a durable snooze; a bare pause
@@ -610,6 +758,11 @@ class Runtime:
         action = parts[0] if parts else "status"
         if action != "status" and not self._bound_route_only():
             return "Proactivity controls are only available on the bound conversation."
+        if action in self._KNOBS:
+            try:
+                return self.operate(action, parts[1] if len(parts) > 1 else "")
+            except ValueError as exc:
+                return str(exc)
         args = {"action": action}
         if action == "pause" and len(parts) > 1:
             args["resume_at"] = parts[1]
@@ -628,6 +781,60 @@ class Runtime:
             return ("Review suggests " + appraisal["action"] +
                     (" for approved watch " + appraisal["task_id"] if appraisal["task_id"] else "") +
                     ". Verify current scope and consent before acting. No background turn queued.")
+        return self._status_text()
+
+    _KNOBS = ("level", "quiet", "timezone", "snooze", "log")
+
+    def operate(self, action, value=""):
+        """The operator's plain-language knobs, shared by /proactivity and the CLI.
+
+        Raises ValueError carrying the usage line; mutations answer with the
+        read-back status. Never reachable from the model tool.
+        """
+        from .proactive_core import LEVELS
+        policy = self.store.load_policy()
+        if action == "log":
+            return self._log_text(policy.timezone)
+        if action == "level":
+            name = (value or "").strip().lower()
+            if name not in LEVELS:
+                raise ValueError("Use /proactivity level quiet, normal or eager.")
+            result = self.control({"action": "level", "level": name})
+        elif action == "quiet":
+            from .proactive_knobs import parse_quiet
+            start, end = parse_quiet(value)
+            result = self.control({"action": "configure", "changes": {"quiet_start": start, "quiet_end": end}})
+        elif action == "timezone":
+            try:
+                self.store.update_policy({"timezone": (value or "").strip()})
+            except ValueError:
+                raise ValueError("Use /proactivity timezone <IANA name>, for example America/Chicago.") from None
+            result = json.dumps({"ok": True})
+        else:
+            from .proactive_knobs import SNOOZE_USAGE, parse_snooze
+            if (value or "").strip().lower() == "off":
+                if not policy.resume_at:
+                    return "No snooze is active."
+                self.store.update_policy({"enabled": True})
+                result = json.dumps({"ok": True})
+            else:
+                result = self.control({"action": "pause", "resume_at": parse_snooze(value, policy.timezone)})
+        if json.loads(result).get("ok") is not True:
+            raise ValueError("Proactivity control failed. No success is claimed; check the installed tool settings.")
+        return self._status_text()
+
+    def _log_text(self, tz):
+        from zoneinfo import ZoneInfo
+        entries = self.ledger.recent_log(10)
+        if not entries:
+            return "No proactive activity yet."
+        lines = []
+        for entry in reversed(entries):
+            when = datetime.fromisoformat(entry["at"]).astimezone(ZoneInfo(tz)).strftime("%b %d %H:%M")
+            lines.append(f"{when}  {entry['kind']}  {entry['reason']}  [{entry['outcome']}]")
+        return "Recent proactive activity (newest first):\n" + "\n".join(lines)
+
+    def _status_text(self):
         state = json.loads(self.control({"action": "status"}))
         if state.get("ok") is not True:
             return "Control was requested, but its effective state could not be verified."
@@ -635,12 +842,15 @@ class Runtime:
         unresolved = sum(counts.get(name, 0) for name in ("dispatching", "accepted_unverified", "uncertain"))
         attention = [state.get("observer_error"), state.get("appraisal_error")]
         if state.get("storage_full"):
-            attention.append("event storage full — new wakes refused")
+            attention.append("event storage full, new wakes refused")
         flagged = "\nAttention: " + "; ".join(item for item in attention if item) if any(attention) else ""
         snoozed = ("" if state["enabled"] or not policy.get("resume_at")
                    else f" until {policy['resume_at']}")
+        quiet = ("off" if policy["quiet_start"] == policy["quiet_end"]
+                 else f"{policy['quiet_start']:02}:00-{policy['quiet_end']:02}:00")
         return (f"Proactivity: {'enabled' if state['enabled'] else 'paused' + snoozed}\n"
-                f"Quiet hours: {policy['quiet_start']:02}:00–{policy['quiet_end']:02}:00 ({policy['timezone']})\n"
+                f"Level: {policy['level']}\n"
+                f"Quiet hours: {quiet} ({policy['timezone']})\n"
                 f"Limits: up to {policy['max_daily_wakes']} reviews/day plus "
                 f"{policy['max_daily_watch_wakes']} scheduled-watch wakes; "
                 f"{policy['min_interval_seconds'] // 60} minutes between automatic reviews\n"
@@ -652,12 +862,35 @@ class Runtime:
                 + flagged + "\n"
                 "Limits are ceilings; nothing useful means silence.")
 
+    def decide_watch(self, action, task_id, code=None):
+        """The operator's decision on a proposal, shared by /watch and the buttons.
+
+        Returns (reply text, outcome) with outcome approved, dismissed or
+        stale, or None when there is nothing pending for that id.
+        """
+        try:
+            if action == "approve":
+                try:
+                    task = self.ledger.approve_task(task_id, code)
+                except StaleProposal as stale:
+                    task = stale.task
+                    return (f"Watch {task_id} changed since you read it, so nothing was approved. Now: {task['scope']} "
+                            f"Next action: {task['next_action']} To approve this version send "
+                            f"/watch approve {task_id} {self.ledger.proposal_hash(task)}"), "stale"
+                return (f"Watch {task_id} is approved and active. Scope: {task['scope']} "
+                        f"Next action: {task['next_action']}"), "approved"
+            kind = self.ledger.dismiss_task(task_id)
+            return (f"Dismissed {task_id}. Proposals of kind {kind} pause after three dismissals "
+                    "in two weeks."), "dismissed"
+        except ValueError:
+            return None
+
     def watch_command(self, raw_args):
         """/watch — the operator's direct surface over standing watches.
 
-        A typed slash command is explicit consent in itself, so these actions
-        bypass nothing: they call the same validated ledger paths the tool
-        uses, and mutation output always reads back live state.
+        A typed slash command is explicit consent in itself, and the only way
+        a watch becomes active: the model's tool can just propose one.
+        Mutation output always reads back live state.
         """
         if not self._bound_route_only():
             return "Watch controls are only available on the bound conversation."
@@ -672,7 +905,10 @@ class Runtime:
                     fire = t.get("next_review_at") or ("due " + t["due_at"] if t.get("due_at") else "manual")
                     cadence = f" every {t['cadence_seconds']}s" if t.get("cadence_seconds") else ""
                     kind = t.get("kind") if t.get("kind") in TASK_KINDS else "watch"
-                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} — {t.get('title') or t['scope'][:60]}"
+                    ask = (f" (approve with /watch approve {t['id']} {self.ledger.proposal_hash(t)})"
+                           if t["status"] == "proposed" or t.get("revision") else "")
+                    ask = " (needs re-approval)" + ask if (t.get("revision") or {}).get("reapproval") else ask
+                    return f"- {t['id']} [{kind}:{t['status']}]{cadence} next: {fire} - {t.get('title') or t['scope'][:60]}{ask}"
                 return "Standing watches:\n" + "\n".join(line(t) for t in tasks)
             if action == "show":
                 task = next((t for t in tasks if t["id"] == rest), None)
@@ -694,16 +930,24 @@ class Runtime:
                 task_id = rest.split()[0] if rest else ""
                 self.ledger.finish_task(task_id, status)
                 return f"Watch {task_id} is now {status}."
+            if action in ("approve", "dismiss"):
+                words = rest.split()
+                decision = self.decide_watch(action, words[0] if words else "", words[1] if len(words) > 1 else None)
+                if decision is None:
+                    raise ValueError("no proposed watch")
+                return decision[0]
             if action == "resume":
                 task_id = rest.split()[0] if rest else ""
                 task = next((t for t in tasks if t["id"] == task_id), None)
                 if task is None:
                     return f"No watch {task_id!r}."
+                if task["status"] == "proposed":
+                    return f"Watch {task_id} is only proposed. Approve it with /watch approve {task_id}."
                 if task["status"] in {"done", "cancelled"}:
-                    return f"Watch {task_id} is {task['status']} — terminal watches need a new id."
+                    return f"Watch {task_id} is {task['status']}; terminal watches need a new id."
                 task = dict(task, status="active")
                 task = {k: v for k, v in task.items()
-                        if k not in {"signal", "signal_at", "approved_at"}}
+                        if k in TASK_FIELDS and k not in {"signal", "signal_at"}}
                 self.ledger.record_task(task)
                 return f"Watch {task_id} is active again."
             if action == "signal":
@@ -713,10 +957,10 @@ class Runtime:
                 self.ledger.report_signal(task_id, signal.strip())
                 return f"Signal recorded on {task_id}."
             return ("Use /watch list, /watch show <id>, /watch add {json}, "
-                    "/watch pause <id>, /watch resume <id>, /watch done <id>, "
+                    "/watch approve <id>, /watch dismiss <id>, /watch pause <id>, /watch resume <id>, /watch done <id>, "
                     "/watch cancel <id>, or /watch signal <id> <text>.")
         except (ValueError, KeyError, IndexError, TypeError):
-            return "Watch command failed — check the id or JSON payload. No change was claimed."
+            return "Watch command failed. Check the id or JSON payload. No change was claimed."
 
 
 def _owning_home() -> Path:
@@ -753,22 +997,28 @@ def _primary_profile(ctx) -> bool:
 
 def register(ctx, *, home=None, background=True):
     runtime = Runtime(ctx, Path(home) if home is not None else _owning_home(), background=background)
-    from .proactive_schema import SCHEMA
-    ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
-                      handler=runtime.tool_control, check_fn=lambda: True)
-    ctx.register_command("proactivity", runtime.command,
-                         description="Status, pause, resume, and configure proactive work")
-    ctx.register_command("watch", runtime.watch_command,
-                         description="List, schedule, pause, or cancel standing proactive watches")
+    primary = _primary_profile(ctx)
     skills_dir = Path(__file__).parent / "skills"
-    ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
+    if primary:
+        from .proactive_schema import SCHEMA
+        ctx.register_tool(name="proactive_control", toolset="proactivity", schema=SCHEMA,
+                          handler=runtime.tool_control, check_fn=lambda: True)
+        ctx.register_command("proactivity", runtime.command,
+                             description="Status, pause, resume, and configure proactive work")
+        ctx.register_command("watch", runtime.watch_command,
+                             description="List, schedule, pause, or cancel standing proactive watches")
+        ctx.register_skill("proactive-primary", skills_dir / "proactive-primary" / "SKILL.md")
     ctx.register_skill("workspace-operations", skills_dir / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills_dir / "workspace-setup" / "SKILL.md")
     ctx.on_unload(runtime.close)
-    if hasattr(ctx, "register_cli_command"):
+    if primary and hasattr(ctx, "register_telegram_handler"):
+        from .proactive_telegram import wire
+        ctx.register_telegram_handler(wire(runtime))
+        runtime.telegram_handler = True
+    if primary and hasattr(ctx, "register_cli_command"):
         from .proactive_operator import setup, execute
         ctx.register_cli_command("proactivity", "Manage the designated proactive primary", setup,
                                  lambda args: execute(runtime, args))
-    if background and _primary_profile(ctx):
+    if background and primary:
         runtime.start()
     return runtime

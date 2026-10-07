@@ -33,8 +33,8 @@ class SilenceTests(unittest.TestCase):
             def claim(self, now=None):
                 return {"id": "test-no-op", "kind": "context_changed", "evidence": "a" * 64,
                         "purpose": False, "session_key": self.load_policy().session_key}
-            def finish(self, event_id, status):
-                self.finished.append((event_id, status))
+            def finish(self, event_id, status, refund=False, appraised=False):
+                self.finished.append((event_id, status, refund, appraised))
         module = load_plugin()
         guard = sys.modules[module.__name__ + ".gateway_guard"]
         with tempfile.TemporaryDirectory() as directory:
@@ -43,7 +43,7 @@ class SilenceTests(unittest.TestCase):
             guard.mark_gateway_ready(home)
             result = runtime.tick()
             self.assertEqual(result["status"], "no_op")
-            self.assertEqual(store.finished, [("test-no-op", "rejected")])
+            self.assertEqual(store.finished, [("test-no-op", "rejected", True, True)])
             runtime.close()
 
 

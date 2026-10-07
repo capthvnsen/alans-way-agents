@@ -32,7 +32,7 @@ def collect_board(home: Path, *, now: datetime | None = None) -> dict:
     try:
         if not path.is_file() or path.is_symlink():
             return {}
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        db = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=1.0)
         try:
             cols = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
             wanted = {"id", "title", "status", "assignee", "created_by", "created_at"}

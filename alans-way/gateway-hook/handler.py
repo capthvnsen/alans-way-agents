@@ -2,22 +2,30 @@
 from pathlib import Path
 import importlib.util
 import os
+import sys
+
+
+def _default_home():
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
 
 
 def handle(event_type, context, *, home=None):
     if event_type != "gateway:startup":
         return
     source_home = Path(__file__).resolve().parents[2]
-    actual_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser().absolute()
-    if home is None and source_home.absolute() != actual_home:
-        return
+    actual_home = Path(os.environ.get("HERMES_HOME") or _default_home()).expanduser().resolve()
     # Under gateway.multiplex_profiles the one gateway:startup emit can land in
-    # any served profile's hooks scope. Whichever profile's copy runs, the
-    # launch home's plugin runtime must still arm, so stamp it alongside the
-    # scoped home when this handler lives under <home>/profiles/<name>/hooks/.
+    # any served profile's hooks scope. A copy under <launch home>/profiles/<name>/hooks/
+    # must still arm the launch home's plugin runtime, so it stamps both homes.
+    # A copy under any other home stays inert.
+    serves_launch_home = source_home.parent.name == "profiles" and source_home.parent.parent == actual_home
+    if home is None and source_home != actual_home and not serves_launch_home:
+        return
     bases = {source_home}
-    if source_home.parent.name == "profiles":
-        bases.add(source_home.parent.parent)
+    if serves_launch_home:
+        bases.add(actual_home)
     targets = set(bases) if home is None else {Path(home)}
     candidates = [
         base / suffix
