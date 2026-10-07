@@ -42,7 +42,9 @@
 //   HERMES_WORKSPACE_MAC_SSH, HERMES_WORKSPACE_HOST_OS,
 //   HERMES_WORKSPACE_MAC_NODE, HERMES_WORKSPACE_MAC_MCP,
 //   HERMES_WORKSPACE_VPS_MCP, HERMES_WORKSPACE_CONNECTION,
-//   HERMES_MAC_STATE_FILE.
+//   HERMES_MAC_STATE_FILE, HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS
+//   (exposes workspace_computer_action again: only setup-workspace.sh
+//   --allow-desktop-actions or the alans-way-computer provider sets it).
 // With no Mac ssh configured the router always serves the local VPS host.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -291,6 +293,17 @@ const READ_ONLY_TOOLS = new Set([
   'workspace_computer_screenshot',
   'workspace_computer_menu',
 ]);
+
+// Desktop input is ungated at the MCP layer (this server carries no trust
+// key), so workspace_computer_action is hidden from tools/list and refused
+// unless the operator opted in: setup-workspace.sh --allow-desktop-actions
+// writes HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS into the managed block, and
+// the alans-way-computer provider sets it on its own private router child
+// (Hermes's computer_use approval gate sits above that path). The read-only
+// computer tools above stay exposed either way.
+const DESKTOP_INPUT_TOOL = 'workspace_computer_action';
+const desktopActionsAllowed = !['', '0', 'false', 'no'].includes(
+  (process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '').trim().toLowerCase());
 
 function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
   return Boolean(
@@ -844,6 +857,9 @@ function annotateResult(msg, host, mac, notice, ms) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
+  if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
+    msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
+  }
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
@@ -1757,6 +1773,15 @@ async function main() {
     if (out !== line) {
       const req = pendingRequests.get(msg.id);
       if (req) req.line = out;
+    }
+    if (!desktopActionsAllowed && msg.params && msg.params.name === DESKTOP_INPUT_TOOL) {
+      pendingRequests.delete(msg.id);
+      unbuffer(line);
+      emitToolError(
+        msg.id,
+        'workspace_computer_action is not exposed by this server. Desktop input goes through the approval-gated computer_use tool.',
+      );
+      return null;
     }
     const args = (msg.params && msg.params.arguments) || {};
     const host = normalizeHost(args.host);

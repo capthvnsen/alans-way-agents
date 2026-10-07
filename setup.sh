@@ -12,7 +12,7 @@
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
-#        --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
+#        --dev-plugin-install --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
@@ -22,7 +22,7 @@ PLUGIN_NAME="alans-way"
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
-SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0
+SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0 DEV_PLUGIN=0
 MIN_HERMES="0.21.5"
 
 while [ $# -gt 0 ]; do
@@ -45,6 +45,7 @@ while [ $# -gt 0 ]; do
     --keep-browser) KEEP_BROWSER=1; shift;;
     --keep-computer-use) KEEP_COMPUTER=1; shift;;
     --allow-desktop-actions) ALLOW_DESKTOP=1; shift;;
+    --dev-plugin-install) DEV_PLUGIN=1; shift;;
     --bind) DO_BIND=1; shift;;
     --proactive) PROACTIVE="$2"; shift 2;;
     --timezone) TIMEZONE="$2"; shift 2;;
@@ -76,11 +77,15 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
                    for Telegram and cron once the workspace browser is configured)
-  --keep-computer-use  leave Hermes' built-in computer_use toolset on when this Hermes has
-                   no pluggable provider API (setup turns it off for Telegram and cron
-                   so the agent uses the workspace_computer_* tools)
-  --allow-desktop-actions  stop Telegram approval prompts for desktop control (click, type,
-                   key, scroll...) by adding them to command_allowlist; off unless you ask
+  --keep-computer-use  deprecated no-op kept for compatibility: setup never disables
+                   the approval-gated computer_use toolset
+  --allow-desktop-actions  manual opt-in only: stop Telegram approval prompts for
+                   desktop control (click, type, key, scroll...) by adding them to
+                   command_allowlist. On a Hermes without the computer-use provider
+                   API it also exposes the ungated workspace_computer_action tool
+  --dev-plugin-install  developer only: install the computer-use provider from this
+                   clone (file://) instead of the Hermes catalog; the setup skill
+                   and docs never pass it
   --skip-browser / --skip-services / --non-interactive for constrained runs
 EOF
       exit 0;;
@@ -193,19 +198,25 @@ write_if_changed() {
 
 
 # When the computer-use provider is the selected backend, its own doctor decides.
+# Otherwise the built-in toolset stays on (it is approval-gated); what verify
+# must catch is the ungated workspace_computer_action tool being exposed.
 check_computer_provider() {
   have hermes || return 0
   if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
-    if [ "$KEEP_COMPUTER" = 1 ]; then
-      skip "built-in computer_use toolset check${PROFILE:+ for profile $PROFILE} (--keep-computer-use)"
-    else
-      for platform in telegram cron; do
-        if hermes_p tools list --platform "$platform" 2>/dev/null | grep -Eq "enabled[[:space:]]+computer_use([[:space:]]|$)"; then
-          warn "built-in 'computer_use' toolset still enabled for $platform${PROFILE:+ in profile $PROFILE}: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform $platform)"
-        else
-          ok "built-in computer_use toolset disabled for $platform${PROFILE:+ in profile $PROFILE}"
-        fi
-      done
+    _cfg="$HERMES_HOME/config.yaml"
+    if [ -n "$PROFILE" ]; then
+      _cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+    elif [ -n "$CONFIG" ]; then
+      _cfg="$CONFIG"
+    fi
+    if [ -f "$_cfg" ] && grep -q 'workspace_browser' "$_cfg"; then
+      if grep -q 'HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS' "$_cfg"; then
+        ok "workspace_computer_action exposed by explicit opt-in (--allow-desktop-actions)${PROFILE:+ in profile $PROFILE}"
+      elif grep -q 'workspace_computer_action' "$_cfg"; then
+        ok "ungated desktop input excluded from workspace_browser${PROFILE:+ in profile $PROFILE}"
+      else
+        warn "workspace_browser in $_cfg does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately"
+      fi
     fi
     return 0
   fi
@@ -687,17 +698,27 @@ fi
 
 # Fetch the repo when running via curl|bash. A --repo-ref pin checks out a
 # reviewed commit instead of tracking main.
+# A ref can be a branch or tag, so the check compares the clone's HEAD with
+# the commit the ref resolves to, not the ref's own name. A mismatch stops
+# setup: continuing on the wrong tree defeats the review boundary.
+check_repo_pin() {
+  [ -n "$REPO_REF" ] || return 0
+  _want="$(git -C "$REPO_DIR" rev-parse --verify -q "$REPO_REF^{commit}" 2>/dev/null || true)"
+  _head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$_want" ] && [ "$_head" = "$_want" ]; then return 0; fi
+  bad "$REPO_DIR is not at --repo-ref $REPO_REF (git checkout $REPO_REF there, or run setup from a fresh download)"
+  exit 1
+}
 if [ -z "$REPO_DIR" ]; then
   step "Fetching alans-way-agents"
   REPO_DIR="$BROWSER_HOME/.local/share/alans-way-agents"
   if [ -d "$REPO_DIR/.git" ]; then
     if [ -n "$REPO_REF" ]; then
-      # A requested pin that can't be applied is a stop, not a fallback —
-      # continuing on the wrong tree defeats the review boundary. Fetch only
-      # when the local objects don't already satisfy the ref.
+      # A requested pin that can't be applied is a stop, not a fallback.
+      # Fetch only when the local objects don't already satisfy the ref.
       if git -C "$REPO_DIR" checkout -q "$REPO_REF" 2>/dev/null \
           || { git -C "$REPO_DIR" fetch -q origin && git -C "$REPO_DIR" checkout -q "$REPO_REF"; }; then
-        ok "pinned $REPO_DIR to $REPO_REF"
+        check_repo_pin && ok "pinned $REPO_DIR to $REPO_REF"
       else
         bad "could not pin $REPO_DIR to $REPO_REF"; exit 1
       fi
@@ -707,14 +728,13 @@ if [ -z "$REPO_DIR" ]; then
   else
     git clone -q "$REPO_URL" "$REPO_DIR" \
       && { [ -z "$REPO_REF" ] || git -C "$REPO_DIR" checkout -q "$REPO_REF"; } \
+      && check_repo_pin \
       && ok "cloned to $REPO_DIR${REPO_REF:+ at $REPO_REF}" \
       || { bad "git clone or pin failed"; exit 1; }
   fi
 elif [ -n "$REPO_REF" ]; then
   # Running from a clone: setup never moves the user's checkout, so the pin must already hold.
-  [ "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" = "$(git -C "$REPO_DIR" rev-parse --verify -q "$REPO_REF^{commit}" 2>/dev/null)" ] \
-    && [ -n "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" ] \
-    || { bad "$REPO_DIR is not at --repo-ref $REPO_REF (git checkout $REPO_REF there, or run setup from a fresh download)"; exit 1; }
+  check_repo_pin
   ok "$REPO_DIR is at $REPO_REF"
 fi
 
@@ -753,7 +773,7 @@ valid_iana() {
 detect_host_timezone() {
   [ -z "$TIMEZONE" ] && [ -n "$MAC_SSH" ] || return 0
   # The router builds the host-OS-specific node command; ssh runs it on the computer.
-  _cmd="$(node "$(wpath "$REPO_DIR")/alans-way/scripts/workspace-router.cjs" --host-timezone-command --host-os "${HOST_OS:-mac}" 2>/dev/null || true)"
+  _cmd="$(node "$(wpath "$(router_script)")" --host-timezone-command --host-os "${HOST_OS:-mac}" 2>/dev/null || true)"
   _tz=""
   [ -z "$_cmd" ] || _tz="$(host_ssh "$_cmd" 2>/dev/null | head -1 || true)"
   _tz="$(printf '%s' "$_tz" | tr -d ' \r\n')"
@@ -808,6 +828,18 @@ except Exception:
 row = rows.get(sys.argv[2])
 sys.exit(0 if isinstance(row, dict) and isinstance(row.get("catalog"), dict) else 1)
 PY
+}
+
+# The router and mac-watch run the copy Hermes actually loaded: under
+# --skip-plugin or a catalog install that is the profile's plugins dir, not a
+# possibly newer clone of this repo. The hook setup does the same.
+router_script() {
+  _rs="$REPO_DIR/$PLUGIN_NAME/scripts/workspace-router.cjs"
+  if { [ "$SKIP_PLUGIN" = 1 ] || plugin_is_catalog_installed; } \
+      && [ -f "$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs" ]; then
+    _rs="$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs"
+  fi
+  printf '%s' "$_rs"
 }
 
 # ---------------------------------------------------------------- plugin
@@ -896,15 +928,32 @@ except subprocess.TimeoutExpired:
 fi
 ensure_computer_provider() {
   COMPUTER_READY=0
+  if [ "$SKIP_PLUGIN" = 1 ]; then
+    # Catalog flow: plugin installs stay with the catalog, so the provider is
+    # the operator's own `hermes plugins install alans-way-computer`.
+    skip "computer-use provider (--skip-plugin leaves plugin installs to the catalog)"
+    return 0
+  fi
   if plugin_listed "$COMPUTER_PLUGIN" || plugin_is_catalog_installed "$COMPUTER_PLUGIN"; then
     ok "computer-use provider already installed; leaving it as it is"
     COMPUTER_READY=1
-  elif hermes_p plugins install --force "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+  elif [ "$DEV_PLUGIN" = 1 ]; then
+    # Developer path only: from this clone instead of the catalog. Nothing in
+    # the skill or docs passes --dev-plugin-install, so catalog users never
+    # land here.
+    if hermes_p plugins install --force "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+      hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
+      ok "computer-use provider installed from $REPO_DIR"
+      COMPUTER_READY=1
+    else
+      warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
+    fi
+  elif hermes_p plugins install "$COMPUTER_PLUGIN" >/dev/null 2>&1; then
     hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
-    ok "computer-use provider installed"
+    ok "computer-use provider installed from the Hermes catalog"
     COMPUTER_READY=1
   else
-    warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
+    warn "could not install the computer-use provider: run: hermes${PROFILE:+ -p $PROFILE} plugins install $COMPUTER_PLUGIN. Desktop control keeps using Hermes' built-in backend"
   fi
 }
 if [ "$COMPUTER_API" = 1 ]; then
@@ -1017,7 +1066,7 @@ install_windows_tasks() {
   fi
   if [ -n "$MAC_SSH" ]; then
     # The router's default state file on Windows is the one the observer reads.
-    win_service AlansWay_MacWatch "$REPO_DIR/alans-way/scripts/workspace-router.cjs" \
+    win_service AlansWay_MacWatch "$(router_script)" \
       --watch --interval 10 --mac-ssh "$(psq "$MAC_SSH")" --host-os "$(psq "$HOST_OS")"
   fi
 }
@@ -1374,7 +1423,7 @@ Type=simple
 User=$MAC_WATCH_USER
 Environment=PATH=$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$WATCH_ENV_DIR/mac-watch.env
-ExecStart=$NODE_BIN $REPO_DIR/alans-way/scripts/workspace-router.cjs --watch --interval 10
+ExecStart=$NODE_BIN $(router_script) --watch --interval 10
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=2
@@ -1413,7 +1462,7 @@ EOF
 	<key>ProgramArguments</key>
 	<array>
 		<string>$(command -v node || echo /usr/local/bin/node)</string>
-		<string>$REPO_DIR/alans-way/scripts/workspace-router.cjs</string>
+		<string>$(router_script)</string>
 		<string>--watch</string>
 		<string>--interval</string>
 		<string>10</string>
@@ -1512,6 +1561,13 @@ workspace_for_profile() {
   [ -n "$BOT_NAME" ] && set -- "$@" --bot-name "$BOT_NAME"
   [ -n "$MAC_SSH" ] && set -- "$@" --mac-ssh "$MAC_SSH"
   set -- "$@" --host-os "$HOST_OS"
+  # The router runs the copy Hermes loaded (the catalog install's own script),
+  # not a possibly newer clone of this repo.
+  set -- "$@" --router "$(router_script)"
+  # Exposing the raw desktop-input tool is the manual opt-in for a Hermes
+  # without the computer-use provider API. With the API, desktop input goes
+  # only through the gated computer_use provider, so the tool stays excluded.
+  [ "$ALLOW_DESKTOP" = 1 ] && [ "$COMPUTER_API" != 1 ] && set -- "$@" --allow-desktop-actions
   if [ -n "$PROFILE" ]; then set -- "$@" --profile "$PROFILE"
   elif [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
@@ -1521,19 +1577,13 @@ workspace_for_profile() {
       hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
         && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
         || warn "could not select the computer-use provider: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
-    fi
-    # Without a provider the stock CuaDriver toolset would compete with the
-    # workspace_computer_* tools, just as the stock browser would.
-    if [ "$COMPUTER_READY" != 1 ]; then
-      if [ "$KEEP_COMPUTER" = 1 ]; then
-        say "  keeping the built-in computer_use toolset on (--keep-computer-use); the agent may pick it instead of your workspace computer tools"
-      else
-        for platform in telegram cron; do
-          hermes_p tools disable computer_use --platform "$platform" >/dev/null 2>&1 \
-            && ok "built-in computer_use toolset disabled for $platform so the agent uses your workspace computer tools. To keep it on, re-run with --keep-computer-use or run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform" \
-            || warn "could not disable the built-in computer_use toolset for $platform: the agent may bypass the workspace computer tools (run: hermes${PROFILE:+ -p $PROFILE} tools disable computer_use --platform $platform)"
-        done
-      fi
+      # The gated toolset is now the only desktop-input path: undo an older
+      # setup's tools disable so the provider can serve it.
+      for platform in telegram cron; do
+        hermes_p tools enable computer_use --platform "$platform" >/dev/null 2>&1 \
+          && ok "computer_use toolset enabled for $platform (approval-gated; actions run through $COMPUTER_PLUGIN)" \
+          || warn "could not enable computer_use for $platform: desktop input stays unavailable there (run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform)"
+      done
     fi
     warn_user_cua_driver
     # The workspace browser replaces Hermes' built-in browser tool: leaving both

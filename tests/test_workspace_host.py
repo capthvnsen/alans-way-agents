@@ -49,6 +49,11 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       { name: 'cua_alans_way_action', inputSchema: { type: 'object', properties: {
         tabId: { type: 'string' }, epoch: { type: 'integer' }, action: { type: 'string' },
       }, required: ['tabId', 'epoch', 'action'] } },
+      { name: 'workspace_computer_apps', inputSchema: { type: 'object', properties: {} } },
+      { name: 'workspace_computer_snapshot', inputSchema: { type: 'object', properties: {
+        pid: { type: 'integer' } } } },
+      { name: 'workspace_computer_action', inputSchema: { type: 'object', properties: {
+        pid: { type: 'integer' }, action: { type: 'string' } } } },
     ] } }) + '\n');
   }
   if (m.method === 'tools/call') {
@@ -73,6 +78,9 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       if (!a.tabId) return reply(m.id, 'Tab not found.', true);
       if (a.epoch !== epoch) return reply(m.id, 'stale_control_epoch: read the tab state and retry after a fresh snapshot.', true);
       return reply(m.id, JSON.stringify({ ok: true, tab: { id: a.tabId, epoch } }));
+    }
+    if ((m.params.name || '').startsWith('workspace_computer_')) {
+      return reply(m.id, 'computer-ok');
     }
   }
   reply(m.id, 'mac');
@@ -170,6 +178,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
                    PROBE_DOWN=str(self.dir / "probe-down"),
                    VM_MODE=vm_mode, VM_TABCOUNT=str(vm_tabs),
                    MAC_PROXY_VM="1" if mac_proxy_vm else "")
+        env.pop("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", None)
         env.update(extra_env)
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -564,6 +573,46 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
         self.assertNotIn("tabId", args)
         self.assertNotIn("epoch", args)
+
+
+class DesktopInputGateTests(ExplicitHostRoutingTests):
+    """The ungated desktop-input tool is dropped from tools/list and refused
+    unless the opt-in marker env is set. setup-workspace.sh writes it only
+    with --allow-desktop-actions; the alans-way-computer provider sets it on
+    its own private router child."""
+
+    def tool_names(self):
+        self.send("tools/list")
+        return [tool["name"] for tool in self.recv()["result"]["tools"]]
+
+    def test_the_desktop_input_tool_is_dropped_from_tools_list(self):
+        self.start()
+        self.handshake()
+        names = self.tool_names()
+        self.assertNotIn("workspace_computer_action", names)
+        # Read-only computer tools stay exposed.
+        self.assertIn("workspace_computer_apps", names)
+        self.assertIn("workspace_computer_snapshot", names)
+
+    def test_the_desktop_input_call_is_refused_without_the_marker(self):
+        self.start()
+        self.handshake()
+        call = self.call("workspace_computer_action", {"pid": 5, "action": "key", "key": "a"})
+        msg = self.recv()
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertIn("computer_use", self.text(msg))
+        self.assertNotIn("workspace_computer_action", self.log("mac.log"))
+
+    def test_the_opt_in_marker_restores_listing_and_calls(self):
+        self.start(HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS="1")
+        self.handshake()
+        self.assertIn("workspace_computer_action", self.tool_names())
+        call = self.call("workspace_computer_action", {"pid": 5, "action": "key", "key": "a"})
+        answered = self.recv()
+        self.assertEqual(answered["id"], call)
+        self.assertFalse(answered["result"].get("isError"))
+        self.assertIn("workspace_computer_action", self.log("mac.log"))
 
 
 @unittest.skipUnless(NODE, "node is required for normalizeHost tests")

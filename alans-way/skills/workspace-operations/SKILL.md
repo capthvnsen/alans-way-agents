@@ -64,8 +64,11 @@ that key is not a tool. Skip status and tabs unless a call fails: every
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
 another host. When status shows the VPS, the Mac is unreachable: the same
-`cua_alans_way_*` tools are that machine's browser, and
-`workspace_computer_*` is its desktop. Press a ref from the accessibility
+`cua_alans_way_*` tools are that machine's browser. Its desktop is read with
+`workspace_computer_apps`, `workspace_computer_snapshot`,
+`workspace_computer_menu` and `workspace_computer_screenshot`, and acted on
+with the `computer_use` tool, which asks the user for approval on each
+action. Press a ref from the accessibility
 tree, leave the focused window alone, and do not move the pointer.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
@@ -247,27 +250,29 @@ snapshot is for element refs a reply did not give you, and a screenshot is
 only for a canvas, a chart, or a page the snapshot says it could not read.
 Never screenshot a page you can already read as text.
 
-Desktop apps, on the Mac and on the Linux machine, use `workspace_computer_apps`,
-then `workspace_computer_snapshot`, then `workspace_computer_action`. Press a
-`ref` from that snapshot. `type` replaces the text of a ref and does not send
-keystrokes. Pass `since=` the previous snapshot's generation
-for a cheap `{unchanged:true}` when that desktop tree is the same. Every ref action needs the `generation` of the latest snapshot; a stale one
-returns code `stale_ref`, so snapshot again. Besides `press`, `click`, `drag`
-and `type`, actions include `double_click`, `right_click`, `scroll`, `key`,
-`hotkey` and `menu`. `workspace_computer_menu` lists a menu bar, and the
-snapshot has a `menubar`. The action
-result includes `generation`. When it says `unchanged`, do not snapshot again.
-When it includes `elements`, that is the fresh tree. On a Mac,
-use `click` or `drag` with the snapshot's x,y only when the control has no name. A drag on a slider sets its value from the end point. On the Linux desktop, press a ref, click its snapshot x,y, or drag a slider or scroll bar to the end point. `workspace_computer_screenshot` captures that one window as a small
-jpeg, and only when the snapshot has no named control for what you need. Image pixels map to screen
-coordinates as `window.x + px * window.width / imageWidth`. Do not screenshot a
-window you can already read as names and refs. A check box or radio name ends in on or off. A disabled control's name ends in disabled, so do not press it. These calls do not move the
+Desktop apps, on the Mac and on the Linux machine, are driven by the
+`computer_use` tool. Hermes asks the user for approval before each action;
+that approval gate is the only desktop-input path, so never look for a way
+around it. `computer_use` `list_apps` names the running apps; `capture` with
+`app` returns one app's numbered element list plus a small window screenshot;
+`click`, `double_click`, `right_click`, `drag`, `scroll`, `key`,
+`set_value` and `focus_app` act on element numbers or capture-pixel
+coordinates. `set_value` replaces a field's text; free typing with no target
+element is not available because nothing takes focus. A stale element
+number comes back `stale_ref`, and a switch between the computer and the VM
+comes back `host_changed`: `list_apps` and `capture` again. To look without
+acting, `workspace_computer_apps`, `workspace_computer_snapshot`,
+`workspace_computer_menu` and `workspace_computer_screenshot` read the
+desktop directly. If `computer_use` is not loaded at all, this Hermes has no
+approval-gated desktop path: report that and stop; do not improvise one.
+These calls do not move the
 human's cursor. Skip the focused window, Keychain, and password fields. Do not open
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
 
-For any desktop app on the user's computer, use the `workspace_computer_*`
-tools (or the `computer_use` tool when that provider is selected), and never run screencapture, osascript or ssh scripts to drive the user's desktop.
+For any desktop app on the user's computer, use the `computer_use` tool
+(and the read-only `workspace_computer_*` tools to look), and never run
+screencapture, osascript or ssh scripts to drive the user's desktop.
 If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp) in System Settings, then retry.
 
 ## Preserve vanilla Hermes

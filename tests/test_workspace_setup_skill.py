@@ -38,10 +38,23 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             r"raw\.githubusercontent\.com/capthvnsen/alans-way/[0-9a-f]{40}/docs/setup-prompt\.md",
             "setup-prompt.md must be fetched at a pinned commit, not main",
         )
+        # A commit cannot contain its own SHA, so this repo's clone is pinned
+        # to the release tag matching plugin.yaml's version field.
+        version = re.search(
+            r"^version:\s*['\"]?([0-9.]+)",
+            (ROOT / "alans-way" / "plugin.yaml").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        ).group(1)
+        tag = "v" + version
         self.assertRegex(
             self.text,
-            r"git -C ~/alans-way-agents checkout [0-9a-f]{40}",
-            "the agents repo clone must be checked out to a pinned commit",
+            r"git -C ~/alans-way-agents checkout " + re.escape(tag) + r"\b",
+            "the agents repo clone must be checked out to the release tag",
+        )
+        self.assertRegex(
+            self.text,
+            r"--repo-ref " + re.escape(tag) + r"\b",
+            "setup.sh must be passed the release tag as --repo-ref so a stale clone hard-stops",
         )
         self.assertRegex(
             self.text,

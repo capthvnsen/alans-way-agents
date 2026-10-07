@@ -139,10 +139,16 @@ without changing anything, `--non-interactive` for scripted runs,
 `--skip-browser` for proactivity-only installs, and `--mac-key` /
 `--mac-host-key` to add your computer's pasted SSH key and host key after
 checking their format. When Hermes has the pluggable computer-use API, setup
-also installs the `alans-way-computer` provider for the profile and selects it
-once the workspace browser is configured. Without that API, setup turns off
-Hermes' built-in `computer_use` toolset for Telegram and cron so the agent uses the
-workspace computer tools (`--keep-computer-use` leaves it on). A `cua-driver`
+also installs the `alans-way-computer` provider for the profile (from the
+Hermes catalog, never over a catalog install) and selects it once the
+workspace browser is configured. Desktop input only ever goes through the
+approval-gated `computer_use` tool: the managed `workspace_browser` block
+excludes `workspace_computer_action`, and the router hides and refuses it
+unless you opted in. Setup never turns `computer_use` off for any platform or
+profile, on any Hermes. On a Hermes too old for the provider API,
+`--allow-desktop-actions` is a manual opt-in that also exposes that ungated
+tool: desktop input then runs with no approval at all, so no skill or prompt
+ever passes it for you. A `cua-driver`
 MCP server you added yourself is kept, and setup warns that the agent then sees
 two computer-use paths and prints the `hermes mcp remove` command. Desktop control asks for approval in
 Telegram for each action; `--allow-desktop-actions` adds click, type, key,
@@ -198,7 +204,7 @@ ordinary Telegram reply and one bounded browser action before relying on it.
 | `proactive_control` tool | `/proactivity` pause/resume/status, budgets, quiet hours — bound to one designated chat |
 | Observer | 30s check for approved watches, bounded automatic opportunities |
 | Gateway hook | Flips the plugin's "armed" flag only when running inside the gateway (not TUI/CLI probes) |
-| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine: `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_action`, `workspace_computer_screenshot` (one window, only when the snapshot cannot name the control). On Linux, press a ref. The config key is not a tool name. |
+| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router and observer read |
 

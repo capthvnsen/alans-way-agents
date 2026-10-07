@@ -53,7 +53,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (msg.method === 'initialize') return out({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake-router', version: '0' } } });
   if (msg.method !== 'tools/call') return;
   const { name, arguments: args } = msg.params;
-  fs.appendFileSync(log, JSON.stringify({ proc: process.pid, name, args, argv: process.argv.slice(2) }) + '\n');
+  fs.appendFileSync(log, JSON.stringify({ proc: process.pid, name, args, argv: process.argv.slice(2),
+    allow: process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '' }) + '\n');
   const c = ctl();
   if (c.die_on === name) process.exit(1);
   const s = state();
@@ -446,6 +447,13 @@ class ProviderTests(unittest.TestCase):
 
     def test_router_is_spawned_with_the_profile_blocks_args(self):
         self.assertEqual(self.log[0]["argv"], ["--bot-id", "4242"])
+
+    def test_the_private_router_child_runs_with_the_desktop_action_marker(self):
+        # The provider IS the approval gate (Hermes asks before each action),
+        # so its own router child alone gets the env marker that lets
+        # workspace_computer_action through the router's default refusal.
+        self.assertTrue(self.log)
+        self.assertTrue(all(c["allow"] == "1" for c in self.log), self.log[:2])
 
     def test_list_apps(self):
         self.assertEqual(self.r["apps"][0], {"name": "Notes", "bundle_id": "com.apple.Notes", "pid": 101, "frontmost": False})

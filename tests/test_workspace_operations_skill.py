@@ -65,13 +65,13 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("workspace_computer_snapshot", self.normalized)
         self.assertIn("{unchanged:true}", self.normalized)
         self.assertIn("since=", self.normalized)
-        self.assertIn("desktop tree is the same", self.normalized)
-        self.assertIn("When it says `unchanged`, do not snapshot again.", self.normalized)
+        self.assertIn("approval gate is the only desktop-input path", self.normalized)
+        self.assertIn("it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
-        self.assertIn("drag a slider or scroll bar to the end point", self.normalized)
-        self.assertIn("A drag on a slider sets its value from the end point.", self.normalized)
-        self.assertIn("A check box or radio name ends in on or off.", self.normalized)
-        self.assertIn("A disabled control's name ends in disabled, so do not press it.", self.normalized)
+        self.assertIn("capture` with `app` returns one app's numbered element list", self.normalized)
+        self.assertIn("A stale element number comes back `stale_ref`", self.normalized)
+        self.assertIn("A check box or radio name ends in on or off", self.normalized)
+        self.assertIn("a disabled control's name ends in disabled", self.normalized)
         self.assertIn("a select name includes the chosen option", self.normalized)
         self.assertIn("a section name ends in open or closed", self.normalized)
         self.assertIn("a selected tab's name ends in selected", self.normalized)
@@ -83,8 +83,8 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A pressed toggle's name ends in on or off, so do not screenshot it to see the state.", self.normalized)
         self.assertIn("An action or batch result also includes elements for up to 40 controls; use those refs.", self.normalized)
         self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
-        self.assertIn("`type` replaces the text of a ref and does not send keystrokes.", self.normalized)
-        self.assertIn("Do not screenshot a window you can already read as names and refs.", self.normalized)
+        self.assertIn("`set_value` replaces a field's text", self.normalized)
+        self.assertIn("Skip the focused window, Keychain, and password fields.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
         self.assertIn("do not move the human's cursor", self.normalized)
 
@@ -111,10 +111,20 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                 self.assertNotIn(stale, self.text)
         desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
         self.assertIn("cua_alans_way_snapshot", desktop)
-        self.assertIn("workspace_computer_action", desktop)
+        self.assertIn("computer_use", desktop)
         self.assertIn("does not move the pointer", desktop)
         self.assertNotIn("workspace_vps_browser", desktop)
         self.assertNotIn("Cua Driver", desktop)
+
+    def test_the_ungated_desktop_input_tool_is_never_named_as_callable(self):
+        # Desktop input goes through Hermes' approval-gated computer_use tool.
+        # The raw MCP action must not appear in any skill or reference as
+        # something the agent can call.
+        for path in [SKILL_PATH] + list((SKILL_PATH.parent / "references").glob("*.md")):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("workspace_computer_action", text, path)
+        self.assertIn("computer_use", self.normalized)
 
     def test_in_app_browser_is_the_only_default_host(self):
         self.assertIn(
@@ -328,7 +338,7 @@ class DesktopAppsSkillTests(unittest.TestCase):
 
     def test_desktop_apps_go_through_the_workspace_tools_only(self):
         self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
-        self.assertIn("or the `computer_use` tool when that provider is selected", self.normalized)
+        self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
     def test_a_permission_error_names_the_app_and_both_switches(self):
         self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)
