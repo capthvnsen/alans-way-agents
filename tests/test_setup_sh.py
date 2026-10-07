@@ -250,7 +250,7 @@ def tooling(directory: Path, log: Path, **kwargs):
 
 def env_for(directory, bin_dir, home, **extra):
     return dict(os.environ, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
-                PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], **extra)
+                PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], ALANS_WAY_BROWSER_PATH=str(bin_dir), **extra)
 
 
 class SkipPluginTests(unittest.TestCase):
@@ -889,6 +889,7 @@ class BrowserHostServiceTests(unittest.TestCase):
         env = env_for(self.root, self.bin_dir, self.home, HERMES_VPS_BROWSER_DATA=str(self.data),
                       ALANS_WAY_UNIT_DIR=str(self.units))
         env["PATH"] = os.pathsep.join(self.path + [os.environ["PATH"]])
+        env["ALANS_WAY_BROWSER_PATH"] = os.pathsep.join(self.path)
         return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
                    "--hermes-home", str(self.home), env=env, check=False)
 
@@ -1298,6 +1299,7 @@ class WindowsGuestSetupTests(unittest.TestCase):
              '  -w) printf "W:%%s" "$2" | tr / "\\\\";;\n  *) printf "%%s" "$2";;\nesac\n' % (self.root / "cygpath.log"))
         fake(self.bin_dir, "powershell", FAKE_POWERSHELL)
         fake(self.bin_dir, "ssh", 'echo path-ssh >> "%s"\nexit 0\n' % (self.root / "ssh.log"))
+        fake(self.bin_dir, "runuser", 'echo "$*" >> "%s"\nexit 1\n' % (self.root / "runuser.log"))
         fake(self.bin_dir, "icacls", 'echo "$*" >> "%s"\n' % (self.root / "icacls.log"))
         self.native = self.system_root / "System32" / "OpenSSH"
         self.exe(self.native / "ssh.exe", 'echo "ssh $*" >> "%s"\ncat >/dev/null 2>&1 </dev/null\nexit 0\n' % (self.root / "native.log"))
@@ -1411,6 +1413,7 @@ class WindowsGuestSetupTests(unittest.TestCase):
     def test_every_host_call_uses_the_native_openssh(self):
         self.setup(host_os="windows")
         self.assertFalse((self.root / "ssh.log").exists(), "an ssh from PATH was used")
+        self.assertFalse((self.root / "runuser.log").exists(), "a Windows guest switched users with runuser")
         calls = (self.root / "native.log").read_text()
         self.assertIn("StrictHostKeyChecking=yes", calls)
         self.assertIn("scp -q", calls)

@@ -548,7 +548,7 @@ fi
 # Setup run as root for a Hermes that a normal account owns still reaches the host
 # as that account: its keys and known_hosts are the ones the router and watcher use.
 as_owner() {
-  if [ "$BROWSER_USER" != "$(id -un)" ] && have runuser; then runuser -u "$BROWSER_USER" -- "$@"; else "$@"; fi
+  if [ "$GUEST_OS" != Windows ] && [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != "$(id -un)" ] && have runuser; then runuser -u "$BROWSER_USER" -- "$@"; else "$@"; fi
 }
 # A Windows guest uses the native OpenSSH client, the one the router runs: it
 # shares the user's keys, agent and known_hosts, and Git's bundled ssh may differ.
@@ -1185,7 +1185,7 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     fi
   else
   for _name in google-chrome google-chrome-stable chromium chromium-browser; do
-    _found="$(command -v "$_name" 2>/dev/null || true)"
+    _found="$(PATH="${ALANS_WAY_BROWSER_PATH:-$PATH}" command -v "$_name" 2>/dev/null || true)"
     [ -n "$_found" ] || continue
     if is_snap_browser "$_found"; then
       [ -n "$SNAP_CHROMIUM" ] || SNAP_CHROMIUM="$_found"
