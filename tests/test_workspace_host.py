@@ -28,8 +28,9 @@ MAC_STUB = r"""
 const fs = require('fs');
 const mode = process.env.MAC_MODE || 'ok';
 let calls = 0;
-const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
-  result: { content: [{ type: 'text', text }] } }) + '\n');
+let epoch = 1;
+const reply = (id, text, isError) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
+  result: { ...(isError ? { isError: true } : {}), content: [{ type: 'text', text }] } }) + '\n');
 require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
   fs.appendFileSync(process.env.MAC_LOG, 'LINE ' + line + '\n');
   const m = JSON.parse(line);
@@ -42,18 +43,37 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
                 description: 'Ignored. The connector already chose the machine.' },
       }, required: ['url'] } },
       { name: 'cua_alans_way_tabs', inputSchema: { type: 'object', properties: {} } },
+      { name: 'cua_alans_way_snapshot', inputSchema: { type: 'object', properties: {
+        tabId: { type: 'string' }, maxChars: { type: 'integer' },
+      }, required: ['tabId'] } },
+      { name: 'cua_alans_way_action', inputSchema: { type: 'object', properties: {
+        tabId: { type: 'string' }, epoch: { type: 'integer' }, action: { type: 'string' },
+      }, required: ['tabId', 'epoch', 'action'] } },
     ] } }) + '\n');
   }
   if (m.method === 'tools/call') {
     calls += 1;
     if (mode === 'die-on-call' && calls >= 2) process.exit(1);
+    const a = (m.params && m.params.arguments) || {};
     if (m.params.name === 'cua_alans_way_tabs') {
-      const tabs = [{ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac' }];
-      if (process.env.MAC_PROXY_VM) tabs.push({ id: 'vm-tab-1', url: 'https://vm.example/proxied', host: 'vps' });
+      const tabs = [{ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac', epoch }];
+      if (process.env.MAC_PROXY_VM) tabs.push({ id: 'vm-tab-1', url: 'https://vm.example/proxied', host: 'vps', epoch });
       return reply(m.id, JSON.stringify({ tabs }));
     }
     if (m.params.name === 'cua_alans_way_open')
-      return reply(m.id, JSON.stringify({ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac' }));
+      return reply(m.id, JSON.stringify({ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac', epoch }));
+    if (m.params.name === 'cua_alans_way_snapshot') {
+      if (!a.tabId) return reply(m.id, 'Tab not found.', true);
+      return reply(m.id, JSON.stringify({ generation: 7, text: 'mac page', tab: { id: a.tabId, epoch } }));
+    }
+    if (m.params.name === 'cua_alans_way_action') {
+      // A human takeover bumps the epoch outside the agent's calls: the error
+      // reply teaches the router nothing, so the next injected epoch is stale.
+      if (a.action === 'takeover') { epoch += 1; return reply(m.id, 'human_has_control: the human took the tab.', true); }
+      if (!a.tabId) return reply(m.id, 'Tab not found.', true);
+      if (a.epoch !== epoch) return reply(m.id, 'stale_control_epoch: read the tab state and retry after a fresh snapshot.', true);
+      return reply(m.id, JSON.stringify({ ok: true, tab: { id: a.tabId, epoch } }));
+    }
   }
   reply(m.id, 'mac');
 });
@@ -90,7 +110,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       return reply(m.id, JSON.stringify({ tabs }));
     }
     if (m.params.name === 'cua_alans_way_open')
-      return reply(m.id, JSON.stringify({ id: 'vm-tab-1', url: (m.params.arguments || {}).url || 'https://vm.example/', host: 'vps' }));
+      return reply(m.id, JSON.stringify({ id: 'vm-tab-1', url: (m.params.arguments || {}).url || 'https://vm.example/', host: 'vps', epoch: 1 }));
     if (m.params.name === 'cua_alans_way_action') {
       if (mode === 'hang') return;
       return reply(m.id, 'vm-action');
@@ -182,6 +202,18 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         path = self.dir / name
         return path.read_text() if path.exists() else ""
 
+    def backend_calls(self, log_name, tool):
+        """The arguments a backend log captured for calls of one tool."""
+        out = []
+        for line in self.log(log_name).splitlines():
+            if not line.startswith("LINE "):
+                continue
+            msg = json.loads(line[5:])
+            params = msg.get("params") or {}
+            if msg.get("method") == "tools/call" and params.get("name") == tool:
+                out.append(params.get("arguments") or {})
+        return out
+
     def vm_spawns(self):
         return [line[5:] for line in self.log("vm.log").splitlines() if line.startswith("ARGV ")]
 
@@ -212,8 +244,8 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         answered = self.recv()
         self.assertEqual((answered["id"], self.served(answered)), (action, "vm-action"))
         self.assertEqual(answered["result"]["_meta"]["workspace"]["host"], "vm")
-        self.assertIn('"tabId": "vm-tab-1"', self.log("vm.log"))
-        self.assertNotIn('"tabId": "vm-tab-1"', self.log("mac.log"))
+        self.assertIn('"tabId":"vm-tab-1"', self.log("vm.log"))
+        self.assertNotIn('"tabId":"vm-tab-1"', self.log("mac.log"))
 
     def test_tabs_are_merged_from_both_backends_once_the_vm_runs(self):
         self.start()
@@ -362,6 +394,106 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         time.sleep(1.3)  # resume writes are debounced 1s
         resume = self.dir / "resume-url-bot1.json"
         self.assertFalse(resume.exists() and "vm.example" in resume.read_text())
+
+    def test_action_and_snapshot_default_to_the_last_used_tab(self):
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        action = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        answered = self.recv()
+        self.assertEqual(answered["id"], action)
+        self.assertFalse(answered["result"].get("isError"))
+        snap = self.call("cua_alans_way_snapshot", {"maxChars": 200})
+        got = self.recv()
+        self.assertEqual(got["id"], snap)
+        self.assertFalse(got["result"].get("isError"))
+        actions = self.backend_calls("mac.log", "cua_alans_way_action")
+        self.assertEqual((actions[-1].get("tabId"), actions[-1].get("epoch")), ("mac-tab-1", 1))
+        snaps = self.backend_calls("mac.log", "cua_alans_way_snapshot")
+        self.assertEqual(snaps[-1].get("tabId"), "mac-tab-1")
+
+    def test_supplied_tab_id_and_epoch_are_never_overwritten(self):
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        self.call("cua_alans_way_action", {"tabId": "other-tab", "epoch": 9, "action": "click"})
+        self.recv()
+        args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
+        self.assertEqual((args["tabId"], args["epoch"]), ("other-tab", 9))
+        # A supplied tabId with no epoch still gets that tab's known epoch.
+        self.call("cua_alans_way_action", {"tabId": "mac-tab-1", "action": "click"})
+        self.recv()
+        args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
+        self.assertEqual((args["tabId"], args["epoch"]), ("mac-tab-1", 1))
+
+    def test_an_injected_vm_tab_routes_to_the_vm_backend(self):
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        action = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        answered = self.recv()
+        self.assertEqual((answered["id"], self.served(answered)), (action, "vm-action"))
+        args = self.backend_calls("vm.log", "cua_alans_way_action")[-1]
+        self.assertEqual((args["tabId"], args["epoch"]), ("vm-tab-1", 1))
+        self.assertFalse(self.backend_calls("mac.log", "cua_alans_way_action"))
+
+    def test_a_stale_injected_epoch_is_rejected_not_retried(self):
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        self.call("cua_alans_way_action", {"action": "click"})
+        self.assertFalse(self.recv()["result"].get("isError"))
+        # The human takes the tab between calls: the backend bumps its epoch
+        # and the error reply teaches the router nothing new.
+        self.call("cua_alans_way_action", {"tabId": "mac-tab-1", "epoch": 1, "action": "takeover"})
+        self.assertTrue(self.recv()["result"]["isError"])
+        stale = self.call("cua_alans_way_action", {"action": "click", "ref": "r2"})
+        rejected = self.recv()
+        self.assertEqual(rejected["id"], stale)
+        self.assertTrue(rejected["result"]["isError"])
+        self.assertIn("stale_control_epoch", self.text(rejected))
+        # The re-read learns the fresh epoch, so the next action succeeds.
+        self.call("cua_alans_way_snapshot", {})
+        self.recv()
+        retry = self.call("cua_alans_way_action", {"action": "click", "ref": "r2"})
+        self.assertFalse(self.recv()["result"].get("isError"))
+        epochs = [a.get("epoch") for a in self.backend_calls("mac.log", "cua_alans_way_action")]
+        self.assertEqual(epochs, [1, 1, 1, 2])
+
+    def test_tools_list_makes_tab_id_and_epoch_optional(self):
+        self.start()
+        self.handshake()
+        self.send("tools/list")
+        msg = self.recv()
+        tools = {t["name"]: t for t in msg["result"]["tools"]}
+        action = tools["cua_alans_way_action"]["inputSchema"]
+        self.assertEqual(action["required"], ["action"])
+        for key in ("tabId", "epoch"):
+            self.assertIn("Optional: defaults to the tab you last used.",
+                          action["properties"][key]["description"])
+        snap = tools["cua_alans_way_snapshot"]["inputSchema"]
+        self.assertNotIn("tabId", snap.get("required", []))
+        self.assertIn("Optional: defaults to the tab you last used.",
+                      snap["properties"]["tabId"]["description"])
+        # The rest of each schema is untouched.
+        self.assertNotIn("epoch", snap["properties"])
+        self.assertEqual(snap["properties"]["maxChars"], {"type": "integer"})
+
+    def test_a_call_without_a_known_tab_passes_through(self):
+        self.start()
+        self.handshake()
+        call = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        msg = self.recv()
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertIn("Tab not found", self.text(msg))
+        args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
+        self.assertNotIn("tabId", args)
+        self.assertNotIn("epoch", args)
 
 
 @unittest.skipUnless(NODE, "node is required for normalizeHost tests")

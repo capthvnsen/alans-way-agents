@@ -813,12 +813,37 @@ function rewriteOpenHost(result) {
   }
 }
 
+// action and snapshot no longer demand tabId and epoch on every call: the
+// router fills in the tab the agent last used and the epoch that backend last
+// returned. Older connectors still require both, so the advertised schema is
+// rewritten here the same way open's host is.
+function rewriteTabDefaults(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    if (!tool || (tool.name !== 'cua_alans_way_action' && tool.name !== 'cua_alans_way_snapshot')) continue;
+    const schema = tool.inputSchema;
+    if (schema && Array.isArray(schema.required)) {
+      schema.required = schema.required.filter((key) => key !== 'tabId' && key !== 'epoch');
+    }
+    const props = schema && schema.properties;
+    if (!props || typeof props !== 'object') continue;
+    for (const key of ['tabId', 'epoch']) {
+      const prop = props[key];
+      if (prop && typeof prop === 'object') {
+        prop.description = `${prop.description ? `${prop.description} ` : ''}Optional: defaults to the tab you last used.`;
+      }
+    }
+  }
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
 function annotateResult(msg, host, mac, notice, ms) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
+  rewriteTabDefaults(msg.result);
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
@@ -1256,7 +1281,8 @@ async function main() {
       }
       holdCalls = false;
       for (const line of heldCalls.splice(0)) {
-        if (!routeToolCall(line)) writeToChild(line);
+        const forwarded = routeToolCall(line);
+        if (forwarded !== null) writeToChild(forwarded);
       }
     };
     if (lost.length) {
@@ -1381,6 +1407,122 @@ async function main() {
     }
   }
 
+  // The tab the agent last worked in, and the newest epoch each backend
+  // itself returned for every tab it has named. Action and snapshot calls
+  // that leave out tabId or epoch get these values injected, which is what
+  // lets the advertised schema mark them optional. An epoch is never
+  // invented or bumped: a stale one still fails at the backend after a human
+  // takeover instead of being silently repaired.
+  const knownTabs = new Map(); // tabId -> { backend: 'computer'|'vm', epoch?: number }
+  let currentTabId = '';
+  const CURRENT_TAB_TOOLS = new Set([
+    'cua_alans_way_open',
+    'cua_alans_way_snapshot',
+    'cua_alans_way_action',
+  ]);
+  const TAB_DEFAULTED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_snapshot']);
+  const TAB_ID = /^[\w-]{1,100}$/;
+
+  function noteKnownTab(id, epoch, backend) {
+    if (typeof id !== 'string' || !TAB_ID.test(id)) return;
+    if (backend === 'vm') vmTabs.add(id);
+    const prev = knownTabs.get(id);
+    knownTabs.set(id, { backend, epoch: Number.isInteger(epoch) ? epoch : prev && prev.epoch });
+  }
+
+  // Every reply shape that names a tab: open and claim answers carry it at
+  // top level, snapshot/action answers under `tab`, a tabs list has an entry
+  // per tab, and a call retargeted onto a VPS tab names it in continuedTab.
+  function learnTabData(data, backend) {
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.tabs)) {
+      for (const tab of data.tabs) {
+        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend);
+      }
+    }
+    if (data.tab && typeof data.tab === 'object') {
+      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend);
+    }
+    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend);
+    if (typeof data.continuedTab === 'string') noteKnownTab(data.continuedTab, data.continuedEpoch, 'vm');
+  }
+
+  // The pending request a reply line answers, without consuming it — big
+  // replies get their id from the fast scanner, like noteServerRpc.
+  function pendingRequestFor(line) {
+    if (line.length > BIG_LINE) {
+      const id = bigLineId(line);
+      return id === undefined ? undefined : pendingRequests.get(id);
+    }
+    try {
+      return pendingRequests.get(JSON.parse(line).id);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function argsTabId(req) {
+    try {
+      return (JSON.parse(req.line).params.arguments || {}).tabId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // A successful open, snapshot or action makes its tab the current one; the
+  // reply's own id wins, then a retargeted continued tab, then the id the
+  // call named. A successful close forgets its tab entirely.
+  function learnTabUse(line, req, backend) {
+    if (line.length > BIG_LINE || !req || req.method !== 'tools/call') return;
+    let data;
+    try {
+      const msg = JSON.parse(line);
+      if (!msg || msg.id == null || !msg.result || msg.result.isError) return;
+      data = textResultData(msg);
+    } catch {
+      return;
+    }
+    learnTabData(data, backend);
+    if (req.name === 'cua_alans_way_close' && data && data.closed) {
+      const closed = argsTabId(req);
+      knownTabs.delete(closed);
+      if (currentTabId === closed) currentTabId = '';
+      return;
+    }
+    if (!CURRENT_TAB_TOOLS.has(req.name)) return;
+    const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
+    if (typeof used === 'string' && TAB_ID.test(used)) {
+      noteKnownTab(used, undefined, backend);
+      currentTabId = used;
+    }
+  }
+
+  // Fill in what the agent may omit: the current tab (which routes the call
+  // to whichever backend owns it) and that tab's latest backend-reported
+  // epoch. Supplied values are never overwritten; with no known tab the call
+  // passes through unchanged so the backend answers its own error.
+  function injectTabDefaults(msg) {
+    const params = msg && msg.params;
+    if (!params || !TAB_DEFAULTED_TOOLS.has(params.name)) return false;
+    if (params.arguments === undefined) params.arguments = {};
+    const args = params.arguments;
+    if (typeof args !== 'object' || args === null) return false;
+    let changed = false;
+    if (typeof args.tabId !== 'string' || !args.tabId) {
+      if (!currentTabId) return false;
+      args.tabId = currentTabId;
+      changed = true;
+    }
+    if (args.epoch === undefined) {
+      const known = knownTabs.get(args.tabId);
+      if (known && Number.isInteger(known.epoch)) {
+        args.epoch = known.epoch;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   // The merged tabs answer keeps the computer's result shape and marks each
   // tab's host. A VM half that never arrived (or errored) simply contributes
   // no tabs.
@@ -1389,6 +1531,8 @@ async function main() {
     const vmData = textResultData(merge.vm);
     learnVmTabData(macData, false);
     learnVmTabData(vmData, true);
+    learnTabData(macData, 'computer');
+    learnTabData(vmData, 'vm');
     if (!merge.mac || !merge.mac.result || merge.mac.result.isError || !Array.isArray((macData || {}).tabs)) {
       return merge.mac;
     }
@@ -1515,9 +1659,11 @@ async function main() {
         if (c !== vmChild) return;
         touchActivity();
         if (swallowLine(line)) return;
+        const seenReq = pendingRequestFor(line);
         const callMs = noteServerRpc(line, pendingRequests);
         if (mergeVmLine(line)) return;
         learnVmTabs(line, true);
+        learnTabUse(line, seenReq, 'vm');
         let out;
         try {
           out = vmAnnotate(line, callMs);
@@ -1551,23 +1697,30 @@ async function main() {
   // the session already runs on the VM is a clear error; host:"vm" and calls
   // aimed at a known VM tab go to the VM connector; a tabs call while it runs
   // merges both lists. Anything else falls through to the active backend.
+  // Returns the line to forward (rewritten when defaults were injected) or
+  // null when the call was answered or sent on internally.
   function routeToolCall(line) {
     let msg;
     try {
       msg = JSON.parse(line);
     } catch {
-      return false;
+      return line;
     }
     const rawArgs = msg && msg.params && msg.params.arguments;
-    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null)) return false;
-    const args = rawArgs || {};
+    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null)) return line;
+    const out = injectTabDefaults(msg) ? JSON.stringify(msg) : line;
+    if (out !== line) {
+      const req = pendingRequests.get(msg.id);
+      if (req) req.line = out;
+    }
+    const args = (msg.params && msg.params.arguments) || {};
     const host = normalizeHost(args.host);
     if (host === 'computer') {
-      if (activeHost !== 'vps') return false;
+      if (activeHost !== 'vps') return out;
       pendingRequests.delete(msg.id);
       unbuffer(line);
       emitToolError(msg.id, 'Your computer is offline. Omit host to use the VM browser, or pass host: "vm".');
-      return true;
+      return null;
     }
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
@@ -1577,24 +1730,24 @@ async function main() {
       const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now() };
       tabMerges.set(msg.id, merge);
       tabMerges.set(merge.vmId, msg.id);
-      writeToChild(line);
+      writeToChild(out);
       try {
         vmChild.stdin.write(`${JSON.stringify({ ...msg, id: merge.vmId })}\n`);
       } catch { /* the merge completes with whatever the computer side answered */ }
-      return true;
+      return null;
     }
-    if (!wantsVm) return false;
+    if (!wantsVm) return out;
     if (!vmAlive()) {
-      if (activeHost === 'vps') return false; // the active backend already is the VM browser
+      if (activeHost === 'vps') return out; // the active backend already is the VM browser
       spawnVmBackend();
     }
     const req = pendingRequests.get(msg.id);
     if (req) req.via = 'vm';
     unbuffer(line);
     try {
-      vmChild.stdin.write(`${line}\n`);
+      vmChild.stdin.write(`${out}\n`);
     } catch { /* a dead connector fails the call from its exit handler */ }
-    return true;
+    return null;
   }
 
   function bindChild(c, host) {
@@ -1625,9 +1778,11 @@ async function main() {
             unavailableStreak = 0;
           }
         }
+        const seenReq = pendingRequestFor(line);
         const callMs = noteServerRpc(line, pendingRequests);
         if (mergeMacLine(line, callMs)) return;
         learnVmTabs(line, false);
+        learnTabUse(line, seenReq, host === 'mac' ? 'computer' : 'vm');
         provedAlive = true;
         if (watchdog) { clearTimeout(watchdog); watchdog = null; }
         bufferedStdin.length = 0;
@@ -1679,7 +1834,12 @@ async function main() {
         heldCalls.push(line);
         return;
       }
-      if (method !== 'tools/call' || !routeToolCall(line)) writeToChild(line);
+      if (method !== 'tools/call') {
+        writeToChild(line);
+      } else {
+        const forwarded = routeToolCall(line);
+        if (forwarded !== null) writeToChild(forwarded);
+      }
       armWatchdog();
     });
 

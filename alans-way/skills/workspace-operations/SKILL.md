@@ -159,27 +159,27 @@ the tab stays yours to keep working.
    a re-sent tree. A check box or radio name ends in on or off, a select name includes the chosen option, a disabled control's name ends in disabled, a section name ends in open or closed, a selected tab's name ends in selected, and the current link's name ends in current. A menu item, option, tree item, slider, or clickable div is listed by its name, so do not screenshot it to find it. A link href omits tracking parameters. A frame src omits tracking parameters too. A control inside an open shadow root is listed the same way; a closed root is not readable. A control inside a same-origin frame is listed by its name. A cross-origin frame is not readable. A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label. A pressed toggle's name ends in on or off, so do not screenshot it to see the state. Request a screenshot only when the DOM view cannot answer
    the question; `cua_alans_way_screenshot` accepts `format`
    (`jpeg`|`png`|`webp`), `quality`, and `maxWidth`; jpeg quality 50
-   at 960px is the default. Use the snapshot's refs and current
-   control epoch for the next action. An action or batch result also
-   includes elements for up to 40 controls; use those refs. When it says
-   unchanged, the controls you already have are still valid, so do not
-   snapshot again. The browser
-   tools target that tab directly in the background and leave the real
-   mouse alone.
+   at 960px is the default. Use the snapshot's refs for the next action;
+   after a tab's first reply, omit `tabId` and `epoch` from action and
+   snapshot calls: they default to the tab you last used. An action or batch
+   result also includes elements for up to 40 controls; use those refs. When
+   it says unchanged, the controls you already have are still valid, so do
+   not snapshot again.
 3. Do multi-step work as one batch: `action=batch` runs up to 25 steps in
    order in a single call, stopping at the first error. Act, `wait` for the
    text or selector you expect (`{action:"wait", text:"Done", timeout:8000}`;
    `selector`, `url`, and `visible:true` conditions also work, and
    `gone:true` waits for the text or selector to disappear), then finish
    with `{action:"read"}` for the page text. The batch reply's `effect` is
-   the state after the last step, so the whole run answers in one call. For
+   the state after the last step: it already shows the page after the
+   action's own updates, so the whole run answers in one call, and you add
+   `wait` or `read` steps only when you need something `effect` does not
+   show. For
    a multi-step browser run, write no chat text between tool calls and send
    one short message when it is done. Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
-   collapsed or hidden will otherwise pass the wait and fail at input. Click
-   failures name what covers the element; if a click still cannot land, drive
-   that step with eval or a different selector rather than retrying. Use
+   collapsed or hidden will otherwise pass the wait and fail at input. Use
    `action=eval` with `code` to run JS in the page: read DOM state, extract
    data, or complete a whole interaction in one call. `eval` awaits Promises,
    so `await new Promise(r => setTimeout(r, 500))` and polling loops work
@@ -195,8 +195,8 @@ the tab stays yours to keep working.
    Besides `click` and `type`, a tab takes `double_click`, `right_click`,
    `drag` (from `ref`, `selector`, or `x,y` to `toRef`, `toSelector`, or
    `toX,toY`) and `select` (an option by value, label, option, text or choice). A batch's
-   `results[]` carry no url, title, generation, or tab: the tab appears once
-   in the response. An element omits an empty name and
+   `results[]` carry no url, title, generation, or tab. An element omits an
+   empty name and
    the default type. A failed navigation says "Navigation failed: ERR_X."
 4. On `human_has_control`, the tab is the human's; ask the user before
    taking it. Say what you need from it and claim only after they agree:

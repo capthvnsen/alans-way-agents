@@ -172,6 +172,17 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("write no chat text between tool calls and send one short message when it is done", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
 
+    def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
+        # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
+        # tokens of pure overhead per turn. The router injects both, so the
+        # skill tells the agent to leave them out.
+        self.assertIn("omit `tabId` and `epoch`", self.normalized)
+        self.assertIn("they default to the tab you last used", self.normalized)
+        self.assertIn(
+            "you add `wait` or `read` steps only when you need something `effect` does not show",
+            self.normalized,
+        )
+
     def test_host_arg_routes_to_the_named_machine(self):
         self.assertIn('`host:"vm"` to use the VM\'s own browser even while the user\'s computer is online', self.normalized)
         self.assertIn('`host:"computer"` to force the user\'s computer', self.normalized)
