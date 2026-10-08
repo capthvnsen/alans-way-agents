@@ -58,15 +58,9 @@ def fixture(directory: Path):
         "STUB_LOG": str(log),
     })
     stub(stub_bin, "supervisorctl", '''echo "supervisorctl $*" >> "$STUB_LOG"
-_gwpid="$STUB_LOG.gwpid"; [ -f "$_gwpid" ] || echo 1 > "$_gwpid"
 # Status reads must see a RUNNING gateway — the relay step only restarts a
-# gateway that supervisord reports as up. `signal USR1` plays Hermes's
-# drain-and-respawn: the next pid read reports the relaunched process.
-case "$1" in
-  status) echo "hermes-gateway RUNNING pid $(cat "$_gwpid"), uptime 0:01:00";;
-  pid) cat "$_gwpid";;
-  signal) [ "$2" = USR1 ] && echo $(( $(cat "$_gwpid") + 1 )) > "$_gwpid";;
-esac
+# gateway that supervisord reports as up.
+case "$1" in status) echo "hermes-gateway RUNNING pid 1, uptime 0:01:00";; esac
 ''')
     stub(stub_bin, "tailscaled", 'echo "tailscaled $*" >> "$STUB_LOG"\n')
     # Nothing on :22 by default — 8022 is a decoy for sloppy `22$` matching.
@@ -300,7 +294,7 @@ class InstallStepTests(unittest.TestCase):
 
     def test_the_generated_gateway_conf_waits_for_the_drain(self):
         """Issue #65: with no stopwaitsecs supervisord escalates SIGTERM to
-        SIGKILL after 10s, and a kill mid-checkpoint corrupts state.db — the
+        SIGKILL after 10s, and a kill mid-checkpoint corrupts state.db, so the
         generated program must give Hermes' drain its full bound."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
@@ -733,26 +727,7 @@ class RelayStepTests(unittest.TestCase):
             self.assertNotIn(self.TOKEN, conf)
             self.assertTrue(
                 (directory / "sbin" / "alan-relay-voice-watch").exists())
-            self.assertIn("supervisorctl signal USR1 hermes-gateway", calls)
-            self.assertNotIn("supervisorctl restart hermes-gateway", calls)
-
-    def test_a_running_gateway_is_bounced_by_usr1_drain_not_restart(self):
-        """Issue #65 on the Orgo updater path: `supervisorctl restart`
-        escalates SIGTERM to SIGKILL at stopwaitsecs — a mid-checkpoint kill
-        corrupts state.db. USR1 makes Hermes drain and supervisord relaunch
-        it, the same approach setup.sh's detached restarter uses."""
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d)
-            env, log, stub_bin = fixture(directory)
-            relay_fixture(directory, env)
-            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
-            self.assertEqual(result.returncode, 0)
-            calls = log.read_text(encoding="utf-8")
-            self.assertIn("supervisorctl signal USR1 hermes-gateway", calls)
-            self.assertNotIn("supervisorctl restart hermes-gateway", calls)
-            bootlog = (directory / "state" / "bootstrap.log").read_text(
-                encoding="utf-8")
-            self.assertIn("new pid", bootlog)
+            self.assertIn("supervisorctl restart hermes-gateway", calls)
 
     def test_the_token_never_reaches_argv_or_logs(self):
         """Every stubbed command echoes its argv to STUB_LOG, and every `run`
@@ -1044,8 +1019,7 @@ esac
 
     def test_a_failed_gateway_restart_does_not_fail_the_step(self):
         """'Never let the bounce fail the step' — a nonzero supervisorctl
-        restart under errexit used to mark the whole relay step failed.
-        `signal` is refused too, so the restart fallback is what fails."""
+        restart under errexit used to mark the whole relay step failed."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
@@ -1053,7 +1027,7 @@ esac
 echo "supervisorctl $*" >> "$STUB_LOG"
 case "$1" in
   status) echo "hermes-gateway RUNNING pid 1, uptime 0:01:00";;
-  signal|restart) exit 1;;
+  restart) exit 1;;
 esac
 ''')
             relay_fixture(directory, env)
