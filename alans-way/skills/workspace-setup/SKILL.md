@@ -139,6 +139,31 @@ different bot's route silently.
    tune with `hermes proactivity set --settings '<json>'`, and check with
    `hermes proactivity status`.
 
+## Moved your agent to a new VM?
+
+The VM's address is saved in several places and none update the others.
+After a move, check each one; a stale copy fails quietly:
+
+- **The app's Settings** on the user's computer: the VM SSH host and the
+  Remote desktop URL are independent fields (`vpsBrowser.sshHost` and
+  `remoteUrl` in the app's `preferences.json`, under `Hermes Workspace` in
+  the app-data directory, readable over the same ssh path the workspace
+  uses). Updating the SSH host does not rewrite the URL: repoint it to
+  `http://<new tailnet IP>:<websockify port>/vnc.html`.
+- **The Hermes desktop app's saved remote**, on each computer that runs
+  it: `connection.json` and `connections.json` under the `Hermes` app-data
+  directory keep the old VM's URL until a new remote is saved. A stale
+  entry is inert until remote mode is selected.
+- **Any phone client**: the saved server URL lives only on the device; the
+  user updates it there.
+- **The VM's API server binding**: `API_SERVER_HOST` in `~/.hermes/.env` or
+  `platforms.api_server` in `config.yaml`. Pinned to the old tailnet
+  address it fails to bind (`Could not bind` in `gateway.log`); `ss -tln`
+  shows where it actually listens.
+- **`tailscale serve` exposure**: `tailscale serve status` on the new VM;
+  nothing published on the old host follows. Republish the ports the
+  preview or remote mode needs.
+
 ## Report, don't claim
 
 `setup.sh` ends with its own Verify section before the restart. Report that
