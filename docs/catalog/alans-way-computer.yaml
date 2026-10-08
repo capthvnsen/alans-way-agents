@@ -5,10 +5,10 @@ repo: https://github.com/capthvnsen/alans-way-agents
 sha: 0000000000000000000000000000000000000000
 subdir: alans-way-computer
 version: "0.7.0"
-title: "Alan's Way Computer"
+title: "Alan's Way Plugin: Computer Use"
 description: >-
   Computer-use provider for Hermes: the stock computer_use tool drives desktop apps on the user's computer
-  through the Alan's Way app, and on the VM's own desktop when the computer is offline. Needs the alans-way
+  through the Alan's Workspace app, and on the VM's own desktop when the computer is offline. Needs the alans-way
   plugin's workspace setup. Select it with computer_use.backend: alans-way-computer.
   Disclosure: starts the workspace router from the profile's workspace_browser MCP block as a long-running
   node child and talks to it over stdio (app screenshots, element lists and input actions); the router reaches the

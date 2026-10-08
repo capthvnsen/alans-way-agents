@@ -69,10 +69,14 @@ const hostOs = hostOsArg === 'windows' || hostOsArg === 'linux' ? hostOsArg : 'm
 const hostName = { windows: 'Windows host', linux: 'Linux host', mac: 'Mac' }[hostOs];
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
 // `npm run package:linux` (electron-packager, x64, no asar) writes
-// alans-way-localapp-linux-x64/ with the executable beside resources/app. No
+// alans-way-localapp-linux-x64/ (alans-workspace once renamed) with the executable beside resources/app. No
 // installer exists for Linux, so these are the places such a folder is
 // expected, as-built or renamed.
 const linuxAppRoots = [
+  '/opt/alans-workspace-linux-x64',
+  '/opt/alans-workspace',
+  '$HOME/.local/share/alans-workspace-linux-x64',
+  '$HOME/.local/share/alans-workspace',
   '/opt/alans-way-localapp-linux-x64',
   '/opt/alans-way-localapp',
   '$HOME/.local/share/alans-way-localapp-linux-x64',
@@ -85,6 +89,7 @@ const macScripts = configuredMacScript
   : hostOs !== 'mac'
     ? []
     : [
+        "/Applications/Alan's Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs",
         '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
         '/Applications/Open Alan.app/Contents/Resources/app/scripts/browser-mcp.cjs',
         "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
@@ -340,6 +345,7 @@ function macBackendCommand(script, node, id, name, scriptWord = shQuote(script))
   // A connector copied into the home directory is newer than the app bundle.
   // Run it with the app's own Node and modules so a rebuild is not required.
   const apps = [
+    "/Applications/Alan's Workspace.app",
     '/Applications/alans-way-localapp.app',
     '/Applications/Open Alan.app',
     "/Applications/Hermes- Alan's way.app",
@@ -366,8 +372,10 @@ function linuxBackendCommand(script, node, id, name, scriptWord = shQuote(script
   const args = tail.join(' ');
   const env = 'HERMES_WORKSPACE_CONNECTION="${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json"; export HERMES_WORKSPACE_CONNECTION; ';
   if (node) return `${env}exec ${shQuote(node)} ${args}`;
-  const checks = linuxAppRoots.map(shellWord).map((root) =>
-    `if [ -x ${root}/alans-way-localapp ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/alans-way-localapp ${args}; fi;`,
+  const checks = linuxAppRoots.map(shellWord).flatMap((root) =>
+    ['alans-workspace', 'alans-way-localapp'].map((exe) =>
+      `if [ -x ${root}/${exe} ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/${exe} ${args}; fi;`,
+    ),
   ).join(' ');
   return `${env}${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
 }
