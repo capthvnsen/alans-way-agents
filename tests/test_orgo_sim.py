@@ -28,11 +28,16 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "alans-way-orgo-sim:test"
 SIM_CTX = ROOT / "tests" / "orgo-sim"
-NETWORK = "orgo-sim"
+# Unique per run: other sim jobs share this docker daemon, and a stale
+# container or network left behind by a killed run must not collide with
+# this one.
+RUN_ID = uuid.uuid4().hex[:8]
+NETWORK = f"orgo-sim-{RUN_ID}"
 REPO_MOUNT = "/srv/alans-way-agents"
 
 DOCKER = shutil.which("docker")
@@ -175,7 +180,9 @@ class OrgoSim(unittest.TestCase):
             if build.returncode != 0:
                 raise AssertionError(
                     f"image build failed:\n{build.stdout[-4000:]}\n{build.stderr[-4000:]}")
-        docker("network", "create", NETWORK)
+        net = docker("network", "create", NETWORK)
+        if net.returncode != 0:
+            raise AssertionError(f"docker network create {NETWORK}: {net.stderr}")
         cls.addClassCleanup(lambda: docker("network", "rm", NETWORK))
         cls.repo_src, cls.repo_rev = prepare_repo_source(Path(cls.tmp.name))
 
@@ -187,14 +194,18 @@ class OrgoSim(unittest.TestCase):
     # -- helpers -----------------------------------------------------------
 
     def start(self, name: str) -> str:
+        name = f"{name}-{RUN_ID}"
         result = docker("run", "-d", "--name", name, "--network", NETWORK,
                         "-v", f"{self.repo_src}:{REPO_MOUNT}", IMAGE)
         if result.returncode != 0:
             self.fail(f"docker run {name}: {result.stderr}")
         self.containers.append(name)
-        # supervisord is PID 1; wait until it answers supervisorctl.
+        # supervisord is PID 1; wait until its RPC answers. `supervisorctl
+        # pid` is the right probe — `status` exits nonzero when ANY program
+        # is not RUNNING (LSB-style), which conflates daemon readiness with
+        # process states.
         wait_for(lambda: docker_exec(
-            name, "supervisorctl", "status", check=False).returncode == 0,
+            name, "supervisorctl", "pid", check=False).returncode == 0,
             30, what=f"{name} supervisord")
         return name
 
@@ -210,11 +221,17 @@ class OrgoSim(unittest.TestCase):
     # -- bootstrap ----------------------------------------------------------
 
     def test_bootstrap_real(self):
-        name = "orgo-sim-boot"
-        self.start(name)
+        name = self.start("orgo-sim-boot")
         docker_exec_bg(name, "python3",
                        "/opt/orgo-sim/callback_server.py",
                        "127.0.0.1", "8799", "/tmp/callback.json")
+        # docker exec -d returns as soon as the process is registered, not
+        # when it is listening — wait for the port to accept connections
+        # before bootstrap can POST to it.
+        wait_for(lambda: docker_exec(
+            name, "python3", "-c",
+            "import socket; socket.create_connection(('127.0.0.1', 8799), 1).close()",
+            check=False).returncode == 0, 15, what="callback server on 8799")
         cmd = [
             "env", f"ALAN_SETUP_SH={REPO_MOUNT}/setup.sh",
             "bash", f"{REPO_MOUNT}/bootstrap-orgo.sh",
@@ -241,8 +258,14 @@ class OrgoSim(unittest.TestCase):
         self.assertRegex(payload["url"],
                          r"^https://login\.tailscale\.com/a/[A-Za-z0-9]+$")
 
-        status = docker_exec(name, "supervisorctl", "status").stdout
-        self.assertRegex(status, r"tailscaled\s+RUNNING")
+        # Poll the one program's state rather than reading the full
+        # `supervisorctl status` listing once: that command exits nonzero
+        # whenever ANY program is not RUNNING, and the sim's alans-way
+        # browser programs go FATAL a few seconds after bootstrap adds
+        # them (their host scripts are only installed by hermes pm, which
+        # the sim never runs) — a check=True read races that transition.
+        wait_for(lambda: container_state(name, "tailscaled") == "RUNNING",
+                 30, what="tailscaled RUNNING")
         conf = docker_exec(name, "cat",
                            "/etc/supervisor/conf.d/tailscaled.conf").stdout
         self.assertIn("--tun=userspace-networking", conf)
@@ -288,12 +311,23 @@ class OrgoSim(unittest.TestCase):
                " && cat >> /root/.ssh/authorized_keys"
                " && chmod 600 /root/.ssh/authorized_keys",
                input_text=pub)
-        # Wait for the dst sshd (a real supervisord program) to answer.
-        wait_for(lambda: docker_exec(
-            src, "ssh-keyscan", "-T", "5", dst, check=False).returncode == 0,
-            30, what=f"sshd on {dst}")
-        docker_exec(src, "sh", "-c",
-                    f"ssh-keyscan {dst} >> /root/.ssh/known_hosts")
+        # Wait for the dst sshd (a real supervisord program) to answer and
+        # pin exactly the keys the poll observed — a second, unpolled
+        # keyscan can catch sshd mid-restart and append nothing, leaving
+        # ssh to fail on host-key verification.
+        keys: list[str] = []
+
+        def scan() -> bool:
+            r = docker_exec(src, "ssh-keyscan", "-T", "5", dst, check=False)
+            if r.returncode == 0 and r.stdout.strip():
+                keys[:] = [r.stdout]
+                return True
+            return False
+
+        wait_for(scan, 30, what=f"sshd on {dst}")
+        pin = docker("exec", "-i", src, "sh", "-c",
+                     "cat >> /root/.ssh/known_hosts", input_text=keys[0])
+        self.assertEqual(0, pin.returncode, f"pinning host keys: {pin.stderr}")
 
     def test_migrate_real(self):
         src = self.start("orgo-sim-src")
