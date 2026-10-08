@@ -8,4 +8,6 @@ Other applications are driven by the `computer_use` tool, which asks the user fo
 
 `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot` still read the desktop without asking; `workspace_computer_screenshot` is one window, a small jpeg, and only when the element list has no named control. Do not screenshot a window you can already read as names and refs.
 
+When the VM's desktop has no accessibility stack (no AT-SPI bus) or no screenshot tool, these calls fail outright instead of answering. Report "VM desktop accessibility unavailable" once and go on without desktop control; do not retry the call in a loop or substitute shell screenshot tools.
+
 If `computer_use` is not loaded, stop and report that. Do not fall back to an external computer-use driver or a full-desktop screenshot.

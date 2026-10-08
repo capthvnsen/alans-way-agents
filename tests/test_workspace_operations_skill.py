@@ -116,6 +116,14 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertNotIn("workspace_vps_browser", desktop)
         self.assertNotIn("Cua Driver", desktop)
 
+    def test_vps_desktop_degraded_mode_is_reported_once(self):
+        # Without an accessibility stack or screenshot tool on the VM the
+        # desktop calls fail outright; the agent must say so once rather
+        # than retry-loop or improvise with shell screenshot tools.
+        desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("VM desktop accessibility unavailable", desktop)
+        self.assertIn("once", desktop)
+
     def test_the_ungated_desktop_input_tool_is_never_named_as_callable(self):
         # Desktop input goes through Hermes' approval-gated computer_use tool.
         # The raw MCP action must not appear in any skill or reference as
