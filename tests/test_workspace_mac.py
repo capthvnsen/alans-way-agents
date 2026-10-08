@@ -666,9 +666,20 @@ class WindowsRouterTests(unittest.TestCase):
             "process.stdout.write(require(process.argv[1]).windowsProbeCommand());")
         self.assertIn(r"$env:APPDATA\Hermes Workspace\connection.json", command)
         self.assertIn("/v1/status", command)
-        # Any HTTP response (401 counts) proves the in-session app is alive.
-        self.assertIn("$_.Exception.Response", command)
+        # Parity with the posix wsr_alive check: the app must accept this
+        # machine's connection token, so a stale connection.json (a 401)
+        # means the host is not usable, not "alive".
+        self.assertIn("$doc.token", command)
+        self.assertIn("Bearer", command)
         self.assertIn("browser-mcp.cjs", command)
+
+    def test_probe_rejects_a_missing_token_and_an_error_status(self):
+        command = self.run_js(
+            "process.stdout.write(require(process.argv[1]).windowsProbeCommand());")
+        # No token in connection.json, or any HTTP error answer (a 401 from a
+        # stale token included), exits 1: it must not count as "app is up".
+        self.assertIn("IsNullOrWhiteSpace($token)", command)
+        self.assertNotIn("$_.Exception.Response", command)
 
     def test_backend_prefers_the_installed_app_runtime(self):
         command = self.run_js(
