@@ -2519,6 +2519,22 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn(ip, result.stdout)
         self.assertNotIn("apt-get install xvfb", result.stdout)
 
+    def test_a_running_vnc_display_beats_a_lower_numbered_socket(self):
+        import socket as socket_mod
+        sockdir = self.root / "x11"
+        sockdir.mkdir()
+        sock = socket_mod.socket(socket_mod.AF_UNIX)
+        try:
+            sock.bind(str(sockdir / "X0"))
+        except OSError:
+            self.skipTest("cannot bind a unix socket here")
+        self.addCleanup(sock.close)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) exit 1;;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :98 -rfbport 5998 -localhost";;\nesac\n')
+        self.run_setup(ALANS_WAY_X11_DIR=str(sockdir))
+        self.assertIn('DISPLAY=":98"', self.conf())
+
     def test_gateway_restart_uses_the_supervisor_program_that_owns_it(self):
         (self.root / "supervisor.state").write_text(
             "custom-gateway RUNNING pid 777, uptime 1:00:00\n", encoding="utf-8")

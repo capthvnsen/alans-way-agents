@@ -237,21 +237,21 @@ except Exception: sys.exit(1)
 sys.exit(0 if s.get("BackendState") == "Running" and s.get("TUN") is False else 1)'
 }
 
-# The display the browser services should export. A live desktop wins: a
-# listening X socket first, then the argv of a running X/VNC server. When
-# nothing is up yet, take the conventional fallback (:99) so the units and the
-# install docs below stay consistent.
+# The display the browser services should export. A running X/VNC server's own
+# display wins (that is the desktop the user actually sees; a bare socket may
+# belong to a console X), then a live X socket, then the conventional fallback
+# (:99) so the units and the install docs below stay consistent.
 detect_display() {
+  _line="$(pgrep -af 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr' 2>/dev/null | head -1 || true)"
+  _d="$(printf '%s\n' "$_line" | grep -oE '[[:space:]]:[0-9]+' | head -1 | tr -d ' ')"
+  [ -n "$_d" ] && { printf '%s' "$_d"; return 0; }
   for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
     [ -S "$_sock" ] || continue
     _n="${_sock##*X}"
     case "$_n" in ''|*[!0-9]*) continue;; esac
     echo ":$_n"; return 0
   done
-  _line="$(pgrep -af 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr' 2>/dev/null | head -1 || true)"
-  _d="$(printf '%s\n' "$_line" | grep -oE '[[:space:]]:[0-9]+' | head -1 | tr -d ' ')"
-  [ -n "$_d" ] || _d="${1:-:99}"
-  printf '%s' "$_d"
+  printf '%s' "${1:-:99}"
 }
 
 # A display stack the browser can run on: a live X socket, a running X/VNC
