@@ -2641,8 +2641,10 @@ class AgentSshProxyTests(unittest.TestCase):
     def test_userspace_tailscale_gets_a_proxycommand(self):
         result = self.setup_run(tun="false")
         text = self.config.read_text()
-        self.assertIn("ProxyCommand", text)
-        self.assertIn("nc %h %p", text)
+        # The ProxyCommand must be its own line ending after %p: a literal "\n"
+        # would merge it with the ControlMaster line and break ssh outright.
+        self.assertIn("  ProxyCommand tailscale nc %h %p\n", text)
+        self.assertIn("nc %h %p\n  ControlMaster auto", text)
 
     def test_kernel_tailscale_gets_no_proxycommand(self):
         for tun in ("true", None):

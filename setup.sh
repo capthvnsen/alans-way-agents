@@ -906,11 +906,12 @@ write_agent_ssh_config() {
   # Userspace-networking Tailscale has no tailscale0 interface, so ssh cannot
   # reach tailnet addresses directly: it must tunnel through `tailscale nc`.
   _proxy=""
-  tailscale_userspace && _proxy="  ProxyCommand $TAILSCALE nc %h %p\n"
+  tailscale_userspace && _proxy="$TAILSCALE nc %h %p"
   _state="$(ALANS_WAY_SSH_PROXY="$_proxy" python3 - "$_cfg" "$MAC_HOST" <<'PY'
 import os, sys
 path, host = sys.argv[1], sys.argv[2]
 proxy = os.environ.get("ALANS_WAY_SSH_PROXY", "")
+proxy = ("  ProxyCommand %s\n" % proxy) if proxy else ""
 begin, end = "# >>> alans-way >>>\n", "# <<< alans-way <<<\n"
 block = (begin + f"Host {host}\n" + proxy + "  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
          "  ServerAliveInterval 15\n  ServerAliveCountMax 3\n" + end)
