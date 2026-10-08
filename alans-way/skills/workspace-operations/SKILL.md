@@ -65,11 +65,14 @@ their exact names are `mcp__workspace_browser__cua_alans_way_status`,
 `mcp__workspace_browser__cua_alans_way_snapshot`,
 `mcp__workspace_browser__cua_alans_way_screenshot`,
 `mcp__workspace_browser__cua_alans_way_action` and
-`mcp__workspace_browser__cua_alans_way_close`. This skill writes
-`cua_alans_way_*` for short; a bare `cua_alans_way_snapshot` does not exist.
-When they are not in your tool list, Hermes has deferred them: call them
-through `tool_call` with the full name, with no `tool_search` first.
-`workspace_browser` alone is not a tool. Skip status and tabs unless a call fails: every
+`mcp__workspace_browser__cua_alans_way_close`. This skill and its references
+write `cua_alans_way_*` and `workspace_computer_*` for short, without the
+`mcp__workspace_browser__` prefix; a bare `cua_alans_way_snapshot` does not
+exist. When they are not in your tool list, Hermes has deferred them: call
+them through `tool_call` with the full name, with no `tool_search` first.
+`workspace_browser` alone is not a tool.
+
+Skip status and tabs unless a call fails: every
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
@@ -92,7 +95,8 @@ for that boundary. Do not use an external computer-use driver.
 `cua_alans_way_*` tools are served by a routing connector that probes the
 Mac at spawn and re-routes automatically when Mac availability flips. A slow
 first response is warmup, not a failure. If a browser tool call errors
-or the tools seem missing, retry once: a dead connector is respawned fresh
+or the tools seem missing (and are not merely deferred; see `tool_call`
+above), retry once: a dead connector is respawned fresh
 and re-probes on its own. A connector whose script on disk is newer exits
 after the current call so the next call loads it. That exit is normal. If it
 still fails, report the failure in one line and stop.

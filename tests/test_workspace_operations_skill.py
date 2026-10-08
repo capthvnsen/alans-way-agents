@@ -119,13 +119,16 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
     def test_skill_gives_the_names_hermes_registers(self):
         # Hermes registers MCP tools as mcp__<server>__<tool>; a bare
         # cua_alans_way_snapshot does not exist, and calling it costs a turn.
-        server = re.search(r"^  (\w+):\n    command: \"node\"", (ROOT / "setup-workspace.sh").read_text(encoding="utf-8"), re.M).group(1)
+        block = re.search(r"^  (\w+):\n    command: \"node\"", (ROOT / "setup-workspace.sh").read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(block, "setup-workspace.sh no longer writes the MCP server block this test reads")
+        server = block.group(1)
         for tool in ["cua_alans_way_status", "cua_alans_way_tabs", "cua_alans_way_open", "cua_alans_way_snapshot",
                      "cua_alans_way_screenshot", "cua_alans_way_action", "cua_alans_way_close",
                      "workspace_computer_apps", "workspace_computer_snapshot", "workspace_computer_menu", "workspace_computer_screenshot"]:
             with self.subTest(tool=tool):
                 self.assertIn(f"mcp__{server}__{tool}", self.text)
         self.assertNotIn("call the tools by these exact names: `cua_alans_way", self.normalized)
+        self.assertIn("`workspace_computer_*` for short", self.normalized)
         self.assertIn("tool_call", self.normalized)
 
     def test_the_app_api_is_never_driven_directly(self):
