@@ -2277,7 +2277,19 @@ for prof_dir in profiles:
         pass
 PY
 )"
-if [ -z "$ROUTES" ]; then
+# An already bound profile keeps its binding across re-runs: without --bind,
+# say so instead of listing routes or claiming check-ins stay silent.
+ALREADY_BOUND=0
+if [ "$DO_BIND" = 0 ] && have hermes \
+    && hermes_p proactivity status 2>/dev/null | python3 -c 'import json, sys
+try: s = json.load(sys.stdin)
+except Exception: s = {}
+sys.exit(0 if s.get("bound") else 1)'; then
+  ALREADY_BOUND=1
+fi
+if [ "$ALREADY_BOUND" = 1 ]; then
+  ok "proactivity is already bound to a primary route: keeping the existing binding (to change it, re-run: setup.sh --bind${PROFILE:+ --profile $PROFILE})"
+elif [ -z "$ROUTES" ]; then
   say "  no Telegram DM sessions yet. Message your bot once on Telegram,"
   say "  then re-run:  setup.sh --bind${PROFILE:+ --profile $PROFILE}"
 else

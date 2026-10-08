@@ -245,7 +245,7 @@ class TimezoneFallbackTests(unittest.TestCase):
             self.assertNotIn("America/Denver", result.stdout)
 
 
-def logging_hermes_bin(directory: Path, log: Path, version="0.21.5"):
+def logging_hermes_bin(directory: Path, log: Path, version="0.21.5", proactivity_status=""):
     bin_dir = directory / "bin"
     bin_dir.mkdir(exist_ok=True)
     hermes = bin_dir / "hermes"
@@ -255,6 +255,7 @@ echo "$*" >> "{log}"
 case "$1" in
   --version) echo "hermes {version}";;
   plugins) [ "$2" = list ] && echo "alans-way";;
+  proactivity) [ "$2" = status ] && echo '{proactivity_status}';;
 esac
 exit 0
 """, encoding="utf-8")
@@ -462,6 +463,39 @@ class AgentShellTests(unittest.TestCase):
             calls = log.read_text(encoding="utf-8")
             self.assertIn("bound primary route: delta", result.stdout)
             self.assertIn("-p delta proactivity bind --session-key agent:delta:telegram:dm:42", calls)
+
+    def test_an_already_bound_profile_keeps_its_binding(self):
+        """A re-run where the target profile is already bound must say so and
+        skip the route list, not claim check-ins stay silent until a bind."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log, proactivity_status='{"bound": true}')
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run("--non-interactive", "--skip-browser", "--skip-services",
+                         "--hermes-home", str(home), env=env, check=False)
+            self.assertIn("already bound", result.stdout)
+            self.assertNotIn("stays silent", result.stdout)
+            self.assertNotIn("pick which bot", result.stdout)
+            self.assertNotIn("proactivity bind", log.read_text(encoding="utf-8"))
+
+    def test_bind_still_rebinds_an_already_bound_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log, proactivity_status='{"bound": true}')
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run("--bind", "--non-interactive", "--skip-browser", "--skip-services",
+                         "--hermes-home", str(home), env=env, check=False)
+            self.assertIn("bound primary route", result.stdout)
+            self.assertIn("proactivity bind --session-key agent:main:telegram:dm:1",
+                          log.read_text(encoding="utf-8"))
 
 
 class PinAndListTests(unittest.TestCase):
