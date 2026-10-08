@@ -2434,8 +2434,9 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn("vps-browser-host.cjs serve", conf)
         self.assertIn("workspace-router.cjs --watch --interval 10", conf)
         self.assertIn("autorestart=unexpected", conf)
-        # exitcodes mirrors the units' RestartPreventExitStatus.
-        self.assertIn("exitcodes=78", conf)
+        # exitcodes mirrors the units' RestartPreventExitStatus: 0 is a clean
+        # exit under on-failure, so it must be "expected" too.
+        self.assertIn("exitcodes=0,78", conf)
         self.assertIn("exitcodes=2", conf)
         self.assertIn('HERMES_VPS_BROWSER_DATA="%s"' % self.data, conf)
         self.assertIn('DISPLAY=', conf)
@@ -2554,6 +2555,22 @@ class SupervisordServiceTests(unittest.TestCase):
             time.sleep(0.2)
         self.assertIn("restart custom-gateway", read_log(self.supervisor_log))
         self.assertNotIn("gateway restart", read_log(self.root / "log"))
+
+    def test_gateway_restart_prefers_the_program_running_the_selected_profile(self):
+        (self.root / "supervisor.state").write_text(
+            "main-gateway RUNNING pid 771, uptime 1:00:00\n"
+            "alt-gateway RUNNING pid 772, uptime 1:00:00\n", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes gateway run --no-supervise";;\n'
+             '  *772*) echo "hermes -p alt gateway run --no-supervise";;\n'
+             'esac\n')
+        self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("restart alt-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
 
 
 class CdpPortTests(unittest.TestCase):

@@ -306,21 +306,24 @@ supervisor_conf_dir() {
 
 # The supervisor program whose command line (or a child's, for wrapper
 # scripts) runs `hermes gateway run`. The name is discovered, never assumed.
+# With several gateway programs, the one carrying -p for the profile being
+# configured wins over the first match.
 supervisor_gateway_program() {
   [ "$GUEST_OS" = Linux ] || return 1
   have supervisorctl && have ps || return 1
+  _any=""
   for _prog in $(supervisorctl status 2>/dev/null | awk '$2 == "RUNNING" {print $1}'); do
     _pid="$(supervisorctl pid "$_prog" 2>/dev/null || true)"
     case "$_pid" in ''|*[!0-9]*|0) continue;; esac
-    case "$(ps -o args= -p "$_pid" 2>/dev/null || true)" in
-      *"gateway run"*) echo "$_prog"; return 0;;
-    esac
-    for _kid in $(pgrep -P "$_pid" 2>/dev/null); do
-      case "$(ps -o args= -p "$_kid" 2>/dev/null)" in
-        *"gateway run"*) echo "$_prog"; return 0;;
+    for _cand in "$_pid" $(pgrep -P "$_pid" 2>/dev/null); do
+      _args="$(ps -o args= -p "$_cand" 2>/dev/null || true)"
+      case "$_args" in
+        *"-p $PROFILE "*"gateway run"*) echo "$_prog"; return 0;;
+        *"gateway run"*) [ -n "$_any" ] || _any="$_prog";;
       esac
     done
   done
+  [ -z "$_any" ] || { echo "$_any"; return 0; }
   return 1
 }
 
@@ -1677,7 +1680,9 @@ EOF
   fi
   # The supervisord counterpart of the systemd units: same programs, same
   # environment, RestartPreventExitStatus mapped to exitcodes (with
-  # autorestart=unexpected that is the same "restart unless clean" policy).
+  # autorestart=unexpected, listing a code keeps its exit down; a clean exit 0
+  # must be listed too, or it would read as a crash and restart, unlike
+  # Restart=on-failure).
   install_supervisor_programs() {
     _confdir="$(supervisor_conf_dir)" || {
       warn "supervisord is running but has no conf.d include dir: add the alans-way programs by hand"
@@ -1745,7 +1750,7 @@ $_sup_user
 environment=$_env_browser$_overseer_env
 directory=$BROWSER_HOME
 autorestart=unexpected
-exitcodes=78
+exitcodes=0,78
 stdout_logfile=$SUP_LOG_DIR/browser.log
 stderr_logfile=$SUP_LOG_DIR/browser.err.log
 $WATCH_SECTION
