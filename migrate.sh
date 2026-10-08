@@ -183,8 +183,11 @@ REMOTE_ARCHIVE="$REMOTE_PARENT/$(basename "$ARCHIVE")"
 # scp switched to SFTP mode in OpenSSH 9 — the remote path goes to
 # sftp-server verbatim, so a %q-escaped target would land a literal
 # backslash in the name. Stream the archive over ssh instead: the remote
-# command uses the same %q quoting model as every other call here.
-ssh "$TO" "$(printf 'mkdir -p %q && cat > %q' "$REMOTE_PARENT" "$REMOTE_ARCHIVE")" \
+# command uses the same %q quoting model as every other call here, and a
+# dead stream removes the partial (token-bearing) file itself because die
+# would fire before the unpack's EXIT trap could.
+ssh "$TO" "$(printf 'mkdir -p %q && cat > %q || { rm -f %q; exit 1; }' \
+    "$REMOTE_PARENT" "$REMOTE_ARCHIVE" "$REMOTE_ARCHIVE")" \
     <"$ARCHIVE" || die "could not copy the archive to $TO"
 
 # Unpack on the remote into a staging dir, rewrite old-home absolute paths
@@ -315,8 +318,10 @@ log "stopped the old gateway: $stopped"
 rollback() {
     log "WARNING: $1"
     if [ -n "$start_old" ]; then
-        $start_old >/dev/null 2>&1 || true
-        die "$1 — old gateway restarted, remote gateway left stopped"
+        if $start_old >/dev/null 2>&1; then
+            die "$1 — old gateway restarted, remote gateway left stopped"
+        fi
+        die "$1 — restarting the old gateway ('$start_old') failed too: both gateways are down; start it by hand"
     fi
     die "$1 — the old gateway was stopped with '$stopped' and has no verified restart verb; bring it back by hand"
 }
@@ -336,7 +341,8 @@ if [ -s "$db_list" ]; then
     tar -czf "$db_archive" -C "$HERMES_HOME" -T "$db_list" \
         || rollback "could not snapshot the databases"
     remote_db_archive="$REMOTE_HERMES/$(basename "$db_archive")"
-    ssh "$TO" "$(printf 'cat > %q' "$remote_db_archive")" <"$db_archive" \
+    ssh "$TO" "$(printf 'cat > %q || { rm -f %q; exit 1; }' \
+        "$remote_db_archive" "$remote_db_archive")" <"$db_archive" \
         || rollback "could not copy the database snapshot to $TO"
     ssh "$TO" "$(printf 'tar -xzf %q -C %q && rm -f %q' \
         "$remote_db_archive" "$REMOTE_HERMES" "$remote_db_archive")" </dev/null \

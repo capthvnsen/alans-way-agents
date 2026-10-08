@@ -409,9 +409,10 @@ class InstallStepTests(unittest.TestCase):
             run(env=env)
             self.assertTrue((directory / "svconf" / "hermes-gateway.conf").exists())
 
-    def test_a_program_conf_whose_command_is_missing_gets_it_installed(self):
+    def test_a_program_conf_whose_command_is_missing_fails_the_step(self):
         """A stale platform conf that points at a missing binary would
-        crash-loop forever; drop our wrapper at the referenced path."""
+        crash-loop forever — fail loudly and name the conf; never write a
+        second [program:...] elsewhere, which breaks supervisorctl reread."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
@@ -422,53 +423,110 @@ class InstallStepTests(unittest.TestCase):
                 encoding="utf-8")
             curl_stub(stub_bin)
             tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s7")
-            run(env=env)
-            self.assertTrue((bin_dest / "orgo-hermes-gateway").exists())
+            result = run(env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((bin_dest / "orgo-hermes-gateway").exists())
             self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "hermes")
+            self.assertIn("fix or remove", doc["error"])
+            self.assertIn("orgo.conf", doc["error"])
 
-    def test_a_defined_gateway_without_a_command_is_repaired_not_duplicated(self):
-        """A [program:hermes-gateway] with no parseable command= gets its
-        conf repaired — writing a second [program:...] elsewhere makes
+    def test_a_defined_gateway_without_a_command_fails_not_duplicated(self):
+        """A [program:hermes-gateway] with no parseable command= fails the
+        step naming the conf — repairing it in place risks folding indented
+        junk into the new option, and a second [program:...] elsewhere makes
         `supervisorctl reread` fail on the duplicate."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
             orgo_conf = directory / "svconf" / "orgo.conf"
-            orgo_conf.write_text(
-                "; platform file\n[program:hermes-gateway]\nuser=root\n",
-                encoding="utf-8")
+            before = "; platform file\n[program:hermes-gateway]\nuser=root\n"
+            orgo_conf.write_text(before, encoding="utf-8")
             curl_stub(stub_bin)
             tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s10")
-            run(env=env)
+            result = run(env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
             self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
-            programs = "".join(
-                c.read_text(encoding="utf-8")
-                for c in (directory / "svconf").glob("*.conf"))
-            self.assertEqual(programs.count("[program:hermes-gateway]"), 1)
-            repaired = orgo_conf.read_text(encoding="utf-8")
-            self.assertIn("command=", repaired)
-            self.assertIn("alan-hermes-gateway", repaired)
+            # The foreign conf is left exactly as it was.
+            self.assertEqual(orgo_conf.read_text(encoding="utf-8"), before)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "hermes")
+            self.assertIn("fix or remove", doc["error"])
+            self.assertIn("orgo.conf", doc["error"])
 
-    def test_a_defined_tailscaled_with_an_indented_command_is_repaired(self):
-        """An indented command= parses as a continuation, not a command —
-        same fix: repair the conf in place, never write a duplicate."""
+    def test_a_defined_tailscaled_whose_command_binary_is_missing_fails(self):
+        """The indented command= under a section header is a real option to
+        ConfigParser, so /gone is the command — missing binary means fail,
+        naming the conf."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
             conf = directory / "svconf" / "orgo-tailscale.conf"
-            conf.write_text(
-                "[program:tailscaled]\n command=/gone\n", encoding="utf-8")
+            before = "[program:tailscaled]\n command=/gone\n"
+            conf.write_text(before, encoding="utf-8")
             curl_stub(stub_bin)
             tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s11")
-            run(env=env)
+            result = run(env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
             self.assertFalse((directory / "svconf" / "tailscaled.conf").exists())
-            programs = "".join(
-                c.read_text(encoding="utf-8")
-                for c in (directory / "svconf").glob("*.conf"))
-            self.assertEqual(programs.count("[program:tailscaled]"), 1)
-            repaired = conf.read_text(encoding="utf-8")
-            self.assertIn("command=tailscaled", repaired)
-            self.assertIn("--tun=userspace-networking", repaired)
+            self.assertEqual(conf.read_text(encoding="utf-8"), before)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "tailscale")
+            self.assertIn("fix or remove", doc["error"])
+            self.assertIn("orgo-tailscale.conf", doc["error"])
+
+    def test_an_indented_command_under_the_header_counts_as_a_command(self):
+        """ConfigParser reads an indented command= directly under a section
+        header as a real option. When its binary exists the conf is reused
+        as-is — treating it as command-less would fail a working conf."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            conf = directory / "svconf" / "orgo-tailscale.conf"
+            before = ("[program:tailscaled]\n"
+                      " command=tailscaled --tun=userspace-networking\n")
+            conf.write_text(before, encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s12")
+            result = run(env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse((directory / "svconf" / "tailscaled.conf").exists())
+            self.assertEqual(conf.read_text(encoding="utf-8"), before)
+            self.assertIn("tailscaled already defined", result.stdout)
+
+    def test_a_defined_program_header_tolerates_trailing_junk(self):
+        """'[program:x] ; comment', trailing whitespace and CRLF endings are
+        still that section to ConfigParser — a broken command under them
+        must fail by name, never silently write a duplicate conf."""
+        cases = [
+            "[program:hermes-gateway] ; platform file\ncommand=/gone\n",
+            "[program:hermes-gateway] \ncommand=/gone\n",
+            "[program:hermes-gateway]\r\ncommand=/gone\r\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text.splitlines()[0]):
+                with tempfile.TemporaryDirectory() as d:
+                    directory = Path(d)
+                    env, log, stub_bin = fixture(directory)
+                    (directory / "svconf" / "orgo.conf").write_text(
+                        text, encoding="utf-8")
+                    curl_stub(stub_bin)
+                    tailscale_stub(
+                        stub_bin, url="https://login.tailscale.com/a/s13")
+                    result = run(env=env, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(
+                        (directory / "svconf" / "hermes-gateway.conf").exists())
+                    doc = json.loads(
+                        (directory / "state" / "state.json").read_text(
+                            encoding="utf-8"))
+                    self.assertEqual(doc["state"], "failed")
+                    self.assertIn("fix or remove", doc["error"])
+                    self.assertIn("orgo.conf", doc["error"])
 
     def test_repo_ref_is_never_interpreted_as_shell(self):
         """--repo-ref comes from the provisioning backend; a quote or $(...)

@@ -174,6 +174,8 @@ if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
   esac
 else
   echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  # Rollback restarts the old gateway; give that verb its own failure knob.
+  [ "$1" = start ] && exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}"
 fi
 exit "${FAKE_SUPERVISORCTL_RC:-0}"
 ''')
@@ -300,7 +302,24 @@ class MigrateTests(unittest.TestCase):
             result = run("--to", "fakehost", "--yes", env=env, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("did not come up", result.stderr)
+            self.assertIn("old gateway restarted", result.stderr)
             self.assertIn("supervisorctl start hermes-gateway", read(remote_calls))
+            self.assertIn("supervisorctl start hermes-gateway", read(local_calls))
+
+    def test_a_failed_old_gateway_restart_is_reported_honestly(self):
+        """Rolling back can fail too — when the restart verb errors the
+        message must say both gateways are down, not claim a restart that
+        never happened."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_REMOTE_START_FAIL"] = "1"
+            env["FAKE_SUPERVISORCTL_START_RC"] = "1"
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("old gateway restarted", result.stderr)
+            self.assertIn("down", result.stderr)
+            self.assertIn("by hand", result.stderr)
             self.assertIn("supervisorctl start hermes-gateway", read(local_calls))
 
     def test_a_failed_remote_park_does_not_leave_both_gateways_polling(self):
@@ -332,6 +351,30 @@ class MigrateTests(unittest.TestCase):
             result = run("--to", "fakehost", "--yes", env=env)
             self.assertEqual(result.returncode, 0)
             self.assertNotIn("start", read(local_calls))
+
+    def test_a_dropped_archive_stream_removes_the_partial_file(self):
+        """If the stream dies mid-copy, `die` fires before the remote
+        unpack/trap ever ran — the remote side of the stream must remove
+        the partial token-bearing tarball itself."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_STREAM_FAIL"] = "1"
+            # `cat > dest` on the remote side dies after a partial write;
+            # cat-with-args (the stub's own state reads) stays real.
+            stub(directory / "stubbin", "cat", '''
+if [ $# -eq 0 ] && [ -n "$FAKE_STREAM_FAIL" ]; then
+  printf 'partial-archive-bytes'
+  exit 1
+fi
+exec /bin/cat "$@"
+''')
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not copy", result.stderr)
+            self.assertFalse(list(remote_home.glob("*.tgz")))
+            self.assertFalse((remote_home / ".hermes").exists())
+            self.assertNotIn("stop", read(local_calls))
 
     def test_remote_unpack_failure_cleans_up_and_keeps_old_running(self):
         with tempfile.TemporaryDirectory() as d:

@@ -85,37 +85,44 @@ first_conf_defining() {
     return 0
 }
 
-# conf_program_command <conf> <program> — the binary the conf's command=
-# runs inside [program:<program>]. An indented command= is a ConfigParser
-# continuation line, not a command, and does not count.
+# conf_program_command <conf> <program> — argv[0] of the command= option
+# inside [program:<program>], read by the same ConfigParser supervisord
+# uses: headers tolerate trailing whitespace, comments and CRLF, an
+# indented command= directly under the header is a real option, and one
+# indented under a lower-indented option is a continuation that folds into
+# that option's value instead.
 conf_program_command() {
-    awk -v section="[program:$2]" '
-        $0 == section {inside = 1; next}
-        /^\[/         {inside = 0}
-        inside && /^command=/ {sub(/^command=/, ""); print $1; exit}
-    ' "$1"
+    python3 - "$1" "$2" <<'PY'
+import configparser
+import shlex
+import sys
+
+parser = configparser.ConfigParser(strict=False, interpolation=None)
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        parser.read_file(f)
+    argv = shlex.split(parser["program:" + sys.argv[2]]["command"])
+except Exception:
+    sys.exit(0)
+if argv:
+    print(argv[0])
+PY
 }
 
-# fix_conf_command <conf> <program> <command-line> — a conf that defines
-# [program:<p>] without a parseable command= gets the line inserted right
-# under the header. Writing a second [program:<p>] in another conf would
-# break `supervisorctl reread` on the duplicate, so repair in place.
-fix_conf_command() {
-    local conf="$1" prog="$2" line="$3"
-    if [ "$DRY_RUN" = 1 ]; then
-        log "would repair $prog in $conf (add 'command=$line')"
+# require_defined_program <conf> <program> — a conf that already defines
+# [program:<p>] is authoritative: a second [program:<p>] in another file
+# breaks `supervisorctl reread`, and editing a foreign conf in place can
+# fold its indented lines into the inserted option. Reuse it when its
+# command binary exists; otherwise fail and name the file.
+require_defined_program() {
+    local conf="$1" prog="$2" cmd=""
+    cmd="$(conf_program_command "$conf" "$prog" || true)"
+    if [ -n "$cmd" ] && { [ -x "$cmd" ] || have "${cmd##*/}"; }; then
+        log "$prog already defined in $conf"
         return 0
     fi
-    if awk -v section="[program:$prog]" -v line="command=$line" '
-        $0 == section && !added {print; print line; added = 1; next}
-        {print}
-    ' "$conf" >"$conf.alan-tmp" && mv "$conf.alan-tmp" "$conf"; then
-        log "repaired $prog in $conf — added 'command=$line'"
-    else
-        rm -f "$conf.alan-tmp"
-        log "WARNING: $conf defines $prog but has no command= line and could not be repaired"
-    fi
-    return 0
+    log "ERROR: $conf defines $prog but its command= is missing or names a missing binary — fix or remove $conf and re-run"
+    return 1
 }
 
 # first_conf_running <basename> — the first *.conf whose command= runs a
@@ -247,27 +254,11 @@ EOF
 # Orgo's Hermes template ships a platform-generated orgo.conf that already
 # defines [program:hermes-gateway]. Reuse it; never add a second entry.
 gateway_conf() {
-    local conf cmd=""
+    local conf
     conf="$(first_conf_defining hermes-gateway)"
     if [ -n "$conf" ]; then
-        cmd="$(conf_program_command "$conf" hermes-gateway)"
-        if [ -z "$cmd" ]; then
-            fix_conf_command "$conf" hermes-gateway "$WRAPPER"
-            return 0
-        fi
-        if [ -x "$cmd" ] || have "${cmd##*/}"; then
-            log "hermes-gateway already defined in $conf"
-            return 0
-        fi
-        # A conf pointing at a missing binary would crash-loop forever —
-        # put our wrapper at the path it references if we can write there.
-        if [ "$DRY_RUN" = 0 ] && [ ! -e "$cmd" ] \
-            && [ -w "$(dirname "$cmd")" ] && cp "$WRAPPER" "$cmd" 2>/dev/null; then
-            chmod 755 "$cmd"
-            log "installed the gateway wrapper at $cmd, which $conf pointed at but was missing"
-            return 0
-        fi
-        log "WARNING: $conf defines hermes-gateway but '$cmd' is missing"
+        require_defined_program "$conf" hermes-gateway
+        return
     fi
     if [ "$DRY_RUN" = 1 ]; then
         log "would write $SUPERVISOR_CONF_DIR/hermes-gateway.conf"
@@ -394,7 +385,7 @@ step_tailscale() {
 }
 
 tailscaled_conf() {
-    local conf cmd=""
+    local conf
     # Orgo VMs have no /dev/net/tun, so the daemon must run userspace — which
     # also means outbound tailnet traffic only works through its SOCKS5
     # server (ssh goes through the ProxyCommand added below), and the
@@ -405,16 +396,8 @@ tailscaled_conf() {
     fi
     conf="$(first_conf_defining tailscaled)"
     if [ -n "$conf" ]; then
-        cmd="$(conf_program_command "$conf" tailscaled)"
-        if [ -z "$cmd" ]; then
-            fix_conf_command "$conf" tailscaled "tailscaled $flags"
-            return 0
-        fi
-        if [ -x "$cmd" ] || have "${cmd##*/}"; then
-            log "tailscaled already defined in $conf"
-            return 0
-        fi
-        log "WARNING: $conf defines tailscaled but '$cmd' is missing"
+        require_defined_program "$conf" tailscaled
+        return
     fi
     if [ "$DRY_RUN" = 1 ]; then
         log "would write $SUPERVISOR_CONF_DIR/tailscaled.conf (tailscaled $flags)"
@@ -439,19 +422,13 @@ EOF
 # Orgo's hermes-agent template already supervises sshd; reuse any existing
 # program and only install openssh-server when the binary is absent.
 sshd_conf() {
-    local conf cmd=""
+    local conf
     # A [program:sshd] section counts as defined even when its command= is
     # unparseable — a duplicate section breaks `supervisorctl reread`.
     conf="$(first_conf_defining sshd)"
     if [ -n "$conf" ]; then
-        cmd="$(conf_program_command "$conf" sshd)"
-        if [ -z "$cmd" ]; then
-            log "WARNING: $conf defines sshd but has no command= line"
-        elif [ ! -x "$cmd" ] && ! have "${cmd##*/}"; then
-            log "WARNING: $conf defines sshd but '$cmd' is missing"
-        fi
-        log "sshd already defined under $SUPERVISOR_CONF_DIR"
-        return 0
+        require_defined_program "$conf" sshd
+        return
     fi
     conf="$(first_conf_running sshd)"
     if [ -n "$conf" ]; then
