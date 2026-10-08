@@ -1324,7 +1324,9 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       warn "no Chrome or Edge found; install Chrome (winget install Google.Chrome) and re-run setup"
     fi
   else
-  for _name in google-chrome google-chrome-stable chromium chromium-browser; do
+  # google-chrome-stable first: a host image can shadow google-chrome with a
+  # wrapper that injects its own debugging port and profile (Orgo does).
+  for _name in google-chrome-stable google-chrome chromium chromium-browser; do
     _found="$(PATH="${ALANS_WAY_BROWSER_PATH:-$PATH}" command -v "$_name" 2>/dev/null || true)"
     [ -n "$_found" ] || continue
     if is_snap_browser "$_found"; then
