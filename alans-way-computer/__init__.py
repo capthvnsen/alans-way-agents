@@ -542,7 +542,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def type_text(self, text, *, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("type", delivery_mode, bring_to_front):
             return bad
-        return self._run("type", {"action": "type", "text": text})
+        result = self._run("type", {"action": "type", "text": text})
+        if not result.ok and "needs a ref" in (result.message or ""):
+            return self._fail("type", result.code, result.message + " Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
+        return result
 
     def set_value(self, value, element=None):
         if element is None:

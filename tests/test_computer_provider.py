@@ -74,6 +74,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     else if (args.pid === 104) result = fail('off_limits: That app is off limits.');
     else if (args.ref !== undefined && args.generation !== s.generation) result = fail('stale_ref: The app changed since your snapshot. Take a fresh snapshot.');
     else if (args.action === 'drag' && args.x2 === undefined) result = fail('bad_request: drag needs x2 and y2.');
+    else if (args.action === 'type' && args.ref === undefined && !c.desktop) result = fail('bad_request: type needs a ref.');
     else { s.generation += 1; save(s); result = text({ ok: true, generation: s.generation, elements: tree(s.generation).elements }); }
   } else result = fail('Unknown browser tool.');
   if (c.notice) result.content.push({ type: 'text', text: c.notice });
@@ -159,7 +160,7 @@ be.capture(mode="som", app="Notes")
 m = mark(); be.set_value("hello", element=2); R["set_value"] = action_calls(m)
 m = mark(); be.key("cmd+s"); R["key_combo"] = action_calls(m)
 m = mark(); be.key("return"); R["key_plain"] = action_calls(m)
-m = mark(); be.type_text("hi"); R["type_text"] = action_calls(m)
+m = mark(); R["type_text_mac"] = plain(be.type_text("hi")); R["type_text"] = action_calls(m)
 
 # --- unsupported actions never reach the router
 m = mark()
@@ -244,6 +245,8 @@ b.capture(mode="ax", app="Notes")
 for key in ("nowindow", "nocontrol", "coded"):
     CTL.write_text(json.dumps({key: True}))
     R["code_" + key] = plain(b.click(x=1, y=1))
+CTL.write_text(json.dumps({"desktop": True}))
+R["type_text_desktop"] = plain(b.type_text("hi"))
 
 # --- vision is screenshot only; a cached pid skips apps; snapshot and screenshot run in parallel
 m = mark()
@@ -520,6 +523,9 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["key_plain"], [{"pid": 101, "action": "key", "key": "return"}])
         # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
         self.assertEqual(self.r["type_text"], [{"pid": 101, "action": "type", "text": "hi"}])
+        self.assertEqual(self.r["type_text_mac"]["code"], "bad_request")
+        self.assertIn("set_value", self.r["type_text_mac"]["message"])
+        self.assertTrue(self.r["type_text_desktop"]["ok"])
 
     def test_unsupported_actions_are_refused_without_reaching_the_router(self):
         for name, result in self.r["unsupported"].items():
