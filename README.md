@@ -304,8 +304,8 @@ setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)
 
 ## Roadmap
 
-The roadmap lives in the GitHub project of
-[capthvnsen/alans-way](https://github.com/capthvnsen/alans-way/projects).
+The roadmap lives in the
+[Hermes Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
 Fastest updates are on X: [@alexhvnsen](https://x.com/alexhvnsen).
 
 ## Tests
