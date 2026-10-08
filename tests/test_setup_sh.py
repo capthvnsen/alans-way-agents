@@ -2746,6 +2746,8 @@ exit 0
     def test_linux_desktop_deps_are_checked_when_the_provider_is_present(self):
         with tempfile.TemporaryDirectory() as directory:
             env = self.setup_env(directory, linux=True, provider_dir=True, backend="alans-way-computer")
+            # A real at-spi bus running on the dev host would mask the warning.
+            fake(Path(directory) / "bin", "pgrep", "exit 1\n")
             result = run("--verify", env=env, check=False)
             self.assertIn("at-spi", result.stdout)
 
