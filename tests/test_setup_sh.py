@@ -1280,6 +1280,30 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
 
+    def test_overseer_bot_ids_survive_a_rerun_without_the_env(self):
+        # The systemd path must preserve HERMES_OVERSEER_BOT_IDS the way the
+        # supervisord conf does: a re-run without the variable keeps the
+        # value the first run wrote, instead of silently dropping it.
+        env = self.linux_root()
+        self.run_setup("Linux", HERMES_OVERSEER_BOT_IDS="4242", **env)
+        unit = self.units / "hermes-alans-way-browser.service"
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="4242"', unit.read_text())
+        self.run_setup("Linux", **env)
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="4242"', unit.read_text())
+
+    def test_an_unquoted_overseer_value_in_an_existing_unit_is_kept_and_quoted(self):
+        # Units written before the value was quoted carry a bare
+        # `Environment=HERMES_OVERSEER_BOT_IDS=...`; the read-back keeps the
+        # value and the rewrite quotes it (a space-separated list would
+        # otherwise parse as stray tokens).
+        env = self.linux_root()
+        self.units.mkdir(parents=True)
+        (self.units / "hermes-alans-way-browser.service").write_text(
+            "[Service]\nEnvironment=HERMES_OVERSEER_BOT_IDS=777\n", encoding="utf-8")
+        self.run_setup("Linux", **env)
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="777"',
+                      (self.units / "hermes-alans-way-browser.service").read_text())
+
     def test_the_watcher_and_the_managed_block_run_the_installed_plugin_copy(self):
         # With a catalog install the router Hermes loaded lives in the
         # profile's plugins dir, not in this clone: services and the managed
@@ -2567,6 +2591,28 @@ class SupervisordServiceTests(unittest.TestCase):
         block = (self.home / "config.yaml").read_text()
         self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', block)
 
+    def test_a_computer_configured_only_in_a_profile_keeps_the_watcher(self):
+        # The #62 residual: `--profile alt --mac-ssh` writes the computer
+        # into alt's managed block only. A bare re-run must still keep the
+        # watcher, the shared state-file env and the managed ssh block —
+        # the computer is configured even though the main block has none.
+        prof = self.home / "profiles" / "alt"
+        prof.mkdir(parents=True)
+        (prof / ".env").write_text("TELEGRAM_BOT_TOKEN=111222333:alt-token\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_setup("--profile", "alt", "--mac-ssh", "me@mac.tail1234.ts.net",
+                           "--bot-id", "111222333").returncode, 0)
+        self.assertIn("[program:alans-way-mac-watch]", self.conf())
+        self.assertEqual(self.run_setup().returncode, 0)
+        conf = self.conf()
+        self.assertIn("[program:alans-way-mac-watch]", conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        block = (prof / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac.tail1234.ts.net"', block)
+        self.assertIn("HERMES_MAC_STATE_FILE:", block)
+        self.assertIn("Host mac.tail1234.ts.net",
+                      (self.root / ".ssh" / "config").read_text())
+
     def test_a_rerun_without_a_prior_block_stays_vps_only(self):
         self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
         self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
@@ -2719,6 +2765,48 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
         self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
 
+    def test_gateway_restart_matches_every_profile_flag_form(self):
+        # `hermes --profile alt gateway run`, `--profile=alt`, `-p=alt` and
+        # `-palt` name the same profile `-p alt` does — each must pick the
+        # alt program, not the unprofiled candidate.
+        for form in ("-p alt", "-p=alt", "-palt", "--profile alt", "--profile=alt"):
+            with self.subTest(form=form):
+                (self.root / "supervisor.state").write_text(
+                    sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+                    sup_line("alt-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+                for stale in self.root.glob("supervisor.state.respawn-*"):
+                    stale.unlink()
+                fake(self.bin_dir, "ps",
+                     'case "$*" in\n'
+                     '  *771*) echo "hermes gateway run --no-supervise";;\n'
+                     '  *772*) echo "hermes %s gateway run --no-supervise";;\n'
+                     'esac\n' % form)
+                self.supervisor_log.write_text("")
+                self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+                deadline = time.time() + 15
+                while "signal USR1 alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+                    time.sleep(0.2)
+                self.assertIn("signal USR1 alt-gateway", read_log(self.supervisor_log))
+                self.assertNotIn("USR1 main-gateway", read_log(self.supervisor_log))
+
+    def test_a_glued_profile_flag_is_not_the_unprofiled_gateway(self):
+        # "-palt" used to fall through to the unprofiled candidate, so a
+        # default --restart could signal the wrong profile's gateway.
+        (self.root / "supervisor.state").write_text(
+            sup_line("alt-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+            sup_line("main-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes -palt gateway run";;\n'
+             '  *772*) echo "hermes gateway run";;\n'
+             'esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
+
     def test_gateway_restart_ignores_a_non_hermes_gateway_program(self):
         (self.root / "supervisor.state").write_text(
             sup_line("api-gateway", "RUNNING", "pid 780, uptime 1:00:00"), encoding="utf-8")
@@ -2811,6 +2899,29 @@ class SupervisordServiceTests(unittest.TestCase):
         while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
             time.sleep(0.2)
         self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+
+    def test_install_retries_mutating_supervisorctl_calls_under_sudo_n(self):
+        """A socket that answers reads but needs root for reread/update/
+        start must not strand the install on a warn: supervisorctl_call's
+        `sudo -n` retry applies to the install verbs too."""
+        # Detection stays open; mutating verbs are gated until sudo unlocks
+        # them, like the fixture's need-sudo flag but per-verb.
+        real = self.bin_dir / "supervisorctl"
+        real.rename(self.bin_dir / "supervisorctl-real")
+        fake(self.bin_dir, "supervisorctl",
+             'case "$1" in\n'
+             '  reread|update|add|start|restart|signal) [ ! -f "%s" ] || exit 1;;\n'
+             'esac\n'
+             'exec "%s" "$@"\n' % (self.root / "verb-sudo", self.bin_dir / "supervisorctl-real"))
+        (self.root / "verb-sudo").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "sudo",
+             'shift; rm -f "%s"\nexec "$@"\n' % (self.root / "verb-sudo"))
+        result = self.run_setup("--mac-ssh", "me@mac.tail1234.ts.net")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("reread or update failed", result.stdout)
+        calls = read_log(self.supervisor_log)
+        self.assertIn("reread", calls)
+        self.assertIn("start alans-way-chromium", calls)
 
     def test_supervisord_counts_as_usable_while_another_program_is_down(self):
         # A real `supervisorctl status` exits 3 when any program is not RUNNING

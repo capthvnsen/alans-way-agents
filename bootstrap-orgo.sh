@@ -24,6 +24,11 @@ HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
 SETUP_URL_BASE="https://raw.githubusercontent.com/capthvnsen/alans-way-agents"
 TAILSCALE_URL_TIMEOUT="${ALAN_TAILSCALE_URL_TIMEOUT:-120}"
+# Hermes drains for up to agent.restart_drain_timeout (configurable) plus the
+# 30s cron drain; 180s bounds the USR1 wait and matches the generated conf's
+# stopwaitsecs so a supervisor stop/restart lets the drain finish too (issue
+# #65 — a SIGKILL mid-checkpoint corrupts state.db).
+GATEWAY_DRAIN_WAIT="${ALAN_GATEWAY_DRAIN_WAIT:-180}"
 WAIT_PAIRED_INTERVAL="${ALAN_WAIT_PAIRED_INTERVAL:-5}"
 WAIT_PAIRED_TIMEOUT="${ALAN_WAIT_PAIRED_TIMEOUT:-600}"
 LOGIN_URL_RE='https://login\.tailscale\.com/a/[A-Za-z0-9]+'
@@ -365,6 +370,10 @@ command=$WRAPPER
 user=$(id -un)
 autorestart=true
 stopsignal=TERM
+; Hermes drains up to agent.restart_drain_timeout plus the cron drain (30s);
+; 180s matches our USR1 wait bound — without it the 10s default escalates a
+; stop/restart to SIGKILL mid-checkpoint and corrupts state.db (issue #65).
+stopwaitsecs=180
 redirect_stderr=true
 stdout_logfile=/var/log/alan-hermes-gateway.log
 stdout_logfile_maxbytes=10MB
@@ -755,6 +764,53 @@ PY
     log "jev switches: routing=shadow, screen=on, skills=on"
 }
 
+# Bounce a RUNNING hermes-gateway without `supervisorctl restart`: restart
+# escalates SIGTERM to SIGKILL at stopwaitsecs, and a kill mid-checkpoint can
+# corrupt state.db (issue #65). USR1 instead — Hermes drains its turns,
+# checkpoints, exits and supervisord relaunches it; start/restart are the
+# fallbacks when the signal verb is refused or the new pid never shows. The
+# same scheme setup.sh's detached restarter uses. Always returns 0: the
+# bounce must never fail the step.
+gateway_drain_restart() {
+    local prog=hermes-gateway
+    local old_pid new_pid s p w down
+    old_pid="$(supervisorctl pid "$prog" 2>/dev/null || true)"
+    old_pid="${old_pid:-0}"
+    if supervisorctl signal USR1 "$prog" >>"$LOG_FILE" 2>&1; then
+        new_pid="" w=0 down=0
+        while [ "$w" -lt "$GATEWAY_DRAIN_WAIT" ]; do
+            s="$(supervisorctl status "$prog" 2>/dev/null || true)"
+            case "$s" in
+                *" RUNNING "*)
+                    p="$(supervisorctl pid "$prog" 2>/dev/null || true)"
+                    p="${p:-0}"
+                    case "$p" in *[!0-9]*) p=0;; esac
+                    if [ "$p" != 0 ] && [ "$p" != "$old_pid" ]; then new_pid="$p"; break; fi
+                    down=0;;
+                *STARTING*|*BACKOFF*) down=0;;
+                *) down=$((down + 1)); [ "$down" -lt 2 ] || break;;
+            esac
+            sleep 2; w=$((w + 2))
+        done
+        if [ -n "$new_pid" ]; then
+            log "restarted: signal USR1 $prog (new pid $new_pid)"
+        else
+            s="$(supervisorctl status "$prog" 2>/dev/null || true)"
+            case "$s" in
+                *" RUNNING "*|*STARTING*|*BACKOFF*)
+                    log "signal USR1 $prog sent; the gateway is still draining or coming back after ${GATEWAY_DRAIN_WAIT}s: supervisord finishes the relaunch on its own";;
+                *)
+                    supervisorctl start "$prog" >>"$LOG_FILE" 2>&1 \
+                        && log "restarted: start $prog (the gateway did not come back after signal USR1)" \
+                        || log "start $prog failed: start that program by hand";;
+            esac
+        fi
+        return 0
+    fi
+    supervisorctl restart "$prog" >>"$LOG_FILE" 2>&1 && { log "restarted: restart $prog"; return 0; }
+    return 1
+}
+
 # The free-voice fallback. Hermes has no provider-fallback setting, so a tiny
 # supervisord program polls <relay>/usage and flips tts.provider between
 # openai and edge. The token stays in .env — never in this conf.
@@ -833,7 +889,10 @@ EOF
     local gw_state
     gw_state="$(supervisorctl status hermes-gateway 2>&1 || true)"
     case "$gw_state" in
-        *RUNNING*|*STARTING*)
+        *RUNNING*)
+            gateway_drain_restart \
+                || log "hermes-gateway did not restart; supervisord keeps retrying";;
+        *STARTING*)
             supervisorctl restart hermes-gateway >>"$LOG_FILE" 2>&1 \
                 || log "hermes-gateway did not restart; supervisord keeps retrying";;
         *STOPPED*|*EXITED*|*FATAL*|*BACKOFF*)

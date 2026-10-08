@@ -45,8 +45,6 @@ if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
   echo "setup-workspace: --profile and --config are mutually exclusive" >&2
   exit 2
 fi
-case "${HOST_OS:-mac}" in mac|windows|linux) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac, windows or linux" >&2; exit 2;; esac
-
 [ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
 # Git Bash on native Windows: the router path goes into config.yaml for Hermes
 # and node, which want C:/ paths, and ssh is the native OpenSSH the router uses.
@@ -90,7 +88,9 @@ fi
 if [ "$HOST_OS_SET" != 1 ]; then
   HOST_OS="$(managed_env_value "$CONFIG" HERMES_WORKSPACE_HOST_OS)"
 fi
-HOST_OS="${HOST_OS:-mac}"
+# Validated after the read-back so a hand-edited block value fails exactly
+# like the same value on the flag would.
+case "${HOST_OS:-mac}" in mac|windows|linux) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac, windows or linux" >&2; exit 2;; esac
 
 # --mac-ssh reaches ssh as an argument: user@host or host, plain characters, never a leading '-'.
 if [ -n "$MAC_SSH" ]; then

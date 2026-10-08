@@ -293,6 +293,52 @@ class MigrateTests(unittest.TestCase):
             # Nothing restarted the old gateway either.
             self.assertNotIn("start", read(local_calls))
 
+    def test_db_snapshot_waits_until_the_old_gateway_is_gone(self):
+        """A stop verb can return while the gateway is still draining; the
+        snapshot must wait for the process to actually exit — a mid-drain
+        copy of state.db is not guaranteed recoverable (issue #65). The
+        remote-side pgrep pattern (no `.*`) stays answered 'no match'."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            polls = directory / "gw-polls"
+            polls.write_text("2\n", encoding="utf-8")
+            env["FAKE_GW_POLLS"] = str(polls)
+            stub(directory / "stubbin", "pgrep", '''
+echo "pgrep $*" >> "$STUB_LOG"
+case "$*" in
+  *".*"*)
+    n="$(cat "$FAKE_GW_POLLS")"
+    [ "$n" -le 0 ] && exit 1
+    echo $((n - 1)) > "$FAKE_GW_POLLS"
+    echo 4242;;
+  *) exit 1;;
+esac
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("pgrep -f hermes", read(calls))
+            self.assertEqual(read(polls).strip(), "0")
+            self.assertTrue((remote_home / ".hermes" / "state.db").exists())
+
+    def test_a_gateway_that_never_exits_fails_before_the_snapshot(self):
+        """A gateway still there when the wait bound runs out is a hard
+        stop before the db snapshot — never a mid-drain copy."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["ALAN_GATEWAY_GONE_WAIT"] = "3"
+            stub(directory / "stubbin", "pgrep", '''
+case "$*" in
+  *".*"*) echo 4242;;
+  *) exit 1;;
+esac
+''')
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("still running", result.stderr)
+            self.assertNotIn("start hermes-gateway", read(remote_calls))
+
     def test_remote_gateway_not_running_rolls_back_to_the_old(self):
         """supervisorctl accepting the start is not proof the gateway came
         up; if status isn't RUNNING, bring the old gateway back."""

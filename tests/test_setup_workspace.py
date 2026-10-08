@@ -538,6 +538,25 @@ class HostOsFlagTests(unittest.TestCase):
         result = run("--bot-id", "bot_123", "--host-os", "freebsd", check=False)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_a_hand_edited_host_os_in_the_block_is_rejected_too(self):
+        # The flag check used to run before the managed-block read-back, so a
+        # bad HERMES_WORKSPACE_HOST_OS in the block passed through where the
+        # same value on the flag would fail.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "mcp_servers:\n"
+                "# >>> alans-way workspace_browser managed block >>>\n"
+                "  workspace_browser:\n"
+                "    env:\n"
+                "      HERMES_WORKSPACE_MAC_SSH: \"me@mac\"\n"
+                "      HERMES_WORKSPACE_HOST_OS: \"freebsd\"\n"
+                "# <<< alans-way workspace_browser managed block <<<\n",
+                encoding="utf-8")
+            result = run("--bot-id", "bot_123", "--config", str(config), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--host-os must be", result.stderr)
+
 
 class HostAddressTests(unittest.TestCase):
     def test_malformed_mac_ssh_is_rejected(self):

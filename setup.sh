@@ -170,19 +170,47 @@ managed_env_value() {
     | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/'
 }
 
+# HERMES_OVERSEER_BOT_IDS: this environment first, then the value a previous
+# service write recorded in one of the files given — the supervisord conf's
+# quoted environment= pair, or a systemd unit's Environment= (quoted now,
+# bare in units written before the value was quoted) — so a re-run without
+# the variable keeps the list instead of silently dropping it.
+overseer_bot_ids() {
+  [ -z "${HERMES_OVERSEER_BOT_IDS:-}" ] || { printf '%s' "$HERMES_OVERSEER_BOT_IDS"; return 0; }
+  for _f in "$@"; do
+    [ -f "$_f" ] || continue
+    _v="$(sed -n -e 's/.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' \
+               -e 's/^Environment=HERMES_OVERSEER_BOT_IDS=\(.*\)$/\1/p' "$_f" | head -1)"
+    if [ -n "$_v" ]; then printf '%s' "$_v"; return 0; fi
+  done
+  return 0
+}
+
 # Re-running without --mac-ssh / --host-os keeps the computer the managed block
 # already configures (the same way the CDP port and HERMES_OVERSEER_BOT_IDS
 # survive re-runs); --mac-ssh none is the explicit removal.
 _main_cfg="$HERMES_HOME/config.yaml"
 [ -z "$CONFIG" ] || _main_cfg="$CONFIG"
 [ -z "$PROFILE" ] || _main_cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+_host_os_cfg="$_main_cfg"
 if [ "$MAC_SSH_SET" = 1 ]; then
   [ "$MAC_SSH" != none ] || MAC_SSH=""
 elif [ -z "$MAC_SSH" ]; then
   MAC_SSH="$(managed_env_value "$_main_cfg" HERMES_WORKSPACE_MAC_SSH)"
+  # A computer configured in any profile's managed block counts too (issue
+  # #62): `--profile <name> --mac-ssh` writes it there, and a bare re-run
+  # must still keep the watcher, the shared state file and the managed ssh
+  # block it set up.
+  if [ -z "$MAC_SSH" ] && [ -z "$CONFIG" ] && [ -d "$HERMES_HOME/profiles" ]; then
+    for _prof_cfg in "$HERMES_HOME"/profiles/*/config.yaml; do
+      [ -f "$_prof_cfg" ] || continue
+      _v="$(managed_env_value "$_prof_cfg" HERMES_WORKSPACE_MAC_SSH)"
+      if [ -n "$_v" ]; then MAC_SSH="$_v"; _host_os_cfg="$_prof_cfg"; break; fi
+    done
+  fi
 fi
 if [ "$HOST_OS_SET" != 1 ] && [ -z "$HOST_OS" ]; then
-  HOST_OS="$(managed_env_value "$_main_cfg" HERMES_WORKSPACE_HOST_OS)"
+  HOST_OS="$(managed_env_value "$_host_os_cfg" HERMES_WORKSPACE_HOST_OS)"
 fi
 
 # Refs drive git fetch/checkout — reject anything that isn't a plain ref.
@@ -367,11 +395,28 @@ SUPCTL_DEF='supervisorctl_call() {
 }'
 eval "$SUPCTL_DEF"
 
+# The profile a hermes argv selects — every equivalent flag spelling: -p X,
+# -p=X, -pX, --profile X and --profile=X — else "default".
+argv_profile() {
+  _next=""
+  for _a in $@; do
+    if [ -n "$_next" ]; then printf '%s' "$_a"; return 0; fi
+    case "$_a" in
+      -p|--profile) _next=1;;
+      --profile=*) printf '%s' "${_a#*=}"; return 0;;
+      -p=*) printf '%s' "${_a#*=}"; return 0;;
+      -p?*) printf '%s' "${_a#-p}"; return 0;;
+    esac
+  done
+  printf '%s' default
+}
+
 # The supervisor program whose command line (or a child's, for wrapper
 # scripts) runs `hermes gateway run`. The name is discovered, never assumed,
 # and a non-Hermes "gateway run" is never touched. With several gateway
-# programs, the one serving the profile being configured wins: -p <profile>,
-# or an argv with no -p when the default profile is the target.
+# programs, the one serving the profile being configured wins: the profile
+# flag in any of its spellings, or an argv with no flag when the default
+# profile is the target.
 supervisor_gateway_program() {
   [ "$GUEST_OS" = Linux ] || return 1
   have supervisorctl && have ps || return 1
@@ -382,9 +427,11 @@ supervisor_gateway_program() {
     for _cand in "$_pid" $(pgrep -P "$_pid" 2>/dev/null); do
       _args="$(ps -o args= -p "$_cand" 2>/dev/null || true)"
       case "$_args" in
-        *hermes*"-p ${PROFILE:-default} "*"gateway run"*) echo "$_prog"; return 0;;
-        *"-p "*"gateway run"*) :;;   # another profile's gateway
-        *hermes*"gateway run"*) [ -n "$_any" ] || _any="$_prog";;
+        *hermes*"gateway run"*)
+          case "$(argv_profile $_args)" in
+            "${PROFILE:-default}") echo "$_prog"; return 0;;
+            default) [ -n "$_any" ] || _any="$_prog";;   # unprofiled candidate
+          esac;;
       esac
     done
   done
@@ -400,10 +447,15 @@ supervisor_gateway_program() {
       /^\[program:/ { n = $0; sub(/^\[program:[[:space:]]*/, "", n); sub(/[[:space:]]*\].*/, "", n); next }
       /^\[/ { n = "" }
       n != "" && /^[[:space:]]*command[[:space:]]*=/ && /hermes/ && /gateway run/ {
-        tagged = ($0 ~ /-p[[:space:]]/ || $0 ~ /--profile[[:space:]]/)
-        if (!tagged && (want == "" || want == "default")) { print n; exit }
-        if (tagged && want != "" && (index($0, "-p " want) || index($0, "-p" want) ||
-            index($0, "--profile " want) || index($0, "--profile=" want))) { print n; exit }
+        prof = "default"
+        for (i = 1; i <= NF; i++) {
+          if ($i == "-p" || $i == "--profile") { prof = $(i + 1); break }
+          if ($i ~ /^--profile=/) { prof = substr($i, 11); break }
+          if ($i ~ /^-p=/) { prof = substr($i, 4); break }
+          if ($i ~ /^-p./) { prof = substr($i, 3); break }
+        }
+        if (want == "") want = "default"
+        if (prof == want) { print n; exit }
       }' "$_f" 2>/dev/null)"
     [ -n "$_prog" ] && { echo "$_prog"; return 0; }
   done
@@ -1789,10 +1841,7 @@ EOF
     fi
     # HERMES_OVERSEER_BOT_IDS rides along when configured: this environment
     # first, then a value a previous run already wrote into the conf.
-    _overseer="${HERMES_OVERSEER_BOT_IDS:-}"
-    if [ -z "$_overseer" ] && [ -f "$_confdir/alans-way.conf" ]; then
-      _overseer="$(sed -n 's/.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' "$_confdir/alans-way.conf" | head -1)"
-    fi
+    _overseer="$(overseer_bot_ids "$_confdir/alans-way.conf")"
     _overseer_env=""; [ -z "$_overseer" ] || _overseer_env=",HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
     _env_browser="HOME=\"$BROWSER_HOME\",PATH=\"$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",DISPLAY=\"$BROWSER_DISPLAY\",HERMES_VPS_BROWSER_DATA=\"$DATA_DIR\""
     WATCH_SECTION=""
@@ -1844,7 +1893,7 @@ $WATCH_SECTION
 EOF
     if [ "$WROTE" = 1 ]; then
       ok "wrote $_conf"
-      supervisorctl reread >/dev/null 2>&1 && supervisorctl update >/dev/null 2>&1 \
+      supervisorctl_call reread >/dev/null 2>&1 && supervisorctl_call update >/dev/null 2>&1 \
         && ok "supervisord picked up the service definitions" \
         || warn "supervisorctl reread or update failed: the programs may not be loaded"
     else
@@ -1853,15 +1902,15 @@ EOF
     # `update` restarts programs whose conf changed; start whatever is still
     # stopped (a fresh install, or a program that exited cleanly).
     for _p in alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
-      case "$(supervisorctl status "$_p" 2>/dev/null || true)" in
+      case "$(supervisorctl_call status "$_p" 2>/dev/null || true)" in
         *" RUNNING "*) ok "$_p running under supervisord";;
-        *) supervisorctl start "$_p" >/dev/null 2>&1 \
+        *) supervisorctl_call start "$_p" >/dev/null 2>&1 \
              && ok "$_p started under supervisord" \
              || warn "could not start $_p via supervisorctl: start it once the desktop stack is up (needs DISPLAY=$BROWSER_DISPLAY)";;
       esac
     done
     if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
-      supervisorctl restart alans-way-browser >/dev/null 2>&1 \
+      supervisorctl_call restart alans-way-browser >/dev/null 2>&1 \
         && ok "browser host restarted on the new scripts" \
         || warn "could not restart alans-way-browser: run supervisorctl restart alans-way-browser"
     fi
@@ -1878,9 +1927,13 @@ EOF
     [ -z "${ALANS_WAY_UNIT_DIR:-}" ] || UNIT_DIR="$ALANS_WAY_UNIT_DIR"
     mkdir -p "$UNIT_DIR"
     # The desktop scripts read HERMES_OVERSEER_BOT_IDS when it is configured;
-    # it rides along in the environment, same as the supervisord path.
+    # it rides along in the environment, same as the supervisord path — and a
+    # re-run without the variable keeps the value this unit already recorded.
+    # The value is quoted: a space-separated list would otherwise read as
+    # stray tokens on the Environment= line.
     OVERSEER_UNIT_ENV=""
-    [ -z "${HERMES_OVERSEER_BOT_IDS:-}" ] || OVERSEER_UNIT_ENV="Environment=HERMES_OVERSEER_BOT_IDS=$HERMES_OVERSEER_BOT_IDS"
+    _overseer="$(overseer_bot_ids "$UNIT_DIR/hermes-alans-way-browser.service")"
+    [ -z "$_overseer" ] || OVERSEER_UNIT_ENV="Environment=HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
     UNITS_CHANGED="" UNITS_UPDATED=""
     write_unit() { # write_unit <name> <exec> <extra>
       _f="$UNIT_DIR/$1"

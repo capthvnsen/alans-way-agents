@@ -12,6 +12,9 @@ set -eEuo pipefail
 TO="" YES=0 DRY_RUN=0
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 REMOTE_HERMES=""
+# Upper bound for the post-stop wait below: Hermes drains up to
+# agent.restart_drain_timeout plus the 30s cron drain (issue #65).
+GONE_WAIT="${ALAN_GATEWAY_GONE_WAIT:-190}"
 
 usage() {
     cat <<'EOF'
@@ -526,6 +529,19 @@ if [ -z "$stopped" ]; then
     die "could not stop the old gateway — the copy is in place on $TO with its gateway left stopped; stop the old one, then: ssh $TO supervisorctl start hermes-gateway"
 fi
 log "stopped the old gateway: $stopped"
+
+# `supervisorctl stop`, `systemctl stop` and `hermes gateway stop` are not
+# all wait-until-gone — a verb can return while the gateway still drains and
+# checkpoints, and a mid-write copy of state.db is not guaranteed
+# recoverable (issue #65). Wait for the process to actually exit before the
+# snapshot below; the bound covers the whole drain budget plus margin.
+tries=0
+while pgrep -f 'hermes .*gatewa[y] run' >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt "$GONE_WAIT" ] \
+        || die "the old gateway is still running ${GONE_WAIT}s after the stop — it was left alone; retry the migration when it exits"
+    sleep 1
+done
 
 rollback() {
     log "WARNING: $1"

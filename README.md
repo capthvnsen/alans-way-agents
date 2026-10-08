@@ -109,10 +109,11 @@ The bootstrap runs every step in order and says what it did:
   chat's tool list), and removes the stale 0.6 startup hook if one is installed
 - **VPS browser host** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
-  systemd units on Linux (user units when you're not root; as root they run as
-  the account that owns `HERMES_HOME`, and as root with `--no-sandbox` only when
-  Hermes itself runs as root), LaunchAgents on a macOS guest via
-  `mac-guest-services.sh`, Scheduled Tasks on a Windows guest. Chrome or Chromium from a deb is preferred over snap
+  systemd units on a Linux host where systemd is live, supervisord programs
+  where it is not (VM images, Orgo computers — user units when you're not root;
+  as root they run as the account that owns `HERMES_HOME`, and as root with
+  `--no-sandbox` only when Hermes itself runs as root), LaunchAgents on a macOS
+  guest via `mac-guest-services.sh`, Scheduled Tasks on a Windows guest. Chrome or Chromium from a deb is preferred over snap
   Chromium, and an upgrade rewrites units and `config.json` whose content changed
 - **Desktop prerequisites** — on Linux, detects whether an X11/VNC stack
   exists and prints the exact packages to install if not; on a macOS guest it
@@ -151,6 +152,7 @@ Useful flags:
 - `--keep-browser`: leave Hermes' built-in browser toolset on.
 - `--keep-computer-use`: deprecated no-op. Setup never disables `computer_use`.
 - `--repo-ref SHA` / `--desktop-ref SHA`: pin this repo and the app repo to a reviewed commit or tag.
+- `--cdp-port PORT`: the managed browser's CDP port (default: keep the configured one, else the first free port from 9223 up; `ALANS_WAY_CDP_PORT` works too).
 - `--mac-key` / `--mac-host-key`: add your computer's pasted SSH key and host key after checking their format.
 - `--dev-plugin-install`: developers only. Installs the computer-use provider from this clone instead of the Hermes catalog.
 
