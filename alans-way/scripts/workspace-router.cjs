@@ -1113,6 +1113,7 @@ async function main() {
   let activeHost = null;
   let provedAlive = false;
   let fellBack = false;
+  let macRetried = false;
   let shuttingDown = false;
   let watchdog = null;
   let hostStartedAt = 0;
@@ -1138,19 +1139,46 @@ async function main() {
   const BATCH_HARD_MS = num('HERMES_ROUTER_BATCH_HARD_MS', 100000);
   const RECHECK_MS = num('HERMES_ROUTER_RECHECK_MS', 15000);
   const UNAVAILABLE_LIMIT = num('HERMES_ROUTER_UNAVAILABLE_LIMIT', 2);
+  // The retried spawn rides warm caches, so a shorter second window suffices.
+  const MAC_RETRY_MS = num('HERMES_ROUTER_MAC_RETRY_MS', 4000);
 
   // A wedged remote that never exits is the worst boot stall: without this,
   // the client waits out its full connect_timeout on dead air. Once the
   // client is actually talking to us, a silent Mac backend gets MAC_WATCHDOG_MS
   // to answer before we route around it. Healthy cold starts answer in ~2s;
-  // the client sends initialize immediately after spawn.
-  function armWatchdog() {
+  // the client sends initialize immediately after spawn. While mac-watch's
+  // verdict is a fresh "online" the host provably answered seconds ago, so
+  // the first silence is a slow or wedged spawn, not a dead host: retry once
+  // on the warm path and fail over only when the retry stays silent too.
+  function armWatchdog(ms = MAC_WATCHDOG_MS) {
     if (watchdog || provedAlive || fellBack || activeHost !== 'mac') return;
     watchdog = setTimeout(() => {
       watchdog = null;
-      failOver(`${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize`);
-    }, MAC_WATCHDOG_MS);
+      const mac = freshMacState(macStateFile);
+      if (!macRetried && mac && mac.state === 'online') {
+        retryMacBackend();
+        return;
+      }
+      failOver(`${hostName} backend silent ${ms}ms after initialize`);
+    }, ms);
     watchdog.unref();
+  }
+
+  // The killed spawn's buffered input replays onto the new one verbatim, the
+  // same replay the VPS fallback does: a remote action may theoretically have
+  // run on it already, which sshd's SIGHUP on the dead session prevents.
+  function retryMacBackend() {
+    if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
+    macRetried = true;
+    const old = activeChild;
+    superseded.add(old);
+    try { old.kill('SIGKILL'); } catch { /* already gone */ }
+    process.stderr.write(
+      `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize; mac-watch reports it online — retrying the spawn\n`,
+    );
+    startMacBackend();
+    for (const line of bufferedStdin) writeToChild(line);
+    armWatchdog(MAC_RETRY_MS);
   }
 
   function failOver(reason) {
@@ -1188,6 +1216,27 @@ async function main() {
     const c = spawn(process.execPath, vpsArgs, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
     bindChild(c, 'vps');
     return c;
+  }
+
+  // Run browser-mcp.cjs on the user's machine over the same ssh session the
+  // probe used. Factored out so the watchdog can kill a wedged spawn and
+  // start another in place.
+  function startMacBackend() {
+    const sshArgs = [
+      '-T',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=6',
+      '-o',
+      'StrictHostKeyChecking=yes',
+      ...sshControlArgs,
+      macSsh,
+      macCommand,
+    ];
+    const sshChild = spawn(sshBinary, sshArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    sshChild.stderr.on('data', (chunk) => { process.stderr.write(chunk); logMuxTrouble(chunk); });
+    bindChild(sshChild, 'mac');
   }
 
   // A fresh backend has not seen the client's handshake. The client already
@@ -1920,23 +1969,8 @@ async function main() {
     });
 
   if (macCommand) {
-    // Run browser-mcp.cjs on the user's machine over the same ssh session the probe used.
-    const sshArgs = [
-      '-T',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'ConnectTimeout=6',
-      '-o',
-      'StrictHostKeyChecking=yes',
-      ...sshControlArgs,
-      macSsh,
-      macCommand,
-    ];
     process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
-    const sshChild = spawn(sshBinary, sshArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    sshChild.stderr.on('data', (chunk) => { process.stderr.write(chunk); logMuxTrouble(chunk); });
-    bindChild(sshChild, 'mac');
+    startMacBackend();
   } else {
     let reason = macSeen && macSeen.state === 'offline' ? 'offline per mac-watch' : 'unreachable';
     if (probeErrTail) reason += ` (${probeErrTail})`;
