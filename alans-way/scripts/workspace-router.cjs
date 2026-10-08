@@ -765,7 +765,7 @@ function workspaceNotice(host, mac, resumeUrl, continued, label = 'Mac', pageNot
     );
   }
   const page = pageNote ? ` ${pageNote}` : continued && continued.url && continued.tabId
-    ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, say so and stop only that page.`
+    ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, tell the user rather than working past it.`
     : resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
   return (
     `[workspace] ${label} unreachable since ${mac.since || 'unknown'}: ` +
@@ -1141,7 +1141,10 @@ async function main() {
   const BATCH_HARD_MS = num('HERMES_ROUTER_BATCH_HARD_MS', 100000);
   const RECHECK_MS = num('HERMES_ROUTER_RECHECK_MS', 15000);
   const UNAVAILABLE_LIMIT = num('HERMES_ROUTER_UNAVAILABLE_LIMIT', 2);
-  // The retried spawn rides warm caches, so a shorter second window suffices.
+  // The retried spawn rides the shared ssh connection, so a shorter second
+  // window suffices. Without multiplexing (socketDir is null, e.g. a
+  // Windows guest) a retry pays a cold handshake that cannot answer inside
+  // it, so the watchdog fails over instead of retrying.
   const MAC_RETRY_MS = num('HERMES_ROUTER_MAC_RETRY_MS', 4000);
 
   // A wedged remote that never exits is the worst boot stall: without this,
@@ -1157,7 +1160,7 @@ async function main() {
     watchdog = setTimeout(() => {
       watchdog = null;
       const mac = freshMacState(macStateFile);
-      if (!macRetried && mac && mac.state === 'online') {
+      if (!macRetried && socketDir && mac && mac.state === 'online') {
         retryMacBackend();
         return;
       }
