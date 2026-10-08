@@ -111,8 +111,8 @@ error names the VPS tab. Use that tab. If that error lists controls, use one
 of those refs. Open the same URL with `cua_alans_way_open` and keep acting
 when that line only names a URL. If the `[workspace]` line names a page,
 open that URL. The connector is already on that machine. A login wall means
-the VPS browser needs that site's login once; say so and stop only that
-page. Do not retry the Mac until status shows it online.
+the VPS browser needs that site's login once; tell the user rather than
+working past it. Do not retry the Mac until status shows it online.
 
 The Mac can also drop in the middle of a call. The connector then moves the
 session to the VPS within about ten seconds, and the `[workspace]` notice
