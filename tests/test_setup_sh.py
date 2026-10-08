@@ -2620,9 +2620,9 @@ class SupervisordServiceTests(unittest.TestCase):
              'case "$*" in *777*) echo "/opt/venv/bin/python /usr/lib/hermes gateway run --no-supervise";; esac\n')
         self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
         deadline = time.time() + 15
-        while "restart custom-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+        while "signal USR1 custom-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
             time.sleep(0.2)
-        self.assertIn("restart custom-gateway", read_log(self.supervisor_log))
+        self.assertIn("signal USR1 custom-gateway", read_log(self.supervisor_log))
         self.assertNotIn("gateway restart", read_log(self.root / "log"))
 
     def test_gateway_restart_prefers_the_program_running_the_selected_profile(self):
@@ -2636,10 +2636,10 @@ class SupervisordServiceTests(unittest.TestCase):
              'esac\n')
         self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
         deadline = time.time() + 15
-        while "restart alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+        while "signal USR1 alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
             time.sleep(0.2)
-        self.assertIn("restart alt-gateway", read_log(self.supervisor_log))
-        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
+        self.assertIn("signal USR1 alt-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 main-gateway", read_log(self.supervisor_log))
 
     def test_gateway_restart_without_a_profile_prefers_the_unprofiled_program(self):
         (self.root / "supervisor.state").write_text(
@@ -2652,10 +2652,10 @@ class SupervisordServiceTests(unittest.TestCase):
              'esac\n')
         self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
         deadline = time.time() + 15
-        while "restart main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+        while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
             time.sleep(0.2)
-        self.assertIn("restart main-gateway", read_log(self.supervisor_log))
-        self.assertNotIn("restart alt-gateway", read_log(self.supervisor_log))
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
 
     def test_gateway_restart_ignores_a_non_hermes_gateway_program(self):
         (self.root / "supervisor.state").write_text(
