@@ -1,4 +1,4 @@
-# Alan's Way — agent plugin
+# Hermes Alan's Way: agent plugin
 
 [![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
 [Discord](https://discord.gg/jBQCPUsVE) · [X @alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
@@ -20,10 +20,12 @@ holds what your agents need to think and act:
   when the user's computer is not a Mac (default `mac`).
 - **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
-- **`alans-way-computer/`** — a second plugin (v0.7.0): a computer-use provider
+- **`alans-way-computer/`**: a second plugin (v0.7.0): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
-  and on the VM desktop when your computer is offline. Every action goes through
-  Hermes' approval-gated `computer_use` tool.
+  and on the VM desktop when your computer is offline. Actions go through
+  Hermes' approval-gated `computer_use` tool: you approve each action type on
+  Telegram and choose what to always allow. Needs a Hermes build with the
+  pluggable computer-use API (on main after 0.21.5).
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
@@ -191,7 +193,7 @@ Prefer to build it yourself? The app repo has build-from-source scripts
 `scripts/install-windows.ps1` in an elevated PowerShell on Windows).
 
 The app's first-run wizard hands you the agent setup prompt. Or sign in to
-Telegram inside the app, then **Settings → Agent setup**: the checklist shows what's already done — Telegram sign-in,
+Telegram inside the app, then **Settings → Agent setup**: the checklist shows what's already done: Telegram sign-in,
 discovered bots, both SSH addresses, connector status. Save the two SSH
 addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 **Copy setup prompt**, then **Test agent path**.
