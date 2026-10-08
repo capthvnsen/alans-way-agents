@@ -1,0 +1,24 @@
+#!/bin/bash
+# supervisord does not export HOME to program children — pin it so the
+# config/env paths below resolve (a bare "$HOME/..." becomes "/...").
+export HOME=/root
+until [ -f /root/.hermes/config.yaml ]; do sleep 15; done
+# Fold this VM's create-time secrets into ~/.hermes/.env before reading
+# it. supervisord starts this launcher out of the golden's memory image,
+# so on a restore it can win the race against the on_resume hook — doing
+# the sync here too means the gateway never comes up on a stale file.
+/usr/local/bin/orgo-hermes-env || true
+# Export the agent env: /root/.env carries create-time secrets, and
+# ~/.hermes/.env carries those PLUS API_SERVER_* (the OpenAI-compat
+# listener on :8642). As of Hermes v0.19 that listener is the
+# "api_server" gateway PLATFORM, enabled only when API_SERVER_KEY (>=16
+# chars) is in the process env — without this the gateway starts with no
+# platform and never binds.
+set -a
+[ -f /root/.env ] && . /root/.env
+[ -f /root/.hermes/.env ] && . /root/.hermes/.env
+set +a
+# --no-supervise keeps the gateway in THIS process. Without it v0.19
+# redirects to an s6/systemd service that does not exist on these
+# images and exits immediately.
+exec hermes gateway run --no-supervise
