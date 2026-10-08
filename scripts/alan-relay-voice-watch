@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""alan-relay-voice-watch — openalan hosted-tier voice-credit watcher.
+
+Installed and supervised by bootstrap-orgo.sh when a relay token is present.
+One poll of ``GET <relay-base>/usage`` decides the TTS provider:
+
+    voice_minutes_left_est <= 0  ->  tts.provider = edge    (free, until reset)
+    voice_minutes_left_est  > 0  ->  tts.provider = openai  (the relay)
+
+After ``resets_at`` the relay's counter is positive again and the next poll
+flips back on its own — the relay is authoritative, so this never needs to
+read the clock against it.
+
+The flip goes through ``hermes config set tts.provider`` — Hermes re-reads
+config.yaml on its file signature, so a running gateway picks the change up
+on the next turn with no restart. The watcher owns the key only while it is
+unset or already ``openai``/``edge``: any other value (the customer chose a
+provider) or a truthy ``tts.use_gateway`` (a managed selection) means hands
+off forever — the watcher logs once and idles.
+
+The relay token is read from $HERMES_HOME/.env (or --env-file); it never
+appears in argv or the log.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+RELAY_PROVIDER = "openai"
+FALLBACK_PROVIDER = "edge"
+# Values this program itself manages; anything else belongs to the operator.
+OWNED_PROVIDERS = {RELAY_PROVIDER, FALLBACK_PROVIDER}
+
+_KEY_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def log(msg: str) -> None:
+    print(f"[alan-relay-voice-watch] {msg}", flush=True)
+
+
+def read_env_file(path: str) -> dict:
+    """Minimal .env reader: KEY=value / export KEY=value, 'quoted' or \"quoted\"."""
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        m = _KEY_LINE.match(line)
+        if not m:
+            continue
+        key, raw = m.group(1), m.group(2).strip()
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            raw = raw[1:-1]
+        values[key] = raw
+    return values
+
+
+def relay_credentials(env_file: str) -> tuple:
+    """(base, token) — process env wins, then the .env file. "" means missing."""
+    file_env = read_env_file(env_file)
+    base = (os.environ.get("ALAN_RELAY_BASE") or file_env.get("ALAN_RELAY_BASE") or "").strip().rstrip("/")
+    token = (os.environ.get("ALAN_RELAY_TOKEN") or file_env.get("ALAN_RELAY_TOKEN") or "").strip()
+    return base, token
+
+
+def fetch_usage(base: str, token: str, timeout: float) -> dict | None:
+    """GET <base>/usage -> parsed dict, or None on any failure (never flips on doubt)."""
+    req = urllib.request.Request(
+        f"{base}/usage", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        log(f"GET {base}/usage -> HTTP {exc.code}; leaving tts.provider alone")
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        log(f"GET {base}/usage failed ({exc}); leaving tts.provider alone")
+        return None
+    try:
+        data = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        log(f"GET {base}/usage returned non-JSON; leaving tts.provider alone")
+        return None
+    if not isinstance(data, dict):
+        log(f"GET {base}/usage returned {type(data).__name__}; leaving tts.provider alone")
+        return None
+    return data
+
+
+def read_tts_provider(config_path: str) -> tuple:
+    """(provider, use_gateway) from the top-level ``tts:`` block of config.yaml.
+
+    Indent-aware line scan: a ``provider:`` nested deeper than the block's own
+    keys (e.g. under ``tts.openai:``) is not the selection. Missing file or
+    missing key -> (None, False).
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None, False
+    in_block = False
+    block_indent = None
+    provider = None
+    use_gateway = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            in_block = re.match(r"tts\s*:\s*(#.*)?$", line) is not None
+            block_indent = None
+            continue
+        if not in_block:
+            continue
+        if block_indent is None:
+            block_indent = indent
+        if indent != block_indent:
+            continue
+        m = re.match(r"([A-Za-z_]+)\s*:\s*(.*?)\s*$", stripped)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        value = value.split(" #", 1)[0].strip()  # trailing comment
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key == "provider":
+            provider = value or None
+        elif key == "use_gateway":
+            use_gateway = value
+    return provider, str(use_gateway or "").lower() in _TRUTHY
+
+
+def set_provider(hermes: str, provider: str) -> bool:
+    env = dict(os.environ)
+    result = subprocess.run(
+        [hermes, "config", "set", "tts.provider", provider],
+        env=env, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        log(f"hermes config set tts.provider {provider} failed: "
+            f"{(result.stderr or result.stdout).strip()[:200]}")
+        return False
+    return True
+
+
+def one_pass(args) -> None:
+    base, token = relay_credentials(args.env_file)
+    if not base or not token:
+        log("no ALAN_RELAY_BASE/ALAN_RELAY_TOKEN in env or --env-file; nothing to watch")
+        return
+    usage = fetch_usage(base, token, args.timeout)
+    if usage is None:
+        return
+    voice_left = usage.get("voice_minutes_left_est")
+    if not isinstance(voice_left, (int, float)) or isinstance(voice_left, bool):
+        log(f"/usage has no numeric voice_minutes_left_est ({voice_left!r}); leaving provider alone")
+        return
+    desired = FALLBACK_PROVIDER if voice_left <= 0 else RELAY_PROVIDER
+    current, managed = read_tts_provider(args.config)
+    if managed:
+        log("tts.use_gateway is set — a managed selection owns TTS; not touching provider")
+        return
+    if current is not None and current not in OWNED_PROVIDERS:
+        log(f"tts.provider is {current!r} — operator-owned, leaving it alone")
+        return
+    if current == desired:
+        return
+    which = f"{current or 'unset'} -> {desired} (voice_minutes_left_est={voice_left})"
+    if set_provider(args.hermes, desired):
+        log(f"tts.provider {which}")
+    # A failed set retries on the next pass — no state is kept.
+
+
+def main() -> int:
+    hermes_home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--env-file", default=os.path.join(hermes_home, ".env"))
+    parser.add_argument("--config", default=os.path.join(hermes_home, "config.yaml"))
+    parser.add_argument("--hermes", default=os.environ.get("ALAN_HERMES_BIN", "hermes"))
+    parser.add_argument("--interval", type=float,
+                        default=float(os.environ.get("ALAN_RELAY_WATCH_INTERVAL", "60")))
+    parser.add_argument("--timeout", type=float, default=15)
+    parser.add_argument("--once", action="store_true", help="one poll/flip pass, then exit")
+    args = parser.parse_args()
+    if args.once:
+        one_pass(args)
+        return 0
+    log(f"watching {args.env_file} relay usage every {args.interval:g}s")
+    while True:
+        try:
+            one_pass(args)
+        except Exception as exc:  # a poll must never kill the watcher
+            log(f"poll error: {exc!r}")
+        time.sleep(max(1.0, args.interval))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
