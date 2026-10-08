@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -46,7 +47,7 @@ case "$cmd" in
   supervisorctl*|systemctl*)
     echo "remote: $cmd" >> "$FAKE_REMOTE_CALLS"
     ;;
-  *) eval "$cmd";;
+  *) eval "$cmd"; exit $?;;
 esac
 exit 0
 '''
@@ -126,6 +127,13 @@ def fixture(directory: Path, hermes_name=".hermes"):
          'echo "local: systemctl $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_SYSTEMCTL_RC:-0}"\n')
     stub(stub_bin, "hermes",
          'echo "local: hermes $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_HERMES_RC:-0}"\n')
+    # Unpacks run on the "remote" side; FAKE_REMOTE_TAR_FAIL makes them die
+    # without touching the real filesystem layout.
+    stub(stub_bin, "tar",
+         'if [ -n "$FAKE_REMOTE_TAR_FAIL" ]; then\n'
+         '  case "$*" in *-x*) echo "stub: remote tar failed" >&2; exit 1;; esac\n'
+         'fi\n'
+         'exec /usr/bin/tar "$@"\n')
     env = dict(os.environ)
     env.update({
         "HOME": str(home),
@@ -184,9 +192,88 @@ class MigrateTests(unittest.TestCase):
             self.assertIn("fixturebot", out)
             self.assertIn("honcho", out)
 
-            # Handover: old gateway stopped locally, remote gateway restarted.
+            # Handover: the remote gateway is parked before the swap and
+            # started only after the old one is confirmed stopped.
+            remote_log = read(remote_calls)
+            self.assertIn("supervisorctl stop hermes-gateway", remote_log)
+            self.assertLess(remote_log.index("supervisorctl stop"),
+                            remote_log.index("supervisorctl start"))
+            self.assertIn("supervisorctl start hermes-gateway", remote_log)
             self.assertIn("supervisorctl stop hermes-gateway", read(local_calls))
-            self.assertIn("supervisorctl restart hermes-gateway", read(remote_calls))
+            # The app polls for this marker.
+            self.assertTrue((remote / ".migrated").exists())
+            # No secrets-bearing debris left on the remote.
+            self.assertFalse(list(remote_home.glob("*.tgz")))
+
+    def test_failing_to_stop_the_old_gateway_is_fatal(self):
+        """If no local supervisor can stop the old gateway, starting the
+        remote one would leave both polling the same bot — hard error."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_SUPERVISORCTL_RC"] = "1"
+            env["FAKE_SYSTEMCTL_RC"] = "1"
+            env["FAKE_HERMES_RC"] = "1"
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not stop", result.stderr)
+            remote_log = read(remote_calls)
+            self.assertIn("supervisorctl stop", remote_log)
+            self.assertNotIn("supervisorctl start", remote_log)
+            # Nothing restarted the old gateway either.
+            self.assertNotIn("start", read(local_calls))
+
+    def test_remote_gateway_not_running_rolls_back_to_the_old(self):
+        """supervisorctl accepting the start is not proof the gateway came
+        up; if status isn't RUNNING, bring the old gateway back."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_REMOTE_STATE"] = "STOPPED"
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("did not come up", result.stderr)
+            self.assertIn("supervisorctl start hermes-gateway", read(remote_calls))
+            self.assertIn("supervisorctl start hermes-gateway", read(local_calls))
+
+    def test_remote_unpack_failure_cleans_up_and_keeps_old_running(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_REMOTE_TAR_FAIL"] = "1"
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((remote_home / ".hermes").exists())
+            self.assertFalse(list(remote_home.glob(".hermes.staging-*")))
+            self.assertFalse(list(remote_home.glob("*.tgz")))
+            self.assertNotIn("stop", read(local_calls))
+            self.assertNotIn("start", read(remote_calls))
+
+    def test_sqlite_db_arrives_consistent(self):
+        """state.db is tarred live, then refreshed after the old gateway
+        stops, so the copy on the remote is a clean database."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            (hermes / "state.db").unlink()
+            subprocess.run(
+                [sys.executable, "-c",
+                 "import sqlite3, sys\n"
+                 "c = sqlite3.connect(sys.argv[1])\n"
+                 "c.execute('create table t (x integer)')\n"
+                 "c.execute('insert into t values (42)')\n"
+                 "c.commit()\n"
+                 "c.close()\n",
+                 str(hermes / "state.db")], check=True)
+            run("--to", "fakehost", "--yes", env=env)
+            out = subprocess.run(
+                [sys.executable, "-c",
+                 "import sqlite3, sys\n"
+                 "print(sqlite3.connect(sys.argv[1]).execute('select x from t').fetchall())\n",
+                 str(remote_home / ".hermes" / "state.db")],
+                capture_output=True, text=True, check=True)
+            self.assertIn("42", out.stdout)
+            self.assertFalse(list((remote_home / ".hermes").glob("dbs-*.tgz")))
 
     def test_remote_home_with_a_space_lands_intact(self):
         """ssh joins the remote command args with spaces and the remote
@@ -280,7 +367,7 @@ class MigrateTests(unittest.TestCase):
             result = run("--to", "fakehost", "--yes", env=env, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("stop", read(local_calls))
-            self.assertNotIn("restart", read(remote_calls))
+            self.assertNotIn("start", read(remote_calls))
             self.assertFalse((remote_home / ".hermes").exists())
 
     def test_dry_run_prints_the_plan_and_changes_nothing(self):

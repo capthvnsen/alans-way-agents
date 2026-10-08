@@ -143,9 +143,9 @@ fi
 if [ "$DRY_RUN" = 1 ]; then
     log "would pack $HERMES_HOME (excluding caches, logs, venvs, node_modules, profiles/.deleted)"
     log "would scp the archive to $TO:$REMOTE_PARENT/"
-    log "would unpack on $TO, rewrite $HERMES_HOME paths to $REMOTE_HERMES in *.yaml, back up any existing remote home, and move it into place"
-    log "would stop the old gateway (supervisorctl stop, systemctl --user stop, systemctl stop, hermes gateway stop — first that works)"
-    log "would run: ssh $TO supervisorctl restart hermes-gateway"
+    log "would park the remote gateway, unpack on $TO, rewrite $HERMES_HOME paths to $REMOTE_HERMES in *.yaml/*.yml, back up any existing remote home, and move it into place"
+    log "would stop the old gateway (supervisorctl stop, systemctl --user stop, systemctl stop, hermes gateway stop — first that works) or abort"
+    log "would ship a fresh sqlite snapshot, then run: ssh $TO supervisorctl start hermes-gateway (verified via status; the old gateway is restarted if it fails)"
     exit 0
 fi
 
@@ -187,6 +187,29 @@ ssh "$TO" "$remote_cmd" <<'REMOTE'
 set -e
 archive="$1"; rhermes="$2"; ohermes="$3"; ts="$4"
 staging="$rhermes.staging-$ts"
+backup=""
+
+# On failure remove the debris (the staging dir, and the archive which
+# contains bot tokens), and put an already-swapped-out old home back.
+cleanup() {
+    rc=$?
+    rm -rf "$staging"
+    rm -f "$archive"
+    if [ -n "$backup" ] && [ ! -e "$rhermes" ]; then
+        mv "$backup" "$rhermes"
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+
+# A bootstrapped gateway wrapper waits for config.yaml and would self-start
+# the moment the swap lands, polling the bots while the old gateway is
+# still up. Park it before touching anything. No supervisorctl means there
+# is no parked gateway to worry about.
+if command -v supervisorctl >/dev/null 2>&1; then
+    supervisorctl stop hermes-gateway >/dev/null 2>&1 || true
+fi
+
 rm -rf "$staging"
 mkdir -p "$staging"
 tar -xzf "$archive" -C "$staging"
@@ -229,36 +252,73 @@ while IFS= read -r f; do
 done
 
 if [ -e "$rhermes" ]; then
-    mv "$rhermes" "$rhermes.pre-migrate-$ts"
+    backup="$rhermes.pre-migrate-$ts"
+    mv "$rhermes" "$backup"
 fi
 mv "$staging" "$rhermes"
+touch "$rhermes/.migrated"
 rm -f "$archive"
 REMOTE
 
 log "remote unpack and move succeeded on $TO"
 
-# Handover: stop the old gateway only now that the new home is in place.
-# Each supervisor may be missing; take the first that works, in this order.
-stopped=""
+# Handover: stop the old gateway only now that the new home is in place,
+# and it MUST stop — starting the remote gateway while the old one still
+# runs leaves both polling the same bot. Remember how to start it again in
+# case the remote side never comes up.
+stopped="" start_old=""
 if have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="supervisorctl stop hermes-gateway"
+    start_old="supervisorctl start hermes-gateway"
 elif have systemctl && systemctl --user stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl --user stop hermes-gateway"
+    start_old="systemctl --user start hermes-gateway"
 elif have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl stop hermes-gateway"
+    start_old="systemctl start hermes-gateway"
 elif have hermes && hermes gateway stop >/dev/null 2>&1; then
     stopped="hermes gateway stop"
+    start_old="hermes gateway start"
 fi
-if [ -n "$stopped" ]; then
-    log "stopped the old gateway: $stopped"
-else
-    log "WARNING: could not stop the old gateway — stop it yourself or both hosts will poll the same bot"
+if [ -z "$stopped" ]; then
+    die "could not stop the old gateway — the copy is in place on $TO with its gateway left stopped; stop the old one, then: ssh $TO supervisorctl start hermes-gateway"
+fi
+log "stopped the old gateway: $stopped"
+
+rollback() {
+    log "WARNING: $1"
+    $start_old >/dev/null 2>&1 || true
+    die "$1 — old gateway restarted, remote gateway left stopped"
+}
+
+# The archive was packed while the old gateway was live, so refresh every
+# sqlite db (and its wal/shm/journal sidecars) now that it is stopped and
+# quiescent — a mid-write copy of state.db is not guaranteed recoverable.
+db_list="$WORKDIR/dbs.txt"
+( cd "$HERMES_HOME" && find . -type f \
+    \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' -o -name '*.db-journal' \) \
+    ! -path './profiles/.deleted/*' \
+    ! -path './cache/*' ! -path './logs/*' ! -path './log/*' \
+    ! -path '*/node_modules/*' ! -path '*/venv/*' ! -path '*/.venv/*' \
+    ) >"$db_list"
+if [ -s "$db_list" ]; then
+    db_archive="$WORKDIR/dbs-$TS.tgz"
+    tar -czf "$db_archive" -C "$HERMES_HOME" -T "$db_list"
+    remote_db_archive="$REMOTE_HERMES/$(basename "$db_archive")"
+    scp "$db_archive" "$TO:$(printf %q "$REMOTE_HERMES/")" </dev/null \
+        || rollback "scp of the database snapshot to $TO failed"
+    ssh "$TO" "$(printf 'tar -xzf %q -C %q && rm -f %q' \
+        "$remote_db_archive" "$REMOTE_HERMES" "$remote_db_archive")" </dev/null \
+        || rollback "could not unpack the database snapshot on $TO"
+    log "synced the quiescent database files"
 fi
 
-if ssh "$TO" supervisorctl restart hermes-gateway </dev/null >/dev/null 2>&1; then
-    log "restarted the gateway on $TO"
+if ssh "$TO" supervisorctl start hermes-gateway </dev/null >/dev/null 2>&1 \
+    && ssh "$TO" supervisorctl status hermes-gateway </dev/null 2>/dev/null \
+        | grep -q 'RUNNING'; then
+    log "gateway running on $TO"
 else
-    log "WARNING: supervisorctl restart hermes-gateway failed on $TO — start it there yourself"
+    rollback "the gateway did not come up on $TO"
 fi
 
 log "done: $(profile_names) now run from $TO:$REMOTE_HERMES"
