@@ -215,9 +215,10 @@ write_if_changed() {
 # on the dead case and "running"/"degraded" on a live one.
 systemd_live() {
   have systemctl || return 1
-  [ -d /run/systemd/system ] && return 0
   case "$(systemctl is-system-running 2>/dev/null || true)" in
     running|degraded|starting|initializing|maintenance) return 0;;
+    # No answer at all: fall back to systemd's own booted marker (sd_booted).
+    '') [ -d /run/systemd/system ] && return 0;;
   esac
   return 1
 }
@@ -2165,7 +2166,7 @@ fi
 # reports a timeout. Widen it where systemd owns the unit; never clobber an
 # operator-set drop-in.
 GW_SERVICE="hermes-gateway${PROFILE:+-$PROFILE}"
-if have systemctl; then
+if systemd_live; then
   for scope in "--user" ""; do
     if systemctl $scope cat "$GW_SERVICE.service" >/dev/null 2>&1; then
       if [ -n "$scope" ]; then
