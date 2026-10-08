@@ -28,21 +28,40 @@ WAIT_PAIRED_INTERVAL="${ALAN_WAIT_PAIRED_INTERVAL:-5}"
 WAIT_PAIRED_TIMEOUT="${ALAN_WAIT_PAIRED_TIMEOUT:-600}"
 LOGIN_URL_RE='https://login\.tailscale\.com/a/[A-Za-z0-9]+'
 
-CALLBACK="" SECRET="" ID="" REPO_REF="main" RELAY_TOKEN=""
+CALLBACK="" SECRET="" ID="" REPO_REF="main"
 DRY_RUN=0 WAIT_PAIRED=0
 CURRENT_STEP="init"
+
+# Hosted-tier relay wiring (spec addendum 2026-10-08). The token is the
+# switch: without one a DIY run skips the relay step entirely.
+RELAY_TOKEN="${ALAN_RELAY_TOKEN:-}"
+RELAY_BASE="${ALAN_RELAY_BASE:-https://openalan.com/api/relay}"
+# hermes-jev-skills pinned at the 0.22.2 release commit; the overrides exist
+# for the container sim and mirrors, production never needs them.
+JEV_REPO_URL="${ALAN_JEV_REPO_URL:-https://github.com/kerpopule/hermes-jev-skills}"
+JEV_COMMIT="${ALAN_JEV_COMMIT:-dddaa39ead316a8ac63e5d54352068d33c00c2b0}"
+JEV_DIR="${ALAN_JEV_DIR:-$HOME/hermes-jev-skills}"
+VOICE_WATCH_SRC="${ALAN_VOICE_WATCH:-}"
+RELAY_WATCH_INTERVAL="${ALAN_RELAY_WATCH_INTERVAL:-60}"
 
 usage() {
     cat <<'EOF'
 usage: bootstrap-orgo.sh [--callback URL] [--secret S] [--id ID]
-       [--hermes-home DIR] [--repo-ref REF] [--dry-run] [--wait-paired]
-       [--relay-token T]
+       [--hermes-home DIR] [--repo-ref REF] [--relay-token T]
+       [--relay-base URL] [--dry-run] [--wait-paired]
 
   --callback URL   POST {"id","secret","url"} with the Tailscale login URL
   --secret S       callback shared secret
   --id ID          computer id; the tailnet hostname becomes alan-<id>
-  --relay-token T  metered-relay bearer token; stored at
-                   $STATE_DIR/relay-token (0600), never logged
+  --relay-token T  metered-relay bearer token ('-' reads it from stdin, and
+                   ALAN_RELAY_TOKEN works with no argv at all). Wires Hermes
+                   TTS/STT at <relay>/openai/v1, hermes-jev-skills at
+                   <relay>/jev, and a supervised watcher that falls back to
+                   edge TTS while voice credits are exhausted. Stored at
+                   $STATE_DIR/relay-token and in ~/.hermes/.env, never
+                   logged. Without it none of the relay wiring runs.
+  --relay-base URL relay base (default https://openalan.com/api/relay, or
+                   $ALAN_RELAY_BASE)
   --hermes-home    Hermes home directory (default $HERMES_HOME or ~/.hermes)
   --repo-ref REF   alans-way-agents ref for setup.sh (default main)
   --dry-run        print the commands instead of running them; writes nothing
@@ -52,6 +71,8 @@ usage: bootstrap-orgo.sh [--callback URL] [--secret S] [--id ID]
 env: ALAN_SETUP_SH  run this local setup.sh instead of fetching
      $SETUP_URL_BASE/<ref>/setup.sh — the container sim points it at a
      mounted checkout of this repo so nothing comes from GitHub.
+     ALAN_VOICE_WATCH  run this local alan-relay-voice-watch instead of
+     fetching scripts/alan-relay-voice-watch at --repo-ref
 EOF
 }
 
@@ -62,7 +83,14 @@ while [ $# -gt 0 ]; do
         --id) ID="$2"; shift 2;;
         --hermes-home) HERMES_HOME="$2"; shift 2;;
         --repo-ref) REPO_REF="$2"; shift 2;;
-        --relay-token) RELAY_TOKEN="$2"; shift 2;;
+        --relay-token)
+            if [ "$2" = "-" ]; then
+                IFS= read -r RELAY_TOKEN || RELAY_TOKEN=""
+            else
+                RELAY_TOKEN="$2"
+            fi
+            shift 2;;
+        --relay-base) RELAY_BASE="$2"; shift 2;;
         --dry-run) DRY_RUN=1; shift;;
         --wait-paired) WAIT_PAIRED=1; shift;;
         -h|--help) usage; exit 0;;
@@ -379,6 +407,216 @@ EOF
     log "wrote $conf"
 }
 
+# --- step: relay ---------------------------------------------------------
+
+# Runs only when a relay token was supplied; the DIY path returns before any
+# of it. The token itself never appears in argv or the log: it reaches the
+# watcher and plugins through $HERMES_HOME/.env (0600), and reaches config.yaml
+# only as a ${VOICE_TOOLS_OPENAI_KEY} template Hermes expands at read time.
+step_relay() {
+    if [ -z "$RELAY_TOKEN" ]; then
+        log "no relay token — DIY install, skipping hosted relay wiring"
+        return 0
+    fi
+    RELAY_BASE="${RELAY_BASE%/}"
+    export HERMES_HOME
+    relay_env
+    relay_hermes_config
+    relay_jev
+    relay_voice_watch
+}
+
+# relay credentials land in ~/.hermes/.env: the gateway wrapper sources it,
+# the voice watcher reads it, and Hermes loads it for VOICE_TOOLS_OPENAI_KEY.
+# Written by python so the token never rides argv or the + command log.
+relay_env() {
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would write ALAN_RELAY_* + audio/jev credentials into $HERMES_HOME/.env"
+        return 0
+    fi
+    mkdir -p "$HERMES_HOME"
+    RELAY_BASE="$RELAY_BASE" RELAY_TOKEN="$RELAY_TOKEN" \
+        python3 - "$HERMES_HOME/.env" >>"$LOG_FILE" 2>&1 <<'PY'
+import os
+import shlex
+import sys
+
+path, base, token = sys.argv[1], os.environ["RELAY_BASE"], os.environ["RELAY_TOKEN"]
+owned = {
+    # voice watcher: where to poll usage, which bearer to send
+    "ALAN_RELAY_BASE": base,
+    "ALAN_RELAY_TOKEN": token,
+    # Hermes audio auth: tts.openai.api_key / stt.openai.api_key hold a
+    # ${VOICE_TOOLS_OPENAI_KEY} reference to this (see relay_hermes_config)
+    "VOICE_TOOLS_OPENAI_KEY": token,
+    # jevkit client.py: TYPESAFE_BASE_URL picks the compatible endpoint
+    # (<base>/v1/systemone); JEV_PROXY_API_KEY is the only credential it will
+    # send to an override host; TYPESAFE_API_KEY satisfies the plugin's
+    # requires_env without ever being forwarded there.
+    "TYPESAFE_BASE_URL": f"{base}/jev",
+    "JEV_PROXY_API_KEY": token,
+    "TYPESAFE_API_KEY": token,
+}
+try:
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+except OSError:
+    lines = []
+seen = set()
+out = []
+for line in lines:
+    key = line.split("=", 1)[0].strip().removeprefix("export ").strip()
+    if key in owned:
+        if key in seen:
+            continue
+        line = f"{key}={shlex.quote(owned[key])}"
+        seen.add(key)
+    out.append(line)
+for key, value in owned.items():
+    if key not in seen:
+        out.append(f"{key}={shlex.quote(value)}")
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(out) + "\n")
+os.chmod(path, 0o600)
+PY
+    log "wrote relay credentials to $HERMES_HOME/.env"
+}
+
+# Hermes audio config, via `hermes config set` so the maintained writer owns
+# config.yaml. api_key values are ${VOICE_TOOLS_OPENAI_KEY} templates: Hermes
+# expands env refs at load (config.py _expand_env_vars) and
+# _preserve_env_ref_templates keeps the template — not the token — on disk.
+# stt.openai.api_key must be a config value, not env-only: in
+# transcription_cloud._direct_openai_credentials the env-key ladder returns
+# the hardcoded OPENAI_BASE_URL and drops stt.openai.base_url.
+relay_hermes_config() {
+    local voice_base="$RELAY_BASE/openai/v1"
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.provider openai
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.model gpt-4o-mini-tts
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.base_url "$voice_base"
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.api_key '${VOICE_TOOLS_OPENAI_KEY}'
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.enabled true
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.provider openai
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.model whisper-1
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.base_url "$voice_base"
+    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.api_key '${VOICE_TOOLS_OPENAI_KEY}'
+}
+
+# hermes-jev-skills, pinned to $JEV_COMMIT. The upstream install.py is the only
+# supported installer: it copies jevkit/ into each plugin dir (the plugins
+# import it relatively), links bin/jev, and edits plugins.enabled in
+# config.yaml. `hermes plugins install` cannot be used — the repo keeps its
+# plugins under hermes/plugin/ and jevkit at the root, so a subdirectory
+# install would land the plugin without its library.
+relay_jev() {
+    local need_checkout=1
+    if [ -d "$JEV_DIR/.git" ] \
+        && [ "$(git -C "$JEV_DIR" rev-parse HEAD 2>/dev/null)" = "$JEV_COMMIT" ]; then
+        need_checkout=0
+    elif [ "$DRY_RUN" = 0 ] && [ ! -d "$JEV_DIR/.git" ]; then
+        if ! have git; then
+            log "git not found — needed for the jev plugin checkout"
+            return 1
+        fi
+        if [ -e "$JEV_DIR" ] && [ -n "$(ls -A "$JEV_DIR" 2>/dev/null)" ]; then
+            log "ERROR: $JEV_DIR exists and is not the hermes-jev-skills checkout — move it or set ALAN_JEV_DIR"
+            return 1
+        fi
+        run git clone --quiet "$JEV_REPO_URL" "$JEV_DIR"
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would pin $JEV_DIR to $JEV_COMMIT and run install.py --enable all"
+        return 0
+    fi
+    if [ "$need_checkout" = 1 ]; then
+        git -C "$JEV_DIR" cat-file -e "$JEV_COMMIT^{commit}" 2>/dev/null \
+            || run git -C "$JEV_DIR" fetch --quiet origin "$JEV_COMMIT"
+        run git -C "$JEV_DIR" checkout --quiet --detach "$JEV_COMMIT"
+    fi
+    run python3 "$JEV_DIR/install.py" --hermes-home "$HERMES_HOME" --enable all
+    relay_jev_switches
+}
+
+# The /jev switches live in jev/state.json under the Hermes root (plugin
+# _setting reads it before plugin settings in config.yaml). routing stays in
+# shadow — it logs decisions without switching models. screen on withholds
+# injected instructions in web_search/web_extract results; skills on gives
+# per-turn skill suggestions; computer/browser action selection rides the
+# jev_choose_action tool, which needs no switch beyond the enabled plugin.
+relay_jev_switches() {
+    python3 - "$HERMES_HOME/jev/state.json" >>"$LOG_FILE" 2>&1 <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as f:
+        state = json.load(f)
+    if not isinstance(state, dict):
+        state = {}
+except (OSError, json.JSONDecodeError):
+    state = {}
+for key, value in {"routing": "shadow", "screen": "on", "skills": "on"}.items():
+    state.setdefault(key, value)  # an existing /jev switch is an operator choice — keep it
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(state, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+    log "jev switches: routing=shadow, screen=on, skills=on"
+}
+
+# The free-voice fallback. Hermes has no provider-fallback setting, so a tiny
+# supervisord program polls <relay>/usage and flips tts.provider between
+# openai and edge. The token stays in .env — never in this conf.
+relay_voice_watch() {
+    local bin="$BIN_DIR/alan-relay-voice-watch"
+    local conf="$SUPERVISOR_CONF_DIR/alan-relay-voice-watch.conf"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would install $bin and $conf"
+        return 0
+    fi
+    if [ -n "$VOICE_WATCH_SRC" ]; then
+        install -m 755 "$VOICE_WATCH_SRC" "$bin"
+    else
+        curl -fsSL "$SETUP_URL_BASE/$REPO_REF/scripts/alan-relay-voice-watch" -o "$bin"
+        chmod 755 "$bin"
+    fi
+    cat >"$conf" <<EOF
+; Written by bootstrap-orgo.sh — hosted-tier voice-credit watcher. Flips
+; tts.provider to edge while the relay reports no voice minutes left, and
+; back to openai once the quota resets. Reads the token from ~/.hermes/.env.
+[program:alan-relay-voice-watch]
+command=$bin --interval $RELAY_WATCH_INTERVAL
+user=$(id -un)
+environment=HOME="$HOME",HERMES_HOME="$HERMES_HOME",PYTHONUNBUFFERED="1"
+autorestart=true
+priority=50
+redirect_stderr=true
+stdout_logfile=/var/log/alan-relay-voice-watch.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=2
+EOF
+    run supervisorctl reread
+    run supervisorctl update
+    # A running gateway loaded its plugin list at start; bounce it so
+    # hermes-jev and the new audio config are live. A parked gateway gets a
+    # start instead — restart on a stopped program is racy across supervisor
+    # versions. Never let the bounce fail the step.
+    local gw_state
+    gw_state="$(supervisorctl status hermes-gateway 2>/dev/null || true)"
+    case "$gw_state" in
+        *RUNNING*|*STARTING*) run supervisorctl restart hermes-gateway;;
+        *STOPPED*|*EXITED*|*FATAL*|*BACKOFF*)
+            supervisorctl start hermes-gateway >>"$LOG_FILE" 2>&1 \
+                || log "hermes-gateway did not start; supervisord keeps retrying";;
+    esac
+    log "voice watcher installed ($bin, every ${RELAY_WATCH_INTERVAL}s)"
+}
+
 # --- step: tailscale -----------------------------------------------------
 
 step_tailscale() {
@@ -648,7 +886,7 @@ main() {
         return 0
     fi
     local s
-    for s in hermes alans-way tailscale ready; do
+    for s in hermes alans-way tailscale relay ready; do
         run_step "$s"
     done
     log "done"

@@ -12,9 +12,10 @@ SCRIPT = ROOT / "bootstrap-orgo.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 
 
-def run(*args, env=None, check=True):
+def run(*args, env=None, check=True, input_text=None):
     result = subprocess.run(
-        [BASH, str(SCRIPT)] + list(args), capture_output=True, text=True, env=env)
+        [BASH, str(SCRIPT)] + list(args), capture_output=True, text=True,
+        env=env, input=input_text)
     if check and result.returncode != 0:
         raise AssertionError(f"exit {result.returncode}: {result.stderr}\n{result.stdout}")
     return result
@@ -53,7 +54,11 @@ def fixture(directory: Path):
         "PATH": os.pathsep.join([str(stub_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
         "STUB_LOG": str(log),
     })
-    stub(stub_bin, "supervisorctl", 'echo "supervisorctl $*" >> "$STUB_LOG"\n')
+    stub(stub_bin, "supervisorctl", '''echo "supervisorctl $*" >> "$STUB_LOG"
+# Status reads must see a RUNNING gateway — the relay step only restarts a
+# gateway that supervisord reports as up.
+case "$1" in status) echo "hermes-gateway RUNNING pid 1, uptime 0:01:00";; esac
+''')
     stub(stub_bin, "tailscaled", 'echo "tailscaled $*" >> "$STUB_LOG"\n')
     # Nothing on :22 by default — 8022 is a decoy for sloppy `22$` matching.
     stub(stub_bin, "ss",
@@ -584,6 +589,228 @@ class InstallStepTests(unittest.TestCase):
             doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(doc["state"], "ready")
             self.assertEqual(doc["step"], "paired")
+
+
+def jev_repo(directory: Path) -> str:
+    """A local stand-in for github.com/kerpopule/hermes-jev-skills: a real git
+    checkout whose install.py records its argv, so no network or GitHub is
+    involved. Returns the commit the bootstrap should pin."""
+    repo = directory / "jev-repo"
+    repo.mkdir()
+    (repo / "install.py").write_text(
+        "import os, sys\n"
+        "open(os.environ['STUB_LOG'], 'a').write("
+        "'install.py ' + ' '.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "install.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "pin me"], check=True)
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    return sha
+
+
+def relay_fixture(directory: Path, env: dict, commit: str = None):
+    """Point the bootstrap's relay hooks at local fakes: the watcher script
+    ships in this repo, and the jev checkout is a local repo on the pin."""
+    env["ALAN_VOICE_WATCH"] = str(ROOT / "scripts" / "alan-relay-voice-watch")
+    env["ALAN_JEV_DIR"] = str(directory / "jev-repo")
+    env["ALAN_JEV_COMMIT"] = commit or jev_repo(directory)
+
+
+class RelayStepTests(unittest.TestCase):
+    TOKEN = "rly-test-token-9f8e7d6c"
+
+    def full_run(self, directory: Path, env: dict, *args, input_text=None, check=True):
+        curl_stub(directory / "stubbin")
+        tailscale_stub(directory / "stubbin", url="https://login.tailscale.com/a/r1")
+        return run(*args, env=env, check=check, input_text=input_text)
+
+    def test_no_token_runs_no_relay_wiring(self):
+        """DIY: nothing relay-shaped may happen — no credential files, no
+        config writes, no watcher program, no jev checkout."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(directory, env)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("skipping hosted relay wiring", result.stdout)
+            self.assertFalse((directory / "state" / "relay-token").exists())
+            env_file = directory / "home" / ".hermes" / ".env"
+            if env_file.exists():
+                self.assertNotIn("ALAN_RELAY", env_file.read_text(encoding="utf-8"))
+            calls = log.read_text(encoding="utf-8")
+            self.assertNotIn("config set", calls)
+            self.assertNotIn("install.py", calls)
+            self.assertFalse(
+                (directory / "svconf" / "alan-relay-voice-watch.conf").exists())
+            self.assertFalse((directory / "home" / ".hermes" / "jev").exists())
+
+    def test_relay_token_wires_voice_jev_and_the_watcher(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+
+            # The token is persisted for the backend, root-only.
+            token_file = directory / "state" / "relay-token"
+            self.assertEqual(token_file.read_text(encoding="utf-8"), self.TOKEN)
+            self.assertEqual(token_file.stat().st_mode & 0o777, 0o600)
+
+            env_text = (directory / "home" / ".hermes" / ".env").read_text(
+                encoding="utf-8")
+            self.assertIn(f"ALAN_RELAY_BASE=https://openalan.com/api/relay", env_text)
+            self.assertIn(f"ALAN_RELAY_TOKEN={self.TOKEN}", env_text)
+            self.assertIn(f"VOICE_TOOLS_OPENAI_KEY={self.TOKEN}", env_text)
+            self.assertIn(
+                "TYPESAFE_BASE_URL=https://openalan.com/api/relay/jev", env_text)
+            self.assertIn(f"JEV_PROXY_API_KEY={self.TOKEN}", env_text)
+            self.assertIn(f"TYPESAFE_API_KEY={self.TOKEN}", env_text)
+            self.assertEqual(
+                (directory / "home" / ".hermes" / ".env").stat().st_mode & 0o777,
+                0o600)
+
+            calls = log.read_text(encoding="utf-8")
+            for want in (
+                "hermes config set tts.provider openai",
+                "hermes config set tts.openai.model gpt-4o-mini-tts",
+                "hermes config set tts.openai.base_url "
+                    "https://openalan.com/api/relay/openai/v1",
+                "hermes config set tts.openai.api_key ${VOICE_TOOLS_OPENAI_KEY}",
+                "hermes config set stt.enabled true",
+                "hermes config set stt.provider openai",
+                "hermes config set stt.openai.model whisper-1",
+                "hermes config set stt.openai.base_url "
+                    "https://openalan.com/api/relay/openai/v1",
+                "hermes config set stt.openai.api_key ${VOICE_TOOLS_OPENAI_KEY}",
+            ):
+                self.assertIn(want, calls)
+            self.assertIn("install.py --hermes-home", calls)
+            self.assertIn("--enable all", calls)
+
+            switches = json.loads(
+                (directory / "home" / ".hermes" / "jev" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(switches["routing"], "shadow")
+            self.assertEqual(switches["screen"], "on")
+            self.assertEqual(switches["skills"], "on")
+
+            conf = (directory / "svconf" / "alan-relay-voice-watch.conf").read_text(
+                encoding="utf-8")
+            self.assertIn("[program:alan-relay-voice-watch]", conf)
+            self.assertIn(str(directory / "sbin" / "alan-relay-voice-watch"), conf)
+            self.assertNotIn(self.TOKEN, conf)
+            self.assertTrue(
+                (directory / "sbin" / "alan-relay-voice-watch").exists())
+            self.assertIn("supervisorctl restart hermes-gateway", calls)
+
+    def test_the_token_never_reaches_argv_or_logs(self):
+        """Every stubbed command echoes its argv to STUB_LOG, and every `run`
+        echoes '+ cmd' to bootstrap.log — the token may appear in neither,
+        nor in stdout."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertNotIn(self.TOKEN, log.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                self.TOKEN,
+                (directory / "state" / "bootstrap.log").read_text(encoding="utf-8"))
+            self.assertNotIn(self.TOKEN, result.stdout)
+
+    def test_token_via_stdin_and_env_both_work(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(
+                directory, env, "--relay-token", "-", input_text=self.TOKEN + "\n")
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                (directory / "state" / "relay-token").read_text(encoding="utf-8"),
+                self.TOKEN)
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            env["ALAN_RELAY_TOKEN"] = self.TOKEN
+            result = self.full_run(directory, env)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                (directory / "state" / "relay-token").read_text(encoding="utf-8"),
+                self.TOKEN)
+            # env-supplied tokens must not echo into argv either
+            self.assertNotIn(self.TOKEN, log.read_text(encoding="utf-8"))
+
+    def test_relay_base_override_reaches_voice_and_jev_urls(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN,
+                          "--relay-base", "http://relay.test:8080/api/relay/")
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn(
+                "tts.openai.base_url http://relay.test:8080/api/relay/openai/v1",
+                calls)
+            env_text = (directory / "home" / ".hermes" / ".env").read_text(
+                encoding="utf-8")
+            self.assertIn(
+                "TYPESAFE_BASE_URL=http://relay.test:8080/api/relay/jev",
+                env_text)
+
+    def test_rerun_is_idempotent_and_preserves_operator_jev_switches(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            # The operator flipped routing on; a re-run must not reset it.
+            state_path = directory / "home" / ".hermes" / "jev" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["routing"] = "on"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.full_run(directory, env, "--relay-token", "rotated-token-2")
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["routing"], "on")
+            self.assertEqual(state["screen"], "on")
+            # rotated token propagates to both stores
+            self.assertEqual(
+                (directory / "state" / "relay-token").read_text(encoding="utf-8"),
+                "rotated-token-2")
+            env_text = (directory / "home" / ".hermes" / ".env").read_text(
+                encoding="utf-8")
+            self.assertEqual(env_text.count("ALAN_RELAY_TOKEN="), 1)
+            self.assertIn("ALAN_RELAY_TOKEN=rotated-token-2", env_text)
+            confs = "".join(
+                c.read_text(encoding="utf-8")
+                for c in (directory / "svconf").glob("*.conf"))
+            self.assertEqual(confs.count("[program:alan-relay-voice-watch]"), 1)
+
+    def test_a_non_git_jev_dir_fails_instead_of_being_deleted(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_VOICE_WATCH"] = str(
+                ROOT / "scripts" / "alan-relay-voice-watch")
+            env["ALAN_JEV_DIR"] = str(directory / "precious")
+            (directory / "precious").mkdir()
+            (directory / "precious" / "keep.txt").write_text("mine")
+            result = self.full_run(
+                directory, env, "--relay-token", self.TOKEN, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((directory / "precious" / "keep.txt").exists())
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "relay")
 
 
 if __name__ == "__main__":
