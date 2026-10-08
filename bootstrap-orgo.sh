@@ -31,6 +31,9 @@ LOGIN_URL_RE='https://login\.tailscale\.com/a/[A-Za-z0-9]+'
 CALLBACK="" SECRET="" ID="" REPO_REF="main"
 DRY_RUN=0 WAIT_PAIRED=0
 CURRENT_STEP="init"
+# Steps that may degrade instead of failing append a slug here; every
+# state.json write carries the accumulated list as "warnings".
+WARNINGS=()
 
 # Hosted-tier relay wiring (spec addendum 2026-10-08). The token is the
 # switch: without one a DIY run skips the relay step entirely.
@@ -103,6 +106,12 @@ done
 # piping a file:// fetch into bash would orphan SCRIPT_DIR, and setup.sh
 # would then clone GitHub and fail a local --repo-ref pin.
 SETUP_SH="${ALAN_SETUP_SH:-}"
+# A local checkout supplies the voice watcher too, so a run never mixes a
+# local setup.sh with scripts fetched from a branch that may not have them.
+if [ -z "$VOICE_WATCH_SRC" ] && [ -n "$SETUP_SH" ] \
+    && [ -f "$(dirname "$SETUP_SH")/scripts/alan-relay-voice-watch" ]; then
+    VOICE_WATCH_SRC="$(dirname "$SETUP_SH")/scripts/alan-relay-voice-watch"
+fi
 
 log() {
     local line="[bootstrap] $*"
@@ -196,7 +205,7 @@ state() {
         return 0
     fi
     local tmp="$STATE_DIR/.state.json.$$"
-    python3 - "$tmp" "$s" "$step" "$err" <<'PY'
+    python3 - "$tmp" "$s" "$step" "$err" "${WARNINGS[*]:-}" <<'PY'
 import datetime
 import json
 import sys
@@ -206,6 +215,7 @@ doc = {
     "state": state,
     "step": step,
     "error": err if err else None,
+    "warnings": sys.argv[5].split(),
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
 }
 with open(path, "w", encoding="utf-8") as f:
@@ -422,7 +432,18 @@ step_relay() {
     export HERMES_HOME
     relay_env
     relay_hermes_config
-    relay_jev
+    # hermes-jev-skills is a third-party GitHub install: if it fails, the
+    # computer still pairs and talks, so record a warning instead of failing.
+    # The subshell keeps errexit live (an `if`/`||` context would disable it).
+    local rc
+    set +e
+    ( set -e; trap - ERR; relay_jev )
+    rc=$?
+    set -e
+    if [ "$rc" != 0 ]; then
+        WARNINGS+=(jev)
+        log "WARNING: the jev plugin install failed (exit $rc) — continuing without it"
+    fi
     relay_voice_watch
 }
 

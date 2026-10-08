@@ -591,13 +591,14 @@ class InstallStepTests(unittest.TestCase):
             self.assertEqual(doc["step"], "paired")
 
 
-def jev_repo(directory: Path) -> str:
+def jev_repo(directory: Path, install_py: str = None) -> str:
     """A local stand-in for github.com/kerpopule/hermes-jev-skills: a real git
     checkout whose install.py records its argv, so no network or GitHub is
     involved. Returns the commit the bootstrap should pin."""
     repo = directory / "jev-repo"
     repo.mkdir()
     (repo / "install.py").write_text(
+        install_py or
         "import os, sys\n"
         "open(os.environ['STUB_LOG'], 'a').write("
         "'install.py ' + ' '.join(sys.argv[1:]) + '\\n')\n",
@@ -794,7 +795,10 @@ class RelayStepTests(unittest.TestCase):
                 for c in (directory / "svconf").glob("*.conf"))
             self.assertEqual(confs.count("[program:alan-relay-voice-watch]"), 1)
 
-    def test_a_non_git_jev_dir_fails_instead_of_being_deleted(self):
+    def test_a_non_git_jev_dir_degrades_to_a_warning_not_a_delete(self):
+        """The jev plugin is a third-party GitHub install: a blocked checkout
+        must not fail a computer whose pairing and voice work. It degrades
+        to a warnings marker — and the foreign dir is still never touched."""
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
@@ -803,14 +807,103 @@ class RelayStepTests(unittest.TestCase):
             env["ALAN_JEV_DIR"] = str(directory / "precious")
             (directory / "precious").mkdir()
             (directory / "precious" / "keep.txt").write_text("mine")
+            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue((directory / "precious" / "keep.txt").exists())
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+            self.assertEqual(doc["step"], "waiting_for_pairing")
+            self.assertEqual(doc["warnings"], ["jev"])
+            # the required wiring still landed
+            self.assertTrue(
+                (directory / "svconf" / "alan-relay-voice-watch.conf").exists())
+
+    def test_a_failed_jev_clone_degrades_to_a_warning(self):
+        """github.com/kerpopule/hermes-jev-skills is third-party — an outage
+        mid-bootstrap is a warning, not a failed computer."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_VOICE_WATCH"] = str(
+                ROOT / "scripts" / "alan-relay-voice-watch")
+            env["ALAN_JEV_REPO_URL"] = str(directory / "no-such-repo")
+            env["ALAN_JEV_DIR"] = str(directory / "jev-dest")
+            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse((directory / "jev-dest" / ".git").exists())
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+            self.assertEqual(doc["warnings"], ["jev"])
+            self.assertTrue(
+                (directory / "svconf" / "alan-relay-voice-watch.conf").exists())
+
+    def test_a_failing_jev_installer_degrades_to_a_warning(self):
+        """The checkout is pinned but upstream install.py dies — same
+        degrade, and the /jev switches file is not written half-way."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_VOICE_WATCH"] = str(
+                ROOT / "scripts" / "alan-relay-voice-watch")
+            env["ALAN_JEV_DIR"] = str(directory / "jev-repo")
+            env["ALAN_JEV_COMMIT"] = jev_repo(
+                directory, install_py="import sys\nsys.exit(3)\n")
+            result = self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse(
+                (directory / "home" / ".hermes" / "jev" / "state.json").exists())
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+            self.assertEqual(doc["warnings"], ["jev"])
+
+    def test_a_missing_voice_watch_source_still_fails_the_run(self):
+        """The degrade is for the third-party plugin only: the voice watcher
+        is our own wiring — if it cannot be installed the computer fails."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            env["ALAN_VOICE_WATCH"] = str(directory / "no-such-script")
             result = self.full_run(
                 directory, env, "--relay-token", self.TOKEN, check=False)
             self.assertNotEqual(result.returncode, 0)
-            self.assertTrue((directory / "precious" / "keep.txt").exists())
             doc = json.loads(
                 (directory / "state" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(doc["state"], "failed")
             self.assertEqual(doc["step"], "relay")
+
+    def test_the_watcher_comes_from_a_local_setup_checkout(self):
+        """ALAN_SETUP_SH means 'nothing comes from GitHub': when it points
+        into a mounted checkout the watcher must install from
+        <checkout>/scripts/ rather than curling raw.githubusercontent.com."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            repo = directory / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            (repo / "setup.sh").write_text(
+                '#!/bin/sh\nmkdir -p "$HERMES_HOME/plugins/alans-way"\n',
+                encoding="utf-8")
+            (repo / "scripts" / "alan-relay-voice-watch").write_text(
+                "#!/bin/sh\n# the mounted checkout's watcher\n",
+                encoding="utf-8")
+            env["ALAN_SETUP_SH"] = str(repo / "setup.sh")
+            env["ALAN_JEV_DIR"] = str(directory / "jev-repo")
+            env["ALAN_JEV_COMMIT"] = jev_repo(directory)
+            curl_stub(stub_bin, fail_on="raw.githubusercontent.com")
+            tailscale_stub(
+                stub_bin, url="https://login.tailscale.com/a/lw1")
+            result = run("--relay-token", self.TOKEN, env=env)
+            self.assertEqual(result.returncode, 0)
+            installed = (directory / "sbin" / "alan-relay-voice-watch")
+            self.assertIn("mounted checkout", installed.read_text(
+                encoding="utf-8"))
+            self.assertNotIn(
+                "raw.githubusercontent.com",
+                log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
