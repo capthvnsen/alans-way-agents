@@ -316,8 +316,11 @@ Run a dedicated Chromium there via `deploy/browser-exec-chromium.service`
 reusing the same `vps-chromium-host.cjs` supervisor with
 `deploy/browser-exec-config.json` under
 `$HERMES_VPS_BROWSER_DATA/config.json`. It keeps its own
-`--user-data-dir`; never point browser_exec at :9223, which the workspace
-VPS browser owns.
+`--user-data-dir`. The workspace VPS browser's CDP port is not fixed at
+9223: `setup.sh` honors `--cdp-port`/`ALANS_WAY_CDP_PORT` and picks the
+first free port at or above 9223 when that port is already taken, and the
+chosen port is the `cdpUrl` in that config.json. Never point browser_exec
+at it.
 
 ## Safety model (short version)
 

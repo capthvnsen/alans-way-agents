@@ -436,9 +436,11 @@ function windowsBackendCommand(script, id, name) {
 }
 
 // The posix probe (above) finds the newest installed bundle AND proves the
-// app is serving and accepts our token. Same probe over PowerShell: connection.json proves the app is serving
-// (any HTTP response, even 401, means the API is up), then emit the newest
-// connector script path — the pushed home copy wins over the install.
+// app is serving and accepts our token. Same probe over PowerShell: like
+// wsr_alive, connection.json must hold a token the API accepts — a 401 from a
+// stale file means this host is not usable, so only a success counts —
+// then emit the newest connector script path; the pushed home copy wins over
+// the install.
 function windowsProbeCommand() {
   return [
     // Invoke-WebRequest's progress stream can reach stdout over ssh and would
@@ -447,10 +449,12 @@ function windowsProbeCommand() {
     '$conn = "$env:APPDATA\\Hermes Workspace\\connection.json"',
     'if (-not (Test-Path $conn)) { exit 1 }',
     '$port = 9464',
-    'try { $port = ([uri](Get-Content $conn -Raw | ConvertFrom-Json).url).Port } catch {}',
+    '$token = ""',
+    'try { $doc = Get-Content $conn -Raw | ConvertFrom-Json; $token = [string]$doc.token; $port = ([uri]$doc.url).Port } catch {}',
+    'if ([string]::IsNullOrWhiteSpace($token)) { exit 1 }',
     '$alive = $false',
-    `try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Uri "http://127.0.0.1:$port/v1/status"; $alive = $true }`,
-    'catch { $alive = ($null -ne $_.Exception.Response) }',
+    `try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Headers @{ Authorization = "Bearer $token" } -Uri "http://127.0.0.1:$port/v1/status"; $alive = $true }`,
+    'catch { $alive = $false }',
     'if (-not $alive) { exit 1 }',
     'foreach ($s in @(' +
       '"$env:APPDATA\\Hermes Workspace\\connector\\scripts\\browser-mcp.cjs",' +

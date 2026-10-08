@@ -116,6 +116,14 @@ different bot's route silently.
    launchd agents, and the user grants Accessibility and Screen Recording
    once in the VM's System Settings (cannot be scripted; TCC is
    SIP-protected).
+   When a VNC server and a websockify/noVNC bridge already run on this
+   host, the app's VM preview needs wiring, not packages: find the
+   websockify listener (`ss -ltn`, or the supervisor's program list) and
+   report `http://<this host's tailnet IP>:<its port>/vnc.html`, plus where
+   the VNC password lives (the VNC server's `-PasswordFile` argument, or the
+   startup config that writes it). The human pastes the URL and password
+   into the app's Settings (Remote desktop connection); tell them where the
+   password is, do not paste its value into chat.
 6. **The gateway restart ends your own session, so it comes last.** You are
    most likely running inside this gateway. `setup.sh --restart` installs,
    binds, sets the timezone and verifies first, prints its summary, and only
@@ -130,6 +138,34 @@ different bot's route silently.
    `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
    tune with `hermes proactivity set --settings '<json>'`, and check with
    `hermes proactivity status`.
+
+## Moved your agent to a new VM?
+
+The VM's address is saved in several places and they mostly do not update
+each other. After a move, check each one; a stale copy fails quietly:
+
+- **The app's Settings** on the user's computer: the VM SSH host and the
+  Remote desktop URL are separate fields (`vpsBrowser.sshHost` and
+  `remoteUrl` in the app's `preferences.json`, under `Hermes Workspace` in
+  the app-data directory, readable over the same ssh path the workspace
+  uses). Current builds re-derive the URL when it was empty or still on
+  the old host; repoint it only if it was meant to follow the VM and
+  stayed stale: `http://<new tailnet IP>:<websockify port>/vnc.html`. A
+  URL that names the same VM differently (a MagicDNS name where the SSH
+  host uses the tailnet IP) never auto-follows, so check it by eye.
+- **The Hermes desktop app's saved remote**, on each computer that runs
+  it: `connection.json` and `connections.json` under the `Hermes` app-data
+  directory keep the old VM's URL until a new remote is saved. A stale
+  entry is inert until remote mode is selected.
+- **Any phone client**: the saved server URL lives only on the device; the
+  user updates it there.
+- **The VM's API server binding**: `API_SERVER_HOST` in `~/.hermes/.env` or
+  `platforms.api_server` in `config.yaml`. Pinned to the old tailnet
+  address it fails to bind (`Could not bind` in `gateway.log`); `ss -tln`
+  shows where it actually listens.
+- **`tailscale serve` exposure**: `tailscale serve status` on the new VM;
+  nothing published on the old host follows. Republish the ports the
+  preview or remote mode needs.
 
 ## Report, don't claim
 
