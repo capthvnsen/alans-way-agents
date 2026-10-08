@@ -1085,6 +1085,13 @@ class BrowserHostServiceTests(unittest.TestCase):
         self.assertTrue(config["browserCommand"].endswith("google-chrome"), config["browserCommand"])
         self.assertIn("--user-data-dir=%s/chromium" % self.data, config["browserArgs"])
 
+    def test_the_packaged_chrome_wins_over_a_bare_google_chrome_wrapper(self):
+        # A host image (Orgo) puts a google-chrome wrapper on PATH that adds its
+        # own debugging port and profile ahead of ours.
+        self.run_setup(browsers=("google-chrome", "google-chrome-stable"))
+        config = self.config()
+        self.assertTrue(config["browserCommand"].endswith("google-chrome-stable"), config["browserCommand"])
+
     def test_args_match_the_exec_deploy_example(self):
         self.run_setup(browsers=("google-chrome",))
         example = json.loads((ROOT / "deploy" / "browser-exec-config.json").read_text())
