@@ -289,7 +289,7 @@ a website's job.
 For any desktop app on the user's computer, use the `computer_use` tool
 (and the read-only `workspace_computer_*` tools to look), and never run
 screencapture, osascript or ssh scripts to drive the user's desktop.
-If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Workspace app in System Settings, then retry.
+If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp) in System Settings, then retry.
 
 ## Preserve vanilla Hermes
 
