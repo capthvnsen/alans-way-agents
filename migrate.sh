@@ -110,14 +110,20 @@ profile_names() {
 [ -n "$TO" ] || { usage >&2; exit 2; }
 [ -d "$HERMES_HOME" ] || die "no Hermes home at $HERMES_HOME"
 
+# ssh/scp would read a leading '-' as an option (e.g. -oProxyCommand=...).
+for v in "$TO" "$HERMES_HOME" "$REMOTE_HERMES"; do
+    case "$v" in -*) die "arguments may not start with '-': $v";; esac
+done
+
 if [ -z "$REMOTE_HERMES" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         REMOTE_HERMES='<remote-home>/.hermes'
     else
-        rhome="$(ssh "$TO" 'printf %s "$HOME"')" \
+        rhome="$(ssh "$TO" 'printf %s "$HOME"' </dev/null)" \
             || die "cannot reach $TO over ssh"
         [ -n "$rhome" ] || die "remote \$HOME is empty on $TO"
         REMOTE_HERMES="$rhome/.hermes"
+        case "$REMOTE_HERMES" in -*) die "remote \$HOME starts with '-': $rhome";; esac
     fi
 fi
 REMOTE_PARENT="$(dirname "$REMOTE_HERMES")"
@@ -166,13 +172,18 @@ tar -czf "$ARCHIVE" -C "$HERMES_HOME" \
 log "packed $HERMES_HOME"
 
 REMOTE_ARCHIVE="$REMOTE_PARENT/$(basename "$ARCHIVE")"
-scp "$ARCHIVE" "$TO:$REMOTE_PARENT/" \
+scp "$ARCHIVE" "$TO:$(printf %q "$REMOTE_PARENT/")" </dev/null \
     || die "scp to $TO failed"
 
 # Unpack on the remote into a staging dir, rewrite old-home absolute paths
 # in every *.yaml, back up an existing remote home, then move into place.
 # If this exits non-zero the script stops here — the old gateway stays up.
-ssh "$TO" bash -s -- "$REMOTE_ARCHIVE" "$REMOTE_HERMES" "$HERMES_HOME" "$TS" <<'REMOTE'
+# ssh joins the command arguments with spaces and the remote shell re-parses
+# them, so build one %q-escaped command string — quoting in the paths then
+# survives the re-parse instead of splitting or executing.
+remote_cmd="$(printf 'bash -s -- %q %q %q %q' \
+    "$REMOTE_ARCHIVE" "$REMOTE_HERMES" "$HERMES_HOME" "$TS")"
+ssh "$TO" "$remote_cmd" <<'REMOTE'
 set -e
 archive="$1"; rhermes="$2"; ohermes="$3"; ts="$4"
 staging="$rhermes.staging-$ts"
@@ -227,7 +238,7 @@ else
     log "WARNING: could not stop the old gateway — stop it yourself or both hosts will poll the same bot"
 fi
 
-if ssh "$TO" supervisorctl restart hermes-gateway >/dev/null 2>&1; then
+if ssh "$TO" supervisorctl restart hermes-gateway </dev/null >/dev/null 2>&1; then
     log "restarted the gateway on $TO"
 else
     log "WARNING: supervisorctl restart hermes-gateway failed on $TO — start it there yourself"

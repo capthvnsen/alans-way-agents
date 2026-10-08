@@ -13,7 +13,8 @@ BASH = shutil.which("bash") or "/bin/bash"
 
 def run(*args, env=None, check=True):
     result = subprocess.run(
-        [BASH, str(SCRIPT)] + list(args), capture_output=True, text=True, env=env)
+        [BASH, str(SCRIPT)] + list(args), capture_output=True, text=True, env=env,
+        input="")
     if check and result.returncode != 0:
         raise AssertionError(f"exit {result.returncode}: {result.stderr}\n{result.stdout}")
     return result
@@ -30,13 +31,22 @@ SSH_STUB = '''
 echo "ssh $*" >> "$STUB_LOG"
 host="$1"; shift
 export HOME="$FAKE_REMOTE_HOME"
+# Model real ssh: the command arguments are joined with spaces and the
+# remote shell re-parses them, so quoting bugs a plain `exec "$@"` would
+# hide show up here.
+cmd="$*"
 if [ -n "$FAKE_SSH_FAIL" ]; then
-  case "$1" in bash) exit 3;; esac
+  case "$cmd" in bash*) exit 3;; esac
 fi
-case "$1" in
-  bash) exec "$@";;
-  supervisorctl|systemctl) echo "remote: $*" >> "$FAKE_REMOTE_CALLS";;
-  *) eval "$1";;
+case "$cmd" in
+  "supervisorctl status"*)
+    echo "remote: $cmd" >> "$FAKE_REMOTE_CALLS"
+    echo "hermes-gateway ${FAKE_REMOTE_STATE:-RUNNING} pid 4242"
+    ;;
+  supervisorctl*|systemctl*)
+    echo "remote: $cmd" >> "$FAKE_REMOTE_CALLS"
+    ;;
+  *) eval "$cmd";;
 esac
 exit 0
 '''
@@ -45,6 +55,8 @@ SCP_STUB = '''
 echo "scp $*" >> "$STUB_LOG"
 src="$1"; dst="$2"
 dir="${dst#*:}"
+# The remote shell re-parses the target — unquote it the same way.
+eval "dir=$dir"
 mkdir -p "$dir"
 cp "$src" "${dir%/}/"
 '''
@@ -103,8 +115,13 @@ def fixture(directory: Path, hermes_name=".hermes"):
     stub(stub_bin, "ssh", SSH_STUB)
     stub(stub_bin, "scp", SCP_STUB)
     stub(stub_bin, "curl", CURL_STUB)
+    # The remote script also calls supervisorctl; the ssh stub exports the
+    # fake remote HOME, so the stub can tell remote calls from local ones.
     stub(stub_bin, "supervisorctl",
-         'echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_SUPERVISORCTL_RC:-0}"\n')
+         'if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then '
+         'echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"; '
+         'else echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"; fi\n'
+         'exit "${FAKE_SUPERVISORCTL_RC:-0}"\n')
     stub(stub_bin, "systemctl",
          'echo "local: systemctl $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_SYSTEMCTL_RC:-0}"\n')
     stub(stub_bin, "hermes",
@@ -131,7 +148,7 @@ class MigrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
-            result = run("--to", "fakehost", env=env)
+            result = run("--to", "fakehost", "--yes", env=env)
             out = result.stdout
 
             remote = remote_home / ".hermes"
@@ -171,12 +188,43 @@ class MigrateTests(unittest.TestCase):
             self.assertIn("supervisorctl stop hermes-gateway", read(local_calls))
             self.assertIn("supervisorctl restart hermes-gateway", read(remote_calls))
 
+    def test_remote_home_with_a_space_lands_intact(self):
+        """ssh joins the remote command args with spaces and the remote
+        shell re-parses them; a spaced path must still arrive as one arg."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_REMOTE_HOME"] = str(directory / "remote home")
+            run("--to", "fakehost", "--yes", env=env)
+            remote = directory / "remote home" / ".hermes"
+            self.assertIn(f"data_dir: {remote}/data", read(remote / "config.yaml"))
+            self.assertIn(f"helper: {directory}/remote home/bin/tool",
+                          read(remote / "config.yaml"))
+
+    def test_remote_home_metachars_are_not_command_injection(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            marker = directory / "pwned"
+            run("--to", "fakehost", "--yes", "--remote-home",
+                f"{directory}/x;touch {marker}", env=env, check=False)
+            self.assertFalse(marker.exists())
+
+    def test_dash_leading_to_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            result = run("--to", "-oProxyCommand=echo pwned", "--yes",
+                         env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("'-'", result.stderr)
+
     def test_remote_failure_leaves_the_old_gateway_running(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
             env["FAKE_SSH_FAIL"] = "1"
-            result = run("--to", "fakehost", env=env, check=False)
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("stop", read(local_calls))
             self.assertNotIn("restart", read(remote_calls))
@@ -197,7 +245,7 @@ class MigrateTests(unittest.TestCase):
             directory = Path(d)
             env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
             env["FAKE_SUPERVISORCTL_RC"] = "1"
-            run("--to", "fakehost", env=env)
+            run("--to", "fakehost", "--yes", env=env)
             calls_text = read(local_calls)
             self.assertIn("supervisorctl stop hermes-gateway", calls_text)
             self.assertIn("systemctl --user stop hermes-gateway", calls_text)
@@ -213,7 +261,7 @@ class MigrateTests(unittest.TestCase):
             (hermes / "config.yaml").write_text(
                 f"data_dir: {hermes}/data\nother: {home}/other/keep.txt\n",
                 encoding="utf-8")
-            run("--to", "fakehost", env=env)
+            run("--to", "fakehost", "--yes", env=env)
             remote = remote_home / ".hermes"
             rconfig = read(remote / "config.yaml")
             self.assertIn(f"data_dir: {remote}/data", rconfig)
@@ -228,7 +276,7 @@ class MigrateTests(unittest.TestCase):
             existing = remote_home / ".hermes"
             existing.mkdir()
             (existing / "config.yaml").write_text("old: true\n", encoding="utf-8")
-            run("--to", "fakehost", env=env)
+            run("--to", "fakehost", "--yes", env=env)
             backups = list(remote_home.glob(".hermes.pre-migrate-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(read(backups[0] / "config.yaml"), "old: true\n")
