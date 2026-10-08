@@ -359,6 +359,37 @@ class MigrateTests(unittest.TestCase):
             self.assertIn("still references", result.stderr)
             self.assertIn("notes.txt", result.stderr)
 
+    def test_piped_entry_without_yes_refuses_to_run(self):
+        """The documented curl|bash one-liner has no tty on stdin — without
+        --yes it must ask for (and get) nothing rather than just proceed."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            result = run("--to", "fakehost", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--yes", result.stderr)
+            self.assertFalse((remote_home / ".hermes").exists())
+
+    def test_bot_token_never_reaches_curl_argv(self):
+        """The getMe token must not sit in ps for the duration of the call."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            run("--to", "fakehost", "--yes", env=env)
+            self.assertNotIn("root-token", read(calls))
+            self.assertNotIn("alpha-token", read(calls))
+
+    def test_export_style_token_with_trailing_comment_is_parsed(self):
+        """Orgo writes 'export KEY='value' # note' lines into .env."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            (hermes / ".env").write_text(
+                "export TELEGRAM_BOT_TOKEN='999000111:root-token' # main bot\n",
+                encoding="utf-8")
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertIn("fixturebot", result.stdout)
+
     def test_remote_failure_leaves_the_old_gateway_running(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)

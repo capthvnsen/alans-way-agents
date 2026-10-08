@@ -258,12 +258,13 @@ An existing remote home is backed up first, and the old gateway stops only
 after the copy lands so both hosts never poll the same bot:
 
 ```sh
-curl -fsSL openalan.com/migrate | bash -s -- --to <tailscale-host>
+curl -fsSL openalan.com/migrate | bash -s -- --to <tailscale-host> --yes
 ```
 
 Useful flags: `bootstrap-orgo.sh --dry-run` prints what it would do;
 `--wait-paired` polls until the tailnet reports the computer paired.
-`migrate.sh --dry-run` prints the plan; `--yes` skips the one confirmation;
+`migrate.sh --dry-run` prints the plan; `--yes` confirms without prompting
+(required on the piped one-liner, since stdin is the script itself);
 `--hermes-home`/`--remote-home` cover non-standard layouts.
 
 ## The workspace_browser tools

@@ -21,7 +21,7 @@ usage: migrate.sh --to <ssh-host> [--hermes-home DIR] [--remote-home DIR]
   --to HOST        ssh destination of the new computer (e.g. a tailscale name)
   --hermes-home    local Hermes home (default $HERMES_HOME or ~/.hermes)
   --remote-home    Hermes home on the new computer (default <remote $HOME>/.hermes)
-  --yes            do not ask for confirmation
+  --yes            do not ask for confirmation (required when stdin is not a tty)
   --dry-run        print the plan and change nothing
 EOF
 }
@@ -48,8 +48,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 bot_token() {
     local d="$1" t=""
     if [ -f "$d/.env" ]; then
-        t="$(sed -n 's/^[[:space:]]*TELEGRAM_BOT_TOKEN=//p' "$d/.env" | tail -n 1 || true)"
-        t="$(printf '%s' "$t" | tr -d "\"' \t")"
+        t="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?TELEGRAM_BOT_TOKEN=//p' "$d/.env" | tail -n 1 || true)"
+        t="$(printf '%s' "$t" | sed -E 's/[[:space:]]+#.*$//' | tr -d "\"' \t")"
     fi
     if [ -z "$t" ] && [ -f "$d/config.yaml" ]; then
         t="$(grep -E '^[[:space:]]*(telegram_bot_token|bot_token):' "$d/config.yaml" 2>/dev/null \
@@ -63,7 +63,8 @@ bot_token() {
 bot_username() {
     local token="$1" user=""
     [ -n "$token" ] && [ "$DRY_RUN" = 0 ] && have curl || { printf '%s' ""; return 0; }
-    user="$(curl -fsS --max-time 8 "https://api.telegram.org/bot$token/getMe" 2>/dev/null \
+    user="$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" \
+        | curl -fsS --max-time 8 -K - 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["username"])' 2>/dev/null \
         || true)"
     printf '%s' "$user"
@@ -130,14 +131,21 @@ REMOTE_PARENT="$(dirname "$REMOTE_HERMES")"
 
 manifest
 
-if [ "$DRY_RUN" = 0 ] && [ "$YES" = 0 ] && [ -t 0 ]; then
-    printf 'Migrate %s to %s:%s? The old gateway stops once the copy lands. [y/N] ' \
-        "$HERMES_HOME" "$TO" "$REMOTE_HERMES"
-    read -r reply
-    case "$reply" in
-        y|Y|yes|YES) ;;
-        *) log "aborted"; exit 1;;
-    esac
+if [ "$DRY_RUN" = 0 ] && [ "$YES" = 0 ]; then
+    # The advertised entry is `curl | bash` — stdin is the script pipe, not
+    # a terminal, so piping in skips the prompt silently. Ask on a tty,
+    # otherwise require an explicit --yes.
+    if [ -t 0 ]; then
+        printf 'Migrate %s to %s:%s? The old gateway stops once the copy lands. [y/N] ' \
+            "$HERMES_HOME" "$TO" "$REMOTE_HERMES"
+        read -r reply
+        case "$reply" in
+            y|Y|yes|YES) ;;
+            *) log "aborted"; exit 1;;
+        esac
+    else
+        die "stdin is not a terminal — pass --yes to confirm the migration"
+    fi
 fi
 
 if [ "$DRY_RUN" = 1 ]; then
