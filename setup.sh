@@ -194,7 +194,12 @@ confirm() { # confirm <prompt>: empty means no
   case "$reply" in y|Y|yes) return 0;; *) return 1;; esac
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
+# ALANS_WAY_MISSING lets a test pretend a binary is absent: fakes can add
+# commands but cannot remove real ones from PATH.
+have() {
+  case " ${ALANS_WAY_MISSING:-} " in *" $1 "*) return 1;; esac
+  command -v "$1" >/dev/null 2>&1
+}
 
 # write_if_changed <file> [backup]: content on stdin; sets WROTE=1 only when the
 # file's content actually changed, so an upgrade refreshes stale paths and an
@@ -204,7 +209,7 @@ write_if_changed() {
   WROTE=0
   if [ -f "$1" ] && [ "$(cat "$1")" = "$_new" ]; then return 0; fi
   if [ -f "$1" ] && [ -n "${2:-}" ]; then cp "$1" "$1.bak"; fi
-  printf '%s\n' "$_new" > "$1"
+  printf '%s\n' "$_new" > "$1" || return 1
   WROTE=1
 }
 
@@ -230,7 +235,7 @@ systemd_live() {
 tailscale_userspace() {
   [ "$GUEST_OS" = Linux ] || return 1
   have "$TAILSCALE" || return 1
-  [ ! -e /sys/class/net/tailscale0 ] || return 1
+  [ ! -e "${ALANS_WAY_SYS_CLASS_NET:-/sys/class/net}/tailscale0" ] || return 1
   "$TAILSCALE" status --json 2>/dev/null | python3 -c 'import json, sys
 try: s = json.load(sys.stdin)
 except Exception: sys.exit(1)
@@ -282,20 +287,32 @@ websockify_port() {
   return 1
 }
 
-# supervisord that is actually answering, not just installed.
+# supervisord that is actually answering, not just installed. `status` cannot
+# prove that: it exits nonzero whenever any program is not RUNNING (an EXITED
+# or FATAL entry makes a healthy daemon look dead). `pid` prints the daemon's
+# own pid whenever it answers.
 supervisord_usable() {
   have supervisorctl || return 1
-  supervisorctl status >/dev/null 2>&1 || return 1
+  case "$(supervisorctl pid 2>/dev/null)" in ''|*[!0-9]*|0) return 1;; esac
 }
 
-# The directory a [program:*] drop-in goes in: the include glob of an existing
-# supervisord.conf first (authoritative even when the dir does not exist yet;
-# the caller creates it, and only then is it included), then the Debian and
-# CentOS conventions.
+# The directory a [program:*] drop-in goes in: the include glob of the running
+# daemon's own conf (a host can carry a stock conf it never reads; relative
+# `files` globs resolve against that file's directory), then the stock confs,
+# then the Debian and CentOS conventions.
 supervisor_conf_dir() {
   [ -z "${ALANS_WAY_SUPERVISOR_CONF_DIR:-}" ] || { printf '%s' "$ALANS_WAY_SUPERVISOR_CONF_DIR"; return 0; }
-  for _d in $(sed -n 's/^ *files *= *//p' /etc/supervisor/supervisord.conf /etc/supervisord.conf 2>/dev/null); do
-    case "$_d" in /*) printf '%s' "${_d%/*}"; return 0;; esac
+  _confs="/etc/supervisor/supervisord.conf /etc/supervisord.conf"
+  _live="$(pgrep -af supervisord 2>/dev/null | sed -n 's/.* -c  *\([^ ]*\).*/\1/p' | head -1)"
+  [ -z "$_live" ] || _confs="$_live $_confs"
+  for _f in $_confs; do
+    for _d in $(sed -n 's/^ *files *= *//p' "$_f" 2>/dev/null); do
+      case "$_d" in
+        /*) printf '%s' "${_d%/*}"; return 0;;
+        */*) printf '%s' "${_f%/*}/${_d%/*}"; return 0;;
+        *) printf '%s' "${_f%/*}"; return 0;;
+      esac
+    done
   done
   for _d in /etc/supervisor/conf.d /etc/supervisord.d; do
     [ -d "$_d" ] && { printf '%s' "$_d"; return 0; }
@@ -305,9 +322,10 @@ supervisor_conf_dir() {
 }
 
 # The supervisor program whose command line (or a child's, for wrapper
-# scripts) runs `hermes gateway run`. The name is discovered, never assumed.
-# With several gateway programs, the one carrying -p for the profile being
-# configured wins over the first match.
+# scripts) runs `hermes gateway run`. The name is discovered, never assumed,
+# and a non-Hermes "gateway run" is never touched. With several gateway
+# programs, the one serving the profile being configured wins: -p <profile>,
+# or an argv with no -p when the default profile is the target.
 supervisor_gateway_program() {
   [ "$GUEST_OS" = Linux ] || return 1
   have supervisorctl && have ps || return 1
@@ -318,8 +336,9 @@ supervisor_gateway_program() {
     for _cand in "$_pid" $(pgrep -P "$_pid" 2>/dev/null); do
       _args="$(ps -o args= -p "$_cand" 2>/dev/null || true)"
       case "$_args" in
-        *"-p $PROFILE "*"gateway run"*) echo "$_prog"; return 0;;
-        *"gateway run"*) [ -n "$_any" ] || _any="$_prog";;
+        *hermes*"-p ${PROFILE:-default} "*"gateway run"*) echo "$_prog"; return 0;;
+        *"-p "*"gateway run"*) :;;   # another profile's gateway
+        *hermes*"gateway run"*) [ -n "$_any" ] || _any="$_prog";;
       esac
     done
   done
@@ -353,7 +372,7 @@ try:
     cfg = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-m = re.search(r":(\d+)$", str(cfg.get("cdpUrl") or ""))
+m = re.search(r":(\d+)(?:[/][^\s]*)?$", str(cfg.get("cdpUrl") or ""))
 if m:
     print(m.group(1))
 PY
@@ -1899,7 +1918,7 @@ EOF
   elif [ "$SKIP_SERVICES" = 0 ] && [ "$GUEST_OS" = Linux ] && supervisord_usable; then
     install_supervisor_programs
   else
-    [ "$SYSTEMD_WARNED" = 1 ] || warn "no live systemd or supervisord here, so the browser services were not installed: see desktop/docs/vps-browser.md in the alans-way repo for manual setup"
+    [ "$SKIP_SERVICES" = 1 ] || [ "$SYSTEMD_WARNED" = 1 ] || warn "no live systemd or supervisord here, so the browser services were not installed: see desktop/docs/vps-browser.md in the alans-way repo for manual setup"
   fi
   fi
   fi
@@ -2371,12 +2390,14 @@ schedule_gateway_restart() {
   # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first,
   # $5 supervisor program name when the gateway is one of supervisord's
   # (restarting that program is the safe path: `hermes gateway restart`
-  # races with supervisord's own respawn of the same process).
+  # races with supervisord's own respawn of the same process), $6 the
+  # resolved supervisorctl path (a detached restarter may not share our PATH).
   GW_SUP="$(supervisor_gateway_program || true)"
+  GW_SUPCTL="$(command -v supervisorctl 2>/dev/null || echo supervisorctl)"
   _restart='sleep "$4"
     if [ -n "$5" ]; then
-      supervisorctl restart "$5" && echo "restarted: supervisorctl restart $5" \
-        || echo "supervisorctl restart $5 failed: restart that program by hand"
+      "$6" restart "$5" && echo "restarted: $6 restart $5" \
+        || echo "$6 restart $5 failed: restart that program by hand"
     elif "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
     elif systemctl is-active --quiet "$3"; then systemctl restart "$3" && echo "restarted: systemctl restart $3"
     elif systemctl --user is-active --quiet "$3"; then systemctl --user restart "$3" && echo "restarted: systemctl --user restart $3"
@@ -2390,7 +2411,7 @@ schedule_gateway_restart() {
     # shellcheck disable=SC2086
     if systemd-run $_scope --collect --quiet --on-active="${GW_DELAY}s" \
         --setenv=HERMES_HOME="$HERMES_HOME" --setenv=HOME="$HOME" \
-        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" >"$GW_LOG" 2>&1; then
+        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" "$GW_SUPCTL" >"$GW_LOG" 2>&1; then
       return 0
     fi
   fi
@@ -2400,7 +2421,7 @@ schedule_gateway_restart() {
   # the gap in which the caller could still kill the restarter along with itself.
   GW_READY="${TMPDIR:-/tmp}/alans-way-restart-ready.$$"
   python3 -c 'import os, sys; os.setsid(); open(sys.argv[1], "w").close(); os.execvp(sys.argv[2], sys.argv[2:])' \
-    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" </dev/null >"$GW_LOG" 2>&1 &
+    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" "$GW_SUPCTL" </dev/null >"$GW_LOG" 2>&1 &
   _tries=0
   while [ ! -e "$GW_READY" ] && [ "$_tries" -lt 50 ]; do sleep 0.1; _tries=$((_tries + 1)); done
   rm -f "$GW_READY"

@@ -2363,7 +2363,10 @@ def linux_with_systemd(bin_dir, log):
 
 
 def fake_supervisord(bin_dir, root, state=""):
-    """A working supervisorctl; program states live in a state file the test owns."""
+    """A working supervisorctl; program states live in a state file the test
+    owns. Exit codes mirror the real tool: status is nonzero when a queried
+    program is not RUNNING (a bare `status` exits 3 if any is down), and `pid`
+    prints the daemon's own pid when no program is named."""
     state_file = Path(root) / "supervisor.state"
     state_file.write_text(state, encoding="utf-8")
     log = Path(root) / "supervisorctl.log"
@@ -2372,11 +2375,18 @@ state="%s"
 case "$1" in
   status)
     if [ -n "${2:-}" ]; then
-      grep "^$2 " "$state" 2>/dev/null || echo "$2 STOPPED"
-    else
-      cat "$state" 2>/dev/null || true
-    fi;;
-  pid) awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state" 2>/dev/null;;
+      _line="$(grep "^$2 " "$state" 2>/dev/null)"; [ -n "$_line" ] || _line="$2 STOPPED"
+      echo "$_line"
+      case "$_line" in *" RUNNING "*) exit 0;; *) exit 3;; esac
+    fi
+    cat "$state" 2>/dev/null || true
+    grep -v " RUNNING " "$state" >/dev/null 2>&1 && exit 3
+    exit 0;;
+  pid)
+    if [ -z "${2:-}" ]; then echo 4321; exit 0; fi
+    _p="$(awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state" 2>/dev/null)"
+    echo "${_p:-0}"
+    [ -n "$_p" ] || exit 7;;
   start)
     grep -v "^$2 " "$state" > "$state.tmp" 2>/dev/null || true
     printf '%%s RUNNING pid 777, uptime 0:00:01\\n' "$2" >> "$state.tmp"
@@ -2572,6 +2582,72 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn("restart alt-gateway", read_log(self.supervisor_log))
         self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
 
+    def test_gateway_restart_without_a_profile_prefers_the_unprofiled_program(self):
+        (self.root / "supervisor.state").write_text(
+            "alt-gateway RUNNING pid 771, uptime 1:00:00\n"
+            "main-gateway RUNNING pid 772, uptime 1:00:00\n", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes -p alt gateway run --no-supervise";;\n'
+             '  *772*) echo "hermes gateway run --no-supervise";;\n'
+             'esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("restart main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("restart alt-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_ignores_a_non_hermes_gateway_program(self):
+        (self.root / "supervisor.state").write_text(
+            "api-gateway RUNNING pid 780, uptime 1:00:00\n", encoding="utf-8")
+        fake(self.bin_dir, "ps", 'case "$*" in *780*) echo "kong gateway run";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "gateway restart" not in read_log(self.root / "log") and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("gateway restart", read_log(self.root / "log"))
+        self.assertNotIn("restart api-gateway", read_log(self.supervisor_log))
+
+    def test_supervisord_counts_as_usable_while_another_program_is_down(self):
+        # A real `supervisorctl status` exits 3 when any program is not RUNNING
+        # (Orgo ships an EXITED hermes-db): detection must not rely on its
+        # exit code, only on the daemon answering.
+        (self.root / "supervisor.state").write_text(
+            "other-thing EXITED Oct 07 10:38 PM\n", encoding="utf-8")
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[program:alans-way-browser]", self.conf())
+
+    def test_the_drop_in_dir_comes_from_the_live_daemons_conf_include(self):
+        custom = self.root / "sup"
+        (custom / "conf.d").mkdir(parents=True)
+        (custom / "supervisord.conf").write_text(
+            "[include]\nfiles = conf.d/*.conf\n", encoding="utf-8")
+        fake(self.bin_dir, "pgrep",
+             'case "$*" in\n'
+             '  *supervisord*) echo "499 python3 /usr/bin/supervisord -n -c %s/supervisord.conf";;\n'
+             '  *) exit 1;;\n'
+             'esac\n' % custom)
+        env = self.env()
+        del env["ALANS_WAY_SUPERVISOR_CONF_DIR"]
+        result = run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[program:alans-way-browser]",
+                      (custom / "conf.d" / "alans-way.conf").read_text(encoding="utf-8"))
+
+    def test_an_unwritable_drop_in_dir_warns_instead_of_claiming_a_write(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the permission bits")
+        self.confd.chmod(0o555)
+        self.addCleanup(self.confd.chmod, 0o755)
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("could not write", result.stdout)
+        self.assertNotIn("wrote %s" % (self.confd / "alans-way.conf"), result.stdout)
+        self.assertNotIn("reread", read_log(self.supervisor_log))
+
 
 class CdpPortTests(unittest.TestCase):
     """The managed browser's CDP port is configurable, preserved on re-run,
@@ -2618,6 +2694,15 @@ class CdpPortTests(unittest.TestCase):
         self.run_setup()
         self.assertEqual(self.config_port(), 9224)
         # And a second re-run keeps it stable.
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+
+    def test_a_cdpurl_with_a_trailing_slash_is_still_preserved(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224/",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
         self.run_setup()
         self.assertEqual(self.config_port(), 9224)
 
@@ -2675,7 +2760,12 @@ class AgentSshProxyTests(unittest.TestCase):
                             '"BackendState":"Running","TUN":%s' % tun)
         fake(bin_dir, "tailscale", ts)
         self.config = self.root / ".ssh" / "config"
-        env = env_for(self.root, bin_dir, self.home)
+        sysnet = self.root / "sysnet"
+        sysnet.mkdir()
+        if tun == "true":
+            (sysnet / "tailscale0").touch()
+        env = env_for(self.root, bin_dir, self.home,
+                      ALANS_WAY_SYS_CLASS_NET=str(sysnet))
         return run("--mac-ssh", "me@" + self.HOST, "--skip-browser", "--skip-services",
                    "--non-interactive", "--hermes-home", str(self.home), env=env, check=False)
 
@@ -2748,8 +2838,10 @@ exit 0
             env = self.setup_env(directory, linux=True, provider_dir=True, backend="alans-way-computer")
             # A real at-spi bus running on the dev host would mask the warning.
             fake(Path(directory) / "bin", "pgrep", "exit 1\n")
+            env["ALANS_WAY_MISSING"] = "at-spi-bus-launcher xdotool scrot import maim"
             result = run("--verify", env=env, check=False)
             self.assertIn("at-spi", result.stdout)
+            self.assertIn("xdotool", result.stdout)
 
     def test_no_desktop_dep_warnings_without_the_provider(self):
         with tempfile.TemporaryDirectory() as directory:
