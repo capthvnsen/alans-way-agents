@@ -131,6 +131,9 @@ done
 # piping a file:// fetch into bash would orphan SCRIPT_DIR, and setup.sh
 # would then clone GitHub and fail a local --repo-ref pin.
 SETUP_SH="${ALAN_SETUP_SH:-}"
+# Host probes, overridable so tests behave the same on any CI runner.
+SYSTEMD_RUN_DIR="${ALAN_SYSTEMD_RUN_DIR:-/run/systemd/system}"
+TUN_DEVICE="${ALAN_TUN_DEVICE:-/dev/net/tun}"
 # A local checkout supplies the voice watcher too, so a run never mixes a
 # local setup.sh with scripts fetched from a branch that may not have them.
 if [ -z "$VOICE_WATCH_SRC" ] && [ -n "$SETUP_SH" ] \
@@ -377,7 +380,9 @@ step_alans_way() {
     # the browser services; on Orgo (supervisord) we run it with
     # --skip-services and install the same programs as supervisord confs.
     local needs_supervisor=1
-    have systemctl && needs_supervisor=0
+    # A systemctl binary is not systemd: Orgo images ship /usr/bin/systemctl
+    # with no systemd running. /run/systemd/system exists only when it is PID 1.
+    [ -d "$SYSTEMD_RUN_DIR" ] && needs_supervisor=0
     if [ -d "$HERMES_HOME/plugins/alans-way" ] \
         && { [ "$needs_supervisor" = 0 ] \
              || [ -f "$SUPERVISOR_CONF_DIR/alans-way.conf" ]; }; then
@@ -869,7 +874,7 @@ tailscaled_conf() {
     # server (ssh goes through the ProxyCommand added below), and the
     # tailscale CLI needs a fixed --socket to talk to it.
     local flags="--state=$TAILSCALE_STATE_DIR/tailscaled.state"
-    if [ ! -e /dev/net/tun ]; then
+    if [ ! -e "$TUN_DEVICE" ]; then
         flags="--tun=userspace-networking --socks5-server=localhost:1055 --socket=$TAILSCALE_SOCKET $flags"
     fi
     conf="$(first_conf_defining tailscaled)"

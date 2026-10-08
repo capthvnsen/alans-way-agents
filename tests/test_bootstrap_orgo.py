@@ -48,6 +48,9 @@ def fixture(directory: Path):
         "SUPERVISOR_CONF_DIR": str(svconf),
         "TAILSCALE_STATE_DIR": str(directory / "tailscale-state"),
         "TAILSCALE_SOCKET": str(directory / "tailscale-run" / "tailscaled.sock"),
+        # Orgo: no systemd running, no /dev/net/tun, whatever the CI host has.
+        "ALAN_SYSTEMD_RUN_DIR": str(directory / "no-systemd"),
+        "ALAN_TUN_DEVICE": str(directory / "no-tun"),
         "SSHD_BIN": str(directory / "ssh" / "sshd"),
         # System dirs only: the real hermes/curl/tailscale on this machine
         # must not leak into the script's view of the world.
