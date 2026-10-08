@@ -1712,10 +1712,17 @@ class IntegrationBase:
         self.home = home
         self.log = self.root / "log"
         bin_dir = tooling(self.root, self.log)
+        # `config` is a stateful key store: setup reads back what it wrote, so a
+        # `set` must be visible to a later `get` (an unset key returns the
+        # test-supplied default, same as before).
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\n'
              '  tools) [ "$2" = list ] && { echo \'%s\'; };;\n'
-             '  config) [ "$2" = get ] && { echo \'%s\'; };;\nesac\nexit 0\n' % (self.log, tools_list, config_get))
+             '  config) case "$2" in\n'
+             '      set) printf \'%%s=%%s\\n\' "$3" "$4" >> "%s.config";;\n'
+             '      get) _v="$(awk -v k="$3" \'index($0, k "=") == 1 { v = substr($0, length(k) + 2) }'
+             ' END { printf "%%s", v }\' "%s.config" 2>/dev/null)"; [ -n "$_v" ] && echo "$_v" || echo \'%s\';;\n'
+             '    esac;;\nesac\nexit 0\n' % (self.log, tools_list, self.log, self.log, config_get))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
         self.env = env_for(self.root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         return run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
@@ -2629,6 +2636,117 @@ class AgentSshProxyTests(unittest.TestCase):
             self.setup_run(tun=tun)
             self.assertNotIn("ProxyCommand", self.config.read_text(), tun)
 
+
+class ProviderVerifyTests(unittest.TestCase):
+    """--verify reports a provider that is installed but not selected, and the
+    Linux desktop pieces its VM-side path needs."""
+
+    def setup_env(self, directory, *, linux=False, provider_dir=False, backend="",
+                  tools="enabled proactivity"):
+        root = Path(directory)
+        home = root / "home"
+        home.mkdir()
+        if provider_dir:
+            (home / "plugins" / "alans-way-computer").mkdir(parents=True)
+        (home / "config.yaml").write_text(
+            "mcp_servers:\n"
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    tools:\n      exclude:\n        - workspace_computer_action\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir()
+        hermes = bin_dir / "hermes"
+        plugin_list = "alans-way\\n" + ("alans-way-computer\\n" if provider_dir else "")
+        hermes.write_text("""#!/bin/sh
+[ "$1" = -p ] && shift 2
+case "$1" in
+  --version) echo "hermes 0.21.5";;
+  plugins) [ "$2" = list ] && printf '%%b' '%s';;
+  tools) [ "$2" = list ] && echo "%s";;
+  config) [ "$2" = get ] && [ "$3" = computer_use.backend ] && echo "%s";;
+  proactivity) [ "$2" = status ] && echo '{"bound":true,"paused":false,"timezone_known":true}';;
+esac
+exit 0
+""" % (plugin_list, tools, backend), encoding="utf-8")
+        hermes.chmod(0o755)
+        if linux:
+            fake(bin_dir, "uname", "echo Linux\n")
+        return env_for(root, bin_dir, home)
+
+    def test_installed_but_unselected_provider_is_flagged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, provider_dir=True, backend="")
+            result = run("--verify", env=env, check=False)
+            self.assertIn("installed but", result.stdout)
+            self.assertIn("config set computer_use.backend alans-way-computer", result.stdout)
+
+    def test_a_selected_provider_runs_the_doctor_not_the_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, provider_dir=True, backend="alans-way-computer")
+            result = run("--verify", env=env, check=False)
+            self.assertNotIn("installed but", result.stdout)
+
+    def test_linux_desktop_deps_are_checked_when_the_provider_is_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, linux=True, provider_dir=True, backend="alans-way-computer")
+            result = run("--verify", env=env, check=False)
+            self.assertIn("at-spi", result.stdout)
+
+    def test_no_desktop_dep_warnings_without_the_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, linux=True, provider_dir=False, backend="")
+            result = run("--verify", env=env, check=False)
+            self.assertNotIn("at-spi", result.stdout)
+
+
+class VerifyExtrasTests(unittest.TestCase):
+    """--verify surfaces a missing proactivity timezone and a stale watcher."""
+
+    def setup_env(self, directory, proactivity_status):
+        root = Path(directory)
+        home = root / "home"
+        home.mkdir()
+        bin_dir = fake_hermes_bin(root, plugins="alans-way", tools="enabled proactivity",
+                                  proactivity_status=proactivity_status)
+        return env_for(root, bin_dir, home), home
+
+    def test_verify_warns_when_the_timezone_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":false}')
+            result = run("--verify", "--skip-browser", env=env, check=False)
+            self.assertIn("timezone", result.stdout)
+            self.assertRegex(result.stdout, r"warn .*timezone")
+
+    def test_no_timezone_warning_when_known_or_unreported(self):
+        for status in ('{"bound":true,"paused":false,"timezone_known":true}',
+                       '{"bound":true,"paused":false}'):
+            with tempfile.TemporaryDirectory() as directory:
+                env, _ = self.setup_env(directory, status)
+                result = run("--verify", "--skip-browser", env=env, check=False)
+                self.assertNotRegex(result.stdout, r"warn .*timezone", status)
+
+    def test_verify_warns_on_a_stale_watcher_state_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, home = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":true}')
+            state = Path(directory) / "mac-state.json"
+            state.write_text('{"state":"online"}', encoding="utf-8")
+            old = time.time() - 3600
+            os.utime(state, (old, old))
+            env["HERMES_MAC_STATE_FILE"] = str(state)
+            result = run("--verify", "--skip-browser", "--mac-ssh", "me@mac.tail1234.ts.net",
+                         env=env, check=False)
+            self.assertIn("stale", result.stdout)
+
+    def test_verify_is_quiet_about_a_fresh_watcher_state_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, home = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":true}')
+            state = Path(directory) / "mac-state.json"
+            state.write_text('{"state":"online"}', encoding="utf-8")
+            env["HERMES_MAC_STATE_FILE"] = str(state)
+            result = run("--verify", "--skip-browser", "--mac-ssh", "me@mac.tail1234.ts.net",
+                         env=env, check=False)
+            self.assertNotIn("stale", result.stdout)
 
 
 class GitAttributesTests(unittest.TestCase):

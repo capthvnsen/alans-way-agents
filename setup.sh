@@ -301,6 +301,9 @@ supervisor_conf_dir() {
   return 1
 }
 
+# GNU stat -c %Y, BSD stat -f %m.
+file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
 # True when nothing listens on 127.0.0.1:$1: the managed browser's debugging
 # socket must not collide with another browser or service.
 port_free() {
@@ -425,6 +428,29 @@ print("exposed")
 PY
 }
 
+# True when the computer-use provider is installed for the profile in scope.
+computer_provider_present() {
+  plugin_listed alans-way-computer && return 0
+  _home="$HERMES_HOME"
+  [ -z "$PROFILE" ] || _home="$HERMES_HOME/profiles/$PROFILE"
+  [ -d "$_home/plugins/alans-way-computer" ]
+}
+
+# The provider's fallback computer path on this host needs a few desktop
+# pieces on Linux; missing ones are warnings, not silent skips.
+check_linux_desktop_deps() {
+  [ "$GUEST_OS" = Linux ] || return 0
+  computer_provider_present || return 0
+  have xdotool \
+    || warn "xdotool missing: keyboard and pointer control on this host needs it (install: apt-get install xdotool)"
+  have scrot || have import || have maim \
+    || warn "no screenshot tool (scrot, maim or ImageMagick's import): desktop screenshots from this host need one (install: apt-get install scrot)"
+  have at-spi-bus-launcher || pgrep -f at-spi-bus >/dev/null 2>&1 \
+    || warn "AT-SPI accessibility bus not found: app and UI-element listing on this host needs it (install: apt-get install at-spi2-core)"
+  python3 -c 'import gi' >/dev/null 2>&1 \
+    || warn "python3-gi missing: the accessibility tree on this host needs PyGObject (install: apt-get install python3-gi)"
+}
+
 # The managed block's desktop-input exclusion is audited on every run: a block
 # that predates this setup or was hand-edited keeps the ungated tool registered
 # even when the provider is the selected backend. When the provider is
@@ -443,7 +469,11 @@ check_computer_provider() {
     exposed) warn "workspace_browser in $_cfg does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately";;
   esac
   have hermes || return 0
-  [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = alans-way-computer ] || return 0
+  if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
+    computer_provider_present \
+      && warn "alans-way-computer is installed but not the configured backend: computer use stays on Hermes' built-in path (run: hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend alans-way-computer)"
+    return 0
+  fi
   if hermes_p computer-use doctor >/dev/null 2>&1; then
     ok "computer-use provider passes hermes computer-use doctor"
   else
@@ -661,11 +691,15 @@ if [ "$VERIFY" = 1 ]; then
     PSTATE="$(hermes_p proactivity status 2>/dev/null | python3 -c 'import json,sys
 try: s=json.load(sys.stdin)
 except Exception: s={}
-print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on")' 2>/dev/null)"
+print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on",
+      "tz-missing" if s.get("timezone_known") is False else "tz-known")' 2>/dev/null)"
     case "$PSTATE" in
-      "bound on") ok "proactivity on for the bound primary route";;
-      "bound paused") warn "proactivity bound but paused: the bot never messages first (send /proactivity resume in the bound chat)";;
+      "bound on "*) ok "proactivity on for the bound primary route";;
+      "bound paused "*) warn "proactivity bound but paused: the bot never messages first (send /proactivity resume in the bound chat)";;
       *) warn "no primary route bound: proactivity is off (run: setup.sh --bind)";;
+    esac
+    case "$PSTATE" in
+      *tz-missing) warn "proactivity does not know your timezone: check-in hours may fire at the wrong time (set it: hermes proactivity set --timezone <IANA zone>, or re-run setup with --bind)";;
     esac
     [ "$(hermes_p config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
       && ok "gateway injection allowed for $PLUGIN_NAME" \
@@ -677,6 +711,22 @@ print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is T
   esac
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
+  # The availability watcher rewrites its state file every --interval seconds;
+  # a stale or missing one means the watcher is not running.
+  _watch_state="$(mac_state_path)"
+  if [ -n "$MAC_SSH" ] || [ -f "$_watch_state" ]; then
+    if [ -f "$_watch_state" ]; then
+      _age=$(( $(date +%s) - $(file_mtime "$_watch_state") ))
+      if [ "$_age" -le 300 ]; then
+        ok "host availability watcher state is fresh"
+      else
+        warn "host availability watcher state is stale (${_age}s old): the watcher service is not running or cannot reach the host"
+      fi
+    else
+      warn "no host availability watcher state at $_watch_state: the watcher service is not running (re-run setup so it is installed)"
+    fi
+  fi
+  check_linux_desktop_deps
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
   OTHER_PROFILES=""
   if [ "$ONLY_PROFILE" = 0 ]; then
@@ -1948,9 +1998,15 @@ workspace_for_profile() {
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     if [ "$COMPUTER_READY" = 1 ]; then
-      hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
-        && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
-        || warn "could not select the computer-use provider: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+      # Read back what was set: a stale write or an overruled value leaves the
+      # provider installed but unselected, which must be loud, not silent.
+      if hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
+          && [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = "$COMPUTER_PLUGIN" ]; then
+        COMPUTER_SELECTED=1
+        ok "computer use runs through $COMPUTER_PLUGIN"
+      else
+        warn "the computer-use provider is installed but could not be selected: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+      fi
       # The gated toolset is now the only desktop-input path: undo an older
       # setup's tools disable so the provider can serve it.
       for platform in telegram cron; do
