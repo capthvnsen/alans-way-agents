@@ -230,6 +230,43 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
 
+## Hosted / Orgo
+
+Two scripts in this repo serve the hosted tier (Hermes + alans-way on an
+[Orgo](https://orgo.ai) computer) and DIY users who want the same hands-off
+path on any fresh Linux box with supervisord.
+
+`bootstrap-orgo.sh` takes a fresh Orgo computer to a running Hermes plus
+alans-way plus Tailscale, then waits for pairing. It installs Hermes with
+the same installer Orgo's Hermes template uses, runs `setup.sh
+--non-interactive` (with `--skip-services` plus supervisord confs, since
+Orgo has no systemd), starts `tailscaled` under supervisord, captures the
+Tailscale login URL and either POSTs it to `--callback` or prints it.
+Every step checks real state before acting, so re-running after a failure
+resumes instead of duplicating work, and progress lands in
+`/var/lib/alan/state.json` for a poller. DIY run, no callback:
+
+```sh
+curl -fsSL openalan.com/bootstrap | bash
+```
+
+`migrate.sh` moves an existing `~/.hermes` — profiles, config, `.env`,
+`SOUL.md`, `auth.json`, `state.db`, `MEMORY.md`, `USER.md`, skills and
+plugins; not caches, logs, venvs or `profiles/.deleted` — to the new
+computer over ssh, rewriting absolute paths that pointed at the old home.
+An existing remote home is backed up first, and the old gateway stops only
+after the copy lands so both hosts never poll the same bot:
+
+```sh
+curl -fsSL openalan.com/migrate | bash -s -- --to <tailscale-host> --yes
+```
+
+Useful flags: `bootstrap-orgo.sh --dry-run` prints what it would do;
+`--wait-paired` polls until the tailnet reports the computer paired.
+`migrate.sh --dry-run` prints the plan; `--yes` confirms without prompting
+(required on the piped one-liner, since stdin is the script itself);
+`--hermes-home`/`--remote-home` cover non-standard layouts.
+
 ## The workspace_browser tools
 
 Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
@@ -302,6 +339,8 @@ scripts/              check_publication.py, the pre-publication secret and path 
 tests/                unittest suite — python3 -m unittest discover -s tests
 setup.sh              one-command bootstrap (install, wire, restart, bind, verify)
 setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)
+bootstrap-orgo.sh     fresh Orgo computer -> Hermes + alans-way + Tailscale
+migrate.sh            move an existing ~/.hermes to a new computer over ssh
 ```
 
 ## Roadmap

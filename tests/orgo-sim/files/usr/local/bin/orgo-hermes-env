@@ -1,0 +1,87 @@
+#!/bin/bash
+# Put the launching workspace's vault secrets where HERMES looks for them.
+#
+# WHY THIS EXISTS. The platform injects a template's declared secrets into
+# /root/.env (0600) at VM-create time and appends a source line to
+# /root/.bashrc — so an INTERACTIVE SHELL sees ANTHROPIC_API_KEY. Hermes
+# never reads /root/.env. It reads ~/.hermes/.env, and that file is the
+# whole environment for every entry point that is not a login shell: the
+# gateway under supervisord, `hermes` started from the desktop, a
+# scheduled run. So a workspace with the key set in its vault still
+# landed on a VM whose agent had no key and asked for one at setup.
+#
+# UPSERT, NOT REPLACE. /root/.env wins for the names IT defines — it is
+# the create-time authority, and re-running has to converge rather than
+# accumulate. Every other line already in ~/.hermes/.env is carried over,
+# which is what protects API_SERVER_KEY: that one is generated ON this
+# guest, never appears in /root/.env, and the gateway does not bind
+# without it (Hermes v0.19 enables the api_server platform only when the
+# key is in the process env).
+#
+# Idempotent, and called from three places on purpose — on_resume (the
+# golden-restore launch path, which bypasses orgo-init entirely), the
+# gateway launcher, and on_every_boot (cold boot) — so no single missed
+# hook leaves the agent keyless.
+set -u
+SRC=/root/.env
+DIR=/root/.hermes
+DST=$DIR/.env
+
+[ -r "$SRC" ] || exit 0
+
+# The VMM writes one `export KEY='value'` per secret, so the NAMES are
+# greppable; the VALUES are recovered by letting a shell unquote them.
+names=$(sed -n "s/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p" "$SRC" | sort -u)
+[ -n "$names" ] || exit 0
+
+umask 077
+install -d -m 700 "$DIR" || exit 0
+tmp=$DIR/.env.orgo.$$
+trap 'rm -f "$tmp"' EXIT
+
+# 1. Carry over every line the platform is NOT redefining this boot.
+#    `names` goes to awk SPACE-separated: `awk -v x=...` rejects a value
+#    containing a newline outright ("newline in string"), and the failure
+#    is silent here — the script would fall through leaving the old file,
+#    i.e. exactly the bug this whole script exists to fix.
+if [ -s "$DST" ]; then
+  awk -v names="$(printf '%s\n' "$names" | tr '\n' ' ')" '
+    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) drop[a[i]] = 1 }
+    # Our own markers are rewritten below — dropping them here is what
+    # keeps the file from growing a line per boot.
+    /^# orgo-hermes-env: / { next }
+    { line = $0
+      sub(/^[ \t]*export[ \t]+/, "", line)
+      if (match(line, /^[A-Za-z_][A-Za-z0-9_]*=/) && substr(line, 1, RLENGTH - 1) in drop) next
+      print }
+  ' "$DST" > "$tmp" || exit 0
+else
+  : > "$tmp"
+fi
+
+# 2. Append the injected values in the bare KEY=value form Hermes' loader
+#    and every existing probe (`grep '^API_SERVER_KEY='`) expect, single-
+#    quoting a value that needs it so the file stays sourceable by the
+#    launcher as well — both readers agree on that form.
+#
+#    A value containing a single quote is SKIPPED, loudly. It has no
+#    encoding both readers agree on: bare, it leaves the file with an
+#    unterminated quote, and `. ~/.hermes/.env` then aborts and silently
+#    blanks EVERY variable after it — one odd secret would cost the
+#    gateway its API_SERVER_KEY. Losing one variable beats that.
+(
+  set -a
+  . "$SRC"
+  set +a
+  for k in $names; do
+    v=${!k-}
+    case $v in
+      *"'"*)                     printf '# orgo-hermes-env: skipped %s — value contains a single quote\n' "$k" ;;
+      *[!A-Za-z0-9_./:@%+,=-]*)  printf "%s='%s'\n" "$k" "$v" ;;
+      *)                         printf '%s=%s\n'   "$k" "$v" ;;
+    esac
+  done
+) >> "$tmp" || exit 0
+
+mv -f "$tmp" "$DST" && chmod 600 "$DST"
+trap - EXIT

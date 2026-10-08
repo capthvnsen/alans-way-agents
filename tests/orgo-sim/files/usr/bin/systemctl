@@ -1,0 +1,6 @@
+#!/bin/sh
+# Real Orgo images ship /usr/bin/systemctl with no systemd running; this stub
+# answers the way the real binary does there.
+echo "System has not been booted with systemd as init system (PID 1). Can't operate." >&2
+echo "Failed to connect to bus: Host is down" >&2
+exit 1
