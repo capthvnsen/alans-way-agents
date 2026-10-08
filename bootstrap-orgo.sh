@@ -45,6 +45,10 @@ usage: bootstrap-orgo.sh [--callback URL] [--secret S] [--id ID]
   --dry-run        print the commands instead of running them; writes nothing
   --wait-paired    poll `tailscale status` until BackendState=Running, then
                    write state {ready, paired}
+
+env: ALAN_SETUP_SH  run this local setup.sh instead of fetching
+     $SETUP_URL_BASE/<ref>/setup.sh — the container sim points it at a
+     mounted checkout of this repo so nothing comes from GitHub.
 EOF
 }
 
@@ -61,6 +65,12 @@ while [ $# -gt 0 ]; do
         *) echo "bootstrap-orgo: unknown flag: $1" >&2; usage >&2; exit 2;;
     esac
 done
+
+# ALAN_SETUP_SH runs a local setup.sh instead of fetching one with curl. The
+# sim uses this to install alans-way from a mounted checkout of this repo:
+# piping a file:// fetch into bash would orphan SCRIPT_DIR, and setup.sh
+# would then clone GitHub and fail a local --repo-ref pin.
+SETUP_SH="${ALAN_SETUP_SH:-}"
 
 log() {
     local line="[bootstrap] $*"
@@ -302,7 +312,10 @@ step_alans_way() {
     fi
     setup_args+=(--repo-ref "$REPO_REF")
     if [ "$DRY_RUN" = 1 ]; then
-        log "would run: curl -fsSL $SETUP_URL_BASE/$REPO_REF/setup.sh | bash -s -- ${setup_args[*]}"
+        log "would run: ${SETUP_SH:+bash $SETUP_SH}${SETUP_SH:-curl -fsSL $SETUP_URL_BASE/$REPO_REF/setup.sh | bash -s --} ${setup_args[*]}"
+    elif [ -n "$SETUP_SH" ]; then
+        printf '+ %s\n' "bash $SETUP_SH ${setup_args[*]}" >>"$LOG_FILE"
+        bash "$SETUP_SH" "${setup_args[@]}" >>"$LOG_FILE" 2>&1
     else
         printf '+ %s\n' "curl -fsSL $SETUP_URL_BASE/$REPO_REF/setup.sh | bash -s -- ${setup_args[*]}" >>"$LOG_FILE"
         curl -fsSL "$SETUP_URL_BASE/$REPO_REF/setup.sh" 2>>"$LOG_FILE" \
