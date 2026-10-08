@@ -12,7 +12,8 @@
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
-#        --dev-plugin-install --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
+#        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --timezone IANA
+#        --restart --non-interactive --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
@@ -23,6 +24,7 @@ BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PRO
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0 DEV_PLUGIN=0
+CDP_PORT_FLAG=""
 MIN_HERMES="0.21.5"
 
 while [ $# -gt 0 ]; do
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
     --desktop-dir) DESKTOP_DIR="$2"; shift 2;;
     --repo-ref) REPO_REF="$2"; shift 2;;
     --desktop-ref) DESKTOP_REF="$2"; shift 2;;
+    --cdp-port) CDP_PORT_FLAG="$2"; shift 2;;
     --skip-browser) SKIP_BROWSER=1; shift;;
     --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
@@ -74,6 +77,9 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --desktop-dir D  where the alans-way app checkout lives (cloned if missing)
   --repo-ref SHA   pin this repo's clone/update to a reviewed commit or tag
   --desktop-ref SHA  pin the alans-way desktop repo clone/update the same way
+  --cdp-port PORT  the managed browser's CDP port (default: keep the configured
+                   one, else the first free port from 9223 up; ALANS_WAY_CDP_PORT
+                   sets it too)
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
                    for Telegram and cron once the workspace browser is configured)
@@ -94,6 +100,12 @@ EOF
 done
 
 case "$PROACTIVE" in ""|yes|no) ;; *) echo "setup: --proactive must be yes or no" >&2; exit 2;; esac
+for _port in "$CDP_PORT_FLAG" "${ALANS_WAY_CDP_PORT:-}"; do
+  [ -z "$_port" ] && continue
+  case "$_port" in *[!0-9]*|'') _port=bad;; esac
+  [ "$_port" != bad ] && [ "$_port" -ge 1 ] 2>/dev/null && [ "$_port" -le 65535 ] \
+    || { echo "setup: --cdp-port must be a port number 1-65535" >&2; exit 2; }
+done
 
 # The guest is the machine setup.sh runs on (Hermes' home); the host is the
 # user's computer reached over --mac-ssh. Git Bash, MSYS2 and Cygwin are a
@@ -273,6 +285,35 @@ supervisor_conf_dir() {
   done
   [ "$(id -u)" = 0 ] && { printf '%s' /etc/supervisor/conf.d; return 0; }
   return 1
+}
+
+# True when nothing listens on 127.0.0.1:$1: the managed browser's debugging
+# socket must not collide with another browser or service.
+port_free() {
+  python3 - "$1" <<'PY'
+import socket, sys
+sock = socket.socket()
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except (OSError, ValueError):
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+}
+
+# The cdpUrl port an existing config.json already uses, else empty.
+configured_cdp_port() {
+  python3 - "$1" 2>/dev/null <<'PY'
+import json, re, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+m = re.search(r":(\d+)$", str(cfg.get("cdpUrl") or ""))
+if m:
+    print(m.group(1))
+PY
 }
 
 # Where the availability watcher's state file lives on this guest, matching
@@ -1461,15 +1502,37 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     "--ozone-platform=x11",
 '
   [ "$GUEST_OS" != Windows ] || LINUX_FLAGS=""
+  # The CDP port is settled once and then kept: an explicit --cdp-port or
+  # ALANS_WAY_CDP_PORT wins, else a port already configured in config.json is
+  # preserved on re-run, else the first free loopback port from 9223 up (the
+  # default may be owned by another browser on a shared host).
+  CDP_PORT="${CDP_PORT_FLAG:-${ALANS_WAY_CDP_PORT:-}}"
+  if [ -z "$CDP_PORT" ]; then
+    CDP_PORT="$(configured_cdp_port "$DATA_DIR/config.json")"
+  fi
+  if [ -z "$CDP_PORT" ]; then
+    _probe=9223 _tries=0
+    while ! port_free "$_probe"; do
+      _probe=$((_probe + 1)); _tries=$((_tries + 1))
+      [ "$_tries" -le 200 ] || { _probe=""; break; }
+    done
+    if [ -n "$_probe" ]; then
+      [ "$_probe" = 9223 ] || warn "CDP port 9223 is already in use by another process: using $_probe instead"
+      CDP_PORT="$_probe"
+    else
+      CDP_PORT=9223
+      warn "no free CDP port within 200 of 9223: pass --cdp-port PORT"
+    fi
+  fi
   CFG_EXISTED=0; [ ! -f "$DATA_DIR/config.json" ] || CFG_EXISTED=1
   write_if_changed "$DATA_DIR/config.json" backup <<EOF
 {
   "port": 9465,
-  "cdpUrl": "http://127.0.0.1:9223",
+  "cdpUrl": "http://127.0.0.1:$CDP_PORT",
   "browserCommand": "$(wpath "$CHROMIUM")",
   "browserArgs": [
 $NO_SANDBOX    "--user-data-dir=$(wpath "$PROFILE_DIR")",
-    "--remote-debugging-port=9223",
+    "--remote-debugging-port=$CDP_PORT",
     "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--start-maximized",

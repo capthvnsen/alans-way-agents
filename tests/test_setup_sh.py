@@ -2512,6 +2512,88 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn(ip, result.stdout)
         self.assertNotIn("apt-get install xvfb", result.stdout)
 
+class CdpPortTests(unittest.TestCase):
+    """The managed browser's CDP port is configurable, preserved on re-run,
+    and moves off the default when another process already owns it."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.data = self.root / "data"
+        self.app = desktop_tree(self.root / "app")
+        self.bin_dir = tooling(self.root, self.root / "log")
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+
+    def run_setup(self, *flags, **env):
+        return run("--skip-plugin", "--skip-services", "--desktop-dir", str(self.app),
+                   "--non-interactive", "--hermes-home", str(self.home), *flags,
+                   env=env_for(self.root, self.bin_dir, self.home,
+                               HERMES_VPS_BROWSER_DATA=str(self.data), **env),
+                   check=False)
+
+    def config(self):
+        return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
+
+    def config_port(self):
+        config = self.config()
+        port = int(config["cdpUrl"].rsplit(":", 1)[1])
+        self.assertIn("--remote-debugging-port=%d" % port, config["browserArgs"])
+        return port
+
+    def test_the_default_port_is_9223(self):
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9223)
+
+    def test_an_existing_port_is_preserved_on_rerun(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+        # And a second re-run keeps it stable.
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+
+    def test_cdp_port_flag_overrides_an_existing_config(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
+        self.run_setup("--cdp-port", "9330")
+        self.assertEqual(self.config_port(), 9330)
+
+    def test_cdp_port_env_overrides_the_default(self):
+        self.run_setup(ALANS_WAY_CDP_PORT="9331")
+        self.assertEqual(self.config_port(), 9331)
+
+    def test_a_busy_default_port_moves_to_the_next_free_one(self):
+        import socket
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", 9223))
+        except OSError:
+            self.skipTest("port 9223 is already bound on this machine")
+        sock.listen()
+        try:
+            result = self.run_setup()
+        finally:
+            sock.close()
+        self.assertNotEqual(self.config_port(), 9223)
+        self.assertIn("9223 is already in use", result.stdout)
+
+    def test_an_invalid_port_is_rejected(self):
+        result = self.run_setup("--cdp-port", "abc")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--cdp-port", result.stderr)
+
+
 
 class GitAttributesTests(unittest.TestCase):
     def test_scripts_setup_runs_are_lf_in_every_checkout(self):
