@@ -191,24 +191,41 @@ rm -rf "$staging"
 mkdir -p "$staging"
 tar -xzf "$archive" -C "$staging"
 
-esc() { printf '%s' "$1" | sed -e 's/[\&|]/\\&/g'; }
-o_esc="$(esc "$ohermes")"
-r_esc="$(esc "$rhermes")"
+# Literal string replacement, not sed: '.' and '[]' in paths are live regex
+# metacharacters (ahermes-backup got mangled, x[1] never matched). The home
+# prefix is only assumed when BOTH hermes dirs are the conventional
+# ~/.hermes, and it is replaced first — every old hermes path starts with
+# the old home, so it lands directly on the new home and the hermes pass
+# below never re-matches inside replaced text (no /home/u -> /home/u22).
 o_home="" r_home=""
-if [ "$(basename "$ohermes")" = ".hermes" ]; then
+if [ "$(basename "$ohermes")" = ".hermes" ] && [ "$(basename "$rhermes")" = ".hermes" ]; then
     o_home="$(dirname "$ohermes")"
     r_home="$(dirname "$rhermes")"
+    [ "$o_home" = "/" ] && o_home=""
 fi
-oh_esc="$(esc "$o_home")"
-rh_esc="$(esc "$r_home")"
 
-find "$staging" -name '*.yaml' -print0 |
+find "$staging" \( -name '*.yaml' -o -name '*.yml' \) -print0 |
 while IFS= read -r -d '' f; do
-    sed -i.bak -e "s|$o_esc|$r_esc|g" "$f"
-    if [ -n "$o_home" ] && [ "$o_home" != "/" ]; then
-        sed -i.bak -e "s|$oh_esc|$rh_esc|g" "$f"
-    fi
-    rm -f "$f.bak"
+    python3 - "$f" "$ohermes" "$rhermes" "$o_home" "$r_home" <<'PY'
+import sys
+
+path, ohermes, rhermes, o_home, r_home = sys.argv[1:6]
+with open(path, encoding="utf-8") as fh:
+    text = fh.read()
+if o_home and ohermes not in r_home:
+    text = text.replace(o_home, r_home)
+text = text.replace(ohermes, rhermes)
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(text)
+PY
+done
+
+# Non-yaml files (.env, auth.json, plugin configs) are not rewritten —
+# warn about the ones that still point at the old home instead.
+find "$staging" -type f ! -name '*.yaml' ! -name '*.yml' \
+    -exec grep -lIF "$ohermes" {} + |
+while IFS= read -r f; do
+    printf 'migrate: WARNING: %s still references %s; fix it by hand\n' "$f" "$ohermes" >&2
 done
 
 if [ -e "$rhermes" ]; then

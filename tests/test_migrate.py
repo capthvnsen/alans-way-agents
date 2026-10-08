@@ -219,6 +219,59 @@ class MigrateTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("'-'", result.stderr)
 
+    def test_dot_in_hermes_does_not_rewrite_unrelated_paths(self):
+        """'.' in '.hermes' used to be a live regex metachar: ahermes-backup
+        got mangled into .hermes-backup. Literal replace leaves it alone."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            cfg = hermes / "config.yaml"
+            cfg.write_text(cfg.read_text(encoding="utf-8") +
+                           f"backup_dir: {home}/ahermes-backup\n", encoding="utf-8")
+            run("--to", "fakehost", "--yes", env=env)
+            rconfig = read(remote_home / ".hermes" / "config.yaml")
+            self.assertIn(f"backup_dir: {remote_home}/ahermes-backup", rconfig)
+            self.assertNotIn(".hermes-backup", rconfig)
+
+    def test_brackets_in_hermes_home_still_rewrite(self):
+        """[1] used to parse as a character class, so the literal old path
+        never matched and the migrated config kept pointing at the old home."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(
+                directory, hermes_name="x[1]")
+            run("--to", "fakehost", "--yes", env=env)
+            remote = remote_home / ".hermes"
+            self.assertIn(f"data_dir: {remote}/data", read(remote / "config.yaml"))
+
+    def test_remote_home_sharing_the_old_prefix_does_not_double_rewrite(self):
+        """Old home /x/srchome -> remote home /x/srchome2: a second pass over
+        already-rewritten text must not produce /x/srchome22."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_REMOTE_HOME"] = str(directory / "srchome2")
+            run("--to", "fakehost", "--yes", env=env)
+            remote = directory / "srchome2" / ".hermes"
+            rconfig = read(remote / "config.yaml")
+            self.assertIn(f"data_dir: {remote}/data", rconfig)
+            self.assertIn(f"helper: {directory}/srchome2/bin/tool", rconfig)
+            self.assertNotIn("srchome22", rconfig)
+
+    def test_yml_files_rewrite_and_other_stragglers_warn(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            (hermes / "extra.yml").write_text(
+                f"path: {hermes}/data\n", encoding="utf-8")
+            (hermes / "notes.txt").write_text(
+                f"see {hermes}/data for details\n", encoding="utf-8")
+            result = run("--to", "fakehost", "--yes", env=env)
+            remote = remote_home / ".hermes"
+            self.assertIn(f"path: {remote}/data", read(remote / "extra.yml"))
+            self.assertIn("still references", result.stderr)
+            self.assertIn("notes.txt", result.stderr)
+
     def test_remote_failure_leaves_the_old_gateway_running(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
