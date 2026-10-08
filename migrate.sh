@@ -281,6 +281,19 @@ if [ -e "$rhermes" ]; then
 fi
 mv "$staging" "$rhermes"
 touch "$rhermes/.migrated"
+
+# The hermes launcher execs $HERMES_HOME/tools/<runtime>/bin/python3 — a path
+# baked into this machine's install. A home packed on another arch carries the
+# source's foreign tool binaries, so the runtimes the launcher needs can be
+# absent from the swapped-in home. Merge this machine's previous tools back
+# in; migrated entries win on a name clash.
+if [ -n "$backup" ] && [ -d "$backup/tools" ]; then
+    mkdir -p "$rhermes/tools"
+    for t in "$backup"/tools/* "$backup"/tools/.[!.]*; do
+        [ -e "$t" ] || continue
+        [ -e "$rhermes/tools/$(basename "$t")" ] || cp -a "$t" "$rhermes/tools/"
+    done
+fi
 rm -f "$archive"
 REMOTE
 
