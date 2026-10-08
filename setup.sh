@@ -1629,6 +1629,9 @@ if [ "$SKIP_BROWSER" = 0 ]; then
       warn "no free CDP port within 200 of 9223: pass --cdp-port PORT"
     fi
   fi
+  if [ -n "${CDP_PORT_FLAG:-${ALANS_WAY_CDP_PORT:-}}" ] && ! port_free "$CDP_PORT"; then
+    warn "CDP port $CDP_PORT is already in use: if that listener is not the managed browser itself, choose a different port"
+  fi
   CFG_EXISTED=0; [ ! -f "$DATA_DIR/config.json" ] || CFG_EXISTED=1
   write_if_changed "$DATA_DIR/config.json" backup <<EOF
 {
