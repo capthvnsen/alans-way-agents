@@ -165,6 +165,22 @@ class ApiRoutesTests(unittest.TestCase):
             routes = [r.resource.canonical for r in app.router.routes()]
             self.assertIn("/api/voice/turn", routes)
 
+    def test_a_second_registration_noops_instead_of_raising(self):
+        """Another plugin may serve the same path — aiohttp would raise on a
+        duplicate add_post and take api_server down with it."""
+        with tempfile.TemporaryDirectory() as d:
+            calls = voice(d)
+            try:
+                from aiohttp import web
+            except ImportError:
+                self.skipTest("aiohttp not installed in the test env")
+            app = web.Application()
+            adapter = SimpleNamespace(_check_auth=lambda req: None)
+            calls.api_routes(native=app, adapter=adapter)
+            voice(d).api_routes(native=app, adapter=adapter)
+            routes = [r.resource.canonical for r in app.router.routes()]
+            self.assertEqual(routes.count("/api/voice/turn"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

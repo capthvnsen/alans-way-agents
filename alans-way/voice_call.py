@@ -70,6 +70,11 @@ class VoiceCall:
             from aiohttp import web
         except Exception:
             return
+        # Another plugin may already serve the same route — whichever loads
+        # first wins; a duplicate add_post would raise and kill api_server.
+        for resource in native.router.resources():
+            if getattr(resource, "canonical", None) == "/api/voice/turn":
+                return
 
         async def turn(request):
             denied = adapter._check_auth(request)
