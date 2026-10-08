@@ -2611,7 +2611,7 @@ class SupervisordServiceTests(unittest.TestCase):
 
     def test_supervisord_counts_as_usable_while_another_program_is_down(self):
         # A real `supervisorctl status` exits 3 when any program is not RUNNING
-        # (Orgo ships an EXITED hermes-db): detection must not rely on its
+        # (a host with an EXITED one-shot program): detection must not rely on its
         # exit code, only on the daemon answering.
         (self.root / "supervisor.state").write_text(
             "other-thing EXITED Oct 07 10:38 PM\n", encoding="utf-8")
