@@ -2519,6 +2519,19 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn(ip, result.stdout)
         self.assertNotIn("apt-get install xvfb", result.stdout)
 
+    def test_gateway_restart_uses_the_supervisor_program_that_owns_it(self):
+        (self.root / "supervisor.state").write_text(
+            "custom-gateway RUNNING pid 777, uptime 1:00:00\n", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *777*) echo "/opt/venv/bin/python /usr/lib/hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart custom-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("restart custom-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("gateway restart", read_log(self.root / "log"))
+
+
 class CdpPortTests(unittest.TestCase):
     """The managed browser's CDP port is configurable, preserved on re-run,
     and moves off the default when another process already owns it."""

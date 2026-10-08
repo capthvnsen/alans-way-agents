@@ -301,6 +301,26 @@ supervisor_conf_dir() {
   return 1
 }
 
+# The supervisor program whose command line (or a child's, for wrapper
+# scripts) runs `hermes gateway run`. The name is discovered, never assumed.
+supervisor_gateway_program() {
+  [ "$GUEST_OS" = Linux ] || return 1
+  have supervisorctl && have ps || return 1
+  for _prog in $(supervisorctl status 2>/dev/null | awk '$2 == "RUNNING" {print $1}'); do
+    _pid="$(supervisorctl pid "$_prog" 2>/dev/null || true)"
+    case "$_pid" in ''|*[!0-9]*|0) continue;; esac
+    case "$(ps -o args= -p "$_pid" 2>/dev/null || true)" in
+      *"gateway run"*) echo "$_prog"; return 0;;
+    esac
+    for _kid in $(pgrep -P "$_pid" 2>/dev/null); do
+      case "$(ps -o args= -p "$_kid" 2>/dev/null)" in
+        *"gateway run"*) echo "$_prog"; return 0;;
+      esac
+    done
+  done
+  return 1
+}
+
 # GNU stat -c %Y, BSD stat -f %m.
 file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
@@ -2327,9 +2347,16 @@ schedule_gateway_restart() {
       || warn "could not schedule the restart: run hermes${PROFILE:+ -p $PROFILE} gateway restart yourself"
     return 0
   fi
-  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first.
+  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first,
+  # $5 supervisor program name when the gateway is one of supervisord's
+  # (restarting that program is the safe path: `hermes gateway restart`
+  # races with supervisord's own respawn of the same process).
+  GW_SUP="$(supervisor_gateway_program || true)"
   _restart='sleep "$4"
-    if "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
+    if [ -n "$5" ]; then
+      supervisorctl restart "$5" && echo "restarted: supervisorctl restart $5" \
+        || echo "supervisorctl restart $5 failed: restart that program by hand"
+    elif "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
     elif systemctl is-active --quiet "$3"; then systemctl restart "$3" && echo "restarted: systemctl restart $3"
     elif systemctl --user is-active --quiet "$3"; then systemctl --user restart "$3" && echo "restarted: systemctl --user restart $3"
     elif pgrep -f "gateway run" >/dev/null 2>&1; then echo "a supervisor-managed gateway is running: restart it through its owner (PM/launchd), not here"
@@ -2342,7 +2369,7 @@ schedule_gateway_restart() {
     # shellcheck disable=SC2086
     if systemd-run $_scope --collect --quiet --on-active="${GW_DELAY}s" \
         --setenv=HERMES_HOME="$HERMES_HOME" --setenv=HOME="$HOME" \
-        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 >"$GW_LOG" 2>&1; then
+        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" >"$GW_LOG" 2>&1; then
       return 0
     fi
   fi
@@ -2352,7 +2379,7 @@ schedule_gateway_restart() {
   # the gap in which the caller could still kill the restarter along with itself.
   GW_READY="${TMPDIR:-/tmp}/alans-way-restart-ready.$$"
   python3 -c 'import os, sys; os.setsid(); open(sys.argv[1], "w").close(); os.execvp(sys.argv[2], sys.argv[2:])' \
-    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" </dev/null >"$GW_LOG" 2>&1 &
+    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" </dev/null >"$GW_LOG" 2>&1 &
   _tries=0
   while [ ! -e "$GW_READY" ] && [ "$_tries" -lt 50 ]; do sleep 0.1; _tries=$((_tries + 1)); done
   rm -f "$GW_READY"
