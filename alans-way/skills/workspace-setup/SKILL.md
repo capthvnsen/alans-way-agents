@@ -116,6 +116,14 @@ different bot's route silently.
    launchd agents, and the user grants Accessibility and Screen Recording
    once in the VM's System Settings (cannot be scripted; TCC is
    SIP-protected).
+   When a VNC server and a websockify/noVNC bridge already run on this
+   host, the app's VM preview needs wiring, not packages: find the
+   websockify listener (`ss -ltn`, or the supervisor's program list) and
+   report `http://<this host's tailnet IP>:<its port>/vnc.html`, plus where
+   the VNC password lives (the VNC server's `-PasswordFile` argument, or the
+   startup config that writes it). The human pastes the URL and password
+   into the app's Settings (Remote desktop connection); tell them where the
+   password is, do not paste its value into chat.
 6. **The gateway restart ends your own session, so it comes last.** You are
    most likely running inside this gateway. `setup.sh --restart` installs,
    binds, sets the timezone and verifies first, prints its summary, and only

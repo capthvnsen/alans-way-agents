@@ -74,6 +74,14 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_display_stack_is_guided_not_auto(self):
         self.assertIn("never auto-installed", self.normalized)
 
+    def test_vm_preview_wiring_is_in_the_order_of_work(self):
+        # A VM that already serves noVNC over websockify only needs the app's
+        # Settings filled in; the skill must surface the URL shape and where
+        # the VNC password lives instead of telling the user to install one.
+        self.assertIn("websockify", self.normalized)
+        self.assertIn("/vnc.html", self.text)
+        self.assertIn("Remote desktop connection", self.text)
+
     def test_primary_binding_not_silent(self):
         self.assertIn("do not bind a different bot's route silently", self.normalized)
         self.assertIn("proactivity bind --session-key", self.normalized)
