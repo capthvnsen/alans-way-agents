@@ -2535,6 +2535,14 @@ class SupervisordServiceTests(unittest.TestCase):
         self.run_setup(ALANS_WAY_X11_DIR=str(sockdir))
         self.assertIn('DISPLAY=":98"', self.conf())
 
+    def test_a_skip_services_rerun_keeps_the_watcher_state_file_in_the_router_env(self):
+        args = ("--mac-ssh", "me@mac.tail1234.ts.net", "--bot-id", "111222333")
+        self.run_setup(*args)
+        self.run_setup(*args, "--skip-services")
+        config = (self.home / "config.yaml").read_text()
+        state = str(self.root / ".local/share/hermes-alans-way/mac-state.json")
+        self.assertIn('HERMES_MAC_STATE_FILE: "%s"' % state, config)
+
     def test_gateway_restart_uses_the_supervisor_program_that_owns_it(self):
         (self.root / "supervisor.state").write_text(
             "custom-gateway RUNNING pid 777, uptime 1:00:00\n", encoding="utf-8")

@@ -593,6 +593,15 @@ elif [ "$(id -u)" = 0 ] && [ -d "$HERMES_HOME" ]; then
   esac
 fi
 
+# The availability watcher and the serving router must agree on the state file:
+# carry the resolved path into the managed block env on every run so a non-root
+# install does not strand the router on the /var/lib default while the watcher
+# writes a user path. Windows resolves its own default and a cygpath value
+# would not parse for the native router, so it is skipped.
+if [ -n "$MAC_SSH" ] && [ "$GUEST_OS" != Windows ]; then
+  ALANS_WAY_MAC_STATE_FILE="$(mac_state_path)"; export ALANS_WAY_MAC_STATE_FILE
+fi
+
 # Resolve the plugin repo: beside this script when run from a clone, else clone.
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
 if [ -f "$SCRIPT_DIR/setup-workspace.sh" ] && [ -d "$SCRIPT_DIR/alans-way" ]; then
@@ -1701,9 +1710,9 @@ EOF
       if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then
         chown "$BROWSER_USER" "$(dirname "$_watch_state")" 2>/dev/null || true
       fi
-      # The serving router resolves the same path: the managed block below
-      # puts HERMES_MAC_STATE_FILE into its env so both processes agree.
-      export ALANS_WAY_MAC_STATE_FILE="$_watch_state"
+      # The serving router resolves the same path: the managed block carries
+      # HERMES_MAC_STATE_FILE (exported near the top of this script on every
+      # run) so both processes agree.
       WATCH_SECTION="$(cat <<EOFW
 
 [program:alans-way-mac-watch]
