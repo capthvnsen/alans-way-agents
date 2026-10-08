@@ -222,6 +222,20 @@ systemd_live() {
   return 1
 }
 
+# Userspace-networking Tailscale (common on cloud VMs that can't load kernel
+# modules) has no tailscale0 interface, so the ssh client cannot route to
+# tailnet addresses: those hosts need `tailscale nc` as a ProxyCommand. Kernel
+# Tailscale sets TUN=true in `tailscale status --json` and has the interface.
+tailscale_userspace() {
+  [ "$GUEST_OS" = Linux ] || return 1
+  have "$TAILSCALE" || return 1
+  [ ! -e /sys/class/net/tailscale0 ] || return 1
+  "$TAILSCALE" status --json 2>/dev/null | python3 -c 'import json, sys
+try: s = json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if s.get("BackendState") == "Running" and s.get("TUN") is False else 1)'
+}
+
 # The display the browser services should export. A live desktop wins: a
 # listening X socket first, then the argv of a running X/VNC server. When
 # nothing is up yet, take the conventional fallback (:99) so the units and the
@@ -819,11 +833,16 @@ write_agent_ssh_config() {
   fi
   mkdir -p "$BROWSER_HOME/.ssh" && chmod 700 "$BROWSER_HOME/.ssh"
   _cfg="$BROWSER_HOME/.ssh/config"
-  _state="$(python3 - "$_cfg" "$MAC_HOST" <<'PY'
+  # Userspace-networking Tailscale has no tailscale0 interface, so ssh cannot
+  # reach tailnet addresses directly: it must tunnel through `tailscale nc`.
+  _proxy=""
+  tailscale_userspace && _proxy="  ProxyCommand $TAILSCALE nc %h %p\n"
+  _state="$(ALANS_WAY_SSH_PROXY="$_proxy" python3 - "$_cfg" "$MAC_HOST" <<'PY'
 import os, sys
 path, host = sys.argv[1], sys.argv[2]
+proxy = os.environ.get("ALANS_WAY_SSH_PROXY", "")
 begin, end = "# >>> alans-way >>>\n", "# <<< alans-way <<<\n"
-block = (begin + f"Host {host}\n  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
+block = (begin + f"Host {host}\n" + proxy + "  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
          "  ServerAliveInterval 15\n  ServerAliveCountMax 3\n" + end)
 try:
     text = open(path, encoding="utf-8", newline="").read()

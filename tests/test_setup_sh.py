@@ -2594,6 +2594,42 @@ class CdpPortTests(unittest.TestCase):
         self.assertIn("--cdp-port", result.stderr)
 
 
+class AgentSshProxyTests(unittest.TestCase):
+    """On a userspace-networking Tailscale host (no tailscale0 interface) the
+    managed ssh block reaches tailnet addresses through `tailscale nc`."""
+
+    HOST = "mac.tail1234.ts.net"
+
+    def setup_run(self, tun):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        bin_dir = tooling(self.root, self.root / "log")
+        fake(bin_dir, "uname", "echo Linux\n")
+        ts = TAILSCALE_UP
+        if tun is not None:
+            ts = ts.replace('"BackendState":"Running"',
+                            '"BackendState":"Running","TUN":%s' % tun)
+        fake(bin_dir, "tailscale", ts)
+        self.config = self.root / ".ssh" / "config"
+        env = env_for(self.root, bin_dir, self.home)
+        return run("--mac-ssh", "me@" + self.HOST, "--skip-browser", "--skip-services",
+                   "--non-interactive", "--hermes-home", str(self.home), env=env, check=False)
+
+    def test_userspace_tailscale_gets_a_proxycommand(self):
+        result = self.setup_run(tun="false")
+        text = self.config.read_text()
+        self.assertIn("ProxyCommand", text)
+        self.assertIn("nc %h %p", text)
+
+    def test_kernel_tailscale_gets_no_proxycommand(self):
+        for tun in ("true", None):
+            self.setup_run(tun=tun)
+            self.assertNotIn("ProxyCommand", self.config.read_text(), tun)
+
+
 
 class GitAttributesTests(unittest.TestCase):
     def test_scripts_setup_runs_are_lf_in_every_checkout(self):
