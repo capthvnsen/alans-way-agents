@@ -11,6 +11,8 @@
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
+#        (re-running without --mac-ssh keeps the configured computer;
+#         --mac-ssh none removes it)
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
 #        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --timezone IANA
 #        --restart --non-interactive --verify
@@ -21,6 +23,7 @@ DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
+MAC_SSH_SET=0 HOST_OS_SET=0
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0 DEV_PLUGIN=0
@@ -31,10 +34,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
     --bot-name) BOT_NAME="$2"; shift 2;;
-    --mac-ssh) MAC_SSH="$2"; shift 2;;
+    --mac-ssh) MAC_SSH="$2"; MAC_SSH_SET=1; shift 2;;
     --mac-key) MAC_KEY="$2"; shift 2;;
     --mac-host-key) MAC_HOST_KEY="$2"; shift 2;;
-    --host-os) HOST_OS="$2"; shift 2;;
+    --host-os) HOST_OS="$2"; HOST_OS_SET=1; shift 2;;
     --profile) PROFILE="$2"; ONLY_PROFILE=1; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --hermes-home) HERMES_HOME_FLAG="$2"; shift 2;;
@@ -60,7 +63,8 @@ while [ $# -gt 0 ]; do
 setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
-  --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP)
+  --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP);
+                   omitted: keep the configured computer; "none" removes it
   --host-os OS     OS of that computer: mac (default), windows or linux
   --mac-key KEY    that computer's public key line (MAC_KEY); added to authorized_keys
   --mac-host-key K that computer's host key (MAC_HOST_KEY, "ssh-ed25519 AAAA..."); pinned in known_hosts
@@ -155,6 +159,31 @@ PROFILE_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; PROFILE_HOME="${PROFI
 hermes_p() { hermes -p "${PROFILE:-default}" "$@"; }
 # Whole-name match: "alans-way" must not be satisfied by "alans-way-computer".
 plugin_listed() { hermes_p plugins list 2>/dev/null | grep -qE "(^|[^A-Za-z0-9_-])$1([^A-Za-z0-9_-]|\$)"; }
+
+# The current value of env key $2 inside the managed workspace_browser block in
+# config $1, else empty. setup-workspace.sh uses the same reader, so a re-run
+# keeps what the block already configures.
+managed_env_value() {
+  [ -f "$1" ] || return 0
+  sed -n '/>>> alans-way workspace_browser managed block >>>/,/<<< alans-way workspace_browser managed block <<</p' "$1" \
+    | sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" | head -1 \
+    | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/'
+}
+
+# Re-running without --mac-ssh / --host-os keeps the computer the managed block
+# already configures (the same way the CDP port and HERMES_OVERSEER_BOT_IDS
+# survive re-runs); --mac-ssh none is the explicit removal.
+_main_cfg="$HERMES_HOME/config.yaml"
+[ -z "$CONFIG" ] || _main_cfg="$CONFIG"
+[ -z "$PROFILE" ] || _main_cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+if [ "$MAC_SSH_SET" = 1 ]; then
+  [ "$MAC_SSH" != none ] || MAC_SSH=""
+elif [ -z "$MAC_SSH" ]; then
+  MAC_SSH="$(managed_env_value "$_main_cfg" HERMES_WORKSPACE_MAC_SSH)"
+fi
+if [ "$HOST_OS_SET" != 1 ] && [ -z "$HOST_OS" ]; then
+  HOST_OS="$(managed_env_value "$_main_cfg" HERMES_WORKSPACE_HOST_OS)"
+fi
 
 # Refs drive git fetch/checkout — reject anything that isn't a plain ref.
 for _ref in "$REPO_REF" "$DESKTOP_REF"; do
@@ -1228,15 +1257,16 @@ sys.exit(0 if isinstance(row, dict) and isinstance(row.get("catalog"), dict) els
 PY
 }
 
-# The router and mac-watch run the copy Hermes actually loaded: under
-# --skip-plugin or a catalog install that is the profile's plugins dir, not a
-# possibly newer clone of this repo. The hook setup does the same.
+# The router and mac-watch run the copy Hermes actually loaded: whenever an
+# installed plugin copy exists that is the profile's plugins dir, not a
+# possibly newer (or deleted) clone of this repo. The hook setup does the same.
 router_script() {
-  _rs="$REPO_DIR/$PLUGIN_NAME/scripts/workspace-router.cjs"
-  if { [ "$SKIP_PLUGIN" = 1 ] || plugin_is_catalog_installed; } \
-      && [ -f "$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs" ]; then
-    _rs="$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs"
-  fi
+  # The installed plugin's own router wins whenever it exists, catalog or
+  # file:// install alike: the checkout this script runs from may be a temp
+  # directory (issue #63). REPO_DIR is only a fallback for runs with no
+  # installed copy.
+  _rs="$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs"
+  [ -f "$_rs" ] || _rs="$REPO_DIR/$PLUGIN_NAME/scripts/workspace-router.cjs"
   printf '%s' "$_rs"
 }
 
@@ -2078,8 +2108,10 @@ PY
 workspace_for_profile() {
   set -- --bot-id "$BOT_ID"
   [ -n "$BOT_NAME" ] && set -- "$@" --bot-name "$BOT_NAME"
-  [ -n "$MAC_SSH" ] && set -- "$@" --mac-ssh "$MAC_SSH"
-  set -- "$@" --host-os "$HOST_OS"
+  # Only an explicit --mac-ssh / --host-os overrides the block's own values;
+  # setup-workspace.sh preserves them per config otherwise. "none" removes.
+  if [ "$MAC_SSH_SET" = 1 ]; then set -- "$@" --mac-ssh "${MAC_SSH:-none}"; fi
+  [ "$HOST_OS_SET" = 1 ] && set -- "$@" --host-os "$HOST_OS"
   # The router runs the copy Hermes loaded (the catalog install's own script),
   # not a possibly newer clone of this repo.
   set -- "$@" --router "$(router_script)"

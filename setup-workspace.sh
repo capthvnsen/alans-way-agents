@@ -9,6 +9,8 @@
 #   ./setup-workspace.sh --verify --mac-ssh me@mymac [--router PATH] [--profile NAME] [--config CFG]
 #
 # Without --config/--profile the block is printed for manual review/paste.
+# Re-running without --mac-ssh / --host-os keeps the values the managed block
+# already configures; --mac-ssh none removes the configured computer.
 # --profile selects a Hermes profile and edits ~/.hermes/profiles/<name>/config.yaml;
 # --config edits an explicit file directly. The script replaces a previous managed
 # block (markers below) or inserts one under the selected profile's existing
@@ -22,12 +24,13 @@
 set -eu
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" ROUTER="" CONFIG="" PROFILE="" VERIFY=0 ALLOW_DESKTOP=0
+MAC_SSH_SET=0 HOST_OS_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
     --bot-name) BOT_NAME="$2"; shift 2;;
-    --mac-ssh) MAC_SSH="$2"; shift 2;;
-    --host-os) HOST_OS="$2"; shift 2;;
+    --mac-ssh) MAC_SSH="$2"; MAC_SSH_SET=1; shift 2;;
+    --host-os) HOST_OS="$2"; HOST_OS_SET=1; shift 2;;
     --router) ROUTER="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
@@ -43,17 +46,6 @@ if [ -n "$PROFILE" ] && [ -n "$CONFIG" ]; then
   exit 2
 fi
 case "${HOST_OS:-mac}" in mac|windows|linux) HOST_OS="${HOST_OS:-mac}";; *) echo "setup-workspace: --host-os must be mac, windows or linux" >&2; exit 2;; esac
-# --mac-ssh reaches ssh as an argument: user@host or host, plain characters, never a leading '-'.
-if [ -n "$MAC_SSH" ]; then
-  _user=""; _host="$MAC_SSH"
-  case "$MAC_SSH" in *@*) _user="${MAC_SSH%%@*}"; _host="${MAC_SSH#*@}";; esac
-  _bad=0
-  case "$MAC_SSH" in *@*@*) _bad=1;; esac
-  case "$MAC_SSH" in *@*) [ -n "$_user" ] || _bad=1;; esac
-  case "$_user" in -*|*[!A-Za-z0-9._-]*) _bad=1;; esac
-  case "$_host" in ''|-*|.*|*[!A-Za-z0-9.:-]*) _bad=1;; esac
-  [ "$_bad" = 0 ] || { echo "setup-workspace: invalid --mac-ssh '$MAC_SSH' (use user@host or host; no spaces, nothing may start with '-')" >&2; exit 2; }
-fi
 
 [ -n "$ROUTER" ] || ROUTER="$(cd "$(dirname "$0")/alans-way/scripts" && pwd)/workspace-router.cjs"
 # Git Bash on native Windows: the router path goes into config.yaml for Hermes
@@ -76,6 +68,40 @@ if [ -n "$PROFILE" ]; then
       exit 2;;
   esac
   CONFIG="${HERMES_HOME:-$HERMES_HOME_DEFAULT}/profiles/$PROFILE/config.yaml"
+fi
+
+# The current value of env key $2 inside the managed workspace_browser block in
+# config $1, else empty. setup.sh uses the same reader, so a re-run keeps what
+# the block already configures.
+managed_env_value() {
+  [ -f "$1" ] || return 0
+  sed -n '/>>> alans-way workspace_browser managed block >>>/,/<<< alans-way workspace_browser managed block <<</p' "$1" \
+    | sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" | head -1 \
+    | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/'
+}
+
+# A re-run without --mac-ssh / --host-os keeps the values the managed block
+# already configures; --mac-ssh none removes the computer (issue #62).
+if [ "$MAC_SSH_SET" = 1 ]; then
+  [ "$MAC_SSH" != none ] || MAC_SSH=""
+elif [ -z "$MAC_SSH" ]; then
+  MAC_SSH="$(managed_env_value "$CONFIG" HERMES_WORKSPACE_MAC_SSH)"
+fi
+if [ "$HOST_OS_SET" != 1 ]; then
+  HOST_OS="$(managed_env_value "$CONFIG" HERMES_WORKSPACE_HOST_OS)"
+fi
+HOST_OS="${HOST_OS:-mac}"
+
+# --mac-ssh reaches ssh as an argument: user@host or host, plain characters, never a leading '-'.
+if [ -n "$MAC_SSH" ]; then
+  _user=""; _host="$MAC_SSH"
+  case "$MAC_SSH" in *@*) _user="${MAC_SSH%%@*}"; _host="${MAC_SSH#*@}";; esac
+  _bad=0
+  case "$MAC_SSH" in *@*@*) _bad=1;; esac
+  case "$MAC_SSH" in *@*) [ -n "$_user" ] || _bad=1;; esac
+  case "$_user" in -*|*[!A-Za-z0-9._-]*) _bad=1;; esac
+  case "$_host" in ''|-*|.*|*[!A-Za-z0-9.:-]*) _bad=1;; esac
+  [ "$_bad" = 0 ] || { echo "setup-workspace: invalid --mac-ssh '$MAC_SSH' (use user@host or host; no spaces, nothing may start with '-')" >&2; exit 2; }
 fi
 
 ok() { echo "  ok   $1"; }

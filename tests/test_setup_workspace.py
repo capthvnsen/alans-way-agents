@@ -136,6 +136,33 @@ class ConfigEditTests(unittest.TestCase):
             self.assertIn('- "newbot"', text)
             self.assertIn("  other:\n    command: echo", text)
 
+    def test_an_omitted_mac_ssh_keeps_the_blocks_computer_and_host_os(self):
+        # Issue #62: re-running without --mac-ssh/--host-os preserves what the
+        # managed block already configures.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--mac-ssh", "me@mac", "--host-os", "windows",
+                "--config", str(config))
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac"', text)
+            self.assertIn('HERMES_WORKSPACE_HOST_OS: "windows"', text)
+
+    def test_mac_ssh_none_clears_the_computer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--mac-ssh", "me@mac", "--config", str(config))
+            run("--bot-id", "bot123", "--mac-ssh", "none", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', text)
+
+    def test_an_omitted_mac_ssh_with_no_prior_block_stays_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', text)
+
     def test_adopts_a_hand_written_entry_instead_of_duplicating_it(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.yaml"

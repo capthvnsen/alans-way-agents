@@ -1309,6 +1309,27 @@ class WatcherServiceTests(unittest.TestCase):
         watch = (self.units / "mac-watch.service").read_text()
         self.assertIn(str(ROOT / "alans-way" / "scripts" / "workspace-router.cjs"), watch)
 
+    def test_a_non_catalog_install_still_prefers_the_installed_router(self):
+        # A plugin installed from a checkout (file://, no catalog metadata)
+        # still lands its own workspace-router.cjs in the profile's plugins
+        # dir. That installed copy wins: the checkout may be a temp directory
+        # (issue #63).
+        plugins = self.home / "plugins"
+        router = plugins / "alans-way" / "scripts" / "workspace-router.cjs"
+        router.parent.mkdir(parents=True)
+        router.write_text("// installed copy\n", encoding="utf-8")
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        env = env_for(self.root, self.bin_dir, self.home, **self.linux_root())
+        self.assertEqual(
+            run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net",
+                "--host-os", "linux", "--desktop-dir", str(self.app), "--non-interactive",
+                "--hermes-home", str(self.home), env=env, check=False).returncode, 0)
+        watch = (self.units / "mac-watch.service").read_text()
+        self.assertIn(str(router), watch)
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn(str(router), block)
+        self.assertNotIn(str(ROOT / "alans-way" / "scripts" / "workspace-router.cjs"), block)
+
 
 FAKE_POWERSHELL = r"""script="$(cat)"
 printf '%s\n----\n' "$script" >> "$PS_LOG"
@@ -2527,6 +2548,31 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn('DISPLAY=', conf)
         self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
         self.assertIn('HERMES_WORKSPACE_HOST_OS="mac"', conf)
+
+    def test_a_rerun_without_mac_ssh_keeps_the_computer_and_the_watcher(self):
+        # Issue #62: omitting --mac-ssh on a re-run must keep the configured
+        # computer, not write the empty flag default over it.
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        conf = self.conf()
+        self.assertIn("[program:alans-way-mac-watch]", conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac.tail1234.ts.net"', block)
+
+    def test_mac_ssh_none_clears_the_computer_and_the_watcher(self):
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "none").returncode, 0)
+        self.assertNotIn("alans-way-mac-watch", self.conf())
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', block)
+
+    def test_a_rerun_without_a_prior_block_stays_vps_only(self):
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        self.assertNotIn("alans-way-mac-watch", self.conf())
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', block)
         calls = self.supervisor_log.read_text()
         self.assertIn("reread", calls)
         self.assertIn("update", calls)
