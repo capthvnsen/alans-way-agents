@@ -1,10 +1,14 @@
-# Alan's Way — agent plugin
+# Hermes Alan's Way: agent plugin
 
-**The behavior half of [Hermes — Alan's Way](https://github.com/capthvnsen/alans-way).**
-This repo is what you install *on the machine running your Hermes agents*
-(a Linux VPS, a macOS VM, or a Windows PC you keep on). The companion repo holds the desktop app for the
-user's computer (macOS or Windows) — this one holds
-what your agents need to think and act:
+[![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
+[Discord](https://discord.gg/jBQCPUsVE) · [X @alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
+
+**The plugin half of Hermes Alan's Way, the open-source Grokbot killer for stock Hermes.**
+The companion desktop app lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
+(download at [openalan.com](https://openalan.com)). This repo is what you install
+*on the machine running your Hermes agents* (a Linux VPS, a macOS VM, or a Windows
+PC you keep on). The app runs on your own computer (macOS or Windows). This repo
+holds what your agents need to think and act:
 
 - **`alans-way/`** — a native Hermes plugin: your primary Telegram bot checks
   in on its own when you've gone quiet — an idle nudge on a schedule you
@@ -16,6 +20,12 @@ what your agents need to think and act:
   when the user's computer is not a Mac (default `mac`).
 - **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
+- **`alans-way-computer/`**: a second plugin (v0.7.0): a computer-use provider
+  for Hermes. It drives desktop apps on your computer through the same router,
+  and on the VM desktop when your computer is offline. Actions go through
+  Hermes' approval-gated `computer_use` tool: you approve each action type on
+  Telegram and choose what to always allow. Needs a Hermes build with the
+  pluggable computer-use API (on main after 0.21.5).
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
@@ -129,12 +139,22 @@ backed up first). Only the launch profile's runtime runs the check-in loop. It a
 to the Hermes user's `~/.ssh/config` so the agent's own ssh commands to your
 computer share one connection.
 
-Useful flags: `--profile NAME` to configure only one Hermes profile, `--host-os
-windows|linux` when the user's computer is not a Mac, `--verify` to audit
-without changing anything, `--non-interactive` for scripted runs,
-`--skip-browser` for proactivity-only installs, and `--mac-key` /
-`--mac-host-key` to add your computer's pasted SSH key and host key after
-checking their format. When Hermes has the pluggable computer-use API, setup
+Useful flags:
+
+- `--profile NAME`: configure only one Hermes profile.
+- `--host-os windows|linux`: the user's computer is not a Mac.
+- `--verify`: audit without changing anything.
+- `--non-interactive`: scripted runs.
+- `--skip-browser`: proactivity-only installs.
+- `--skip-plugin`: leave an already installed plugin as it is (catalog installs).
+- `--skip-services`: don't install the Chromium/broker services or scheduled tasks.
+- `--keep-browser`: leave Hermes' built-in browser toolset on.
+- `--keep-computer-use`: deprecated no-op. Setup never disables `computer_use`.
+- `--repo-ref SHA` / `--desktop-ref SHA`: pin this repo and the app repo to a reviewed commit or tag.
+- `--mac-key` / `--mac-host-key`: add your computer's pasted SSH key and host key after checking their format.
+- `--dev-plugin-install`: developers only. Installs the computer-use provider from this clone instead of the Hermes catalog.
+
+ When Hermes has the pluggable computer-use API, setup
 also installs the `alans-way-computer` provider for the profile (from the
 Hermes catalog, never over a catalog install) and selects it once the
 workspace browser is configured. Desktop input only ever goes through the
@@ -163,19 +183,17 @@ the same `setup.sh`, and proves both ends work. The
 
 ### 3. The desktop app
 
-On the user's Mac:
+Download the one-click installer:
 
-```sh
-curl -fsSL https://openalan.com/install-mac | sh
-```
+- **Mac:** [openalan.com/download/mac](https://openalan.com/download/mac). Developer ID signed and notarized.
+- **Windows:** [openalan.com/download/windows](https://openalan.com/download/windows). Unsigned, so SmartScreen warns you. Click **More info → Run anyway**.
 
-On a Windows PC, run `scripts/install-windows.ps1` from the app repo in an
-elevated PowerShell — it builds the app locally with `npm run package:win`
-(no installer or SmartScreen prompt).
+Prefer to build it yourself? The app repo has build-from-source scripts
+(`curl -fsSL https://openalan.com/install-mac | sh` on a Mac,
+`scripts/install-windows.ps1` in an elevated PowerShell on Windows).
 
-Either builds and installs the app locally (no release zip or Gatekeeper
-workaround). Sign in to Telegram inside the app, then **Settings → Agent
-setup**: the checklist shows what's already done — Telegram sign-in,
+The app's first-run wizard hands you the agent setup prompt. Or sign in to
+Telegram inside the app, then **Settings → Agent setup**: the checklist shows what's already done: Telegram sign-in,
 discovered bots, both SSH addresses, connector status. Save the two SSH
 addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 **Copy setup prompt**, then **Test agent path**.
@@ -189,9 +207,17 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 
 ### Upgrading
 
-`git pull` (or re-run the `curl|bash` line), then restart the gateway — a
-running gateway keeps already-imported code until restarted. Verify one
-ordinary Telegram reply and one bounded browser action before relying on it.
+The agent setup prompt pins the plugin clone to a release tag (`v` + the
+`version:` in `alans-way/plugin.yaml`) via `--repo-ref`. A catalog install pins
+it to the catalog-recorded commit instead. A bare `setup.sh` run with no
+`--repo-ref` follows `main`.
+
+The desktop app's update popup updates the app and the plugin on every saved VM
+over SSH. Nothing to run by hand.
+
+Manual path: `git pull` (or re-run the `curl|bash` line), then restart the
+gateway. A running gateway keeps already-imported code until restarted. Verify
+one ordinary Telegram reply and one bounded browser action before relying on it.
 
 ### What each piece does
 
@@ -269,11 +295,20 @@ VPS browser owns.
 ```
 alans-way/            the plugin (plugin.yaml + tool + idle-nudge hooks + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
+alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
 docs/                 proactivity guide, agent-driven setup prompt
+docs/catalog/         Hermes plugin-catalog entry drafts (alans-way-computer.yaml)
+scripts/              check_publication.py, the pre-publication secret and path check CI runs
 tests/                unittest suite — python3 -m unittest discover -s tests
 setup.sh              one-command bootstrap (install, wire, restart, bind, verify)
 setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)
 ```
+
+## Roadmap
+
+The roadmap lives in the
+[Hermes Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
+Fastest updates are on X: [@alexhvnsen](https://x.com/alexhvnsen).
 
 ## Tests
 
