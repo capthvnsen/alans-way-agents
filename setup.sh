@@ -289,11 +289,13 @@ supervisord_usable() {
 }
 
 # The directory a [program:*] drop-in goes in: the include glob of an existing
-# supervisord.conf first, then the Debian and CentOS conventions.
+# supervisord.conf first (authoritative even when the dir does not exist yet;
+# the caller creates it, and only then is it included), then the Debian and
+# CentOS conventions.
 supervisor_conf_dir() {
   [ -z "${ALANS_WAY_SUPERVISOR_CONF_DIR:-}" ] || { printf '%s' "$ALANS_WAY_SUPERVISOR_CONF_DIR"; return 0; }
   for _d in $(sed -n 's/^ *files *= *//p' /etc/supervisor/supervisord.conf /etc/supervisord.conf 2>/dev/null); do
-    case "$_d" in /*) _d="${_d%/*}"; [ -d "$_d" ] && { printf '%s' "$_d"; return 0; };; esac
+    case "$_d" in /*) printf '%s' "${_d%/*}"; return 0;; esac
   done
   for _d in /etc/supervisor/conf.d /etc/supervisord.d; do
     [ -d "$_d" ] && { printf '%s' "$_d"; return 0; }
@@ -1717,7 +1719,7 @@ EOFW
 )"
     fi
     _conf="$_confdir/alans-way.conf"
-    write_if_changed "$_conf" <<EOF
+    write_if_changed "$_conf" <<EOF || { warn "could not write $_conf: service install skipped"; return 0; }
 [program:alans-way-chromium]
 command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs
 $_sup_user
