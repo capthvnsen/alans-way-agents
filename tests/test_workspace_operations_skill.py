@@ -116,6 +116,24 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertNotIn("workspace_vps_browser", desktop)
         self.assertNotIn("Cua Driver", desktop)
 
+    def test_skill_gives_the_names_hermes_registers(self):
+        # Hermes registers MCP tools as mcp__<server>__<tool>; a bare
+        # cua_alans_way_snapshot does not exist, and calling it costs a turn.
+        server = re.search(r"^  (\w+):\n    command: \"node\"", (ROOT / "setup-workspace.sh").read_text(encoding="utf-8"), re.M).group(1)
+        for tool in ["cua_alans_way_status", "cua_alans_way_tabs", "cua_alans_way_open", "cua_alans_way_snapshot",
+                     "cua_alans_way_screenshot", "cua_alans_way_action", "cua_alans_way_close",
+                     "workspace_computer_apps", "workspace_computer_snapshot", "workspace_computer_menu", "workspace_computer_screenshot"]:
+            with self.subTest(tool=tool):
+                self.assertIn(f"mcp__{server}__{tool}", self.text)
+        self.assertNotIn("call the tools by these exact names: `cua_alans_way", self.normalized)
+        self.assertIn("tool_call", self.normalized)
+
+    def test_the_app_api_is_never_driven_directly(self):
+        # Tabs opened by curl against connection.json belong to another bot id,
+        # so the browser tools refuse them afterwards.
+        self.assertIn("connection.json", self.normalized)
+        self.assertRegex(self.normalized, r"[Nn]ever (call|drive) the app's HTTP API")
+
     def test_the_ungated_desktop_input_tool_is_never_named_as_callable(self):
         # Desktop input goes through Hermes' approval-gated computer_use tool.
         # The raw MCP action must not appear in any skill or reference as

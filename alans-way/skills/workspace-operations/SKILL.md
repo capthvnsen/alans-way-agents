@@ -46,8 +46,11 @@ instead, and every rule below is identical either way. (Likewise "VPS" is
 Hermes' own computer, which can be a Linux VPS or a macOS virtual machine.)
 All web work goes through the `cua_alans_way_*` tools, never another browser
 tool (browser_exec, computer-use drivers), and never opening a URL in the
-human's personal browser via terminal/`open`. If a workspace browser call
-fails, report the failure; do not silently substitute another browser.
+human's personal browser via terminal/`open`. Never call the app's HTTP API
+yourself (curl or a script with its `connection.json` token, locally or over
+SSH): those tabs carry another bot id, and the tools refuse them afterwards.
+If a workspace browser call fails, report the failure; do not silently
+substitute another browser.
 
 `cua_alans_way_open` takes an optional `host`. Omit it for the default: the
 user's computer when it is reachable, the VM's own browser when it is not.
@@ -55,18 +58,27 @@ Pass `host:"vm"` to use the VM's own browser even while the user's computer
 is online. Pass `host:"computer"` to force the user's computer; while it is
 offline the call errors instead of silently landing on the VM.
 
-For a task in a workspace tab, call the tools by these exact names:
-`cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`,
-`cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`,
-`cua_alans_way_close`. The Hermes config key is still `workspace_browser`;
-that key is not a tool. Skip status and tabs unless a call fails: every
+Hermes registers these MCP tools under the `workspace_browser` server, so
+their exact names are `mcp__workspace_browser__cua_alans_way_status`,
+`mcp__workspace_browser__cua_alans_way_tabs`,
+`mcp__workspace_browser__cua_alans_way_open`,
+`mcp__workspace_browser__cua_alans_way_snapshot`,
+`mcp__workspace_browser__cua_alans_way_screenshot`,
+`mcp__workspace_browser__cua_alans_way_action` and
+`mcp__workspace_browser__cua_alans_way_close`. This skill writes
+`cua_alans_way_*` for short; a bare `cua_alans_way_snapshot` does not exist.
+When they are not in your tool list, Hermes has deferred them: call them
+through `tool_call` with the full name, with no `tool_search` first.
+`workspace_browser` alone is not a tool. Skip status and tabs unless a call fails: every
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
 another host. When status shows the VPS, the Mac is unreachable: the same
 `cua_alans_way_*` tools are that machine's browser. Its desktop is read with
-`workspace_computer_apps`, `workspace_computer_snapshot`,
-`workspace_computer_menu` and `workspace_computer_screenshot`, and acted on
+`mcp__workspace_browser__workspace_computer_apps`,
+`mcp__workspace_browser__workspace_computer_snapshot`,
+`mcp__workspace_browser__workspace_computer_menu` and
+`mcp__workspace_browser__workspace_computer_screenshot`, and acted on
 with the `computer_use` tool, which asks the user for approval on each
 action. Press a ref from the accessibility
 tree, leave the focused window alone, and do not move the pointer.
