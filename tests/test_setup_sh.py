@@ -1033,7 +1033,7 @@ class BrowserHostServiceTests(unittest.TestCase):
         self.bin_dir = tooling(self.root, self.root / "log")
         self.systemctl_log = self.root / "systemctl.log"
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "systemctl", 'echo "$*" >> "%s"\nexit 0\n' % self.systemctl_log)
+        linux_with_systemd(self.bin_dir, self.systemctl_log)
         self.path = [str(self.bin_dir)]
 
     def run_setup(self, *, root_user=False, owner="alice", browsers=(), snap_browsers=()):
@@ -1202,7 +1202,7 @@ class WatcherServiceTests(unittest.TestCase):
                    env=env, check=False)
 
     def linux_root(self):
-        fake(self.bin_dir, "systemctl", "exit 0\n")
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
         fake(self.bin_dir, "id", 'case "$1" in -u) echo 0;; -un) echo root;; *) exec /usr/bin/id "$@";; esac\n')
         fake(self.bin_dir, "stat", "echo alice\n")
         fake(self.bin_dir, "chown", "exit 0\n")
@@ -1500,7 +1500,7 @@ class WindowsGuestSetupTests(unittest.TestCase):
 
     def test_wsl_is_linux_not_native_windows(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "systemctl", "exit 0\n")
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
         fake(self.bin_dir, "tailscale", TAILSCALE_UP)
         result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units")))
         self.assertEqual(self.tasks(), {})
@@ -1628,7 +1628,9 @@ class UserSystemdTests(unittest.TestCase):
         fake(bin_dir, "uname", "echo Linux\n")
         fake(bin_dir, "google-chrome", "exit 0\n")
         fake(bin_dir, "loginctl", 'printf "%%s\\n" "$*" >> "%s"\nexit 0\n' % self.loginctl)
-        fake(bin_dir, "systemctl", 'case "$*" in *--user*) exit %d;; esac\nexit 0\n' % (0 if user_systemd else 1))
+        fake(bin_dir, "systemctl",
+             'case "$*" in\n  is-system-running) echo running;;\n  *--user*) exit %d;;\nesac\nexit 0\n'
+             % (0 if user_systemd else 1))
         env = env_for(self.root, bin_dir, home, HERMES_VPS_BROWSER_DATA=str(self.root / "data"))
         return run("--skip-plugin", "--desktop-dir", str(app), "--non-interactive", "--hermes-home", str(home),
                    env=env, check=False)
@@ -2338,6 +2340,177 @@ class AgentSshReuseTests(unittest.TestCase):
         run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home),
             env=env_for(root, tooling(root, root / "log"), home), check=False)
         self.assertFalse((root / ".ssh" / "config").exists())
+
+
+def linux_without_systemd(bin_dir, log):
+    """A VM image or container: the systemctl binary exists but PID 1 is not systemd."""
+    fake(bin_dir, "uname", "echo Linux\n")
+    fake(bin_dir, "systemctl",
+         'echo "$*" >> "%s"\ncase "$1" in is-system-running) echo offline;; esac\nexit 0\n' % log)
+
+
+def linux_with_systemd(bin_dir, log):
+    fake(bin_dir, "uname", "echo Linux\n")
+    fake(bin_dir, "systemctl",
+         'echo "$*" >> "%s"\ncase "$1" in is-system-running) echo running;; esac\nexit 0\n' % log)
+
+
+def fake_supervisord(bin_dir, root, state=""):
+    """A working supervisorctl; program states live in a state file the test owns."""
+    state_file = Path(root) / "supervisor.state"
+    state_file.write_text(state, encoding="utf-8")
+    log = Path(root) / "supervisorctl.log"
+    fake(bin_dir, "supervisorctl", '''echo "$*" >> "%s"
+state="%s"
+case "$1" in
+  status)
+    if [ -n "${2:-}" ]; then
+      grep "^$2 " "$state" 2>/dev/null || echo "$2 STOPPED"
+    else
+      cat "$state" 2>/dev/null || true
+    fi;;
+  pid) awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state" 2>/dev/null;;
+  start)
+    grep -v "^$2 " "$state" > "$state.tmp" 2>/dev/null || true
+    printf '%%s RUNNING pid 777, uptime 0:00:01\\n' "$2" >> "$state.tmp"
+    mv "$state.tmp" "$state";;
+esac
+exit 0
+''' % (log, state_file))
+    return log
+
+
+class SupervisordServiceTests(unittest.TestCase):
+    """A Linux guest with no live systemd but a working supervisord gets the
+    services as supervisor programs in a conf.d drop-in, not dead units."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.data = self.root / "data"
+        self.units = self.root / "units"
+        self.units.mkdir()
+        self.confd = self.root / "conf.d"
+        self.confd.mkdir()
+        self.app = desktop_tree(self.root / "app")
+        self.bin_dir = tooling(self.root, self.root / "log")
+        linux_without_systemd(self.bin_dir, self.root / "systemctl.log")
+        self.supervisor_log = fake_supervisord(self.bin_dir, self.root)
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+        fake(self.bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
+        fake(self.bin_dir, "scp", "exit 0\n")
+
+    def env(self, **extra):
+        return env_for(self.root, self.bin_dir, self.home,
+                       HERMES_VPS_BROWSER_DATA=str(self.data),
+                       ALANS_WAY_UNIT_DIR=str(self.units),
+                       ALANS_WAY_SUPERVISOR_CONF_DIR=str(self.confd), **extra)
+
+    def run_setup(self, *flags, **env):
+        return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
+                   "--hermes-home", str(self.home), *flags, env=self.env(**env), check=False)
+
+    def conf(self):
+        return (self.confd / "alans-way.conf").read_text(encoding="utf-8")
+
+    def test_writes_supervisor_programs_instead_of_dead_systemd_units(self):
+        result = self.run_setup("--mac-ssh", "me@mac.tail1234.ts.net")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(self.units.glob("*.service")), [])
+        conf = self.conf()
+        for prog in ("alans-way-chromium", "alans-way-browser", "alans-way-mac-watch"):
+            self.assertIn("[program:%s]" % prog, conf)
+        self.assertIn("vps-chromium-host.cjs", conf)
+        self.assertIn("vps-browser-host.cjs serve", conf)
+        self.assertIn("workspace-router.cjs --watch --interval 10", conf)
+        self.assertIn("autorestart=unexpected", conf)
+        # exitcodes mirrors the units' RestartPreventExitStatus.
+        self.assertIn("exitcodes=78", conf)
+        self.assertIn("exitcodes=2", conf)
+        self.assertIn('HERMES_VPS_BROWSER_DATA="%s"' % self.data, conf)
+        self.assertIn('DISPLAY=', conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        self.assertIn('HERMES_WORKSPACE_HOST_OS="mac"', conf)
+        calls = self.supervisor_log.read_text()
+        self.assertIn("reread", calls)
+        self.assertIn("update", calls)
+
+    def test_no_watcher_program_without_a_host(self):
+        self.run_setup()
+        conf = self.conf()
+        self.assertIn("alans-way-browser", conf)
+        self.assertNotIn("alans-way-mac-watch", conf)
+
+    def test_overseer_bot_ids_ride_along_when_configured(self):
+        self.run_setup(HERMES_OVERSEER_BOT_IDS="4242")
+        self.assertIn('HERMES_OVERSEER_BOT_IDS="4242"', self.conf())
+
+    def test_an_overseer_value_in_an_existing_conf_is_kept(self):
+        (self.confd / "alans-way.conf").write_text(
+            '[program:alans-way-browser]\nenvironment=HERMES_OVERSEER_BOT_IDS="777"\n', encoding="utf-8")
+        self.run_setup()
+        self.assertIn('HERMES_OVERSEER_BOT_IDS="777"', self.conf())
+
+    def test_a_re_run_is_idempotent_and_starts_stopped_programs(self):
+        self.run_setup()
+        conf = self.confd / "alans-way.conf"
+        before = conf.read_bytes()
+        self.supervisor_log.write_text("")
+        (self.root / "supervisor.state").write_text("")
+        self.run_setup()
+        self.assertEqual(conf.read_bytes(), before)
+        calls = self.supervisor_log.read_text()
+        self.assertNotIn("reread", calls)
+        self.assertNotIn("update", calls)
+        self.assertIn("start alans-way-chromium", calls)
+        self.assertIn("start alans-way-browser", calls)
+
+    def test_running_programs_are_not_restarted(self):
+        self.run_setup()
+        (self.root / "supervisor.state").write_text(
+            "alans-way-chromium RUNNING pid 11, uptime 1:00:00\n"
+            "alans-way-browser RUNNING pid 12, uptime 1:00:00\n", encoding="utf-8")
+        self.supervisor_log.write_text("")
+        self.run_setup()
+        calls = self.supervisor_log.read_text()
+        self.assertNotIn("start alans-way", calls)
+        self.assertNotIn("restart", calls)
+
+    def test_skip_services_writes_no_conf(self):
+        result = self.run_setup("--skip-services")
+        self.assertFalse((self.confd / "alans-way.conf").exists())
+        self.assertNotIn("reread", read_log(self.supervisor_log))
+
+    def test_neither_manager_warns_instead_of_half_installing(self):
+        (self.bin_dir / "supervisorctl").unlink()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"warn .*(systemd|supervisor)")
+        self.assertFalse((self.confd / "alans-way.conf").exists())
+        self.assertEqual(list(self.units.glob("*.service")), [])
+
+    def test_the_browser_display_matches_the_live_desktop(self):
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) exit 1;;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :98 -rfbport 5998 -localhost";;\nesac\n')
+        self.run_setup(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+        self.assertIn('DISPLAY=":98"', self.conf())
+
+    def test_a_live_display_stack_prints_the_viewer_url(self):
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n')
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        result = self.run_setup()
+        self.assertIn("6080", result.stdout)
+        self.assertIn("vnc.html", result.stdout)
+        self.assertIn(ip, result.stdout)
+        self.assertNotIn("apt-get install xvfb", result.stdout)
 
 
 class GitAttributesTests(unittest.TestCase):

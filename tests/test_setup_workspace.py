@@ -43,6 +43,14 @@ class PrintModeTests(unittest.TestCase):
         result = run("--bot-id", "bot_123")
         self.assertNotIn("--bot-name", result.stdout)
 
+    def test_the_block_carries_the_watcher_state_file_when_setup_chose_one(self):
+        env = dict(os.environ)
+        out = run("--bot-id", "bot_123", env=env).stdout
+        self.assertNotIn("HERMES_MAC_STATE_FILE", out)
+        env["ALANS_WAY_MAC_STATE_FILE"] = "/home/user/.local/share/hermes-alans-way/mac-state.json"
+        out = run("--bot-id", "bot_123", env=env).stdout
+        self.assertIn('HERMES_MAC_STATE_FILE: "/home/user/.local/share/hermes-alans-way/mac-state.json"', out)
+
 
 class DesktopInputGateTests(unittest.TestCase):
     """The managed block excludes the ungated workspace_computer_action tool:

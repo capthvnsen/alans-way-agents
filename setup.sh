@@ -196,6 +196,104 @@ write_if_changed() {
   WROTE=1
 }
 
+# A VM image can ship the systemctl binary while PID 1 is something else (an
+# init shim, supervisord, a container). Units written on such a host are dead:
+# only call systemctl when systemd is actually running. /run/systemd/system is
+# systemd's own booted marker (sd_booted); is-system-running answers "offline"
+# on the dead case and "running"/"degraded" on a live one.
+systemd_live() {
+  have systemctl || return 1
+  [ -d /run/systemd/system ] && return 0
+  case "$(systemctl is-system-running 2>/dev/null || true)" in
+    running|degraded|starting|initializing|maintenance) return 0;;
+  esac
+  return 1
+}
+
+# The display the browser services should export. A live desktop wins: a
+# listening X socket first, then the argv of a running X/VNC server. When
+# nothing is up yet, take the conventional fallback (:99) so the units and the
+# install docs below stay consistent.
+detect_display() {
+  for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
+    [ -S "$_sock" ] || continue
+    _n="${_sock##*X}"
+    case "$_n" in ''|*[!0-9]*) continue;; esac
+    echo ":$_n"; return 0
+  done
+  _line="$(pgrep -af 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr' 2>/dev/null | head -1 || true)"
+  _d="$(printf '%s\n' "$_line" | grep -oE '[[:space:]]:[0-9]+' | head -1 | tr -d ' ')"
+  [ -n "$_d" ] || _d="${1:-:99}"
+  printf '%s' "$_d"
+}
+
+# A display stack the browser can run on: a live X socket, a running X/VNC
+# server, websockify bridging one over noVNC, or a server binary on PATH.
+display_stack_present() {
+  for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
+    [ -S "$_sock" ] && return 0
+  done
+  pgrep -f 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr|websockify' >/dev/null 2>&1 && return 0
+  have Xvfb || have x11vnc || have Xtigervnc || have x0vncserver || have Xvnc || have websockify
+}
+
+# The noVNC listen port of a running websockify, else nothing. websockify argv
+# is "websockify [opts] [listen_addr:]port target" — the first bare port or
+# addr:port token is the listener.
+websockify_port() {
+  _line="$(pgrep -af websockify 2>/dev/null | head -1)"
+  [ -n "$_line" ] || return 1
+  for _tok in ${_line#* }; do
+    case "$_tok" in
+      *:*) case "${_tok%%:*}" in ''|*[!0-9.]*) continue;; esac; _p="${_tok##*:}";;
+      *) _p="$_tok";;
+    esac
+    case "$_p" in ''|*[!0-9]*) continue;; esac
+    [ "$_p" -gt 0 ] 2>/dev/null && [ "$_p" -le 65535 ] 2>/dev/null || continue
+    echo "$_p"; return 0
+  done
+  return 1
+}
+
+# supervisord that is actually answering, not just installed.
+supervisord_usable() {
+  have supervisorctl || return 1
+  supervisorctl status >/dev/null 2>&1 || return 1
+}
+
+# The directory a [program:*] drop-in goes in: the include glob of an existing
+# supervisord.conf first, then the Debian and CentOS conventions.
+supervisor_conf_dir() {
+  [ -z "${ALANS_WAY_SUPERVISOR_CONF_DIR:-}" ] || { printf '%s' "$ALANS_WAY_SUPERVISOR_CONF_DIR"; return 0; }
+  for _d in $(sed -n 's/^ *files *= *//p' /etc/supervisor/supervisord.conf /etc/supervisord.conf 2>/dev/null); do
+    case "$_d" in /*) _d="${_d%/*}"; [ -d "$_d" ] && { printf '%s' "$_d"; return 0; };; esac
+  done
+  for _d in /etc/supervisor/conf.d /etc/supervisord.d; do
+    [ -d "$_d" ] && { printf '%s' "$_d"; return 0; }
+  done
+  [ "$(id -u)" = 0 ] && { printf '%s' /etc/supervisor/conf.d; return 0; }
+  return 1
+}
+
+# Where the availability watcher's state file lives on this guest, matching
+# the router's own default chain (workspace-router.cjs macStateFile). On Linux
+# the router default is /var/lib/hermes-alans-way; a non-root watcher can't
+# write there, so setup points both processes at a user path instead.
+mac_state_path() {
+  if [ -n "${HERMES_MAC_STATE_FILE:-}" ]; then
+    printf '%s' "$HERMES_MAC_STATE_FILE"; return 0
+  fi
+  case "$GUEST_OS" in
+    Darwin) printf '%s' "$HOME/Library/Application Support/hermes-alans-way/mac-state.json";;
+    Windows) printf '%s' "$BROWSER_HOME/.local/share/hermes-alans-way/mac-state.json";;
+    *) if [ "$(id -u)" = 0 ] || [ -f /var/lib/hermes-alans-way/mac-state.json ]; then
+         printf '%s' /var/lib/hermes-alans-way/mac-state.json
+       else
+         printf '%s' "$BROWSER_HOME/.local/share/hermes-alans-way/mac-state.json"
+       fi;;
+  esac
+}
+
 
 # The state of the workspace_browser block's desktop-input gate in config $1:
 #   opt-in    the --allow-desktop-actions marker env is present
@@ -1402,8 +1500,9 @@ EOF
   if [ "$GUEST_OS" = Windows ]; then
     [ "$SKIP_SERVICES" = 1 ] || install_windows_tasks
   else
+  BROWSER_DISPLAY="$(detect_display :99)"
   SYSTEMD_USABLE=0 SYSTEMD_WARNED=0
-  if [ "$SKIP_SERVICES" = 0 ] && have systemctl; then
+  if [ "$SKIP_SERVICES" = 0 ] && systemd_live; then
     if [ "$(id -u)" = 0 ] || systemctl --user list-units >/dev/null 2>&1; then
       SYSTEMD_USABLE=1
     else
@@ -1411,6 +1510,108 @@ EOF
       warn "no systemd user session here (not root, and systemctl --user is unavailable), so the browser services were not installed. Start them yourself after logging in with a full session, or run setup as root. See desktop/docs/vps-browser.md in the alans-way repo"
     fi
   fi
+  # The supervisord counterpart of the systemd units: same programs, same
+  # environment, RestartPreventExitStatus mapped to exitcodes (with
+  # autorestart=unexpected that is the same "restart unless clean" policy).
+  install_supervisor_programs() {
+    _confdir="$(supervisor_conf_dir)" || {
+      warn "supervisord is running but has no conf.d include dir: add the alans-way programs by hand"
+      return 0
+    }
+    NODE_BIN="$(command -v node || echo /usr/bin/node)"
+    SUP_LOG_DIR="$BROWSER_HOME/.local/state/hermes-alans-way"
+    mkdir -p "$_confdir" "$SUP_LOG_DIR" || { warn "cannot write $_confdir or $SUP_LOG_DIR: service install skipped"; return 0; }
+    _sup_user=""
+    if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then
+      _sup_user="user=$BROWSER_USER"
+      mkdir -p /var/lib/hermes-alans-way 2>/dev/null \
+        && chown "$BROWSER_USER" /var/lib/hermes-alans-way 2>/dev/null || true
+      chown -R "$BROWSER_USER" "$SUP_LOG_DIR" 2>/dev/null || true
+    elif [ "$(id -u)" = 0 ]; then
+      mkdir -p /var/lib/hermes-alans-way 2>/dev/null || true
+    fi
+    # HERMES_OVERSEER_BOT_IDS rides along when configured: this environment
+    # first, then a value a previous run already wrote into the conf.
+    _overseer="${HERMES_OVERSEER_BOT_IDS:-}"
+    if [ -z "$_overseer" ] && [ -f "$_confdir/alans-way.conf" ]; then
+      _overseer="$(sed -n 's/.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' "$_confdir/alans-way.conf" | head -1)"
+    fi
+    _overseer_env=""; [ -z "$_overseer" ] || _overseer_env=",HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
+    _env_browser="HOME=\"$BROWSER_HOME\",PATH=\"$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",DISPLAY=\"$BROWSER_DISPLAY\",HERMES_VPS_BROWSER_DATA=\"$DATA_DIR\""
+    WATCH_SECTION=""
+    if [ -n "$MAC_SSH" ]; then
+      _watch_state="$(mac_state_path)"
+      mkdir -p "$(dirname "$_watch_state")" 2>/dev/null || true
+      if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then
+        chown "$BROWSER_USER" "$(dirname "$_watch_state")" 2>/dev/null || true
+      fi
+      # The serving router resolves the same path: the managed block below
+      # puts HERMES_MAC_STATE_FILE into its env so both processes agree.
+      export ALANS_WAY_MAC_STATE_FILE="$_watch_state"
+      WATCH_SECTION="$(cat <<EOFW
+
+[program:alans-way-mac-watch]
+command=$NODE_BIN $(router_script) --watch --interval 10
+$_sup_user
+environment=HOME="$BROWSER_HOME",PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",HERMES_WORKSPACE_MAC_SSH="$MAC_SSH",HERMES_WORKSPACE_HOST_OS="$HOST_OS",HERMES_MAC_STATE_FILE="$_watch_state"
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=2
+stdout_logfile=$SUP_LOG_DIR/mac-watch.log
+stderr_logfile=$SUP_LOG_DIR/mac-watch.err.log
+EOFW
+)"
+    fi
+    _conf="$_confdir/alans-way.conf"
+    write_if_changed "$_conf" <<EOF
+[program:alans-way-chromium]
+command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs
+$_sup_user
+environment=$_env_browser
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=0
+stdout_logfile=$SUP_LOG_DIR/chromium.log
+stderr_logfile=$SUP_LOG_DIR/chromium.err.log
+
+[program:alans-way-browser]
+command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-browser-host.cjs serve
+$_sup_user
+environment=$_env_browser$_overseer_env
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=78
+stdout_logfile=$SUP_LOG_DIR/browser.log
+stderr_logfile=$SUP_LOG_DIR/browser.err.log
+$WATCH_SECTION
+EOF
+    if [ "$WROTE" = 1 ]; then
+      ok "wrote $_conf"
+      supervisorctl reread >/dev/null 2>&1 && supervisorctl update >/dev/null 2>&1 \
+        && ok "supervisord picked up the service definitions" \
+        || warn "supervisorctl reread or update failed: the programs may not be loaded"
+    else
+      ok "$_conf already current"
+    fi
+    # `update` restarts programs whose conf changed; start whatever is still
+    # stopped (a fresh install, or a program that exited cleanly).
+    for _p in alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
+      case "$(supervisorctl status "$_p" 2>/dev/null || true)" in
+        *" RUNNING "*) ok "$_p running under supervisord";;
+        *) supervisorctl start "$_p" >/dev/null 2>&1 \
+             && ok "$_p started under supervisord" \
+             || warn "could not start $_p via supervisorctl: start it once the desktop stack is up (needs DISPLAY=$BROWSER_DISPLAY)";;
+      esac
+    done
+    if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
+      supervisorctl restart alans-way-browser >/dev/null 2>&1 \
+        && ok "browser host restarted on the new scripts" \
+        || warn "could not restart alans-way-browser: run supervisorctl restart alans-way-browser"
+    fi
+    if [ "$CONFIG_CHANGED" = 1 ] && [ "$CFG_EXISTED" = 1 ]; then
+      say "  browser settings changed: restart the alans-way-chromium program to apply them (open tabs close)"
+    fi
+  }
   if [ "$SYSTEMD_USABLE" = 1 ]; then
     NODE_BIN="$(command -v node || echo /usr/bin/node)"
     UNIT_DIR="/etc/systemd/system"; SYSCTL="systemctl"; UNIT_USER="User=$BROWSER_USER"
@@ -1419,6 +1620,10 @@ EOF
     fi
     [ -z "${ALANS_WAY_UNIT_DIR:-}" ] || UNIT_DIR="$ALANS_WAY_UNIT_DIR"
     mkdir -p "$UNIT_DIR"
+    # The desktop scripts read HERMES_OVERSEER_BOT_IDS when it is configured;
+    # it rides along in the environment, same as the supervisord path.
+    OVERSEER_UNIT_ENV=""
+    [ -z "${HERMES_OVERSEER_BOT_IDS:-}" ] || OVERSEER_UNIT_ENV="Environment=HERMES_OVERSEER_BOT_IDS=$HERMES_OVERSEER_BOT_IDS"
     UNITS_CHANGED="" UNITS_UPDATED=""
     write_unit() { # write_unit <name> <exec> <extra>
       _f="$UNIT_DIR/$1"
@@ -1431,8 +1636,9 @@ After=network.target
 [Service]
 Type=simple
 $UNIT_USER
-Environment=DISPLAY=:99
+Environment=DISPLAY=$BROWSER_DISPLAY
 Environment=HERMES_VPS_BROWSER_DATA=$DATA_DIR
+${OVERSEER_UNIT_ENV}
 $3
 ExecStart=$NODE_BIN $2
 Restart=on-failure
@@ -1452,7 +1658,7 @@ EOF
     [ -z "$UNITS_CHANGED" ] || $SYSCTL daemon-reload 2>/dev/null || true
     $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
-      || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+      || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=$BROWSER_DISPLAY)"
     # User units stop at logout unless the account is allowed to linger.
     if [ "$SYSCTL" != systemctl ] && have loginctl; then
       loginctl enable-linger "$(id -un)" >/dev/null 2>&1 \
@@ -1517,8 +1723,10 @@ EOF
     elif [ -n "$MAC_SSH" ]; then
       warn "Mac availability watcher not installed (needs root + systemd): see README 'mac-watch'"
     fi
+  elif [ "$SKIP_SERVICES" = 0 ] && [ "$GUEST_OS" = Linux ] && supervisord_usable; then
+    install_supervisor_programs
   else
-    [ "$SYSTEMD_WARNED" = 1 ] || warn "systemd unavailable or skipped: see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
+    [ "$SYSTEMD_WARNED" = 1 ] || warn "no live systemd or supervisord here, so the browser services were not installed: see desktop/docs/vps-browser.md in the alans-way repo for manual setup"
   fi
   fi
   fi
@@ -1584,13 +1792,20 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     say "  Windows guest needs no X11 stack: Chrome opens on the signed-in desktop. Keep this"
     say "  PC awake and signed in (the browser and watcher start at logon), and turn on"
     say "  automatic sign-in (run netplwiz) so a reboot brings everything back."
-  elif have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
-    ok "an X display stack is present"
+  elif display_stack_present; then
+    ok "a display stack is present (DISPLAY=${BROWSER_DISPLAY:-:99})"
+    _wsport="$(websockify_port || true)"
+    if [ -n "$_wsport" ]; then
+      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+      say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+    fi
   else
-    say "  no Xvfb/x11vnc detected: for the VPS desktop, install a display stack:"
+    say "  no display stack detected (Xvfb, x11vnc, TigerVNC, or websockify): for the VPS"
+    say "  desktop, install one:"
     say "    apt-get install xvfb x11vnc websockify chromium-browser"
-    say "  then start Xvfb on :99, x11vnc, and a noVNC viewer. The browser services above"
-    say "  expect DISPLAY=:99. Full guide: desktop/docs/vps-browser.md in the alans-way repo."
+    say "    (or tigervnc-standalone-server for a TigerVNC + noVNC stack)"
+    say "  then start the server on DISPLAY=${BROWSER_DISPLAY:-:99} and a noVNC viewer."
+    say "  Full guide: desktop/docs/vps-browser.md in the alans-way repo."
   fi
 fi
 

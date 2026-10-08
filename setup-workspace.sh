@@ -270,6 +270,13 @@ block() {
   else
     DESKTOP_TOOLS_BLOCK="$(printf '\n    tools:\n      exclude:\n        - workspace_computer_action')"
   fi
+  # When setup.sh put the availability watcher's state file somewhere other
+  # than the router default (a non-root supervisord program), the router that
+  # serves requests must read the same file: it takes HERMES_MAC_STATE_FILE
+  # from this env.
+  MAC_STATE_ENV=""
+  [ -z "${ALANS_WAY_MAC_STATE_FILE:-}" ] \
+    || MAC_STATE_ENV="$(printf '\n      HERMES_MAC_STATE_FILE: %s' "$(yaml_quote "$ALANS_WAY_MAC_STATE_FILE")")"
   cat <<EOF
 $MARK_BEGIN
   workspace_browser:
@@ -283,7 +290,7 @@ $MARK_BEGIN
     timeout: $TOOL_TIMEOUT$DESKTOP_TOOLS_BLOCK
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
-      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")$DESKTOP_ALLOW_ENV
+      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")$DESKTOP_ALLOW_ENV$MAC_STATE_ENV
 $MARK_END
 EOF
 }
