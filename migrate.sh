@@ -3,10 +3,10 @@
 # one, or anything reachable over ssh).
 #
 # Pack ~/.hermes (minus caches, logs, venvs, node_modules and
-# profiles/.deleted), scp it over, unpack on the remote into a staging dir,
-# rewrite absolute paths that pointed at the old home, swap it into place
-# with a timestamped backup, and only then stop the old gateway so the two
-# never poll the same bot at once.
+# profiles/.deleted), stream it over ssh, unpack on the remote into a
+# staging dir, rewrite absolute paths that pointed at the old home, swap
+# it into place with a timestamped backup, and only then stop the old
+# gateway so the two never poll the same bot at once.
 set -eEuo pipefail
 
 TO="" YES=0 DRY_RUN=0
@@ -150,7 +150,7 @@ fi
 
 if [ "$DRY_RUN" = 1 ]; then
     log "would pack $HERMES_HOME (excluding caches, logs, venvs, node_modules, profiles/.deleted)"
-    log "would scp the archive to $TO:$REMOTE_PARENT/"
+    log "would stream the archive to $TO over ssh"
     log "would park the remote gateway, unpack on $TO, rewrite $HERMES_HOME paths to $REMOTE_HERMES in *.yaml/*.yml, back up any existing remote home, and move it into place"
     log "would stop the old gateway (supervisorctl stop, systemctl --user stop, systemctl stop, hermes gateway stop — first that works) or abort"
     log "would ship a fresh sqlite snapshot, then run: ssh $TO supervisorctl start hermes-gateway (verified via status; the old gateway is restarted if it fails)"
@@ -180,8 +180,12 @@ tar -czf "$ARCHIVE" -C "$HERMES_HOME" \
 log "packed $HERMES_HOME"
 
 REMOTE_ARCHIVE="$REMOTE_PARENT/$(basename "$ARCHIVE")"
-scp "$ARCHIVE" "$TO:$(printf %q "$REMOTE_PARENT/")" </dev/null \
-    || die "scp to $TO failed"
+# scp switched to SFTP mode in OpenSSH 9 — the remote path goes to
+# sftp-server verbatim, so a %q-escaped target would land a literal
+# backslash in the name. Stream the archive over ssh instead: the remote
+# command uses the same %q quoting model as every other call here.
+ssh "$TO" "$(printf 'mkdir -p %q && cat > %q' "$REMOTE_PARENT" "$REMOTE_ARCHIVE")" \
+    <"$ARCHIVE" || die "could not copy the archive to $TO"
 
 # Unpack on the remote into a staging dir, rewrite old-home absolute paths
 # in every *.yaml, back up an existing remote home, then move into place.
@@ -228,6 +232,8 @@ tar -xzf "$archive" -C "$staging"
 # ~/.hermes, and it is replaced first — every old hermes path starts with
 # the old home, so it lands directly on the new home and the hermes pass
 # below never re-matches inside replaced text (no /home/u -> /home/u22).
+# Replacements also stop at a path boundary — /home/u inside /home/ubuntu
+# is a different directory and must be left alone.
 o_home="" r_home=""
 if [ "$(basename "$ohermes")" = ".hermes" ] && [ "$(basename "$rhermes")" = ".hermes" ]; then
     o_home="$(dirname "$ohermes")"
@@ -238,14 +244,21 @@ fi
 find "$staging" \( -name '*.yaml' -o -name '*.yml' \) -print0 |
 while IFS= read -r -d '' f; do
     python3 - "$f" "$ohermes" "$rhermes" "$o_home" "$r_home" <<'PY'
+import re
 import sys
 
 path, ohermes, rhermes, o_home, r_home = sys.argv[1:6]
 with open(path, encoding="utf-8") as fh:
     text = fh.read()
+
+def reprefix(text, old, new):
+    # A match only counts as a path prefix before '/', a quote, whitespace,
+    # or the end of the string — anything else is a longer name of its own.
+    return re.sub(re.escape(old) + r"(?=[/'\"\s]|$)", lambda _: new, text)
+
 if o_home and ohermes not in r_home:
-    text = text.replace(o_home, r_home)
-text = text.replace(ohermes, rhermes)
+    text = reprefix(text, o_home, r_home)
+text = reprefix(text, ohermes, rhermes)
 with open(path, "w", encoding="utf-8") as fh:
     fh.write(text)
 PY
@@ -286,7 +299,13 @@ elif have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
     start_old="systemctl start hermes-gateway"
 elif have hermes && hermes gateway stop >/dev/null 2>&1; then
     stopped="hermes gateway stop"
-    start_old="hermes gateway start"
+    # `hermes gateway start` exists in v0.21 but only revives a gateway
+    # installed as a service via `hermes gateway install` — `status`
+    # answering is the check. Without it there is no restart verb, so
+    # rollback must say so instead of claiming a restart that never ran.
+    if hermes gateway status >/dev/null 2>&1; then
+        start_old="hermes gateway start"
+    fi
 fi
 if [ -z "$stopped" ]; then
     die "could not stop the old gateway — the copy is in place on $TO with its gateway left stopped; stop the old one, then: ssh $TO supervisorctl start hermes-gateway"
@@ -295,8 +314,11 @@ log "stopped the old gateway: $stopped"
 
 rollback() {
     log "WARNING: $1"
-    $start_old >/dev/null 2>&1 || true
-    die "$1 — old gateway restarted, remote gateway left stopped"
+    if [ -n "$start_old" ]; then
+        $start_old >/dev/null 2>&1 || true
+        die "$1 — old gateway restarted, remote gateway left stopped"
+    fi
+    die "$1 — the old gateway was stopped with '$stopped' and has no verified restart verb; bring it back by hand"
 }
 
 # The archive was packed while the old gateway was live, so refresh every
@@ -308,25 +330,46 @@ db_list="$WORKDIR/dbs.txt"
     ! -path './profiles/.deleted/*' \
     ! -path './cache/*' ! -path './logs/*' ! -path './log/*' \
     ! -path '*/node_modules/*' ! -path '*/venv/*' ! -path '*/.venv/*' \
-    ) >"$db_list"
+    ) >"$db_list" || rollback "could not snapshot the databases"
 if [ -s "$db_list" ]; then
     db_archive="$WORKDIR/dbs-$TS.tgz"
-    tar -czf "$db_archive" -C "$HERMES_HOME" -T "$db_list"
+    tar -czf "$db_archive" -C "$HERMES_HOME" -T "$db_list" \
+        || rollback "could not snapshot the databases"
     remote_db_archive="$REMOTE_HERMES/$(basename "$db_archive")"
-    scp "$db_archive" "$TO:$(printf %q "$REMOTE_HERMES/")" </dev/null \
-        || rollback "scp of the database snapshot to $TO failed"
+    ssh "$TO" "$(printf 'cat > %q' "$remote_db_archive")" <"$db_archive" \
+        || rollback "could not copy the database snapshot to $TO"
     ssh "$TO" "$(printf 'tar -xzf %q -C %q && rm -f %q' \
         "$remote_db_archive" "$REMOTE_HERMES" "$remote_db_archive")" </dev/null \
         || rollback "could not unpack the database snapshot on $TO"
     log "synced the quiescent database files"
 fi
 
-if ssh "$TO" supervisorctl start hermes-gateway </dev/null >/dev/null 2>&1 \
-    && ssh "$TO" supervisorctl status hermes-gateway </dev/null 2>/dev/null \
-        | grep -q 'RUNNING'; then
-    log "gateway running on $TO"
+# Status before start: a park that did not hold leaves the remote gateway
+# RUNNING — starting it again only errors, and rolling back then restarts
+# the old gateway while the remote still polls the same bot. The pgrep
+# fallback catches a remote gateway supervised by something other than
+# supervisord (its cmdline is 'hermes gateway run ...').
+remote_gateway_running() {
+    ssh "$TO" supervisorctl status hermes-gateway </dev/null 2>/dev/null \
+        | grep -q 'RUNNING' \
+    || ssh "$TO" "pgrep -f 'hermes gatewa[y] run'" </dev/null >/dev/null 2>&1
+}
+
+if remote_gateway_running; then
+    log "the gateway on $TO is already running — its park did not hold, leaving it up"
 else
-    rollback "the gateway did not come up on $TO"
+    ssh "$TO" supervisorctl start hermes-gateway </dev/null >/dev/null 2>&1 || true
+    # A slow start or an ssh transport blip can hide a gateway that did
+    # come up — retry status before declaring the remote down.
+    tries=0
+    until remote_gateway_running; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 4 ]; then
+            rollback "the gateway did not come up on $TO"
+        fi
+        sleep 3
+    done
+    log "gateway running on $TO"
 fi
 
 log "done: $(profile_names) now run from $TO:$REMOTE_HERMES"
