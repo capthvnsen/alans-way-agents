@@ -11,8 +11,11 @@
 # Flags: --bot-id ID --bot-name NAME --mac-ssh HOST --profile NAME
 #        --hermes-home DIR --desktop-dir DIR --repo-ref SHA --desktop-ref SHA
 #        --host-os mac|windows|linux --mac-key KEY --mac-host-key KEY
+#        (re-running without --mac-ssh keeps the configured computer;
+#         --mac-ssh none removes it)
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
-#        --dev-plugin-install --bind --proactive yes|no --timezone IANA --restart --non-interactive --verify
+#        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --timezone IANA
+#        --restart --non-interactive --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
@@ -20,25 +23,28 @@ DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
 BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
+MAC_SSH_SET=0 HOST_OS_SET=0
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0 DEV_PLUGIN=0
+CDP_PORT_FLAG=""
 MIN_HERMES="0.21.5"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --bot-id) BOT_ID="$2"; shift 2;;
     --bot-name) BOT_NAME="$2"; shift 2;;
-    --mac-ssh) MAC_SSH="$2"; shift 2;;
+    --mac-ssh) MAC_SSH="$2"; MAC_SSH_SET=1; shift 2;;
     --mac-key) MAC_KEY="$2"; shift 2;;
     --mac-host-key) MAC_HOST_KEY="$2"; shift 2;;
-    --host-os) HOST_OS="$2"; shift 2;;
+    --host-os) HOST_OS="$2"; HOST_OS_SET=1; shift 2;;
     --profile) PROFILE="$2"; ONLY_PROFILE=1; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --hermes-home) HERMES_HOME_FLAG="$2"; shift 2;;
     --desktop-dir) DESKTOP_DIR="$2"; shift 2;;
     --repo-ref) REPO_REF="$2"; shift 2;;
     --desktop-ref) DESKTOP_REF="$2"; shift 2;;
+    --cdp-port) CDP_PORT_FLAG="$2"; shift 2;;
     --skip-browser) SKIP_BROWSER=1; shift;;
     --skip-plugin) SKIP_PLUGIN=1; shift;;
     --skip-services) SKIP_SERVICES=1; shift;;
@@ -57,7 +63,8 @@ while [ $# -gt 0 ]; do
 setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
-  --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP)
+  --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP);
+                   omitted: keep the configured computer; "none" removes it
   --host-os OS     OS of that computer: mac (default), windows or linux
   --mac-key KEY    that computer's public key line (MAC_KEY); added to authorized_keys
   --mac-host-key K that computer's host key (MAC_HOST_KEY, "ssh-ed25519 AAAA..."); pinned in known_hosts
@@ -74,6 +81,9 @@ setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
   --desktop-dir D  where the alans-way app checkout lives (cloned if missing)
   --repo-ref SHA   pin this repo's clone/update to a reviewed commit or tag
   --desktop-ref SHA  pin the alans-way desktop repo clone/update the same way
+  --cdp-port PORT  the managed browser's CDP port (default: keep the configured
+                   one, else the first free port from 9223 up; ALANS_WAY_CDP_PORT
+                   sets it too)
   --skip-plugin    leave an already installed plugin in place (catalog installs)
   --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
                    for Telegram and cron once the workspace browser is configured)
@@ -94,6 +104,12 @@ EOF
 done
 
 case "$PROACTIVE" in ""|yes|no) ;; *) echo "setup: --proactive must be yes or no" >&2; exit 2;; esac
+for _port in "$CDP_PORT_FLAG" "${ALANS_WAY_CDP_PORT:-}"; do
+  [ -z "$_port" ] && continue
+  case "$_port" in *[!0-9]*|'') _port=bad;; esac
+  [ "$_port" != bad ] && [ "$_port" -ge 1 ] 2>/dev/null && [ "$_port" -le 65535 ] \
+    || { echo "setup: --cdp-port must be a port number 1-65535" >&2; exit 2; }
+done
 
 # The guest is the machine setup.sh runs on (Hermes' home); the host is the
 # user's computer reached over --mac-ssh. Git Bash, MSYS2 and Cygwin are a
@@ -144,6 +160,59 @@ hermes_p() { hermes -p "${PROFILE:-default}" "$@"; }
 # Whole-name match: "alans-way" must not be satisfied by "alans-way-computer".
 plugin_listed() { hermes_p plugins list 2>/dev/null | grep -qE "(^|[^A-Za-z0-9_-])$1([^A-Za-z0-9_-]|\$)"; }
 
+# The current value of env key $2 inside the managed workspace_browser block in
+# config $1, else empty. setup-workspace.sh uses the same reader, so a re-run
+# keeps what the block already configures.
+managed_env_value() {
+  [ -f "$1" ] || return 0
+  sed -n '/>>> alans-way workspace_browser managed block >>>/,/<<< alans-way workspace_browser managed block <<</p' "$1" \
+    | sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" | head -1 \
+    | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/'
+}
+
+# HERMES_OVERSEER_BOT_IDS: this environment first, then the value a previous
+# service write recorded in one of the files given — the supervisord conf's
+# quoted environment= pair, or a systemd unit's Environment= (quoted now,
+# bare in units written before the value was quoted) — so a re-run without
+# the variable keeps the list instead of silently dropping it.
+overseer_bot_ids() {
+  [ -z "${HERMES_OVERSEER_BOT_IDS:-}" ] || { printf '%s' "$HERMES_OVERSEER_BOT_IDS"; return 0; }
+  for _f in "$@"; do
+    [ -f "$_f" ] || continue
+    _v="$(sed -n -e 's/^[[:space:]]*[Ee]nvironment=.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' \
+               -e 's/^[[:space:]]*Environment=HERMES_OVERSEER_BOT_IDS=\(.*\)$/\1/p' "$_f" | head -1)"
+    if [ -n "$_v" ]; then printf '%s' "$_v"; return 0; fi
+  done
+  return 0
+}
+
+# Re-running without --mac-ssh / --host-os keeps the computer the managed block
+# already configures (the same way the CDP port and HERMES_OVERSEER_BOT_IDS
+# survive re-runs); --mac-ssh none is the explicit removal.
+_main_cfg="$HERMES_HOME/config.yaml"
+[ -z "$CONFIG" ] || _main_cfg="$CONFIG"
+[ -z "$PROFILE" ] || _main_cfg="$HERMES_HOME/profiles/$PROFILE/config.yaml"
+_host_os_cfg="$_main_cfg"
+if [ "$MAC_SSH_SET" = 1 ]; then
+  [ "$MAC_SSH" != none ] || MAC_SSH=""
+elif [ -z "$MAC_SSH" ]; then
+  MAC_SSH="$(managed_env_value "$_main_cfg" HERMES_WORKSPACE_MAC_SSH)"
+  # A computer configured in any profile's managed block counts too (issue
+  # #62): `--profile <name> --mac-ssh` writes it there, and a bare re-run
+  # must still keep the watcher, the shared state file and the managed ssh
+  # block it set up.
+  if [ -z "$MAC_SSH" ] && [ -z "$CONFIG" ] && [ -d "$HERMES_HOME/profiles" ]; then
+    for _prof_cfg in "$HERMES_HOME"/profiles/*/config.yaml; do
+      [ -f "$_prof_cfg" ] || continue
+      _v="$(managed_env_value "$_prof_cfg" HERMES_WORKSPACE_MAC_SSH)"
+      if [ -n "$_v" ]; then MAC_SSH="$_v"; _host_os_cfg="$_prof_cfg"; break; fi
+    done
+  fi
+fi
+if [ "$HOST_OS_SET" != 1 ] && [ -z "$HOST_OS" ]; then
+  HOST_OS="$(managed_env_value "$_host_os_cfg" HERMES_WORKSPACE_HOST_OS)"
+fi
+
 # Refs drive git fetch/checkout — reject anything that isn't a plain ref.
 for _ref in "$REPO_REF" "$DESKTOP_REF"; do
   [ -z "$_ref" ] && continue
@@ -182,7 +251,12 @@ confirm() { # confirm <prompt>: empty means no
   case "$reply" in y|Y|yes) return 0;; *) return 1;; esac
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
+# ALANS_WAY_MISSING lets a test pretend a binary is absent: fakes can add
+# commands but cannot remove real ones from PATH.
+have() {
+  case " ${ALANS_WAY_MISSING:-} " in *" $1 "*) return 1;; esac
+  command -v "$1" >/dev/null 2>&1
+}
 
 # write_if_changed <file> [backup]: content on stdin; sets WROTE=1 only when the
 # file's content actually changed, so an upgrade refreshes stale paths and an
@@ -192,8 +266,254 @@ write_if_changed() {
   WROTE=0
   if [ -f "$1" ] && [ "$(cat "$1")" = "$_new" ]; then return 0; fi
   if [ -f "$1" ] && [ -n "${2:-}" ]; then cp "$1" "$1.bak"; fi
-  printf '%s\n' "$_new" > "$1"
+  printf '%s\n' "$_new" > "$1" || return 1
   WROTE=1
+}
+
+# A VM image can ship the systemctl binary while PID 1 is something else (an
+# init shim, supervisord, a container). Units written on such a host are dead:
+# only call systemctl when systemd is actually running. /run/systemd/system is
+# systemd's own booted marker (sd_booted); is-system-running answers "offline"
+# on the dead case and "running"/"degraded" on a live one.
+systemd_live() {
+  have systemctl || return 1
+  case "$(systemctl is-system-running 2>/dev/null || true)" in
+    running|degraded|starting|initializing|maintenance) return 0;;
+    # No answer at all: fall back to systemd's own booted marker (sd_booted).
+    '') [ -d /run/systemd/system ] && return 0;;
+  esac
+  return 1
+}
+
+# Userspace-networking Tailscale (common on cloud VMs that can't load kernel
+# modules) has no tailscale0 interface, so the ssh client cannot route to
+# tailnet addresses: those hosts need `tailscale nc` as a ProxyCommand. Kernel
+# Tailscale sets TUN=true in `tailscale status --json` and has the interface.
+tailscale_userspace() {
+  [ "$GUEST_OS" = Linux ] || return 1
+  have "$TAILSCALE" || return 1
+  [ ! -e "${ALANS_WAY_SYS_CLASS_NET:-/sys/class/net}/tailscale0" ] || return 1
+  "$TAILSCALE" status --json 2>/dev/null | python3 -c 'import json, sys
+try: s = json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if s.get("BackendState") == "Running" and s.get("TUN") is False else 1)'
+}
+
+# The display the browser services should export. A running X/VNC server's own
+# display wins (that is the desktop the user actually sees; a bare socket may
+# belong to a console X), then a live X socket, then the conventional fallback
+# (:99) so the units and the install docs below stay consistent.
+detect_display() {
+  _line="$(pgrep -af 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr' 2>/dev/null | head -1 || true)"
+  _d="$(printf '%s\n' "$_line" | grep -oE '[[:space:]]:[0-9]+' | head -1 | tr -d ' ')"
+  [ -n "$_d" ] && { printf '%s' "$_d"; return 0; }
+  for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
+    [ -S "$_sock" ] || continue
+    _n="${_sock##*X}"
+    case "$_n" in ''|*[!0-9]*) continue;; esac
+    echo ":$_n"; return 0
+  done
+  printf '%s' "${1:-:99}"
+}
+
+# A display stack the browser can run on: a live X socket, a running X/VNC
+# server, websockify bridging one over noVNC, or a server binary on PATH.
+display_stack_present() {
+  for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
+    [ -S "$_sock" ] && return 0
+  done
+  pgrep -f 'Xtigervnc|Xvfb|Xvnc|x0vncserver|x11vnc|Xephyr|websockify' >/dev/null 2>&1 && return 0
+  have Xvfb || have x11vnc || have Xtigervnc || have x0vncserver || have Xvnc || have websockify
+}
+
+# The noVNC listen port of a running websockify, else nothing. websockify argv
+# is "websockify [opts] [listen_addr:]port target" — the first bare port or
+# addr:port token is the listener.
+websockify_port() {
+  _line="$(pgrep -af websockify 2>/dev/null | head -1)"
+  [ -n "$_line" ] || return 1
+  for _tok in ${_line#* }; do
+    case "$_tok" in
+      *:*) case "${_tok%%:*}" in ''|*[!0-9.]*) continue;; esac; _p="${_tok##*:}";;
+      *) _p="$_tok";;
+    esac
+    case "$_p" in ''|*[!0-9]*) continue;; esac
+    [ "$_p" -gt 0 ] 2>/dev/null && [ "$_p" -le 65535 ] 2>/dev/null || continue
+    echo "$_p"; return 0
+  done
+  return 1
+}
+
+# supervisord that is actually answering, not just installed. `status` cannot
+# prove that: it exits nonzero whenever any program is not RUNNING (an EXITED
+# or FATAL entry makes a healthy daemon look dead). `pid` prints the daemon's
+# own pid whenever it answers.
+supervisord_usable() {
+  have supervisorctl || return 1
+  case "$(supervisorctl_call pid 2>/dev/null)" in ''|*[!0-9]*|0) return 1;; esac
+}
+
+# The directory a [program:*] drop-in goes in: the include glob of the running
+# daemon's own conf (a host can carry a stock conf it never reads; relative
+# `files` globs resolve against that file's directory), then the stock confs,
+# then the Debian and CentOS conventions.
+supervisor_conf_dir() {
+  [ -z "${ALANS_WAY_SUPERVISOR_CONF_DIR:-}" ] || { printf '%s' "$ALANS_WAY_SUPERVISOR_CONF_DIR"; return 0; }
+  _confs="/etc/supervisor/supervisord.conf /etc/supervisord.conf"
+  _live="$(pgrep -af supervisord 2>/dev/null | sed -n 's/.* -c  *\([^ ]*\).*/\1/p' | head -1)"
+  [ -z "$_live" ] || _confs="$_live $_confs"
+  for _f in $_confs; do
+    for _d in $(sed -n 's/^ *files *= *//p' "$_f" 2>/dev/null); do
+      case "$_d" in
+        /*) printf '%s' "${_d%/*}"; return 0;;
+        */*) printf '%s' "${_f%/*}/${_d%/*}"; return 0;;
+        *) printf '%s' "${_f%/*}"; return 0;;
+      esac
+    done
+  done
+  for _d in /etc/supervisor/conf.d /etc/supervisord.d; do
+    [ -d "$_d" ] && { printf '%s' "$_d"; return 0; }
+  done
+  [ "$(id -u)" = 0 ] && { printf '%s' /etc/supervisor/conf.d; return 0; }
+  return 1
+}
+
+# supervisorctl as this user, retried under `sudo -n` when the socket needs
+# root (-n fails instead of ever asking for a password). Only one call
+# answers: status and pid exit nonzero whenever a program is not RUNNING while
+# still printing a valid reply, so a plain || retry would run both and
+# concatenate their output (two pid lines reading as one number). On a double
+# failure the first reply is still printed, since it carries the state. The
+# detached gateway restarter cannot share this function, so it evals the same
+# definition text from $SUPCTL_DEF with $SUPCTL pointing at the resolved path.
+SUPCTL="${SUPCTL:-supervisorctl}"
+SUPCTL_DEF='supervisorctl_call() {
+  _o="$("$SUPCTL" "$@" 2>/dev/null)" && { printf "%s" "$_o"; return 0; }
+  command -v sudo >/dev/null 2>&1 || { printf "%s" "$_o"; return 1; }
+  _s="$(sudo -n "$SUPCTL" "$@" 2>/dev/null)" && { printf "%s" "$_s"; return 0; }
+  printf "%s" "$_o"; return 1
+}'
+eval "$SUPCTL_DEF"
+
+# The profile a hermes argv selects — every equivalent flag spelling: -p X,
+# -p=X, -pX, --profile X and --profile=X — else "default".
+argv_profile() {
+  _next=""
+  for _a in $@; do
+    if [ -n "$_next" ]; then printf '%s' "$_a"; return 0; fi
+    case "$_a" in
+      -p|--profile) _next=1;;
+      --profile=*) printf '%s' "${_a#*=}"; return 0;;
+      -p=*) printf '%s' "${_a#*=}"; return 0;;
+      -p?*) printf '%s' "${_a#-p}"; return 0;;
+    esac
+  done
+  printf '%s' default
+}
+
+# The supervisor program whose command line (or a child's, for wrapper
+# scripts) runs `hermes gateway run`. The name is discovered, never assumed,
+# and a non-Hermes "gateway run" is never touched. With several gateway
+# programs, the one serving the profile being configured wins: the profile
+# flag in any of its spellings, or an argv with no flag when the default
+# profile is the target.
+supervisor_gateway_program() {
+  [ "$GUEST_OS" = Linux ] || return 1
+  have supervisorctl && have ps || return 1
+  _any=""
+  for _prog in $(supervisorctl_call status 2>/dev/null | awk '$2 == "RUNNING" {print $1}'); do
+    _pid="$(supervisorctl_call pid "$_prog" 2>/dev/null || true)"
+    case "$_pid" in ''|*[!0-9]*|0) continue;; esac
+    for _cand in "$_pid" $(pgrep -P "$_pid" 2>/dev/null); do
+      _args="$(ps -o args= -p "$_cand" 2>/dev/null || true)"
+      case "$_args" in
+        *hermes*"gateway run"*)
+          case "$(argv_profile $_args)" in
+            "${PROFILE:-default}") echo "$_prog"; return 0;;
+            # An unprofiled argv is only a candidate when the default
+            # profile is the target — the strict match the conf-scan
+            # fallback below applies too.
+            default) if [ "${PROFILE:-default}" = default ]; then [ -n "$_any" ] || _any="$_prog"; fi;;
+          esac;;
+      esac
+    done
+  done
+  [ -z "$_any" ] || { echo "$_any"; return 0; }
+  # A stopped gateway has no argv to match; its conf command line is the
+  # fallback, so it still restarts through supervisord. Never on a live-systemd
+  # host, where a leftover conf must not win over the real unit.
+  systemd_live && return 1
+  _cd="$(supervisor_conf_dir 2>/dev/null || true)"
+  for _f in ${_cd:+"$_cd"/*.conf}; do
+    [ -f "$_f" ] || continue
+    _prog="$(awk -v want="${PROFILE:-}" '
+      /^\[program:/ { n = $0; sub(/^\[program:[[:space:]]*/, "", n); sub(/[[:space:]]*\].*/, "", n); next }
+      /^\[/ { n = "" }
+      n != "" && /^[[:space:]]*command[[:space:]]*=/ && /hermes/ && /gateway run/ {
+        prof = "default"
+        for (i = 1; i <= NF; i++) {
+          if ($i == "-p" || $i == "--profile") { prof = $(i + 1); break }
+          if ($i ~ /^--profile=/) { prof = substr($i, 11); break }
+          if ($i ~ /^-p=/) { prof = substr($i, 4); break }
+          if ($i ~ /^-p./) { prof = substr($i, 3); break }
+        }
+        if (want == "") want = "default"
+        if (prof == want) { print n; exit }
+      }' "$_f" 2>/dev/null)"
+    [ -n "$_prog" ] && { echo "$_prog"; return 0; }
+  done
+  return 1
+}
+
+# GNU stat -c %Y, BSD stat -f %m.
+file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+# True when nothing listens on 127.0.0.1:$1: the managed browser's debugging
+# socket must not collide with another browser or service.
+port_free() {
+  python3 - "$1" <<'PY'
+import socket, sys
+sock = socket.socket()
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except (OSError, ValueError):
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+}
+
+# The cdpUrl port an existing config.json already uses, else empty.
+configured_cdp_port() {
+  python3 - "$1" 2>/dev/null <<'PY'
+import json, re, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+m = re.search(r":(\d+)(?:[/][^\s]*)?$", str(cfg.get("cdpUrl") or ""))
+if m:
+    print(m.group(1))
+PY
+}
+
+# Where the availability watcher's state file lives on this guest, matching
+# the router's own default chain (workspace-router.cjs macStateFile). On Linux
+# the router default is /var/lib/hermes-alans-way; a non-root watcher can't
+# write there, so setup points both processes at a user path instead.
+mac_state_path() {
+  if [ -n "${HERMES_MAC_STATE_FILE:-}" ]; then
+    printf '%s' "$HERMES_MAC_STATE_FILE"; return 0
+  fi
+  case "$GUEST_OS" in
+    Darwin) printf '%s' "$HOME/Library/Application Support/hermes-alans-way/mac-state.json";;
+    Windows) printf '%s' "$BROWSER_HOME/.local/share/hermes-alans-way/mac-state.json";;
+    *) if [ "$(id -u)" = 0 ] || [ -f /var/lib/hermes-alans-way/mac-state.json ]; then
+         printf '%s' /var/lib/hermes-alans-way/mac-state.json
+       else
+         printf '%s' "$BROWSER_HOME/.local/share/hermes-alans-way/mac-state.json"
+       fi;;
+  esac
 }
 
 
@@ -272,6 +592,29 @@ print("exposed")
 PY
 }
 
+# True when the computer-use provider is installed for the profile in scope.
+computer_provider_present() {
+  plugin_listed alans-way-computer && return 0
+  _home="$HERMES_HOME"
+  [ -z "$PROFILE" ] || _home="$HERMES_HOME/profiles/$PROFILE"
+  [ -d "$_home/plugins/alans-way-computer" ]
+}
+
+# The provider's fallback computer path on this host needs a few desktop
+# pieces on Linux; missing ones are warnings, not silent skips.
+check_linux_desktop_deps() {
+  [ "$GUEST_OS" = Linux ] || return 0
+  computer_provider_present || return 0
+  have xdotool \
+    || warn "xdotool missing: keyboard and pointer control on this host needs it (install: apt-get install xdotool)"
+  have scrot || have import || have maim \
+    || warn "no screenshot tool (scrot, maim or ImageMagick's import): desktop screenshots from this host need one (install: apt-get install scrot)"
+  have at-spi-bus-launcher || pgrep -f at-spi-bus >/dev/null 2>&1 \
+    || warn "AT-SPI accessibility bus not found: app and UI-element listing on this host needs it (install: apt-get install at-spi2-core)"
+  python3 -c 'import gi' >/dev/null 2>&1 \
+    || warn "python3-gi missing: the accessibility tree on this host needs PyGObject (install: apt-get install python3-gi)"
+}
+
 # The managed block's desktop-input exclusion is audited on every run: a block
 # that predates this setup or was hand-edited keeps the ungated tool registered
 # even when the provider is the selected backend. When the provider is
@@ -290,7 +633,11 @@ check_computer_provider() {
     exposed) warn "workspace_browser in $_cfg does not exclude workspace_computer_action, an ungated desktop-input tool: re-run setup, or pass --allow-desktop-actions to keep it deliberately";;
   esac
   have hermes || return 0
-  [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = alans-way-computer ] || return 0
+  if [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" != alans-way-computer ]; then
+    computer_provider_present \
+      && warn "alans-way-computer is installed but not the configured backend: computer use stays on Hermes' built-in path (run: hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend alans-way-computer)"
+    return 0
+  fi
   if hermes_p computer-use doctor >/dev/null 2>&1; then
     ok "computer-use provider passes hermes computer-use doctor"
   else
@@ -385,6 +732,15 @@ elif [ "$(id -u)" = 0 ] && [ -d "$HERMES_HOME" ]; then
       [ -n "$BROWSER_HOME" ] || BROWSER_HOME="$(eval echo "~$_owner")"
       case "$BROWSER_HOME" in /*) ;; *) BROWSER_HOME="$HOME";; esac;;
   esac
+fi
+
+# The availability watcher and the serving router must agree on the state file:
+# carry the resolved path into the managed block env on every run so a non-root
+# install does not strand the router on the /var/lib default while the watcher
+# writes a user path. Windows resolves its own default and a cygpath value
+# would not parse for the native router, so it is skipped.
+if [ -n "$MAC_SSH" ] && [ "$GUEST_OS" != Windows ]; then
+  ALANS_WAY_MAC_STATE_FILE="$(mac_state_path)"; export ALANS_WAY_MAC_STATE_FILE
 fi
 
 # Resolve the plugin repo: beside this script when run from a clone, else clone.
@@ -508,11 +864,15 @@ if [ "$VERIFY" = 1 ]; then
     PSTATE="$(hermes_p proactivity status 2>/dev/null | python3 -c 'import json,sys
 try: s=json.load(sys.stdin)
 except Exception: s={}
-print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on")' 2>/dev/null)"
+print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is True else "on",
+      "tz-missing" if s.get("timezone_known") is False else "tz-known")' 2>/dev/null)"
     case "$PSTATE" in
-      "bound on") ok "proactivity on for the bound primary route";;
-      "bound paused") warn "proactivity bound but paused: the bot never messages first (send /proactivity resume in the bound chat)";;
+      "bound on "*) ok "proactivity on for the bound primary route";;
+      "bound paused "*) warn "proactivity bound but paused: the bot never messages first (send /proactivity resume in the bound chat)";;
       *) warn "no primary route bound: proactivity is off (run: setup.sh --bind)";;
+    esac
+    case "$PSTATE" in
+      *tz-missing) warn "proactivity does not know your timezone: check-in hours may fire at the wrong time (set it: hermes proactivity set --timezone <IANA zone>, or re-run setup with --bind)";;
     esac
     [ "$(hermes_p config get "plugins.entries.$PLUGIN_NAME.allow_gateway_injection" 2>/dev/null | tail -1)" = true ] \
       && ok "gateway injection allowed for $PLUGIN_NAME" \
@@ -524,6 +884,22 @@ print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is T
   esac
   [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
     || warn "browser host connection file absent (browser host not started?)"
+  # The availability watcher rewrites its state file every --interval seconds;
+  # a stale or missing one means the watcher is not running.
+  _watch_state="$(mac_state_path)"
+  if [ -n "$MAC_SSH" ] || [ -f "$_watch_state" ]; then
+    if [ -f "$_watch_state" ]; then
+      _age=$(( $(date +%s) - $(file_mtime "$_watch_state") ))
+      if [ "$_age" -le 300 ]; then
+        ok "host availability watcher state is fresh"
+      else
+        warn "host availability watcher state is stale (${_age}s old): the watcher service is not running or cannot reach the host"
+      fi
+    else
+      warn "no host availability watcher state at $_watch_state: the watcher service is not running (re-run setup so it is installed)"
+    fi
+  fi
+  check_linux_desktop_deps
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
   OTHER_PROFILES=""
   if [ "$ONLY_PROFILE" = 0 ]; then
@@ -680,11 +1056,17 @@ write_agent_ssh_config() {
   fi
   mkdir -p "$BROWSER_HOME/.ssh" && chmod 700 "$BROWSER_HOME/.ssh"
   _cfg="$BROWSER_HOME/.ssh/config"
-  _state="$(python3 - "$_cfg" "$MAC_HOST" <<'PY'
+  # Userspace-networking Tailscale has no tailscale0 interface, so ssh cannot
+  # reach tailnet addresses directly: it must tunnel through `tailscale nc`.
+  _proxy=""
+  tailscale_userspace && _proxy="$TAILSCALE nc %h %p"
+  _state="$(ALANS_WAY_SSH_PROXY="$_proxy" python3 - "$_cfg" "$MAC_HOST" <<'PY'
 import os, sys
 path, host = sys.argv[1], sys.argv[2]
+proxy = os.environ.get("ALANS_WAY_SSH_PROXY", "")
+proxy = ("  ProxyCommand %s\n" % proxy) if proxy else ""
 begin, end = "# >>> alans-way >>>\n", "# <<< alans-way <<<\n"
-block = (begin + f"Host {host}\n  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
+block = (begin + f"Host {host}\n" + proxy + "  ControlMaster auto\n  ControlPath ~/.ssh/cm-%C\n  ControlPersist 10m\n"
          "  ServerAliveInterval 15\n  ServerAliveCountMax 3\n" + end)
 try:
     text = open(path, encoding="utf-8", newline="").read()
@@ -930,15 +1312,16 @@ sys.exit(0 if isinstance(row, dict) and isinstance(row.get("catalog"), dict) els
 PY
 }
 
-# The router and mac-watch run the copy Hermes actually loaded: under
-# --skip-plugin or a catalog install that is the profile's plugins dir, not a
-# possibly newer clone of this repo. The hook setup does the same.
+# The router and mac-watch run the copy Hermes actually loaded: whenever an
+# installed plugin copy exists that is the profile's plugins dir, not a
+# possibly newer (or deleted) clone of this repo. The hook setup does the same.
 router_script() {
-  _rs="$REPO_DIR/$PLUGIN_NAME/scripts/workspace-router.cjs"
-  if { [ "$SKIP_PLUGIN" = 1 ] || plugin_is_catalog_installed; } \
-      && [ -f "$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs" ]; then
-    _rs="$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs"
-  fi
+  # The installed plugin's own router wins whenever it exists, catalog or
+  # file:// install alike: the checkout this script runs from may be a temp
+  # directory (issue #63). REPO_DIR is only a fallback for runs with no
+  # installed copy.
+  _rs="$PROFILE_HOME/plugins/$PLUGIN_NAME/scripts/workspace-router.cjs"
+  [ -f "$_rs" ] || _rs="$REPO_DIR/$PLUGIN_NAME/scripts/workspace-router.cjs"
   printf '%s' "$_rs"
 }
 
@@ -1365,15 +1748,40 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     "--ozone-platform=x11",
 '
   [ "$GUEST_OS" != Windows ] || LINUX_FLAGS=""
+  # The CDP port is settled once and then kept: an explicit --cdp-port or
+  # ALANS_WAY_CDP_PORT wins, else a port already configured in config.json is
+  # preserved on re-run, else the first free loopback port from 9223 up (the
+  # default may be owned by another browser on a shared host).
+  CDP_PORT="${CDP_PORT_FLAG:-${ALANS_WAY_CDP_PORT:-}}"
+  if [ -z "$CDP_PORT" ]; then
+    CDP_PORT="$(configured_cdp_port "$DATA_DIR/config.json")"
+  fi
+  if [ -z "$CDP_PORT" ]; then
+    _probe=9223 _tries=0
+    while ! port_free "$_probe"; do
+      _probe=$((_probe + 1)); _tries=$((_tries + 1))
+      [ "$_tries" -le 200 ] || { _probe=""; break; }
+    done
+    if [ -n "$_probe" ]; then
+      [ "$_probe" = 9223 ] || warn "CDP port 9223 is already in use by another process: using $_probe instead"
+      CDP_PORT="$_probe"
+    else
+      CDP_PORT=9223
+      warn "no free CDP port within 200 of 9223: pass --cdp-port PORT"
+    fi
+  fi
+  if [ -n "${CDP_PORT_FLAG:-${ALANS_WAY_CDP_PORT:-}}" ] && ! port_free "$CDP_PORT"; then
+    warn "CDP port $CDP_PORT is already in use: if that listener is not the managed browser itself, choose a different port"
+  fi
   CFG_EXISTED=0; [ ! -f "$DATA_DIR/config.json" ] || CFG_EXISTED=1
   write_if_changed "$DATA_DIR/config.json" backup <<EOF
 {
   "port": 9465,
-  "cdpUrl": "http://127.0.0.1:9223",
+  "cdpUrl": "http://127.0.0.1:$CDP_PORT",
   "browserCommand": "$(wpath "$CHROMIUM")",
   "browserArgs": [
 $NO_SANDBOX    "--user-data-dir=$(wpath "$PROFILE_DIR")",
-    "--remote-debugging-port=9223",
+    "--remote-debugging-port=$CDP_PORT",
     "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--start-maximized",
@@ -1404,8 +1812,9 @@ EOF
   if [ "$GUEST_OS" = Windows ]; then
     [ "$SKIP_SERVICES" = 1 ] || install_windows_tasks
   else
+  BROWSER_DISPLAY="$(detect_display :99)"
   SYSTEMD_USABLE=0 SYSTEMD_WARNED=0
-  if [ "$SKIP_SERVICES" = 0 ] && have systemctl; then
+  if [ "$SKIP_SERVICES" = 0 ] && systemd_live; then
     if [ "$(id -u)" = 0 ] || systemctl --user list-units >/dev/null 2>&1; then
       SYSTEMD_USABLE=1
     else
@@ -1413,6 +1822,107 @@ EOF
       warn "no systemd user session here (not root, and systemctl --user is unavailable), so the browser services were not installed. Start them yourself after logging in with a full session, or run setup as root. See desktop/docs/vps-browser.md in the alans-way repo"
     fi
   fi
+  # The supervisord counterpart of the systemd units: same programs, same
+  # environment, RestartPreventExitStatus mapped to exitcodes (with
+  # autorestart=unexpected, listing a code keeps its exit down; a clean exit 0
+  # must be listed too, or it would read as a crash and restart, unlike
+  # Restart=on-failure).
+  install_supervisor_programs() {
+    _confdir="$(supervisor_conf_dir)" || {
+      warn "supervisord is running but has no conf.d include dir: add the alans-way programs by hand"
+      return 0
+    }
+    NODE_BIN="$(command -v node || echo /usr/bin/node)"
+    SUP_LOG_DIR="$BROWSER_HOME/.local/state/hermes-alans-way"
+    mkdir -p "$_confdir" "$SUP_LOG_DIR" || { warn "cannot write $_confdir or $SUP_LOG_DIR: service install skipped"; return 0; }
+    _sup_user=""
+    if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then
+      _sup_user="user=$BROWSER_USER"
+      mkdir -p /var/lib/hermes-alans-way 2>/dev/null \
+        && chown "$BROWSER_USER" /var/lib/hermes-alans-way 2>/dev/null || true
+      chown -R "$BROWSER_USER" "$SUP_LOG_DIR" 2>/dev/null || true
+    elif [ "$(id -u)" = 0 ]; then
+      mkdir -p /var/lib/hermes-alans-way 2>/dev/null || true
+    fi
+    # HERMES_OVERSEER_BOT_IDS rides along when configured: this environment
+    # first, then a value a previous run already wrote into the conf.
+    _overseer="$(overseer_bot_ids "$_confdir/alans-way.conf")"
+    _overseer_env=""; [ -z "$_overseer" ] || _overseer_env=",HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
+    _env_browser="HOME=\"$BROWSER_HOME\",PATH=\"$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",DISPLAY=\"$BROWSER_DISPLAY\",HERMES_VPS_BROWSER_DATA=\"$DATA_DIR\""
+    WATCH_SECTION=""
+    if [ -n "$MAC_SSH" ]; then
+      _watch_state="$(mac_state_path)"
+      mkdir -p "$(dirname "$_watch_state")" 2>/dev/null || true
+      if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then
+        chown "$BROWSER_USER" "$(dirname "$_watch_state")" 2>/dev/null || true
+      fi
+      # The serving router resolves the same path: the managed block carries
+      # HERMES_MAC_STATE_FILE (exported near the top of this script on every
+      # run) so both processes agree.
+      WATCH_SECTION="$(cat <<EOFW
+
+[program:alans-way-mac-watch]
+command=$NODE_BIN $(router_script) --watch --interval 10
+$_sup_user
+environment=HOME="$BROWSER_HOME",PATH="$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",HERMES_WORKSPACE_MAC_SSH="$MAC_SSH",HERMES_WORKSPACE_HOST_OS="$HOST_OS",HERMES_MAC_STATE_FILE="$_watch_state"
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=2
+stdout_logfile=$SUP_LOG_DIR/mac-watch.log
+stderr_logfile=$SUP_LOG_DIR/mac-watch.err.log
+EOFW
+)"
+    fi
+    _conf="$_confdir/alans-way.conf"
+    write_if_changed "$_conf" <<EOF || { warn "could not write $_conf: service install skipped"; return 0; }
+[program:alans-way-chromium]
+command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs
+$_sup_user
+environment=$_env_browser
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=0
+stdout_logfile=$SUP_LOG_DIR/chromium.log
+stderr_logfile=$SUP_LOG_DIR/chromium.err.log
+
+[program:alans-way-browser]
+command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-browser-host.cjs serve
+$_sup_user
+environment=$_env_browser$_overseer_env
+directory=$BROWSER_HOME
+autorestart=unexpected
+exitcodes=0,78
+stdout_logfile=$SUP_LOG_DIR/browser.log
+stderr_logfile=$SUP_LOG_DIR/browser.err.log
+$WATCH_SECTION
+EOF
+    if [ "$WROTE" = 1 ]; then
+      ok "wrote $_conf"
+      supervisorctl_call reread >/dev/null 2>&1 && supervisorctl_call update >/dev/null 2>&1 \
+        && ok "supervisord picked up the service definitions" \
+        || warn "supervisorctl reread or update failed: the programs may not be loaded"
+    else
+      ok "$_conf already current"
+    fi
+    # `update` restarts programs whose conf changed; start whatever is still
+    # stopped (a fresh install, or a program that exited cleanly).
+    for _p in alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
+      case "$(supervisorctl_call status "$_p" 2>/dev/null || true)" in
+        *" RUNNING "*) ok "$_p running under supervisord";;
+        *) supervisorctl_call start "$_p" >/dev/null 2>&1 \
+             && ok "$_p started under supervisord" \
+             || warn "could not start $_p via supervisorctl: start it once the desktop stack is up (needs DISPLAY=$BROWSER_DISPLAY)";;
+      esac
+    done
+    if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
+      supervisorctl_call restart alans-way-browser >/dev/null 2>&1 \
+        && ok "browser host restarted on the new scripts" \
+        || warn "could not restart alans-way-browser: run supervisorctl restart alans-way-browser"
+    fi
+    if [ "$CONFIG_CHANGED" = 1 ] && [ "$CFG_EXISTED" = 1 ]; then
+      say "  browser settings changed: restart the alans-way-chromium program to apply them (open tabs close)"
+    fi
+  }
   if [ "$SYSTEMD_USABLE" = 1 ]; then
     NODE_BIN="$(command -v node || echo /usr/bin/node)"
     UNIT_DIR="/etc/systemd/system"; SYSCTL="systemctl"; UNIT_USER="User=$BROWSER_USER"
@@ -1421,6 +1931,14 @@ EOF
     fi
     [ -z "${ALANS_WAY_UNIT_DIR:-}" ] || UNIT_DIR="$ALANS_WAY_UNIT_DIR"
     mkdir -p "$UNIT_DIR"
+    # The desktop scripts read HERMES_OVERSEER_BOT_IDS when it is configured;
+    # it rides along in the environment, same as the supervisord path — and a
+    # re-run without the variable keeps the value this unit already recorded.
+    # The value is quoted: a space-separated list would otherwise read as
+    # stray tokens on the Environment= line.
+    OVERSEER_UNIT_ENV=""
+    _overseer="$(overseer_bot_ids "$UNIT_DIR/hermes-alans-way-browser.service")"
+    [ -z "$_overseer" ] || OVERSEER_UNIT_ENV="Environment=HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
     UNITS_CHANGED="" UNITS_UPDATED=""
     write_unit() { # write_unit <name> <exec> <extra>
       _f="$UNIT_DIR/$1"
@@ -1433,8 +1951,9 @@ After=network.target
 [Service]
 Type=simple
 $UNIT_USER
-Environment=DISPLAY=:99
+Environment=DISPLAY=$BROWSER_DISPLAY
 Environment=HERMES_VPS_BROWSER_DATA=$DATA_DIR
+${OVERSEER_UNIT_ENV}
 $3
 ExecStart=$NODE_BIN $2
 Restart=on-failure
@@ -1454,7 +1973,7 @@ EOF
     [ -z "$UNITS_CHANGED" ] || $SYSCTL daemon-reload 2>/dev/null || true
     $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
-      || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=:99)"
+      || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=$BROWSER_DISPLAY)"
     # User units stop at logout unless the account is allowed to linger.
     if [ "$SYSCTL" != systemctl ] && have loginctl; then
       loginctl enable-linger "$(id -un)" >/dev/null 2>&1 \
@@ -1519,8 +2038,10 @@ EOF
     elif [ -n "$MAC_SSH" ]; then
       warn "Mac availability watcher not installed (needs root + systemd): see README 'mac-watch'"
     fi
+  elif [ "$SKIP_SERVICES" = 0 ] && [ "$GUEST_OS" = Linux ] && supervisord_usable; then
+    install_supervisor_programs
   else
-    [ "$SYSTEMD_WARNED" = 1 ] || warn "systemd unavailable or skipped: see desktop/docs/vps-browser.md in the alans-way repo for manual unit setup"
+    [ "$SKIP_SERVICES" = 1 ] || [ "$SYSTEMD_WARNED" = 1 ] || warn "no live systemd or supervisord here, so the browser services were not installed: see desktop/docs/vps-browser.md in the alans-way repo for manual setup"
   fi
   fi
   fi
@@ -1586,13 +2107,20 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     say "  Windows guest needs no X11 stack: Chrome opens on the signed-in desktop. Keep this"
     say "  PC awake and signed in (the browser and watcher start at logon), and turn on"
     say "  automatic sign-in (run netplwiz) so a reboot brings everything back."
-  elif have Xvfb || pgrep -f Xvfb >/dev/null 2>&1 || pgrep -f x11vnc >/dev/null 2>&1; then
-    ok "an X display stack is present"
+  elif display_stack_present; then
+    ok "a display stack is present (DISPLAY=${BROWSER_DISPLAY:-:99})"
+    _wsport="$(websockify_port || true)"
+    if [ -n "$_wsport" ]; then
+      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+      say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+    fi
   else
-    say "  no Xvfb/x11vnc detected: for the VPS desktop, install a display stack:"
+    say "  no display stack detected (Xvfb, x11vnc, TigerVNC, or websockify): for the VPS"
+    say "  desktop, install one:"
     say "    apt-get install xvfb x11vnc websockify chromium-browser"
-    say "  then start Xvfb on :99, x11vnc, and a noVNC viewer. The browser services above"
-    say "  expect DISPLAY=:99. Full guide: desktop/docs/vps-browser.md in the alans-way repo."
+    say "    (or tigervnc-standalone-server for a TigerVNC + noVNC stack)"
+    say "  then start the server on DISPLAY=${BROWSER_DISPLAY:-:99} and a noVNC viewer."
+    say "  Full guide: desktop/docs/vps-browser.md in the alans-way repo."
   fi
 fi
 
@@ -1638,8 +2166,10 @@ PY
 workspace_for_profile() {
   set -- --bot-id "$BOT_ID"
   [ -n "$BOT_NAME" ] && set -- "$@" --bot-name "$BOT_NAME"
-  [ -n "$MAC_SSH" ] && set -- "$@" --mac-ssh "$MAC_SSH"
-  set -- "$@" --host-os "$HOST_OS"
+  # Only an explicit --mac-ssh / --host-os overrides the block's own values;
+  # setup-workspace.sh preserves them per config otherwise. "none" removes.
+  if [ "$MAC_SSH_SET" = 1 ]; then set -- "$@" --mac-ssh "${MAC_SSH:-none}"; fi
+  [ "$HOST_OS_SET" = 1 ] && set -- "$@" --host-os "$HOST_OS"
   # The router runs the copy Hermes loaded (the catalog install's own script),
   # not a possibly newer clone of this repo.
   set -- "$@" --router "$(router_script)"
@@ -1653,9 +2183,15 @@ workspace_for_profile() {
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     if [ "$COMPUTER_READY" = 1 ]; then
-      hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
-        && { COMPUTER_SELECTED=1; ok "computer use runs through $COMPUTER_PLUGIN"; } \
-        || warn "could not select the computer-use provider: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+      # Read back what was set: a stale write or an overruled value leaves the
+      # provider installed but unselected, which must be loud, not silent.
+      if hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
+          && [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = "$COMPUTER_PLUGIN" ]; then
+        COMPUTER_SELECTED=1
+        ok "computer use runs through $COMPUTER_PLUGIN"
+      else
+        warn "the computer-use provider is installed but could not be selected: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+      fi
       # The gated toolset is now the only desktop-input path: undo an older
       # setup's tools disable so the provider can serve it.
       for platform in telegram cron; do
@@ -1793,7 +2329,7 @@ fi
 # reports a timeout. Widen it where systemd owns the unit; never clobber an
 # operator-set drop-in.
 GW_SERVICE="hermes-gateway${PROFILE:+-$PROFILE}"
-if have systemctl; then
+if systemd_live; then
   for scope in "--user" ""; do
     if systemctl $scope cat "$GW_SERVICE.service" >/dev/null 2>&1; then
       if [ -n "$scope" ]; then
@@ -1866,7 +2402,19 @@ for prof_dir in profiles:
         pass
 PY
 )"
-if [ -z "$ROUTES" ]; then
+# An already bound profile keeps its binding across re-runs: without --bind,
+# say so instead of listing routes or claiming check-ins stay silent.
+ALREADY_BOUND=0
+if [ "$DO_BIND" = 0 ] && have hermes \
+    && hermes_p proactivity status 2>/dev/null | python3 -c 'import json, sys
+try: s = json.load(sys.stdin)
+except Exception: s = {}
+sys.exit(0 if s.get("bound") else 1)'; then
+  ALREADY_BOUND=1
+fi
+if [ "$ALREADY_BOUND" = 1 ]; then
+  ok "proactivity is already bound to a primary route: keeping the existing binding (to change it, re-run: setup.sh --bind${PROFILE:+ --profile $PROFILE})"
+elif [ -z "$ROUTES" ]; then
   say "  no Telegram DM sessions yet. Message your bot once on Telegram,"
   say "  then re-run:  setup.sh --bind${PROFILE:+ --profile $PROFILE}"
 else
@@ -1965,6 +2513,7 @@ fi
 
 schedule_gateway_restart() {
   GW_DELAY="${ALANS_WAY_RESTART_DELAY:-10}"
+  GW_DRAIN="${ALANS_WAY_DRAIN_WAIT:-180}"
   GW_LOG="$(mktemp "${TMPDIR:-/tmp}/alans-way-gateway-restart.XXXXXX" 2>/dev/null)" || GW_LOG=/dev/null
   GW_HERMES="$(command -v hermes || echo hermes)"
   if [ "$GUEST_OS" = Windows ]; then
@@ -1976,9 +2525,53 @@ schedule_gateway_restart() {
       || warn "could not schedule the restart: run hermes${PROFILE:+ -p $PROFILE} gateway restart yourself"
     return 0
   fi
-  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first.
+  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first, $5 the
+  # supervisor program name when the gateway is one of supervisord's, $6 the
+  # resolved supervisorctl path (a detached restarter may not share our PATH),
+  # $7 the drain bound in seconds. A Hermes gateway restarts on SIGUSR1: it
+  # drains its turns, exits, and supervisord relaunches it. `restart` is only
+  # the fallback for a daemon without `signal`, since it escalates SIGTERM to
+  # SIGKILL after the program's stopwaitsecs and a kill mid-checkpoint
+  # corrupts state.db.
+  GW_SUP="$(supervisor_gateway_program || true)"
+  GW_SUPCTL="$(command -v supervisorctl 2>/dev/null || echo supervisorctl)"
   _restart='sleep "$4"
-    if "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
+    if [ -n "$5" ]; then
+      SUPCTL="$6"
+'"$SUPCTL_DEF"'
+      _old="$(supervisorctl_call pid "$5" || true)"; _old="${_old:-0}"
+      if supervisorctl_call signal USR1 "$5"; then
+        _w=0 _new="" _down=0
+        while [ "$_w" -lt "$7" ]; do
+          _s="$(supervisorctl_call status "$5" || true)"
+          case "$_s" in
+            *" RUNNING "*)
+              _p="$(supervisorctl_call pid "$5" || true)"; _p="${_p:-0}"
+              case "$_p" in *[!0-9]*) _p=0;; esac
+              if [ "$_p" != 0 ] && [ "$_p" != "$_old" ]; then _new="$_p"; break; fi
+              _down=0;;
+            *STARTING*|*BACKOFF*) _down=0;;
+            *) _down=$((_down + 1)); [ "$_down" -lt 2 ] || break;;
+          esac
+          sleep 2; _w=$((_w + 2))
+        done
+        if [ -n "$_new" ]; then
+          echo "restarted: $6 signal USR1 $5 (new pid $_new)"
+        else
+          _s="$(supervisorctl_call status "$5" || true)"
+          case "$_s" in
+            *" RUNNING "*|*STARTING*|*BACKOFF*)
+              echo "$6 signal USR1 $5 sent; the gateway is still draining or coming back after $7s: supervisord finishes the relaunch on its own";;
+            *)
+              supervisorctl_call start "$5" \
+                && echo "restarted: $6 start $5 (the gateway did not come back after signal USR1)" \
+                || echo "$6 start $5 failed: start that program by hand";;
+          esac
+        fi
+      elif supervisorctl_call restart "$5"; then echo "restarted: $6 restart $5"
+      else echo "$6 restart $5 failed: restart that program by hand"
+      fi
+    elif "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
     elif systemctl is-active --quiet "$3"; then systemctl restart "$3" && echo "restarted: systemctl restart $3"
     elif systemctl --user is-active --quiet "$3"; then systemctl --user restart "$3" && echo "restarted: systemctl --user restart $3"
     elif pgrep -f "gateway run" >/dev/null 2>&1; then echo "a supervisor-managed gateway is running: restart it through its owner (PM/launchd), not here"
@@ -1991,7 +2584,7 @@ schedule_gateway_restart() {
     # shellcheck disable=SC2086
     if systemd-run $_scope --collect --quiet --on-active="${GW_DELAY}s" \
         --setenv=HERMES_HOME="$HERMES_HOME" --setenv=HOME="$HOME" \
-        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 >"$GW_LOG" 2>&1; then
+        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" "$GW_SUPCTL" "$GW_DRAIN" >"$GW_LOG" 2>&1; then
       return 0
     fi
   fi
@@ -2001,7 +2594,7 @@ schedule_gateway_restart() {
   # the gap in which the caller could still kill the restarter along with itself.
   GW_READY="${TMPDIR:-/tmp}/alans-way-restart-ready.$$"
   python3 -c 'import os, sys; os.setsid(); open(sys.argv[1], "w").close(); os.execvp(sys.argv[2], sys.argv[2:])' \
-    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" </dev/null >"$GW_LOG" 2>&1 &
+    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" "$GW_SUPCTL" "$GW_DRAIN" </dev/null >"$GW_LOG" 2>&1 &
   _tries=0
   while [ ! -e "$GW_READY" ] && [ "$_tries" -lt 50 ]; do sleep 0.1; _tries=$((_tries + 1)); done
   rm -f "$GW_READY"

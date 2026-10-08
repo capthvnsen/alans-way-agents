@@ -293,6 +293,10 @@ command=$WRAPPER
 user=$(id -un)
 autorestart=true
 stopsignal=TERM
+; Hermes drains its turns on SIGTERM (agent.restart_drain_timeout plus a 30s
+; cron drain). The 10s default would SIGKILL it mid-checkpoint and corrupt
+; state.db (issue #65), so give the drain room.
+stopwaitsecs=180
 redirect_stderr=true
 stdout_logfile=/var/log/alan-hermes-gateway.log
 stdout_logfile_maxbytes=10MB
