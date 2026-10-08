@@ -2547,6 +2547,10 @@ class SupervisordServiceTests(unittest.TestCase):
                        ALANS_WAY_SUPERVISOR_CONF_DIR=str(self.confd), **extra)
 
     def run_setup(self, *flags, **env):
+        if "--restart" in flags:
+            # The detached restarter outlives setup.sh; wait for it before
+            # the temp dir is torn down (see wait_for_restarter).
+            self.addCleanup(self.wait_for_restarter)
         return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
                    "--hermes-home", str(self.home), *flags, env=self.env(**env), check=False)
 
@@ -2788,6 +2792,11 @@ class SupervisordServiceTests(unittest.TestCase):
                     time.sleep(0.2)
                 self.assertIn("signal USR1 alt-gateway", read_log(self.supervisor_log))
                 self.assertNotIn("USR1 main-gateway", read_log(self.supervisor_log))
+                # Wait out each restarter before the next subTest rewrites
+                # supervisor.state and unlinks respawn-* — otherwise the
+                # previous form's restarter loses its respawn marker
+                # mid-drain and polls the full drain bound.
+                self.wait_for_restarter()
 
     def test_a_glued_profile_flag_is_not_the_unprofiled_gateway(self):
         # "-palt" used to fall through to the unprofiled candidate, so a
@@ -2822,6 +2831,38 @@ class SupervisordServiceTests(unittest.TestCase):
         """The detached restarter's own log (its mktemp file lands in TMPDIR)."""
         return "\n".join(p.read_text(encoding="utf-8")
                          for p in self.root.glob("alans-way-gateway-restart.*"))
+
+    def wait_for_restarter(self, seconds=30):
+        """Teardown barrier for the detached restarter. It sleeps
+        ALANS_WAY_RESTART_DELAY, then polls supervisorctl — writing its log,
+        supervisorctl.log and the respawn/state tmp files, all inside this
+        test's temp dir — for up to the drain bound after setup.sh returns.
+        Without the wait, cleanup's rmtree races those writes on CI
+        (OSError: Directory not empty). Done when every restart log ends in
+        a final "restarted:"/"failed"/"by hand" line or no restarter is
+        left running."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if not self._restarter_running():
+                return
+            logs = list(self.root.glob("alans-way-gateway-restart.*"))
+            if logs and all(any(m in p.read_text(encoding="utf-8", errors="replace")
+                                for m in ("restarted:", "failed", "by hand"))
+                            for p in logs):
+                return
+            time.sleep(0.2)
+
+    def _restarter_running(self):
+        # The restarter's argv carries this test's bin dir (the fake hermes
+        # and supervisorctl paths it was launched with), so a real pgrep -f
+        # on the temp dir names it — the test's own PATH is untouched by the
+        # fixture's.
+        try:
+            return subprocess.run(["pgrep", "-f", str(self.root)],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0
+        except OSError:
+            return True  # no pgrep: keep waiting on the log markers alone
 
     def test_gateway_restart_signals_usr1_and_waits_for_a_new_pid(self):
         """A Hermes gateway drains its turns on SIGUSR1 and supervisord relaunches

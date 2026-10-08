@@ -182,6 +182,13 @@ exit "${FAKE_SUPERVISORCTL_RC:-0}"
 ''')
     stub(stub_bin, "systemctl",
          'echo "local: systemctl $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_SYSTEMCTL_RC:-0}"\n')
+    # pgrep is consulted twice: locally for the post-stop wait and remotely
+    # via the ssh stub's eval for remote_gateway_running. The default stub
+    # answers "no match" so neither can see the real machine's process
+    # table — a stray `... hermes gateway run` argv (e.g. a detached
+    # restarter left over from another suite) would otherwise fake a live
+    # remote gateway. Tests that model a draining gateway stub it again.
+    stub(stub_bin, "pgrep", "exit 1\n")
     # `gateway status` gets its own knob: v0.21 only answers it when the
     # gateway was installed as a service via `hermes gateway install`.
     stub(stub_bin, "hermes", '''
