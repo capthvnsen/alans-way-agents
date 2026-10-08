@@ -14,6 +14,8 @@ LOG_FILE="${ALAN_LOG_FILE:-$STATE_DIR/bootstrap.log}"
 BIN_DIR="${ALAN_BIN_DIR:-/usr/local/bin}"
 SUPERVISOR_CONF_DIR="${SUPERVISOR_CONF_DIR:-/etc/supervisor/conf.d}"
 TAILSCALE_STATE_DIR="${TAILSCALE_STATE_DIR:-/var/lib/tailscale}"
+TAILSCALE_SOCKET="${TAILSCALE_SOCKET:-/var/run/tailscale/tailscaled.sock}"
+SSHD_BIN="${SSHD_BIN:-/usr/sbin/sshd}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
 # The same installer Alex's reference Orgo computer used: it git-clones
@@ -70,6 +72,23 @@ log() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# first_conf_defining <name> — prints the first $SUPERVISOR_CONF_DIR/*.conf
+# that defines [program:<name>]. Only *.conf files count: editor backups
+# like hermes-gateway.conf.bak never load into supervisord.
+first_conf_defining() {
+    local name="$1" conf
+    for conf in "$SUPERVISOR_CONF_DIR"/*.conf; do
+        [ -f "$conf" ] || continue
+        grep -q "^\[program:$name\]" "$conf" && { printf '%s' "$conf"; return 0; }
+    done
+    return 0
+}
+
+# conf_program_command <conf> — the binary the conf's command= runs.
+conf_program_command() {
+    sed -n 's/^command=\([^[:space:]]*\).*/\1/p' "$1" | head -n 1
+}
 
 # state <state> <step> [error] — atomic write via tmp file + mv.
 state() {
@@ -179,9 +198,23 @@ EOF
 # Orgo's Hermes template ships a platform-generated orgo.conf that already
 # defines [program:hermes-gateway]. Reuse it; never add a second entry.
 gateway_conf() {
-    if grep -rl '^\[program:hermes-gateway\]' "$SUPERVISOR_CONF_DIR" >/dev/null 2>&1; then
-        log "hermes-gateway already defined under $SUPERVISOR_CONF_DIR"
-        return 0
+    local conf cmd=""
+    conf="$(first_conf_defining hermes-gateway)"
+    if [ -n "$conf" ]; then
+        cmd="$(conf_program_command "$conf")"
+        if [ -n "$cmd" ] && { [ -x "$cmd" ] || have "${cmd##*/}"; }; then
+            log "hermes-gateway already defined in $conf"
+            return 0
+        fi
+        # A conf pointing at a missing binary would crash-loop forever —
+        # put our wrapper at the path it references if we can write there.
+        if [ "$DRY_RUN" = 0 ] && [ -n "$cmd" ] && [ ! -e "$cmd" ] \
+            && [ -w "$(dirname "$cmd")" ] && cp "$WRAPPER" "$cmd" 2>/dev/null; then
+            chmod 755 "$cmd"
+            log "installed the gateway wrapper at $cmd, which $conf pointed at but was missing"
+            return 0
+        fi
+        log "WARNING: $conf defines hermes-gateway but '$cmd' is missing"
     fi
     if [ "$DRY_RUN" = 1 ]; then
         log "would write $SUPERVISOR_CONF_DIR/hermes-gateway.conf"
@@ -283,6 +316,8 @@ step_tailscale() {
         run_sh "curl -fsSL '$TAILSCALE_INSTALL_URL' | sh"
     fi
     tailscaled_conf
+    sshd_conf
+    tailnet_ssh_config
     if have supervisorctl; then
         run supervisorctl reread
         run supervisorctl update
@@ -295,28 +330,111 @@ step_tailscale() {
 }
 
 tailscaled_conf() {
-    if grep -rl '^\[program:tailscaled\]' "$SUPERVISOR_CONF_DIR" >/dev/null 2>&1; then
-        log "tailscaled already defined under $SUPERVISOR_CONF_DIR"
-        return 0
+    local conf cmd=""
+    conf="$(first_conf_defining tailscaled)"
+    if [ -n "$conf" ]; then
+        cmd="$(conf_program_command "$conf")"
+        if [ -n "$cmd" ] && { [ -x "$cmd" ] || have "${cmd##*/}"; }; then
+            log "tailscaled already defined in $conf"
+            return 0
+        fi
+        log "WARNING: $conf defines tailscaled but '$cmd' is missing"
     fi
-    # Orgo VMs have no /dev/net/tun, so the daemon must run userspace.
-    local tun=""
-    [ -e /dev/net/tun ] || tun=" --tun=userspace-networking"
+    # Orgo VMs have no /dev/net/tun, so the daemon must run userspace — which
+    # also means outbound tailnet traffic only works through its SOCKS5
+    # server (ssh goes through the ProxyCommand added below), and the
+    # tailscale CLI needs a fixed --socket to talk to it.
+    local flags="--state=$TAILSCALE_STATE_DIR/tailscaled.state"
+    if [ ! -e /dev/net/tun ]; then
+        flags="--tun=userspace-networking --socks5-server=localhost:1055 --socket=$TAILSCALE_SOCKET $flags"
+    fi
     if [ "$DRY_RUN" = 1 ]; then
-        log "would write $SUPERVISOR_CONF_DIR/tailscaled.conf (tailscaled --state=$TAILSCALE_STATE_DIR/tailscaled.state$tun)"
+        log "would write $SUPERVISOR_CONF_DIR/tailscaled.conf (tailscaled $flags)"
         return 0
     fi
-    mkdir -p "$TAILSCALE_STATE_DIR"
+    mkdir -p "$TAILSCALE_STATE_DIR" "$(dirname "$TAILSCALE_SOCKET")"
     cat >"$SUPERVISOR_CONF_DIR/tailscaled.conf" <<EOF
 ; Written by bootstrap-orgo.sh — Orgo has no systemd unit for tailscaled.
 [program:tailscaled]
-command=tailscaled --state=$TAILSCALE_STATE_DIR/tailscaled.state$tun
+command=tailscaled $flags
 autorestart=true
 redirect_stderr=true
 stdout_logfile=/var/log/alan-tailscaled.log
 stdout_logfile_maxbytes=10MB
 EOF
     log "wrote $SUPERVISOR_CONF_DIR/tailscaled.conf"
+}
+
+# Inbound tailnet connections are forwarded to localhost ports when
+# tailscaled runs userspace, so ssh lands on localhost:22 — an sshd must be
+# running for `ssh user@alan-<id>` (and migrate.sh) to reach this computer.
+# Orgo's hermes-agent template already supervises sshd; reuse any existing
+# program and only install openssh-server when the binary is absent.
+sshd_conf() {
+    if grep -l 'sshd' "$SUPERVISOR_CONF_DIR"/*.conf >/dev/null 2>&1; then
+        log "sshd already defined under $SUPERVISOR_CONF_DIR"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would ensure openssh-server is installed and write $SUPERVISOR_CONF_DIR/sshd.conf"
+        return 0
+    fi
+    if [ ! -x "$SSHD_BIN" ] && have apt-get; then
+        run_sh "apt-get update && apt-get install -y openssh-server"
+    fi
+    if [ ! -x "$SSHD_BIN" ]; then
+        log "WARNING: no sshd at $SSHD_BIN — inbound ssh to this computer will not work"
+        return 0
+    fi
+    local keygen
+    keygen="$(command -v ssh-keygen || echo ssh-keygen)"
+    cat >"$BIN_DIR/alan-sshd" <<EOF
+#!/bin/sh
+# Written by bootstrap-orgo.sh.
+mkdir -p /run/sshd
+$keygen -A
+exec $SSHD_BIN -D -e
+EOF
+    chmod 755 "$BIN_DIR/alan-sshd"
+    cat >"$SUPERVISOR_CONF_DIR/sshd.conf" <<EOF
+; Written by bootstrap-orgo.sh — inbound tailnet connections land on
+; localhost:22, so sshd runs here the way Orgo's template supervises it.
+[program:sshd]
+command=$BIN_DIR/alan-sshd
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/alan-sshd.log
+stdout_logfile_maxbytes=10MB
+EOF
+    log "wrote $SUPERVISOR_CONF_DIR/sshd.conf"
+}
+
+# With --tun=userspace-networking this computer cannot route to tailnet
+# IPs, so outbound ssh to peers (e.g. back to the Mac) goes through
+# tailscale nc. Managed block — the markers keep it idempotent.
+tailnet_ssh_config() {
+    local conf="$HOME/.ssh/config"
+    if [ -f "$conf" ] && grep -q 'alan tailscale ssh' "$conf"; then
+        log "tailnet ssh block already in $conf"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would add a 'Host 100.*' ProxyCommand block to $conf"
+        return 0
+    fi
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+    cat >>"$conf" <<'EOF'
+
+# >>> alan tailscale ssh >>>
+# tailscaled runs with --tun=userspace-networking, so tailnet IPs are only
+# reachable through tailscale nc.
+Host 100.*
+  ProxyCommand tailscale nc %h %p
+# <<< alan tailscale ssh <<<
+EOF
+    chmod 600 "$conf"
+    log "added the Host 100.* ProxyCommand block to $conf"
 }
 
 tailscale_backend_running() {
@@ -334,8 +452,12 @@ except Exception:
 capture_login_url() {
     local host="$ID"
     [ -n "$host" ] || host="$(hostname 2>/dev/null || echo orgo)"
+    # The tailnet hostname is alan-<id> verbatim — lowercased, [a-z0-9-]
+    # only, max 63 chars — never the OS hostname when --id was given.
+    host="$(printf 'alan-%s' "$host" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-63)"
+    [ "$host" = "alan-" ] && host="alan-orgo"
     if [ "$DRY_RUN" = 1 ]; then
-        log "would run: tailscale up --hostname alan-$host --timeout=0 (background, poll ${TAILSCALE_URL_TIMEOUT}s for a login URL)"
+        log "would run: tailscale up --hostname $host --timeout=0 (background, poll ${TAILSCALE_URL_TIMEOUT}s for a login URL)"
         if [ -n "$CALLBACK" ]; then
             log "would POST {id, secret, url} to $CALLBACK"
         else
@@ -343,8 +465,13 @@ capture_login_url() {
         fi
         return 0
     fi
+    # A re-run can otherwise race a `tailscale up` from the previous attempt
+    # that is still parked waiting for login.
+    if have pkill; then
+        run pkill -f 'tailscale up --hostname' || true
+    fi
     local up_log="$STATE_DIR/.tailscale-up.$$.log"
-    tailscale up --hostname "alan-$host" --timeout=0 >"$up_log" 2>&1 &
+    tailscale up --hostname "$host" --timeout=0 </dev/null >"$up_log" 2>&1 &
     local pid=$! deadline=$(( $(date +%s) + TAILSCALE_URL_TIMEOUT )) url=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
         url="$(grep -oE "$LOGIN_URL_RE" "$up_log" 2>/dev/null | head -n 1 || true)"
@@ -353,6 +480,7 @@ capture_login_url() {
             sleep 1
             url="$(grep -oE "$LOGIN_URL_RE" "$up_log" 2>/dev/null | head -n 1 || true)"
             [ -n "$url" ] && break
+            rm -f "$up_log"
             log "tailscale up exited without printing a login URL"
             return 1
         fi
@@ -360,9 +488,11 @@ capture_login_url() {
     done
     if [ -z "$url" ]; then
         kill "$pid" 2>/dev/null || true
+        rm -f "$up_log"
         log "no Tailscale login URL within ${TAILSCALE_URL_TIMEOUT}s"
         return 1
     fi
+    rm -f "$up_log"
     log "tailscale login URL: $url"
     if [ -n "$CALLBACK" ]; then
         local payload

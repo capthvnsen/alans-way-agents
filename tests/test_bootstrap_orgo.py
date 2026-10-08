@@ -46,6 +46,8 @@ def fixture(directory: Path):
         "ALAN_BIN_DIR": str(bin_dest),
         "SUPERVISOR_CONF_DIR": str(svconf),
         "TAILSCALE_STATE_DIR": str(directory / "tailscale-state"),
+        "TAILSCALE_SOCKET": str(directory / "tailscale-run" / "tailscaled.sock"),
+        "SSHD_BIN": str(directory / "ssh" / "sshd"),
         # System dirs only: the real hermes/curl/tailscale on this machine
         # must not leak into the script's view of the world.
         "PATH": os.pathsep.join([str(stub_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
@@ -53,6 +55,13 @@ def fixture(directory: Path):
     })
     stub(stub_bin, "supervisorctl", 'echo "supervisorctl $*" >> "$STUB_LOG"\n')
     stub(stub_bin, "tailscaled", 'echo "tailscaled $*" >> "$STUB_LOG"\n')
+    # Installing openssh-server lands the sshd binary.
+    stub(stub_bin, "apt-get", '''
+echo "apt-get $*" >> "$STUB_LOG"
+mkdir -p "$(dirname "$SSHD_BIN")"
+printf '#!/bin/sh\\n' > "$SSHD_BIN"
+chmod 755 "$SSHD_BIN"
+''')
     return env, log, stub_bin
 
 
@@ -241,13 +250,13 @@ class InstallStepTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
             env, log, stub_bin = fixture(directory)
+            bin_dest = directory / "sbin"
             (directory / "svconf" / "orgo.conf").write_text(
                 "; orgo-generated — do not edit\n"
                 "[program:hermes-gateway]\n"
-                "command=/usr/local/bin/orgo-hermes-gateway\n",
+                f"command={bin_dest}/orgo-hermes-gateway\n",
                 encoding="utf-8",
             )
-            bin_dest = directory / "sbin"
             (bin_dest / "orgo-hermes-gateway").write_text("#!/bin/sh\n", encoding="utf-8")
             (bin_dest / "orgo-hermes-gateway").chmod(0o755)
             curl_stub(stub_bin)
@@ -271,6 +280,103 @@ class InstallStepTests(unittest.TestCase):
             conf = (directory / "svconf" / "tailscaled.conf").read_text(encoding="utf-8")
             self.assertIn("--tun=userspace-networking", conf)
             self.assertIn("--state=", conf)
+            # Userspace networking can only reach tailnet peers through the
+            # SOCKS5 server, and the CLI needs a fixed socket path.
+            self.assertIn("--socks5-server=localhost:1055", conf)
+            self.assertIn(f"--socket={env['TAILSCALE_SOCKET']}", conf)
+
+    def test_sshd_is_installed_and_supervised_when_absent(self):
+        """Inbound tailnet ssh lands on localhost:22, so sshd must run —
+        the Orgo template supervises it; we add a program when none exists."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            self.assertFalse(Path(env["SSHD_BIN"]).exists())
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s1")
+            run(env=env)
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("apt-get", calls)  # openssh-server install
+            self.assertTrue(Path(env["SSHD_BIN"]).exists())
+            conf = (directory / "svconf" / "sshd.conf").read_text(encoding="utf-8")
+            self.assertIn("[program:sshd]", conf)
+
+    def test_an_existing_sshd_program_is_reused(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            (directory / "svconf" / "sshd.conf").write_text(
+                "; orgo template\n[program:sshd]\ncommand=/usr/sbin/sshd -D\n",
+                encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s2")
+            run(env=env)
+            confs = [c.read_text(encoding="utf-8")
+                     for c in (directory / "svconf").glob("*.conf")]
+            self.assertEqual(sum("program:sshd" in c for c in confs), 1)
+            self.assertNotIn("apt-get", log.read_text(encoding="utf-8"))
+
+    def test_ssh_config_gets_the_tailnet_proxycommand_block_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s3")
+            run(env=env)
+            conf = (directory / "home" / ".ssh" / "config").read_text(encoding="utf-8")
+            self.assertIn("Host 100.*", conf)
+            self.assertIn("ProxyCommand tailscale nc %h %p", conf)
+            # A second run does not duplicate the managed block.
+            run(env=env)
+            conf = (directory / "home" / ".ssh" / "config").read_text(encoding="utf-8")
+            self.assertEqual(conf.count("Host 100.*"), 1)
+
+    def test_hostname_is_alan_id_lowercased_and_sanitized(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s4")
+            run("--id", "C_42.X", env=env)
+            self.assertIn("tailscale up --hostname alan-c42x",
+                          log.read_text(encoding="utf-8"))
+
+    def test_tailscale_up_log_is_removed_after_the_url_is_captured(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s5")
+            run(env=env)
+            self.assertFalse(list((directory / "state").glob(".tailscale-up.*")))
+
+    def test_conf_backup_file_does_not_count_as_a_defined_program(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            (directory / "svconf" / "hermes-gateway.conf.bak").write_text(
+                "[program:hermes-gateway]\ncommand=/gone\n", encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s6")
+            run(env=env)
+            self.assertTrue((directory / "svconf" / "hermes-gateway.conf").exists())
+
+    def test_a_program_conf_whose_command_is_missing_gets_it_installed(self):
+        """A stale platform conf that points at a missing binary would
+        crash-loop forever; drop our wrapper at the referenced path."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            bin_dest = directory / "sbin"
+            (directory / "svconf" / "orgo.conf").write_text(
+                "[program:hermes-gateway]\n"
+                f"command={bin_dest}/orgo-hermes-gateway\n",
+                encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s7")
+            run(env=env)
+            self.assertTrue((bin_dest / "orgo-hermes-gateway").exists())
+            self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
 
     def test_wait_paired_writes_ready_paired(self):
         with tempfile.TemporaryDirectory() as d:
