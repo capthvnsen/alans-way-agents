@@ -85,9 +85,58 @@ first_conf_defining() {
     return 0
 }
 
-# conf_program_command <conf> — the binary the conf's command= runs.
+# conf_program_command <conf> <program> — the binary the conf's command=
+# runs inside [program:<program>]. An indented command= is a ConfigParser
+# continuation line, not a command, and does not count.
 conf_program_command() {
-    sed -n 's/^command=\([^[:space:]]*\).*/\1/p' "$1" | head -n 1
+    awk -v section="[program:$2]" '
+        $0 == section {inside = 1; next}
+        /^\[/         {inside = 0}
+        inside && /^command=/ {sub(/^command=/, ""); print $1; exit}
+    ' "$1"
+}
+
+# fix_conf_command <conf> <program> <command-line> — a conf that defines
+# [program:<p>] without a parseable command= gets the line inserted right
+# under the header. Writing a second [program:<p>] in another conf would
+# break `supervisorctl reread` on the duplicate, so repair in place.
+fix_conf_command() {
+    local conf="$1" prog="$2" line="$3"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would repair $prog in $conf (add 'command=$line')"
+        return 0
+    fi
+    if awk -v section="[program:$prog]" -v line="command=$line" '
+        $0 == section && !added {print; print line; added = 1; next}
+        {print}
+    ' "$conf" >"$conf.alan-tmp" && mv "$conf.alan-tmp" "$conf"; then
+        log "repaired $prog in $conf — added 'command=$line'"
+    else
+        rm -f "$conf.alan-tmp"
+        log "WARNING: $conf defines $prog but has no command= line and could not be repaired"
+    fi
+    return 0
+}
+
+# first_conf_running <basename> — the first *.conf whose command= runs a
+# binary literally named <basename>: absolute paths must exist, bare names
+# must be on PATH. A command mentioning sshd ('sshd-healthcheck') does not
+# count as a running sshd.
+first_conf_running() {
+    local want="$1" conf c
+    for conf in "$SUPERVISOR_CONF_DIR"/*.conf; do
+        [ -f "$conf" ] || continue
+        while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            case "$c" in
+                */*) [ "${c##*/}" = "$want" ] && [ -x "$c" ] || continue;;
+                *)   [ "$c" = "$want" ] && have "$c" || continue;;
+            esac
+            printf '%s' "$conf"
+            return 0
+        done < <(awk '/^command=/ {sub(/^command=/, ""); print $1}' "$conf")
+    done
+    return 0
 }
 
 # state <state> <step> [error] — atomic write via tmp file + mv.
@@ -201,14 +250,18 @@ gateway_conf() {
     local conf cmd=""
     conf="$(first_conf_defining hermes-gateway)"
     if [ -n "$conf" ]; then
-        cmd="$(conf_program_command "$conf")"
-        if [ -n "$cmd" ] && { [ -x "$cmd" ] || have "${cmd##*/}"; }; then
+        cmd="$(conf_program_command "$conf" hermes-gateway)"
+        if [ -z "$cmd" ]; then
+            fix_conf_command "$conf" hermes-gateway "$WRAPPER"
+            return 0
+        fi
+        if [ -x "$cmd" ] || have "${cmd##*/}"; then
             log "hermes-gateway already defined in $conf"
             return 0
         fi
         # A conf pointing at a missing binary would crash-loop forever —
         # put our wrapper at the path it references if we can write there.
-        if [ "$DRY_RUN" = 0 ] && [ -n "$cmd" ] && [ ! -e "$cmd" ] \
+        if [ "$DRY_RUN" = 0 ] && [ ! -e "$cmd" ] \
             && [ -w "$(dirname "$cmd")" ] && cp "$WRAPPER" "$cmd" 2>/dev/null; then
             chmod 755 "$cmd"
             log "installed the gateway wrapper at $cmd, which $conf pointed at but was missing"
@@ -342,15 +395,6 @@ step_tailscale() {
 
 tailscaled_conf() {
     local conf cmd=""
-    conf="$(first_conf_defining tailscaled)"
-    if [ -n "$conf" ]; then
-        cmd="$(conf_program_command "$conf")"
-        if [ -n "$cmd" ] && { [ -x "$cmd" ] || have "${cmd##*/}"; }; then
-            log "tailscaled already defined in $conf"
-            return 0
-        fi
-        log "WARNING: $conf defines tailscaled but '$cmd' is missing"
-    fi
     # Orgo VMs have no /dev/net/tun, so the daemon must run userspace — which
     # also means outbound tailnet traffic only works through its SOCKS5
     # server (ssh goes through the ProxyCommand added below), and the
@@ -358,6 +402,19 @@ tailscaled_conf() {
     local flags="--state=$TAILSCALE_STATE_DIR/tailscaled.state"
     if [ ! -e /dev/net/tun ]; then
         flags="--tun=userspace-networking --socks5-server=localhost:1055 --socket=$TAILSCALE_SOCKET $flags"
+    fi
+    conf="$(first_conf_defining tailscaled)"
+    if [ -n "$conf" ]; then
+        cmd="$(conf_program_command "$conf" tailscaled)"
+        if [ -z "$cmd" ]; then
+            fix_conf_command "$conf" tailscaled "tailscaled $flags"
+            return 0
+        fi
+        if [ -x "$cmd" ] || have "${cmd##*/}"; then
+            log "tailscaled already defined in $conf"
+            return 0
+        fi
+        log "WARNING: $conf defines tailscaled but '$cmd' is missing"
     fi
     if [ "$DRY_RUN" = 1 ]; then
         log "would write $SUPERVISOR_CONF_DIR/tailscaled.conf (tailscaled $flags)"
@@ -382,9 +439,29 @@ EOF
 # Orgo's hermes-agent template already supervises sshd; reuse any existing
 # program and only install openssh-server when the binary is absent.
 sshd_conf() {
-    if grep -l -e '^\[program:sshd\]' -e '^command=.*sshd' \
-        "$SUPERVISOR_CONF_DIR"/*.conf >/dev/null 2>&1; then
+    local conf cmd=""
+    # A [program:sshd] section counts as defined even when its command= is
+    # unparseable — a duplicate section breaks `supervisorctl reread`.
+    conf="$(first_conf_defining sshd)"
+    if [ -n "$conf" ]; then
+        cmd="$(conf_program_command "$conf" sshd)"
+        if [ -z "$cmd" ]; then
+            log "WARNING: $conf defines sshd but has no command= line"
+        elif [ ! -x "$cmd" ] && ! have "${cmd##*/}"; then
+            log "WARNING: $conf defines sshd but '$cmd' is missing"
+        fi
         log "sshd already defined under $SUPERVISOR_CONF_DIR"
+        return 0
+    fi
+    conf="$(first_conf_running sshd)"
+    if [ -n "$conf" ]; then
+        log "sshd already supervised by $conf"
+        return 0
+    fi
+    # A non-supervised sshd already bound to :22 (systemd on a DIY host)
+    # works fine — adding a supervised one would just crash-loop on bind.
+    if have ss && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE '[:.]22$'; then
+        log "port 22 is already served — not supervising a second sshd"
         return 0
     fi
     if [ "$DRY_RUN" = 1 ]; then

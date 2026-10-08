@@ -55,6 +55,9 @@ def fixture(directory: Path):
     })
     stub(stub_bin, "supervisorctl", 'echo "supervisorctl $*" >> "$STUB_LOG"\n')
     stub(stub_bin, "tailscaled", 'echo "tailscaled $*" >> "$STUB_LOG"\n')
+    # Nothing on :22 by default — 8022 is a decoy for sloppy `22$` matching.
+    stub(stub_bin, "ss",
+         'printf "LISTEN 0 128 *:8022 *:*\\n"\n')
     # Installing openssh-server lands the sshd binary.
     stub(stub_bin, "apt-get", '''
 echo "apt-get $*" >> "$STUB_LOG"
@@ -327,6 +330,40 @@ class InstallStepTests(unittest.TestCase):
             self.assertEqual(sum("program:sshd" in c for c in confs), 1)
             self.assertNotIn("apt-get", log.read_text(encoding="utf-8"))
 
+    def test_a_command_mentioning_sshd_is_not_a_running_sshd(self):
+        """'sshd-healthcheck' satisfies '^command=.*sshd' but is no sshd —
+        only a command whose binary basename is sshd (and exists) counts,
+        or inbound tailnet ssh stays dead silently."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            (directory / "svconf" / "monit.conf").write_text(
+                "[program:monit]\ncommand=/usr/bin/sshd-healthcheck\n",
+                encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s8")
+            run(env=env)
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("apt-get", calls)
+            conf = (directory / "svconf" / "sshd.conf").read_text(encoding="utf-8")
+            self.assertIn("[program:sshd]", conf)
+
+    def test_a_port_22_listener_skips_the_supervised_sshd(self):
+        """A non-supervised sshd already bound to :22 (systemd on a DIY
+        host) works — adding our own program would just crash-loop on
+        bind."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            stub(stub_bin, "ss",
+                 'printf "LISTEN 0 128 *:22 *:*\\n"\n')
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s9")
+            result = run(env=env)
+            self.assertIn("port 22", result.stdout)
+            self.assertFalse((directory / "svconf" / "sshd.conf").exists())
+            self.assertNotIn("apt-get", log.read_text(encoding="utf-8"))
+
     def test_ssh_config_gets_the_tailnet_proxycommand_block_once(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
@@ -388,6 +425,50 @@ class InstallStepTests(unittest.TestCase):
             run(env=env)
             self.assertTrue((bin_dest / "orgo-hermes-gateway").exists())
             self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
+
+    def test_a_defined_gateway_without_a_command_is_repaired_not_duplicated(self):
+        """A [program:hermes-gateway] with no parseable command= gets its
+        conf repaired — writing a second [program:...] elsewhere makes
+        `supervisorctl reread` fail on the duplicate."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            orgo_conf = directory / "svconf" / "orgo.conf"
+            orgo_conf.write_text(
+                "; platform file\n[program:hermes-gateway]\nuser=root\n",
+                encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s10")
+            run(env=env)
+            self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
+            programs = "".join(
+                c.read_text(encoding="utf-8")
+                for c in (directory / "svconf").glob("*.conf"))
+            self.assertEqual(programs.count("[program:hermes-gateway]"), 1)
+            repaired = orgo_conf.read_text(encoding="utf-8")
+            self.assertIn("command=", repaired)
+            self.assertIn("alan-hermes-gateway", repaired)
+
+    def test_a_defined_tailscaled_with_an_indented_command_is_repaired(self):
+        """An indented command= parses as a continuation, not a command —
+        same fix: repair the conf in place, never write a duplicate."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            conf = directory / "svconf" / "orgo-tailscale.conf"
+            conf.write_text(
+                "[program:tailscaled]\n command=/gone\n", encoding="utf-8")
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/s11")
+            run(env=env)
+            self.assertFalse((directory / "svconf" / "tailscaled.conf").exists())
+            programs = "".join(
+                c.read_text(encoding="utf-8")
+                for c in (directory / "svconf").glob("*.conf"))
+            self.assertEqual(programs.count("[program:tailscaled]"), 1)
+            repaired = conf.read_text(encoding="utf-8")
+            self.assertIn("command=tailscaled", repaired)
+            self.assertIn("--tun=userspace-networking", repaired)
 
     def test_repo_ref_is_never_interpreted_as_shell(self):
         """--repo-ref comes from the provisioning backend; a quote or $(...)
