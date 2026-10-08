@@ -28,7 +28,7 @@ WAIT_PAIRED_INTERVAL="${ALAN_WAIT_PAIRED_INTERVAL:-5}"
 WAIT_PAIRED_TIMEOUT="${ALAN_WAIT_PAIRED_TIMEOUT:-600}"
 LOGIN_URL_RE='https://login\.tailscale\.com/a/[A-Za-z0-9]+'
 
-CALLBACK="" SECRET="" ID="" REPO_REF="main"
+CALLBACK="" SECRET="" ID="" REPO_REF="main" RELAY_TOKEN=""
 DRY_RUN=0 WAIT_PAIRED=0
 CURRENT_STEP="init"
 
@@ -36,10 +36,13 @@ usage() {
     cat <<'EOF'
 usage: bootstrap-orgo.sh [--callback URL] [--secret S] [--id ID]
        [--hermes-home DIR] [--repo-ref REF] [--dry-run] [--wait-paired]
+       [--relay-token T]
 
   --callback URL   POST {"id","secret","url"} with the Tailscale login URL
   --secret S       callback shared secret
   --id ID          computer id; the tailnet hostname becomes alan-<id>
+  --relay-token T  metered-relay bearer token; stored at
+                   $STATE_DIR/relay-token (0600), never logged
   --hermes-home    Hermes home directory (default $HERMES_HOME or ~/.hermes)
   --repo-ref REF   alans-way-agents ref for setup.sh (default main)
   --dry-run        print the commands instead of running them; writes nothing
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
         --id) ID="$2"; shift 2;;
         --hermes-home) HERMES_HOME="$2"; shift 2;;
         --repo-ref) REPO_REF="$2"; shift 2;;
+        --relay-token) RELAY_TOKEN="$2"; shift 2;;
         --dry-run) DRY_RUN=1; shift;;
         --wait-paired) WAIT_PAIRED=1; shift;;
         -h|--help) usage; exit 0;;
@@ -631,6 +635,13 @@ wait_paired() {
 main() {
     if [ "$DRY_RUN" = 0 ]; then
         mkdir -p "$STATE_DIR" "$BIN_DIR" "$SUPERVISOR_CONF_DIR"
+        # relay token: the metered-relay bearer for this computer. Persisted
+        # root-only alongside state.json; the token value is never logged.
+        if [ -n "$RELAY_TOKEN" ]; then
+            umask 077
+            printf '%s' "$RELAY_TOKEN" > "$STATE_DIR/relay-token"
+            umask 022
+        fi
     fi
     if [ "$WAIT_PAIRED" = 1 ]; then
         wait_paired
