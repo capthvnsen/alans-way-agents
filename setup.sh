@@ -321,6 +321,23 @@ supervisor_conf_dir() {
   return 1
 }
 
+# supervisorctl as this user, retried under `sudo -n` when the socket needs
+# root (-n fails instead of ever asking for a password). Only one call
+# answers: status and pid exit nonzero whenever a program is not RUNNING while
+# still printing a valid reply, so a plain || retry would run both and
+# concatenate their output (two pid lines reading as one number). On a double
+# failure the first reply is still printed, since it carries the state. The
+# detached gateway restarter cannot share this function, so it evals the same
+# definition text from $SUPCTL_DEF with $SUPCTL pointing at the resolved path.
+SUPCTL="${SUPCTL:-supervisorctl}"
+SUPCTL_DEF='supervisorctl_call() {
+  _o="$("$SUPCTL" "$@" 2>/dev/null)" && { printf "%s" "$_o"; return 0; }
+  command -v sudo >/dev/null 2>&1 || { printf "%s" "$_o"; return 1; }
+  _s="$(sudo -n "$SUPCTL" "$@" 2>/dev/null)" && { printf "%s" "$_s"; return 0; }
+  printf "%s" "$_o"; return 1
+}'
+eval "$SUPCTL_DEF"
+
 # The supervisor program whose command line (or a child's, for wrapper
 # scripts) runs `hermes gateway run`. The name is discovered, never assumed,
 # and a non-Hermes "gateway run" is never touched. With several gateway
@@ -330,8 +347,8 @@ supervisor_gateway_program() {
   [ "$GUEST_OS" = Linux ] || return 1
   have supervisorctl && have ps || return 1
   _any=""
-  for _prog in $(supervisorctl status 2>/dev/null | awk '$2 == "RUNNING" {print $1}'); do
-    _pid="$(supervisorctl pid "$_prog" 2>/dev/null || true)"
+  for _prog in $(supervisorctl_call status 2>/dev/null | awk '$2 == "RUNNING" {print $1}'); do
+    _pid="$(supervisorctl_call pid "$_prog" 2>/dev/null || true)"
     case "$_pid" in ''|*[!0-9]*|0) continue;; esac
     for _cand in "$_pid" $(pgrep -P "$_pid" 2>/dev/null); do
       _args="$(ps -o args= -p "$_cand" 2>/dev/null || true)"
@@ -343,6 +360,24 @@ supervisor_gateway_program() {
     done
   done
   [ -z "$_any" ] || { echo "$_any"; return 0; }
+  # A stopped gateway has no argv to match; its conf command line is the
+  # fallback, so it still restarts through supervisord. Never on a live-systemd
+  # host, where a leftover conf must not win over the real unit.
+  systemd_live && return 1
+  _cd="$(supervisor_conf_dir 2>/dev/null || true)"
+  for _f in ${_cd:+"$_cd"/*.conf}; do
+    [ -f "$_f" ] || continue
+    _prog="$(awk -v want="${PROFILE:-}" '
+      /^\[program:/ { n = $0; sub(/^\[program:[[:space:]]*/, "", n); sub(/[[:space:]]*\].*/, "", n); next }
+      /^\[/ { n = "" }
+      n != "" && /^[[:space:]]*command[[:space:]]*=/ && /hermes/ && /gateway run/ {
+        tagged = ($0 ~ /-p[[:space:]]/ || $0 ~ /--profile[[:space:]]/)
+        if (!tagged && (want == "" || want == "default")) { print n; exit }
+        if (tagged && want != "" && (index($0, "-p " want) || index($0, "-p" want) ||
+            index($0, "--profile " want) || index($0, "--profile=" want))) { print n; exit }
+      }' "$_f" 2>/dev/null)"
+    [ -n "$_prog" ] && { echo "$_prog"; return 0; }
+  done
   return 1
 }
 
@@ -2412,22 +2447,16 @@ schedule_gateway_restart() {
   GW_SUPCTL="$(command -v supervisorctl 2>/dev/null || echo supervisorctl)"
   _restart='sleep "$4"
     if [ -n "$5" ]; then
-      _ctlbin="$6"
-      _ctl() {
-        _ctlo="$("$_ctlbin" "$@" 2>/dev/null)"; _ctlrc=$?
-        if [ "$_ctlrc" != 0 ] && command -v sudo >/dev/null 2>&1; then
-          _ctlo="$(sudo -n "$_ctlbin" "$@" 2>/dev/null)"; _ctlrc=$?
-        fi
-        printf "%s\n" "$_ctlo"; [ "$_ctlrc" = 0 ]
-      }
-      _old="$(_ctl pid "$5" || true)"; _old="${_old:-0}"
-      if _ctl signal USR1 "$5"; then
+      SUPCTL="$6"
+'"$SUPCTL_DEF"'
+      _old="$(supervisorctl_call pid "$5" || true)"; _old="${_old:-0}"
+      if supervisorctl_call signal USR1 "$5"; then
         _w=0 _new="" _down=0
         while [ "$_w" -lt "$7" ]; do
-          _s="$(_ctl status "$5" || true)"
+          _s="$(supervisorctl_call status "$5" || true)"
           case "$_s" in
             *" RUNNING "*)
-              _p="${_s#* RUNNING pid }"; _p="${_p%%,*}"
+              _p="$(supervisorctl_call pid "$5" || true)"; _p="${_p:-0}"
               case "$_p" in *[!0-9]*) _p=0;; esac
               if [ "$_p" != 0 ] && [ "$_p" != "$_old" ]; then _new="$_p"; break; fi
               _down=0;;
@@ -2439,17 +2468,17 @@ schedule_gateway_restart() {
         if [ -n "$_new" ]; then
           echo "restarted: $6 signal USR1 $5 (new pid $_new)"
         else
-          _s="$(_ctl status "$5" || true)"
+          _s="$(supervisorctl_call status "$5" || true)"
           case "$_s" in
             *" RUNNING "*|*STARTING*|*BACKOFF*)
               echo "$6 signal USR1 $5 sent; the gateway is still draining or coming back after $7s: supervisord finishes the relaunch on its own";;
             *)
-              _ctl start "$5" \
+              supervisorctl_call start "$5" \
                 && echo "restarted: $6 start $5 (the gateway did not come back after signal USR1)" \
                 || echo "$6 start $5 failed: start that program by hand";;
           esac
         fi
-      elif _ctl restart "$5"; then echo "restarted: $6 restart $5"
+      elif supervisorctl_call restart "$5"; then echo "restarted: $6 restart $5"
       else echo "$6 restart $5 failed: restart that program by hand"
       fi
     elif "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
