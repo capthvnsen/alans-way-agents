@@ -292,6 +292,21 @@ class InstallStepTests(unittest.TestCase):
                 for c in (directory / "svconf").glob("*.conf"))
             self.assertEqual(programs.count("[program:hermes-gateway]"), 1)
 
+    def test_the_generated_gateway_conf_waits_for_the_drain(self):
+        """Issue #65: with no stopwaitsecs supervisord escalates SIGTERM to
+        SIGKILL after 10s, and a kill mid-checkpoint corrupts state.db, so the
+        generated program must give Hermes' drain its full bound."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/x9")
+            result = run(env=env)
+            self.assertEqual(result.returncode, 0)
+            conf = (directory / "svconf" / "hermes-gateway.conf").read_text(
+                encoding="utf-8")
+            self.assertIn("stopwaitsecs=180", conf)
+
     def test_tailscaled_uses_userspace_networking_without_dev_net_tun(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
