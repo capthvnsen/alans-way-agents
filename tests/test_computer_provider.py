@@ -3,6 +3,7 @@
 Hermes runs in a subprocess (HERMES_MAIN=<hermes checkout with .venv>), so the rest of the suite stays free of
 Hermes internals. Without HERMES_MAIN the Hermes-backed tests skip; the static checks always run."""
 from pathlib import Path
+import importlib.util
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "alans-way-computer"
@@ -380,6 +382,24 @@ class StaticTests(unittest.TestCase):
                        *(f"cua:{a}:background" for a in ("click", "double_click", "right_click", "drag", "scroll", "key", "set_value", "focus_app"))):
             self.assertIn(needle, readme)
         self.assertNotIn("\u2014", readme)
+
+    def test_router_child_env_passes_the_desktop_session_vars(self):
+        # The provider's private router child also serves the VM desktop
+        # fallback, which needs the X display and the session bus the gateway
+        # was started with; the env whitelist must not strip them. Tokens and
+        # keys stay out either way.
+        spec = importlib.util.spec_from_file_location("alans_way_computer_env", PLUGIN / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        env = {"PATH": os.environ["PATH"], "HOME": "/tmp", "DISPLAY": ":99",
+               "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/dbus-test", "XAUTHORITY": "/home/user/.Xauthority",
+               "TELEGRAM_BOT_TOKEN": "11:secret", "AWS_SECRET_ACCESS_KEY": "secret"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            _, child_env = mod._launch({"command": sys.executable, "args": []})
+        for key in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"):
+            self.assertEqual(child_env[key], env[key])
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", child_env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", child_env)
 
     def test_catalog_draft_pins_docs_to_the_sha_and_lists_known_issues(self):
         entry = (ROOT / "docs/catalog/alans-way-computer.yaml").read_text()
