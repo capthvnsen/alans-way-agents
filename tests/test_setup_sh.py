@@ -2400,17 +2400,31 @@ def fake_supervisord(bin_dir, root, state=""):
     """A working supervisorctl; program states live in a state file the test
     owns. Exit codes mirror the real tool: status is nonzero when a queried
     program is not RUNNING (a bare `status` exits 3 if any is down), and `pid`
-    prints the daemon's own pid when no program is named."""
+    prints the daemon's own pid when no program is named. `signal USR1` plays
+    Hermes's drain-and-respawn: the program goes STOPPED and the supervisor
+    relaunches it under a new pid, visible on the next query. Plant
+    <root>/no-respawn to leave it STOPPED, or <root>/no-signal for a daemon
+    old enough to lack the signal verb."""
     state_file = Path(root) / "supervisor.state"
     state_file.write_text(state, encoding="utf-8")
     log = Path(root) / "supervisorctl.log"
     fake(bin_dir, "supervisorctl", '''echo "$*" >> "%s"
 state="%s"
+nosignal="%s"
+norespawn="%s"
+_respawn() {
+  [ -f "$state.respawn-$1" ] || return 0
+  rm -f "$state.respawn-$1"
+  grep -v "^$1 " "$state" > "$state.tmp" 2>/dev/null || true
+  printf '%%s RUNNING pid 888, uptime 0:00:01\\n' "$1" >> "$state.tmp"
+  mv "$state.tmp" "$state"
+}
 case "$1" in
   status)
     if [ -n "${2:-}" ]; then
       _line="$(grep "^$2 " "$state" 2>/dev/null)"; [ -n "$_line" ] || _line="$2 STOPPED"
       echo "$_line"
+      _respawn "$2"
       case "$_line" in *" RUNNING "*) exit 0;; *) exit 3;; esac
     fi
     cat "$state" 2>/dev/null || true
@@ -2420,14 +2434,25 @@ case "$1" in
     if [ -z "${2:-}" ]; then echo 4321; exit 0; fi
     _p="$(awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state" 2>/dev/null)"
     echo "${_p:-0}"
+    _respawn "$2"
     [ -n "$_p" ] || exit 7;;
   start)
+    rm -f "$state.respawn-$2"
     grep -v "^$2 " "$state" > "$state.tmp" 2>/dev/null || true
     printf '%%s RUNNING pid 777, uptime 0:00:01\\n' "$2" >> "$state.tmp"
     mv "$state.tmp" "$state";;
+  signal)
+    [ ! -f "$nosignal" ] || exit 1
+    [ "$2" = USR1 ] || exit 1
+    grep "^$3 " "$state" 2>/dev/null | grep -q " RUNNING " || exit 1
+    rm -f "$state.respawn-$3"
+    grep -v "^$3 " "$state" > "$state.tmp" 2>/dev/null || true
+    printf '%%s STOPPED\\n' "$3" >> "$state.tmp"
+    mv "$state.tmp" "$state"
+    [ -f "$norespawn" ] || touch "$state.respawn-$3";;
 esac
 exit 0
-''' % (log, state_file))
+''' % (log, state_file, root / "no-signal", root / "no-respawn"))
     return log
 
 
@@ -2642,6 +2667,54 @@ class SupervisordServiceTests(unittest.TestCase):
             time.sleep(0.2)
         self.assertIn("gateway restart", read_log(self.root / "log"))
         self.assertNotIn("restart api-gateway", read_log(self.supervisor_log))
+
+    def restart_log(self):
+        """The detached restarter's own log (its mktemp file lands in TMPDIR)."""
+        return "\n".join(p.read_text(encoding="utf-8")
+                         for p in self.root.glob("alans-way-gateway-restart.*"))
+
+    def test_gateway_restart_signals_usr1_and_waits_for_a_new_pid(self):
+        """A Hermes gateway drains its turns on SIGUSR1 and supervisord relaunches
+        it; `supervisorctl restart` would escalate SIGTERM to SIGKILL after
+        stopwaitsecs, which corrupts state.db mid-checkpoint."""
+        (self.root / "supervisor.state").write_text(
+            "main-gateway RUNNING pid 771, uptime 1:00:00\n", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1" not in self.restart_log() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("signal USR1 main-gateway (new pid 888)", self.restart_log())
+        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_starts_a_program_that_did_not_come_back(self):
+        (self.root / "supervisor.state").write_text(
+            "main-gateway RUNNING pid 771, uptime 1:00:00\n", encoding="utf-8")
+        (self.root / "no-respawn").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "start main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("start main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_falls_back_to_restart_when_signal_is_unsupported(self):
+        (self.root / "supervisor.state").write_text(
+            "main-gateway RUNNING pid 771, uptime 1:00:00\n", encoding="utf-8")
+        (self.root / "no-signal").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("restart main-gateway", read_log(self.supervisor_log))
 
     def test_supervisord_counts_as_usable_while_another_program_is_down(self):
         # A real `supervisorctl status` exits 3 when any program is not RUNNING

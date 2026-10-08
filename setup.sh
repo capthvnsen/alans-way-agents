@@ -2388,6 +2388,7 @@ fi
 
 schedule_gateway_restart() {
   GW_DELAY="${ALANS_WAY_RESTART_DELAY:-10}"
+  GW_DRAIN="${ALANS_WAY_DRAIN_WAIT:-180}"
   GW_LOG="$(mktemp "${TMPDIR:-/tmp}/alans-way-gateway-restart.XXXXXX" 2>/dev/null)" || GW_LOG=/dev/null
   GW_HERMES="$(command -v hermes || echo hermes)"
   if [ "$GUEST_OS" = Windows ]; then
@@ -2399,17 +2400,58 @@ schedule_gateway_restart() {
       || warn "could not schedule the restart: run hermes${PROFILE:+ -p $PROFILE} gateway restart yourself"
     return 0
   fi
-  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first,
-  # $5 supervisor program name when the gateway is one of supervisord's
-  # (restarting that program is the safe path: `hermes gateway restart`
-  # races with supervisord's own respawn of the same process), $6 the
-  # resolved supervisorctl path (a detached restarter may not share our PATH).
+  # $1 hermes, $2 profile, $3 systemd unit, $4 seconds to wait first, $5 the
+  # supervisor program name when the gateway is one of supervisord's, $6 the
+  # resolved supervisorctl path (a detached restarter may not share our PATH),
+  # $7 the drain bound in seconds. A Hermes gateway restarts on SIGUSR1: it
+  # drains its turns, exits, and supervisord relaunches it. `restart` is only
+  # the fallback for a daemon without `signal`, since it escalates SIGTERM to
+  # SIGKILL after the program's stopwaitsecs and a kill mid-checkpoint
+  # corrupts state.db.
   GW_SUP="$(supervisor_gateway_program || true)"
   GW_SUPCTL="$(command -v supervisorctl 2>/dev/null || echo supervisorctl)"
   _restart='sleep "$4"
     if [ -n "$5" ]; then
-      "$6" restart "$5" && echo "restarted: $6 restart $5" \
-        || echo "$6 restart $5 failed: restart that program by hand"
+      _ctlbin="$6"
+      _ctl() {
+        _ctlo="$("$_ctlbin" "$@" 2>/dev/null)"; _ctlrc=$?
+        if [ "$_ctlrc" != 0 ] && command -v sudo >/dev/null 2>&1; then
+          _ctlo="$(sudo -n "$_ctlbin" "$@" 2>/dev/null)"; _ctlrc=$?
+        fi
+        printf "%s\n" "$_ctlo"; [ "$_ctlrc" = 0 ]
+      }
+      _old="$(_ctl pid "$5" || true)"; _old="${_old:-0}"
+      if _ctl signal USR1 "$5"; then
+        _w=0 _new="" _down=0
+        while [ "$_w" -lt "$7" ]; do
+          _s="$(_ctl status "$5" || true)"
+          case "$_s" in
+            *" RUNNING "*)
+              _p="${_s#* RUNNING pid }"; _p="${_p%%,*}"
+              case "$_p" in *[!0-9]*) _p=0;; esac
+              if [ "$_p" != 0 ] && [ "$_p" != "$_old" ]; then _new="$_p"; break; fi
+              _down=0;;
+            *STARTING*|*BACKOFF*) _down=0;;
+            *) _down=$((_down + 1)); [ "$_down" -lt 2 ] || break;;
+          esac
+          sleep 2; _w=$((_w + 2))
+        done
+        if [ -n "$_new" ]; then
+          echo "restarted: $6 signal USR1 $5 (new pid $_new)"
+        else
+          _s="$(_ctl status "$5" || true)"
+          case "$_s" in
+            *" RUNNING "*|*STARTING*|*BACKOFF*)
+              echo "$6 signal USR1 $5 sent; the gateway is still draining or coming back after $7s: supervisord finishes the relaunch on its own";;
+            *)
+              _ctl start "$5" \
+                && echo "restarted: $6 start $5 (the gateway did not come back after signal USR1)" \
+                || echo "$6 start $5 failed: start that program by hand";;
+          esac
+        fi
+      elif _ctl restart "$5"; then echo "restarted: $6 restart $5"
+      else echo "$6 restart $5 failed: restart that program by hand"
+      fi
     elif "$1" -p "$2" gateway restart; then echo "restarted: hermes gateway restart"
     elif systemctl is-active --quiet "$3"; then systemctl restart "$3" && echo "restarted: systemctl restart $3"
     elif systemctl --user is-active --quiet "$3"; then systemctl --user restart "$3" && echo "restarted: systemctl --user restart $3"
@@ -2423,7 +2465,7 @@ schedule_gateway_restart() {
     # shellcheck disable=SC2086
     if systemd-run $_scope --collect --quiet --on-active="${GW_DELAY}s" \
         --setenv=HERMES_HOME="$HERMES_HOME" --setenv=HOME="$HOME" \
-        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" "$GW_SUPCTL" >"$GW_LOG" 2>&1; then
+        /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" 0 "$GW_SUP" "$GW_SUPCTL" "$GW_DRAIN" >"$GW_LOG" 2>&1; then
       return 0
     fi
   fi
@@ -2433,7 +2475,7 @@ schedule_gateway_restart() {
   # the gap in which the caller could still kill the restarter along with itself.
   GW_READY="${TMPDIR:-/tmp}/alans-way-restart-ready.$$"
   python3 -c 'import os, sys; os.setsid(); open(sys.argv[1], "w").close(); os.execvp(sys.argv[2], sys.argv[2:])' \
-    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" "$GW_SUPCTL" </dev/null >"$GW_LOG" 2>&1 &
+    "$GW_READY" nohup /bin/sh -c "$_restart" sh "$GW_HERMES" "${PROFILE:-default}" "$GW_SERVICE" "$GW_DELAY" "$GW_SUP" "$GW_SUPCTL" "$GW_DRAIN" </dev/null >"$GW_LOG" 2>&1 &
   _tries=0
   while [ ! -e "$GW_READY" ] && [ "$_tries" -lt 50 ]; do sleep 0.1; _tries=$((_tries + 1)); done
   rm -f "$GW_READY"
