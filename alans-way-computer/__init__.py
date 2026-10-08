@@ -541,9 +541,15 @@ class AlansWayComputerBackend(ComputerUseBackend):
             return self._run("scroll", step)
         return self._by_element_or_point("scroll", step, element, x, y)
 
+    # A VM desktop the agent owns types at the focused window; a host whose
+    # apps never take focus refuses in its helper and points to set_value.
     def type_text(self, text, *, delivery_mode=None, bring_to_front=False):
-        return self._fail("type", "unsupported_action", "Typing needs a target field here, because the app never takes focus. "
-                          "Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
+        if bad := self._limits("type", delivery_mode, bring_to_front):
+            return bad
+        result = self._run("type", {"action": "type", "text": text})
+        if not result.ok and "needs a ref" in (result.message or ""):
+            return self._fail("type", result.code, result.message + " Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
+        return result
 
     def set_value(self, value, element=None):
         if element is None:

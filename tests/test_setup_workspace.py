@@ -43,6 +43,14 @@ class PrintModeTests(unittest.TestCase):
         result = run("--bot-id", "bot_123")
         self.assertNotIn("--bot-name", result.stdout)
 
+    def test_the_block_carries_the_watcher_state_file_when_setup_chose_one(self):
+        env = dict(os.environ)
+        out = run("--bot-id", "bot_123", env=env).stdout
+        self.assertNotIn("HERMES_MAC_STATE_FILE", out)
+        env["ALANS_WAY_MAC_STATE_FILE"] = "/home/user/.local/share/hermes-alans-way/mac-state.json"
+        out = run("--bot-id", "bot_123", env=env).stdout
+        self.assertIn('HERMES_MAC_STATE_FILE: "/home/user/.local/share/hermes-alans-way/mac-state.json"', out)
+
 
 class DesktopInputGateTests(unittest.TestCase):
     """The managed block excludes the ungated workspace_computer_action tool:
@@ -127,6 +135,33 @@ class ConfigEditTests(unittest.TestCase):
             self.assertEqual(text.count("workspace_browser:"), 1)
             self.assertIn('- "newbot"', text)
             self.assertIn("  other:\n    command: echo", text)
+
+    def test_an_omitted_mac_ssh_keeps_the_blocks_computer_and_host_os(self):
+        # Issue #62: re-running without --mac-ssh/--host-os preserves what the
+        # managed block already configures.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--mac-ssh", "me@mac", "--host-os", "windows",
+                "--config", str(config))
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac"', text)
+            self.assertIn('HERMES_WORKSPACE_HOST_OS: "windows"', text)
+
+    def test_mac_ssh_none_clears_the_computer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--mac-ssh", "me@mac", "--config", str(config))
+            run("--bot-id", "bot123", "--mac-ssh", "none", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', text)
+
+    def test_an_omitted_mac_ssh_with_no_prior_block_stays_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            run("--bot-id", "bot123", "--config", str(config))
+            text = config.read_text(encoding="utf-8")
+            self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', text)
 
     def test_adopts_a_hand_written_entry_instead_of_duplicating_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -502,6 +537,25 @@ class HostOsFlagTests(unittest.TestCase):
     def test_host_os_rejects_other_values(self):
         result = run("--bot-id", "bot_123", "--host-os", "freebsd", check=False)
         self.assertNotEqual(result.returncode, 0)
+
+    def test_a_hand_edited_host_os_in_the_block_is_rejected_too(self):
+        # The flag check used to run before the managed-block read-back, so a
+        # bad HERMES_WORKSPACE_HOST_OS in the block passed through where the
+        # same value on the flag would fail.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text(
+                "mcp_servers:\n"
+                "# >>> alans-way workspace_browser managed block >>>\n"
+                "  workspace_browser:\n"
+                "    env:\n"
+                "      HERMES_WORKSPACE_MAC_SSH: \"me@mac\"\n"
+                "      HERMES_WORKSPACE_HOST_OS: \"freebsd\"\n"
+                "# <<< alans-way workspace_browser managed block <<<\n",
+                encoding="utf-8")
+            result = run("--bot-id", "bot_123", "--config", str(config), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--host-os must be", result.stderr)
 
 
 class HostAddressTests(unittest.TestCase):

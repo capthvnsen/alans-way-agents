@@ -817,6 +817,236 @@ class DeadBackendFallbackTests(unittest.TestCase):
             self.assertIn('"stub":"vps"', line)
             self.assertIn("silent 400ms after initialize", err)
 
+    def test_a_silent_mac_spawn_retries_once_while_the_verdict_is_freshly_online(self):
+        """A silent backend while mac-watch reports the host online is a slow
+        start, not a dead host: respawn once on the warm path and only fall
+        back to the VPS when the retry stays silent too. The move must be
+        announced; "back online" while on the VPS browser would mislead."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "echo mac >> \"$EVENT_LOG\"\n"
+                "exec sleep 30\n",  # every spawn wedges: no output, no exit
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('fs').appendFileSync(process.env.EVENT_LOG, 'vps\\n');"
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,"
+                "result:{content:[{type:'text',text:'vps'}]}})+'\\n');});\n",
+                encoding="utf-8")
+            (home / "mac-state.json").write_text(
+                json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}),
+                encoding="utf-8")
+            events = home / "events.log"
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       EVENT_LOG=str(events),
+                       HERMES_ROUTER_MAC_WATCHDOG_MS="400",
+                       HERMES_ROUTER_MAC_RETRY_MS="400")
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(home / "mac-state.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the retry and fallback did not fire")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            # A second Mac spawn rides the warm path before any VPS spawn.
+            self.assertEqual(events.read_text().split(), ["mac", "mac", "vps"], err)
+            self.assertIn('"id":1', line)
+            self.assertIn("moved to the VPS browser", line)
+            self.assertNotIn("back online", line)
+            self.assertIn("retrying", err)
+
+    def test_a_silent_mac_spawn_falls_back_at_once_on_an_offline_verdict(self):
+        """The retry is only for a fresh online verdict: an offline verdict
+        means the silence is a dead host, so the router moves to the VPS
+        backend without a second Mac spawn, and still says so."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "for last in \"$@\"; do :; done\n"
+                "case \"$last\" in\n"
+                "  *conn_script*) printf %s \"/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
+                "  *) echo mac >> \"$EVENT_LOG\"; exec sleep 30 ;;\n"  # the remote backend wedges
+                "esac\n",
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('fs').appendFileSync(process.env.EVENT_LOG, 'vps\\n');"
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,"
+                "result:{content:[{type:'text',text:'vps'}]}})+'\\n');});\n",
+                encoding="utf-8")
+            (home / "mac-state.json").write_text(
+                json.dumps({"state": "offline", "since": "2026-02-01T10:00:00Z"}),
+                encoding="utf-8")
+            events = home / "events.log"
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       EVENT_LOG=str(events),
+                       HERMES_ROUTER_MAC_WATCHDOG_MS="400")
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(home / "mac-state.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the watchdog fallback did not fire")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            self.assertEqual(events.read_text().split(), ["mac", "vps"], err)
+            self.assertIn('"id":1', line)
+            self.assertIn("moved to the VPS browser", line)
+
+    def test_a_silent_mac_spawn_falls_back_at_once_on_a_stale_online_verdict(self):
+        """An online verdict older than the watcher's refresh interval is a
+        dead watcher's last word, not a live host: the router moves to the
+        VPS backend without a second Mac spawn."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "for last in \"$@\"; do :; done\n"
+                "case \"$last\" in\n"
+                "  *conn_script*) printf %s \"/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs\"; exit 0 ;;\n"
+                "  *) echo mac >> \"$EVENT_LOG\"; exec sleep 30 ;;\n"  # the remote backend wedges
+                "esac\n",
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('fs').appendFileSync(process.env.EVENT_LOG, 'vps\\n');"
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,"
+                "result:{content:[{type:'text',text:'vps'}]}})+'\\n');});\n",
+                encoding="utf-8")
+            state = home / "mac-state.json"
+            state.write_text(
+                json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}),
+                encoding="utf-8")
+            stale = time.time() - 60
+            os.utime(state, (stale, stale))
+            events = home / "events.log"
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       EVENT_LOG=str(events),
+                       HERMES_ROUTER_MAC_WATCHDOG_MS="400")
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(state)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the watchdog fallback did not fire")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            self.assertEqual(events.read_text().split(), ["mac", "vps"], err)
+            self.assertIn('"id":1', line)
+            self.assertIn("moved to the VPS browser", line)
+            self.assertNotIn("retrying", err)
+
+    def test_a_silent_mac_spawn_does_not_retry_without_ssh_multiplexing(self):
+        """A guest whose ssh cannot multiplex (a Windows guest has no
+        ControlMaster) pays a full handshake per spawn, so a retried spawn
+        cannot answer inside the retry window: the first silence moves
+        straight to the VPS backend."""
+        if not (SH and NODE):
+            self.skipTest("sh and node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "echo mac >> \"$EVENT_LOG\"\n"
+                "exec sleep 30\n",  # every spawn wedges: no output, no exit
+                encoding="utf-8")
+            fake_ssh.chmod(0o755)
+            preload = home / "win32.cjs"
+            preload.write_text(
+                "Object.defineProperty(process, 'platform', {value: 'win32'});\n",
+                encoding="utf-8")
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('fs').appendFileSync(process.env.EVENT_LOG, 'vps\\n');"
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,"
+                "result:{content:[{type:'text',text:'vps'}]}})+'\\n');});\n",
+                encoding="utf-8")
+            (home / "mac-state.json").write_text(
+                json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}),
+                encoding="utf-8")
+            events = home / "events.log"
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
+                       EVENT_LOG=str(events),
+                       SystemRoot=str(home / "Windows"),
+                       HERMES_ROUTER_MAC_WATCHDOG_MS="400")
+            proc = subprocess.Popen(
+                [NODE, "-r", str(preload), str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(home / "mac-state.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            try:
+                proc.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], 15)[0]:
+                    self.fail("no response within 15s — the watchdog fallback did not fire")
+                line = proc.stdout.readline()
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            self.assertEqual(events.read_text().split(), ["mac", "vps"], err)
+            self.assertIn('"id":1', line)
+            self.assertIn("moved to the VPS browser", line)
+            self.assertNotIn("retrying", err)
+
 
 @unittest.skipUnless(NODE, "node is required for router tests")
 class RouterHelperTests(unittest.TestCase):
@@ -1029,8 +1259,10 @@ process.stdout.write(JSON.stringify([
         self.assertIn("v-2", mirrored.split("Look at these")[1])
         self.assertIn("Continued https://docs.example/d/abc as VPS tab v-9", continued)
         self.assertIn("Logins did not carry over", continued)
-        self.assertIn("Windows host connection lost", bare)
+        self.assertIn("Windows host browser did not answer in time", bare)
         self.assertIn("No tabs were mirrored", bare)
+        self.assertIn("Logins did not carry over", bare)
+        self.assertIn("tell the user", bare)
         self.assertIn("still restoring", pending)
         self.assertNotIn("No tabs were mirrored", pending)
         self.assertIn("VPS browser is not responding", down)
