@@ -905,6 +905,251 @@ class RelayStepTests(unittest.TestCase):
                 "raw.githubusercontent.com",
                 log.read_text(encoding="utf-8"))
 
+    def test_stdin_token_is_refused_when_the_script_is_on_stdin(self):
+        """`curl ... | bash -s -- --relay-token -` would read the script's
+        own bytes as the token — refuse and say to use ALAN_RELAY_TOKEN."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            with open(SCRIPT, "rb") as f:
+                result = subprocess.run(
+                    [BASH, "-s", "--", "--relay-token", "-"],
+                    stdin=f, capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("stdin", result.stderr)
+            self.assertFalse((directory / "state").exists())
+
+    def test_an_empty_stdin_token_fails_loudly(self):
+        """EOF on the token read used to degrade silently to a DIY install;
+        a billed hosted computer must fail instead."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(
+                directory, env, "--relay-token", "-", input_text="",
+                check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("empty", result.stderr)
+            self.assertFalse(
+                (directory / "state" / "state.json").exists())
+
+    def test_a_value_flag_without_a_value_is_a_usage_error(self):
+        """--relay-token as the last argv word used to die on unbound $2
+        under set -u instead of printing a usage error."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            for flag in ("--relay-token", "--callback", "--id",
+                         "--relay-base"):
+                with self.subTest(flag=flag):
+                    result = run(flag, env=env, check=False)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("requires a value", result.stderr)
+
+    def test_wait_paired_preserves_recorded_warnings(self):
+        """A jev degrade writes warnings:[jev]; a later --wait-paired
+        invocation rewrites state.json and must not erase it — warnings are
+        the only observability the backend has."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_VOICE_WATCH"] = str(
+                ROOT / "scripts" / "alan-relay-voice-watch")
+            env["ALAN_JEV_DIR"] = str(directory / "precious")
+            (directory / "precious").mkdir()
+            (directory / "precious" / "keep.txt").write_text("mine")
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(doc["warnings"], ["jev"])
+            tailscale_stub(stub_bin, backend="Running")
+            result = run("--wait-paired", env=env)
+            self.assertEqual(result.returncode, 0)
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+            self.assertEqual(doc["step"], "paired")
+            self.assertEqual(doc["warnings"], ["jev"])
+
+    def test_an_unrecognized_gateway_status_is_logged_not_silent(self):
+        """'hermes-gateway: no such process' matches no case arm — the old
+        code fell through with no bounce and no log, leaving the new audio
+        config unloaded while state said ready."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            stub(stub_bin, "supervisorctl", '''
+echo "supervisorctl $*" >> "$STUB_LOG"
+case "$1" in
+  status) echo "hermes-gateway: ERROR (no such process)" >&2; exit 1;;
+esac
+''')
+            relay_fixture(directory, env)
+            result = self.full_run(directory, env, "--relay-token",
+                                   self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+            bootlog = (directory / "state" / "bootstrap.log").read_text(
+                encoding="utf-8")
+            self.assertIn("unrecognized", bootlog)
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+
+    def test_a_failed_gateway_restart_does_not_fail_the_step(self):
+        """'Never let the bounce fail the step' — a nonzero supervisorctl
+        restart under errexit used to mark the whole relay step failed."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            stub(stub_bin, "supervisorctl", '''
+echo "supervisorctl $*" >> "$STUB_LOG"
+case "$1" in
+  status) echo "hermes-gateway RUNNING pid 1, uptime 0:01:00";;
+  restart) exit 1;;
+esac
+''')
+            relay_fixture(directory, env)
+            result = self.full_run(directory, env, "--relay-token",
+                                   self.TOKEN)
+            self.assertEqual(result.returncode, 0)
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+
+    def test_operator_audio_config_survives_a_rerun(self):
+        """The marker file records what bootstrap set; a re-run only writes
+        keys that are still unset or still hold the recorded value, so a
+        customer-set tts.provider is not clobbered."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            marker = directory / "home" / ".hermes" / ".alan-relay-managed"
+            self.assertTrue(marker.exists())
+            managed = json.loads(marker.read_text(encoding="utf-8"))[
+                "managed"]
+            self.assertEqual(managed["tts.provider"], "openai")
+            # The customer switches to their own provider; a provisioning
+            # retry must not reset it (the stub records calls cumulatively,
+            # so the count must stay at one).
+            cfg = directory / "home" / ".hermes" / "config.yaml"
+            cfg.write_text("tts:\n  provider: elevenlabs\n",
+                           encoding="utf-8")
+            self.full_run(directory, env, "--relay-token",
+                          "rotated-token-3")
+            calls = log.read_text(encoding="utf-8")
+            self.assertEqual(
+                calls.count("hermes config set tts.provider openai"), 1)
+            # Keys the customer did not touch are still refreshed.
+            self.assertEqual(
+                calls.count("hermes config set tts.openai.model "
+                            "gpt-4o-mini-tts"), 2)
+
+    def test_jev_checkout_is_reset_before_install(self):
+        """A dirty managed checkout must not fail the pin or run a locally
+        modified install.py — the dir is ours, so reset it hard."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            install_py = directory / "jev-repo" / "install.py"
+            original = install_py.read_text(encoding="utf-8")
+            # A locally poisoned install.py plus an untracked stray file:
+            # the next run must restore the pin, not execute or trip on it.
+            install_py.write_text("import sys\nsys.exit(9)\n",
+                                  encoding="utf-8")
+            (directory / "jev-repo" / "stray.txt").write_text("x")
+            self.full_run(directory, env, "--relay-token",
+                          "rotated-token-4")
+            self.assertEqual(install_py.read_text(encoding="utf-8"),
+                             original)
+            self.assertFalse(
+                (directory / "jev-repo" / "stray.txt").exists())
+            doc = json.loads(
+                (directory / "state" / "state.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(doc["state"], "ready")
+
+    def test_the_watcher_conf_bakes_the_absolute_hermes_path(self):
+        """supervisord's environment has no PATH guarantee; a bare `hermes`
+        lookup inside the watcher used to die as a swallowed poll error."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            conf = (directory / "svconf" /
+                    "alan-relay-voice-watch.conf").read_text(
+                        encoding="utf-8")
+            self.assertIn(f"--hermes {stub_bin}/hermes", conf)
+
+    def test_a_foreign_watcher_conf_is_reused_not_duplicated(self):
+        """A pre-existing [program:alan-relay-voice-watch] elsewhere must be
+        reused like every other program here — a second section makes
+        `supervisorctl reread` fail the whole step."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            foreign = directory / "svconf" / "platform.conf"
+            bin_path = directory / "sbin" / "alan-relay-voice-watch"
+            foreign.write_text(
+                "[program:alan-relay-voice-watch]\n"
+                f"command={bin_path}\n", encoding="utf-8")
+            # The foreign conf names the bin we install — place it so the
+            # command resolves and the conf is reused.
+            bin_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            bin_path.chmod(0o755)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertFalse(
+                (directory / "svconf" /
+                 "alan-relay-voice-watch.conf").exists())
+            programs = "".join(
+                c.read_text(encoding="utf-8")
+                for c in (directory / "svconf").glob("*.conf"))
+            self.assertEqual(
+                programs.count("[program:alan-relay-voice-watch]"), 1)
+            bootlog = (directory / "state" / "bootstrap.log").read_text(
+                encoding="utf-8")
+            self.assertIn("already defined", bootlog)
+
+    def test_the_watcher_binary_installs_via_a_tmp_file(self):
+        """A truncated curl -o used to land a half-written watcher as the
+        live binary; the install must be tmp+rename like every other
+        writer here."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            self.full_run(directory, env, "--relay-token", self.TOKEN)
+            self.assertFalse(
+                list((directory / "sbin").glob(
+                    "alan-relay-voice-watch.tmp*")))
+            # The fetch is routed through `run` so its stderr reaches
+            # bootstrap.log.
+            self.assertFalse(
+                list((directory / "home" / ".hermes").glob(".env.tmp*")))
+
+    def test_relay_base_without_a_token_warns_instead_of_ignoring(self):
+        """--relay-base without a token used to silently mean DIY."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            relay_fixture(directory, env)
+            result = self.full_run(
+                directory, env,
+                "--relay-base", "http://relay.test:8080/api/relay")
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("relay token", result.stdout)
+            self.assertIn("relay-base", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,10 +13,16 @@ read the clock against it.
 
 The flip goes through ``hermes config set tts.provider`` — Hermes re-reads
 config.yaml on its file signature, so a running gateway picks the change up
-on the next turn with no restart. The watcher owns the key only while it is
-unset or already ``openai``/``edge``: any other value (the customer chose a
-provider) or a truthy ``tts.use_gateway`` (a managed selection) means hands
-off forever — the watcher logs once and idles.
+on the next turn with no restart.
+
+Provenance, not value, decides ownership. ``tts.openai.base_url`` must still
+start with the relay base and ``tts.openai.api_key`` must still be the
+``${VOICE_TOOLS_OPENAI_KEY}`` template, or the relay credentials would be
+sent to a third party. A customer-set ``edge`` is recorded by absence:
+``.alan-relay-managed`` (written by bootstrap-orgo.sh, updated here) tracks
+the provider this watcher last set, so edge only ever flips back to openai
+when *we* put it there. Any other provider value, a truthy
+``tts.use_gateway``, or a re-pointed openai block means hands off.
 
 The relay token is read from $HERMES_HOME/.env (or --env-file); it never
 appears in argv or the log.
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -97,56 +104,98 @@ def fetch_usage(base: str, token: str, timeout: float) -> dict | None:
     return data
 
 
-def read_tts_provider(config_path: str) -> tuple:
-    """(provider, use_gateway) from the top-level ``tts:`` block of config.yaml.
+def _unquote(value: str) -> str:
+    value = value.split(" #", 1)[0].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value
 
-    Indent-aware line scan: a ``provider:`` nested deeper than the block's own
-    keys (e.g. under ``tts.openai:``) is not the selection. Missing file or
-    missing key -> (None, False).
+
+def flat_yaml(lines: list) -> dict:
+    """{(nested, key, path): scalar} for simple block mappings.
+
+    Indent-aware: ``provider:`` under ``tts.openai:`` lands at
+    ("tts", "openai", "provider"), never ("tts", "provider"). One-line flow
+    maps (``tts: {provider: edge}``) unfold into their children.
     """
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return None, False
-    in_block = False
-    block_indent = None
-    provider = None
-    use_gateway = None
+    out = {}
+    stack = []
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         indent = len(line) - len(line.lstrip())
-        if indent == 0:
-            in_block = re.match(r"tts\s*:\s*(#.*)?$", line) is not None
-            block_indent = None
-            continue
-        if not in_block:
-            continue
-        if block_indent is None:
-            block_indent = indent
-        if indent != block_indent:
-            continue
-        m = re.match(r"([A-Za-z_]+)\s*:\s*(.*?)\s*$", stripped)
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", stripped)
         if not m:
             continue
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
         key, value = m.group(1), m.group(2)
-        value = value.split(" #", 1)[0].strip()  # trailing comment
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if key == "provider":
-            provider = value or None
-        elif key == "use_gateway":
-            use_gateway = value
-    return provider, str(use_gateway or "").lower() in _TRUTHY
+        path = tuple(k for _, k in stack) + (key,)
+        if value.startswith("{") and value.endswith("}"):
+            for part in value[1:-1].split(","):
+                pm = re.match(
+                    r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", part)
+                if pm:
+                    out[path + (pm.group(1),)] = _unquote(pm.group(2))
+        elif value:
+            out[path] = _unquote(value)
+        else:
+            stack.append((indent, key))
+    return out
+
+
+def read_tts_config(config_path: str) -> dict:
+    """The keys the watcher needs from the ``tts:`` block of config.yaml:
+    provider, use_gateway, and the openai wiring used to prove provenance.
+    Missing file or missing keys read as absent."""
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return {}
+    flat = flat_yaml(lines)
+    return {
+        "provider": flat.get(("tts", "provider")),
+        "use_gateway": str(flat.get(("tts", "use_gateway")) or "").lower()
+            in _TRUTHY,
+        "openai_base_url": flat.get(("tts", "openai", "base_url")),
+        "openai_api_key": flat.get(("tts", "openai", "api_key")),
+    }
+
+
+def read_marker(path: str) -> dict:
+    """The .alan-relay-managed marker bootstrap writes; {} when absent."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            marker = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return marker if isinstance(marker, dict) else {}
+
+
+def write_marker(path: str, marker: dict) -> None:
+    """Record the provider this watcher just set, preserving the managed
+    keys bootstrap recorded."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(marker, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log(f"could not write {path} ({exc}) — flip provenance is lost")
 
 
 def set_provider(hermes: str, provider: str) -> bool:
     env = dict(os.environ)
-    result = subprocess.run(
-        [hermes, "config", "set", "tts.provider", provider],
-        env=env, capture_output=True, text=True, timeout=120)
+    try:
+        result = subprocess.run(
+            [hermes, "config", "set", "tts.provider", provider],
+            env=env, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        log(f"hermes binary not found: {hermes!r} — cannot set tts.provider")
+        return False
     if result.returncode != 0:
         log(f"hermes config set tts.provider {provider} failed: "
             f"{(result.stderr or result.stdout).strip()[:200]}")
@@ -163,12 +212,15 @@ def one_pass(args) -> None:
     if usage is None:
         return
     voice_left = usage.get("voice_minutes_left_est")
-    if not isinstance(voice_left, (int, float)) or isinstance(voice_left, bool):
-        log(f"/usage has no numeric voice_minutes_left_est ({voice_left!r}); leaving provider alone")
+    if (not isinstance(voice_left, (int, float))
+            or isinstance(voice_left, bool)
+            or not math.isfinite(voice_left)):
+        log(f"/usage has no finite numeric voice_minutes_left_est ({voice_left!r}); leaving provider alone")
         return
     desired = FALLBACK_PROVIDER if voice_left <= 0 else RELAY_PROVIDER
-    current, managed = read_tts_provider(args.config)
-    if managed:
+    cfg = read_tts_config(args.config)
+    current = cfg.get("provider")
+    if cfg.get("use_gateway"):
         log("tts.use_gateway is set — a managed selection owns TTS; not touching provider")
         return
     if current is not None and current not in OWNED_PROVIDERS:
@@ -176,10 +228,41 @@ def one_pass(args) -> None:
         return
     if current == desired:
         return
+    # The openai block must still be the relay wiring bootstrap wrote —
+    # a re-pointed base_url or a literal api_key means the customer owns it.
+    relay_wired = (
+        (cfg.get("openai_base_url") or "").startswith(base)
+        and cfg.get("openai_api_key") == "${VOICE_TOOLS_OPENAI_KEY}")
+    marker = read_marker(args.managed_file)
+    if desired == FALLBACK_PROVIDER:
+        if current == RELAY_PROVIDER and not relay_wired:
+            log("tts.provider is openai but tts.openai is not the relay "
+                "wiring — operator-owned, leaving it alone")
+            return
+    else:
+        # Restoring the relay is only safe for state this watcher created:
+        # a customer-chosen edge (marker absent) or a re-pointed openai
+        # block both stay put.
+        if current == FALLBACK_PROVIDER:
+            if marker.get("watcher_provider") != FALLBACK_PROVIDER:
+                log("tts.provider is edge and the marker does not say this "
+                    "watcher set it — operator-owned, leaving it alone")
+                return
+            if not relay_wired:
+                log("tts.openai no longer points at the relay — not "
+                    "restoring openai, leaving provider at edge")
+                return
+        elif current is None and not relay_wired:
+            log("tts.provider is unset and tts.openai is not the relay "
+                "wiring — leaving it alone")
+            return
     which = f"{current or 'unset'} -> {desired} (voice_minutes_left_est={voice_left})"
     if set_provider(args.hermes, desired):
+        marker["watcher_provider"] = desired
+        write_marker(args.managed_file, marker)
         log(f"tts.provider {which}")
-    # A failed set retries on the next pass — no state is kept.
+    # A failed set retries on the next pass — the marker is only updated
+    # after a successful flip.
 
 
 def main() -> int:
@@ -187,6 +270,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=os.path.join(hermes_home, ".env"))
     parser.add_argument("--config", default=os.path.join(hermes_home, "config.yaml"))
+    parser.add_argument("--managed-file",
+                        default=os.path.join(hermes_home, ".alan-relay-managed"))
     parser.add_argument("--hermes", default=os.environ.get("ALAN_HERMES_BIN", "hermes"))
     parser.add_argument("--interval", type=float,
                         default=float(os.environ.get("ALAN_RELAY_WATCH_INTERVAL", "60")))

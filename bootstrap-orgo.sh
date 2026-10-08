@@ -46,6 +46,7 @@ JEV_COMMIT="${ALAN_JEV_COMMIT:-dddaa39ead316a8ac63e5d54352068d33c00c2b0}"
 JEV_DIR="${ALAN_JEV_DIR:-$HOME/hermes-jev-skills}"
 VOICE_WATCH_SRC="${ALAN_VOICE_WATCH:-}"
 RELAY_WATCH_INTERVAL="${ALAN_RELAY_WATCH_INTERVAL:-60}"
+RELAY_BASE_GIVEN="${ALAN_RELAY_BASE:+1}"
 
 usage() {
     cat <<'EOF'
@@ -56,13 +57,16 @@ usage: bootstrap-orgo.sh [--callback URL] [--secret S] [--id ID]
   --callback URL   POST {"id","secret","url"} with the Tailscale login URL
   --secret S       callback shared secret
   --id ID          computer id; the tailnet hostname becomes alan-<id>
-  --relay-token T  metered-relay bearer token ('-' reads it from stdin, and
-                   ALAN_RELAY_TOKEN works with no argv at all). Wires Hermes
-                   TTS/STT at <relay>/openai/v1, hermes-jev-skills at
+  --relay-token T  metered-relay bearer token ('-' reads a line from stdin,
+                   and ALAN_RELAY_TOKEN works with no argv at all). Wires
+                   Hermes TTS/STT at <relay>/openai/v1, hermes-jev-skills at
                    <relay>/jev, and a supervised watcher that falls back to
                    edge TTS while voice credits are exhausted. Stored at
                    $STATE_DIR/relay-token and in ~/.hermes/.env, never
                    logged. Without it none of the relay wiring runs.
+                   '-' is refused when the script itself arrived on stdin
+                   (curl | bash -s) — the read would consume the script;
+                   use ALAN_RELAY_TOKEN there.
   --relay-base URL relay base (default https://openalan.com/api/relay, or
                    $ALAN_RELAY_BASE)
   --hermes-home    Hermes home directory (default $HERMES_HOME or ~/.hermes)
@@ -81,6 +85,14 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --callback|--secret|--id|--hermes-home|--repo-ref|--relay-token|--relay-base)
+            if [ $# -lt 2 ]; then
+                echo "bootstrap-orgo: $1 requires a value" >&2
+                usage >&2
+                exit 2
+            fi;;
+    esac
+    case "$1" in
         --callback) CALLBACK="$2"; shift 2;;
         --secret) SECRET="$2"; shift 2;;
         --id) ID="$2"; shift 2;;
@@ -88,12 +100,25 @@ while [ $# -gt 0 ]; do
         --repo-ref) REPO_REF="$2"; shift 2;;
         --relay-token)
             if [ "$2" = "-" ]; then
+                # `curl | bash -s --` makes stdin the script itself: read
+                # would eat buffered script bytes as the "token". $0 is the
+                # shell's own path there (a real file), so BASH_SOURCE — set
+                # only when bash runs a script file — is the check.
+                if [ -z "${BASH_SOURCE[0]:-}" ]; then
+                    echo "bootstrap-orgo: --relay-token - cannot read a token when the script arrived on stdin; set ALAN_RELAY_TOKEN in the environment instead" >&2
+                    exit 2
+                fi
                 IFS= read -r RELAY_TOKEN || RELAY_TOKEN=""
+                RELAY_TOKEN="${RELAY_TOKEN%$'\r'}"
             else
                 RELAY_TOKEN="$2"
             fi
+            if [ -z "$RELAY_TOKEN" ]; then
+                echo "bootstrap-orgo: --relay-token got an empty token" >&2
+                exit 2
+            fi
             shift 2;;
-        --relay-base) RELAY_BASE="$2"; shift 2;;
+        --relay-base) RELAY_BASE="$2"; RELAY_BASE_GIVEN=1; shift 2;;
         --dry-run) DRY_RUN=1; shift;;
         --wait-paired) WAIT_PAIRED=1; shift;;
         -h|--help) usage; exit 0;;
@@ -205,17 +230,30 @@ state() {
         return 0
     fi
     local tmp="$STATE_DIR/.state.json.$$"
-    python3 - "$tmp" "$s" "$step" "$err" "${WARNINGS[*]:-}" <<'PY'
+    python3 - "$tmp" "$STATE_FILE" "$s" "$step" "$err" "${WARNINGS[*]:-}" <<'PY'
 import datetime
 import json
 import sys
 
-path, state, step, err = sys.argv[1:5]
+path, dest, state, step, err = sys.argv[1:6]
+# Warnings persist across invocations: a --wait-paired run (or a resume)
+# must not erase the degrade markers a previous run recorded.
+warnings = []
+try:
+    with open(dest, encoding="utf-8") as f:
+        prev = json.load(f).get("warnings")
+    if isinstance(prev, list):
+        warnings = [str(w) for w in prev]
+except Exception:
+    pass
+for w in sys.argv[6].split():
+    if w not in warnings:
+        warnings.append(w)
 doc = {
     "state": state,
     "step": step,
     "error": err if err else None,
-    "warnings": sys.argv[5].split(),
+    "warnings": warnings,
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
 }
 with open(path, "w", encoding="utf-8") as f:
@@ -425,7 +463,11 @@ EOF
 # only as a ${VOICE_TOOLS_OPENAI_KEY} template Hermes expands at read time.
 step_relay() {
     if [ -z "$RELAY_TOKEN" ]; then
-        log "no relay token — DIY install, skipping hosted relay wiring"
+        if [ -n "$RELAY_BASE_GIVEN" ]; then
+            log "WARNING: --relay-base/ALAN_RELAY_BASE without a relay token does nothing — DIY install"
+        else
+            log "no relay token — DIY install, skipping hosted relay wiring"
+        fi
         return 0
     fi
     RELAY_BASE="${RELAY_BASE%/}"
@@ -496,9 +538,11 @@ for line in lines:
 for key, value in owned.items():
     if key not in seen:
         out.append(f"{key}={shlex.quote(value)}")
-with open(path, "w", encoding="utf-8") as f:
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
     f.write("\n".join(out) + "\n")
-os.chmod(path, 0o600)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
 PY
     log "wrote relay credentials to $HERMES_HOME/.env"
 }
@@ -510,17 +554,123 @@ PY
 # stt.openai.api_key must be a config value, not env-only: in
 # transcription_cloud._direct_openai_credentials the env-key ladder returns
 # the hardcoded OPENAI_BASE_URL and drops stt.openai.base_url.
+#
+# The marker file records the values bootstrap last wrote so a re-run can
+# tell "we set this" from "the customer changed it": a key is only written
+# while it is unset or still holds the recorded (or wanted) value — a
+# customer-set tts.provider survives a provisioning retry.
 relay_hermes_config() {
     local voice_base="$RELAY_BASE/openai/v1"
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.provider openai
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.model gpt-4o-mini-tts
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.base_url "$voice_base"
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set tts.openai.api_key '${VOICE_TOOLS_OPENAI_KEY}'
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.enabled true
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.provider openai
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.model whisper-1
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.base_url "$voice_base"
-    run env "HERMES_HOME=$HERMES_HOME" hermes config set stt.openai.api_key '${VOICE_TOOLS_OPENAI_KEY}'
+    local marker="$HERMES_HOME/.alan-relay-managed"
+    local -a pairs=(
+        "tts.provider=openai"
+        "tts.openai.model=gpt-4o-mini-tts"
+        "tts.openai.base_url=$voice_base"
+        "tts.openai.api_key=\${VOICE_TOOLS_OPENAI_KEY}"
+        "stt.enabled=true"
+        "stt.provider=openai"
+        "stt.openai.model=whisper-1"
+        "stt.openai.base_url=$voice_base"
+        "stt.openai.api_key=\${VOICE_TOOLS_OPENAI_KEY}"
+    )
+    local allowed
+    allowed="$(python3 - "$HERMES_HOME" "${pairs[@]}" <<'PY'
+import json
+import os
+import re
+import sys
+
+home = sys.argv[1]
+pairs = dict(a.split("=", 1) for a in sys.argv[2:])
+
+
+def unquote(v):
+    v = v.split(" #", 1)[0].strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        v = v[1:-1]
+    return v
+
+
+# Minimal block-mapping reader: enough of config.yaml to compare the managed
+# keys (two levels deep under tts:/stt:), including one-line {flow} maps.
+flat = {}
+stack = []
+try:
+    with open(os.path.join(home, "config.yaml"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+except OSError:
+    lines = []
+for line in lines:
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip())
+    m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", s)
+    if not m:
+        continue
+    while stack and indent <= stack[-1][0]:
+        stack.pop()
+    key, val = m.group(1), m.group(2)
+    path = tuple(k for _, k in stack) + (key,)
+    if val.startswith("{") and val.endswith("}"):
+        for part in val[1:-1].split(","):
+            pm = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", part)
+            if pm:
+                flat[path + (pm.group(1),)] = unquote(pm.group(2))
+    elif val:
+        flat[path] = unquote(val)
+    else:
+        stack.append((indent, key))
+
+marker = {}
+try:
+    with open(os.path.join(home, ".alan-relay-managed"),
+              encoding="utf-8") as f:
+        marker = json.load(f)
+except (OSError, ValueError):
+    pass
+managed = marker.get("managed") or {}
+for key, want in pairs.items():
+    cur = flat.get(tuple(key.split(".")))
+    if cur is None or cur == managed.get(key) or cur == want:
+        print(key)
+PY
+)"
+    local pair key
+    for pair in "${pairs[@]}"; do
+        key="${pair%%=*}"
+        printf '%s\n' "$allowed" | grep -qxF "$key" || continue
+        run env "HERMES_HOME=$HERMES_HOME" hermes config set \
+            "$key" "${pair#*=}"
+    done
+    if [ "$DRY_RUN" = 0 ]; then
+        python3 - "$marker" "$allowed" "${pairs[@]}" <<'PY'
+import json
+import os
+import sys
+
+path, allowed_raw = sys.argv[1], sys.argv[2]
+pairs = dict(a.split("=", 1) for a in sys.argv[3:])
+try:
+    with open(path, encoding="utf-8") as f:
+        marker = json.load(f)
+    if not isinstance(marker, dict):
+        marker = {}
+except (OSError, ValueError):
+    marker = {}
+managed = marker.get("managed")
+if not isinstance(managed, dict):
+    managed = {}
+for key in allowed_raw.split():
+    managed[key] = pairs[key]
+marker["managed"] = managed
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(marker, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+    fi
 }
 
 # hermes-jev-skills, pinned to $JEV_COMMIT. The upstream install.py is the only
@@ -530,11 +680,7 @@ relay_hermes_config() {
 # plugins under hermes/plugin/ and jevkit at the root, so a subdirectory
 # install would land the plugin without its library.
 relay_jev() {
-    local need_checkout=1
-    if [ -d "$JEV_DIR/.git" ] \
-        && [ "$(git -C "$JEV_DIR" rev-parse HEAD 2>/dev/null)" = "$JEV_COMMIT" ]; then
-        need_checkout=0
-    elif [ "$DRY_RUN" = 0 ] && [ ! -d "$JEV_DIR/.git" ]; then
+    if [ "$DRY_RUN" = 0 ] && [ ! -d "$JEV_DIR/.git" ]; then
         if ! have git; then
             log "git not found — needed for the jev plugin checkout"
             return 1
@@ -549,10 +695,24 @@ relay_jev() {
         log "would pin $JEV_DIR to $JEV_COMMIT and run install.py --enable all"
         return 0
     fi
-    if [ "$need_checkout" = 1 ]; then
+    if [ -w "$JEV_DIR/.git" ]; then
+        # The checkout is managed: a dirty worktree must neither fail the
+        # pin nor let a locally modified install.py run as root — reset to
+        # the commit and drop untracked files before install.
         git -C "$JEV_DIR" cat-file -e "$JEV_COMMIT^{commit}" 2>/dev/null \
             || run git -C "$JEV_DIR" fetch --quiet origin "$JEV_COMMIT"
-        run git -C "$JEV_DIR" checkout --quiet --detach "$JEV_COMMIT"
+        run git -C "$JEV_DIR" reset --hard --quiet "$JEV_COMMIT"
+        run git -C "$JEV_DIR" clean -fdq
+    else
+        # An operator-supplied ALAN_JEV_DIR may be a read-only mount that
+        # cannot be reset — accept it only when it is already exactly the
+        # pin with a clean tree; a modified install.py never runs.
+        if [ "$(git -C "$JEV_DIR" rev-parse HEAD 2>/dev/null)" != "$JEV_COMMIT" ] \
+            || [ -n "$(GIT_OPTIONAL_LOCKS=0 git -C "$JEV_DIR" \
+                       status --porcelain 2>/dev/null)" ]; then
+            log "ERROR: $JEV_DIR is read-only and not a clean checkout of $JEV_COMMIT"
+            return 1
+        fi
     fi
     run python3 "$JEV_DIR/install.py" --hermes-home "$HERMES_HOME" --enable all
     relay_jev_switches
@@ -600,18 +760,45 @@ relay_voice_watch() {
         log "would install $bin and $conf"
         return 0
     fi
+    # The interval lands verbatim in the supervisord command= — reject
+    # anything that is not a plain number before it is interpolated.
+    case "$RELAY_WATCH_INTERVAL" in
+        ""|*[!0-9.]*|*.*.*)
+            log "WARNING: RELAY_WATCH_INTERVAL='$RELAY_WATCH_INTERVAL' is not a number; using 60"
+            RELAY_WATCH_INTERVAL=60;;
+    esac
+    # tmp+rename: a truncated fetch must not sit at the live path.
+    local tmp_bin="$bin.tmp.$$"
     if [ -n "$VOICE_WATCH_SRC" ]; then
-        install -m 755 "$VOICE_WATCH_SRC" "$bin"
+        run install -m 755 "$VOICE_WATCH_SRC" "$tmp_bin"
     else
-        curl -fsSL "$SETUP_URL_BASE/$REPO_REF/scripts/alan-relay-voice-watch" -o "$bin"
-        chmod 755 "$bin"
+        run curl -fsSL \
+            "$SETUP_URL_BASE/$REPO_REF/scripts/alan-relay-voice-watch" \
+            -o "$tmp_bin"
+        run chmod 755 "$tmp_bin"
     fi
-    cat >"$conf" <<EOF
+    run mv -f "$tmp_bin" "$bin"
+    # supervisord children get a minimal environment; bake the resolved
+    # hermes path so the watcher never depends on PATH lookup luck.
+    local hermes_bin=""
+    hermes_bin="$(command -v hermes || true)"
+    if [ -z "$hermes_bin" ]; then
+        log "WARNING: hermes is not on PATH — the watcher will fail its config set calls"
+    fi
+    local existing
+    existing="$(first_conf_defining alan-relay-voice-watch)"
+    if [ -n "$existing" ] && [ "$existing" != "$conf" ]; then
+        # A foreign conf already owns the program name — a second section
+        # would break `supervisorctl reread`; reuse it like every other
+        # program here (fail if its command= names a missing binary).
+        require_defined_program "$existing" alan-relay-voice-watch
+    else
+        cat >"$conf" <<EOF
 ; Written by bootstrap-orgo.sh — hosted-tier voice-credit watcher. Flips
 ; tts.provider to edge while the relay reports no voice minutes left, and
 ; back to openai once the quota resets. Reads the token from ~/.hermes/.env.
 [program:alan-relay-voice-watch]
-command=$bin --interval $RELAY_WATCH_INTERVAL
+command=$bin --interval $RELAY_WATCH_INTERVAL${hermes_bin:+ --hermes $hermes_bin}
 user=$(id -un)
 environment=HOME="$HOME",HERMES_HOME="$HERMES_HOME",PYTHONUNBUFFERED="1"
 autorestart=true
@@ -621,19 +808,34 @@ stdout_logfile=/var/log/alan-relay-voice-watch.log
 stdout_logfile_maxbytes=5MB
 stdout_logfile_backups=2
 EOF
+        log "wrote $conf"
+    fi
     run supervisorctl reread
     run supervisorctl update
+    # `update` starts a new program but never restarts one already running —
+    # bounce it so a reinstalled binary takes effect now.
+    local w_state
+    w_state="$(supervisorctl status alan-relay-voice-watch 2>&1 || true)"
+    case "$w_state" in
+        *RUNNING*|*STARTING*)
+            supervisorctl restart alan-relay-voice-watch >>"$LOG_FILE" 2>&1 \
+                || log "alan-relay-voice-watch did not restart; supervisord keeps retrying";;
+    esac
     # A running gateway loaded its plugin list at start; bounce it so
     # hermes-jev and the new audio config are live. A parked gateway gets a
     # start instead — restart on a stopped program is racy across supervisor
     # versions. Never let the bounce fail the step.
     local gw_state
-    gw_state="$(supervisorctl status hermes-gateway 2>/dev/null || true)"
+    gw_state="$(supervisorctl status hermes-gateway 2>&1 || true)"
     case "$gw_state" in
-        *RUNNING*|*STARTING*) run supervisorctl restart hermes-gateway;;
+        *RUNNING*|*STARTING*)
+            supervisorctl restart hermes-gateway >>"$LOG_FILE" 2>&1 \
+                || log "hermes-gateway did not restart; supervisord keeps retrying";;
         *STOPPED*|*EXITED*|*FATAL*|*BACKOFF*)
             supervisorctl start hermes-gateway >>"$LOG_FILE" 2>&1 \
                 || log "hermes-gateway did not start; supervisord keeps retrying";;
+        *)
+            log "WARNING: unrecognized 'supervisorctl status hermes-gateway' output: ${gw_state:-<empty>} — gateway left alone";;
     esac
     log "voice watcher installed ($bin, every ${RELAY_WATCH_INTERVAL}s)"
 }

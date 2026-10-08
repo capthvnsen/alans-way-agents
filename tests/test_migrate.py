@@ -1,5 +1,6 @@
 """migrate.sh: pack, ship, path rewriting and gateway handover."""
 from pathlib import Path
+import json
 import os
 import shutil
 import subprocess
@@ -661,6 +662,133 @@ exec /bin/cat "$@"
             self.assertEqual(len(backups), 1)
             self.assertEqual(read(backups[0] / "config.yaml"), "old: true\n")
             self.assertIn("data_dir:", read(existing / "config.yaml"))
+
+
+RELAY_ENV_SOURCE = (
+    "ALAN_RELAY_BASE=https://openalan.com/api/relay\n"
+    "ALAN_RELAY_TOKEN=source-relay-token\n"
+    "VOICE_TOOLS_OPENAI_KEY=source-relay-token\n"
+    "TYPESAFE_BASE_URL=https://openalan.com/api/relay/jev\n"
+    "TYPESAFE_API_KEY=source-relay-token\n"
+    "JEV_PROXY_API_KEY=source-relay-token\n")
+RELAY_ENV_TARGET = (
+    "ALAN_RELAY_BASE=https://openalan.com/api/relay\n"
+    "ALAN_RELAY_TOKEN=target-relay-token\n"
+    "VOICE_TOOLS_OPENAI_KEY=target-relay-token\n"
+    "TYPESAFE_BASE_URL=https://openalan.com/api/relay/jev\n"
+    "TYPESAFE_API_KEY=target-relay-token\n"
+    "JEV_PROXY_API_KEY=target-relay-token\n")
+RELAY_TTS_SOURCE = (
+    "tts:\n  provider: openai\n  openai:\n    model: gpt-4o-mini-tts\n"
+    "    base_url: https://openalan.com/api/relay/openai/v1\n"
+    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n")
+# The target's watcher already flipped this computer to edge.
+RELAY_TTS_TARGET = (
+    "tts:\n  provider: edge\n  openai:\n    model: gpt-4o-mini-tts\n"
+    "    base_url: https://openalan.com/api/relay/openai/v1\n"
+    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n"
+    "stt:\n  enabled: true\n  provider: openai\n  openai:\n"
+    "    base_url: https://openalan.com/api/relay/openai/v1\n"
+    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n")
+
+
+def wire_relay(hermes_dir: Path, env_text: str, tts: str, marker=None):
+    """Make a hermes home look hosted: relay .env keys, relay audio config,
+    and the bootstrap's managed marker."""
+    env_path = hermes_dir / ".env"
+    env_path.write_text(
+        (env_path.read_text(encoding="utf-8") if env_path.exists() else "")
+        + env_text, encoding="utf-8")
+    cfg = hermes_dir / "config.yaml"
+    cfg.write_text(
+        (cfg.read_text(encoding="utf-8") if cfg.exists() else "") + tts,
+        encoding="utf-8")
+    if marker is None:
+        marker = {"managed": {"tts.provider": "openai"},
+                  "watcher_provider": "edge"}
+    (hermes_dir / ".alan-relay-managed").write_text(
+        json.dumps(marker), encoding="utf-8")
+
+
+class MigrateRelayTests(unittest.TestCase):
+    def test_hosted_to_hosted_keeps_the_targets_relay_account(self):
+        """hosted->hosted: the source's relay token must NOT land on the
+        target — the watcher would flip this computer's TTS on the old
+        account's balance. Target wins for the managed keys only."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            wire_relay(hermes, RELAY_ENV_SOURCE, RELAY_TTS_SOURCE,
+                       marker={"managed": {"tts.provider": "openai"},
+                               "watcher_provider": None})
+            target = remote_home / ".hermes"
+            target.mkdir()
+            wire_relay(target, RELAY_ENV_TARGET, RELAY_TTS_TARGET)
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+
+            env_text = read(target / ".env")
+            self.assertIn("ALAN_RELAY_TOKEN=target-relay-token", env_text)
+            self.assertNotIn("source-relay-token", env_text)
+            self.assertIn("VOICE_TOOLS_OPENAI_KEY=target-relay-token",
+                          env_text)
+            self.assertIn("JEV_PROXY_API_KEY=target-relay-token", env_text)
+            self.assertIn("TYPESAFE_API_KEY=target-relay-token", env_text)
+            # Non-relay keys still migrated.
+            self.assertIn("TELEGRAM_BOT_TOKEN", env_text)
+
+            cfg = read(target / "config.yaml")
+            # The watcher had flipped the target to edge — that live value
+            # is preserved, not the source's openai.
+            self.assertIn("tts:\n  provider: edge", cfg)
+            # And the migrated content survived around it.
+            self.assertIn("data_dir:", cfg)
+
+            # The provenance marker is the target's, not the source's.
+            marker = json.loads(read(target / ".alan-relay-managed"))
+            self.assertEqual(marker["watcher_provider"], "edge")
+
+    def test_diy_to_hosted_keeps_the_targets_relay_wiring(self):
+        """DIY->hosted (the flagship flow): the source has no relay keys at
+        all, so the target's credentials and managed audio config must be
+        carried across the swap wholesale."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            target = remote_home / ".hermes"
+            target.mkdir()
+            wire_relay(target, RELAY_ENV_TARGET, RELAY_TTS_TARGET)
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+
+            env_text = read(target / ".env")
+            self.assertIn("ALAN_RELAY_TOKEN=target-relay-token", env_text)
+            self.assertIn("TYPESAFE_BASE_URL=", env_text)
+            self.assertIn("TELEGRAM_BOT_TOKEN", env_text)  # migrated
+
+            cfg = read(target / "config.yaml")
+            self.assertIn("provider: edge", cfg)
+            self.assertIn("base_url: https://openalan.com/api/relay/openai/v1",
+                          cfg)
+            self.assertIn("api_key: ${VOICE_TOOLS_OPENAI_KEY}", cfg)
+            self.assertIn("enabled: true", cfg)
+            self.assertIn("data_dir:", cfg)  # migrated yaml still rewritten
+            self.assertTrue(
+                (target / ".alan-relay-managed").exists())
+
+    def test_a_diy_target_keeps_the_migrated_config_untouched(self):
+        """hosted->DIY has no target wiring to preserve — the relay keys
+        are owned by whichever home has them, so an unwired target changes
+        nothing."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            wire_relay(hermes, RELAY_ENV_SOURCE, RELAY_TTS_SOURCE,
+                       marker={"managed": {"tts.provider": "openai"},
+                               "watcher_provider": None})
+            run("--to", "fakehost", "--yes", env=env)
+            env_text = read(remote_home / ".hermes" / ".env")
+            self.assertIn("ALAN_RELAY_TOKEN=source-relay-token", env_text)
 
 
 if __name__ == "__main__":

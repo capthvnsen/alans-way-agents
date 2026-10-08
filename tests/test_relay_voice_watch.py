@@ -59,7 +59,7 @@ class UsageServer:
 
 
 def run_watch(directory: Path, *, base="", token="relay-secret-1",
-              config=None, env_extra=None, interval_env=None):
+              config=None, env_extra=None, interval_env=None, managed=None):
     """One --once pass against a stub hermes that records `config set` argv."""
     bin_dir = directory / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -78,6 +78,9 @@ def run_watch(directory: Path, *, base="", token="relay-secret-1",
     config_path = directory / "config.yaml"
     if config is not None:
         config_path.write_text(config, encoding="utf-8")
+    managed_path = directory / ".alan-relay-managed"
+    if managed is not None:
+        managed_path.write_text(json.dumps(managed), encoding="utf-8")
     env = dict(os.environ)
     env.update({"CALLS_LOG": str(calls), "HERMES_HOME": str(directory)})
     if env_extra:
@@ -85,16 +88,27 @@ def run_watch(directory: Path, *, base="", token="relay-secret-1",
     result = subprocess.run(
         [sys.executable, str(WATCHER), "--once",
          "--env-file", str(env_file), "--config", str(config_path),
-         "--hermes", str(hermes)],
+         "--hermes", str(hermes),
+         "--managed-file", str(managed_path)],
         capture_output=True, text=True, env=env, timeout=60)
     calls_text = calls.read_text(encoding="utf-8") if calls.exists() else ""
-    return result, calls_text
+    marker = (json.loads(managed_path.read_text(encoding="utf-8"))
+              if managed_path.exists() else None)
+    return result, calls_text, marker
+
+
+def relay_config(base: str, provider: str = "openai") -> str:
+    """The tts block bootstrap writes: provider + the relay openai wiring."""
+    return (f"tts:\n  provider: {provider}\n  openai:\n"
+            f"    model: gpt-4o-mini-tts\n"
+            f"    base_url: {base}/openai/v1\n"
+            "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n")
 
 
 class WatcherTests(unittest.TestCase):
     def test_no_credentials_polls_nothing(self):
         with tempfile.TemporaryDirectory() as d:
-            result, calls = run_watch(Path(d), base="", token=None)
+            result, calls, _ = run_watch(Path(d), base="", token=None)
             self.assertEqual(result.returncode, 0)
             self.assertIn("nothing to watch", result.stdout)
             self.assertEqual(calls, "")
@@ -103,27 +117,126 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(Path(d), base=server.base)
+                result, calls, marker = run_watch(Path(d), base=server.base)
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(server.requests[0]["path"], "/api/relay/usage")
                 self.assertEqual(
                     server.requests[0]["auth"], "Bearer relay-secret-1")
                 self.assertIn("hermes config set tts.provider edge", calls)
+                # The flip records provenance so a later positive balance may
+                # restore openai — and only if the watcher set edge itself.
+                self.assertEqual(marker["watcher_provider"], "edge")
         finally:
             server.close()
 
     def test_positive_minutes_restores_openai(self):
         """After resets_at the relay's counter is positive again; the next
-        poll flips the fallback off on its own."""
+        poll flips the fallback off — but only because the marker says this
+        watcher set edge, and only while the relay wiring is intact."""
         server = UsageServer()
         server.document["voice_minutes_left_est"] = 42.5
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, marker = run_watch(
                     Path(d), base=server.base,
-                    config="tts:\n  provider: edge\n  openai:\n    model: gpt-4o-mini-tts\n")
+                    config=relay_config(server.base, provider="edge"),
+                    managed={"watcher_provider": "edge"})
                 self.assertEqual(result.returncode, 0)
                 self.assertIn("hermes config set tts.provider openai", calls)
+                self.assertEqual(marker["watcher_provider"], "openai")
+        finally:
+            server.close()
+
+    def test_customer_chosen_edge_is_never_flipped_back(self):
+        """provider=edge the customer set themselves is indistinguishable by
+        value — only the marker proves the watcher did not set it, so a
+        positive balance must leave it alone."""
+        server = UsageServer()
+        server.document["voice_minutes_left_est"] = 42.5
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for managed in (None, {"watcher_provider": "openai"},
+                                {"managed": {"tts.provider": "openai"}}):
+                    with self.subTest(managed=managed):
+                        result, calls, _ = run_watch(
+                            Path(d), base=server.base,
+                            config=relay_config(server.base, provider="edge"),
+                            managed=managed)
+                        self.assertEqual(calls, "")
+        finally:
+            server.close()
+
+    def test_customer_openai_is_never_flipped_to_edge(self):
+        """A customer running their own OpenAI TTS has tts.provider=openai
+        but a base_url that is not the relay (or an api_key that is not the
+        env-ref template): an exhausted relay balance must not flip it —
+        they never consume the relay's voice minutes."""
+        server = UsageServer()  # voice_minutes_left_est: 0
+        try:
+            configs = [
+                # entirely their own OpenAI account
+                "tts:\n  provider: openai\n  openai:\n"
+                "    base_url: https://api.openai.com/v1\n"
+                "    api_key: sk-customer\n",
+                # relay base_url but a literal key — not our template
+                "tts:\n  provider: openai\n  openai:\n"
+                f"    base_url: {server.base}/openai/v1\n"
+                "    api_key: sk-theirs\n",
+            ]
+            for config in configs:
+                with self.subTest(config=config):
+                    with tempfile.TemporaryDirectory() as d:
+                        result, calls, _ = run_watch(
+                            Path(d), base=server.base, config=config)
+                        self.assertEqual(calls, "")
+        finally:
+            server.close()
+
+    def test_watcher_set_edge_flips_back_only_while_relay_wired(self):
+        """If the operator re-points tts.openai while the provider sits on
+        watcher-set edge, restoring openai would send the relay bearer to a
+        third party — hands off instead."""
+        server = UsageServer()
+        server.document["voice_minutes_left_est"] = 42.5
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result, calls, _ = run_watch(
+                    Path(d), base=server.base,
+                    config="tts:\n  provider: edge\n  openai:\n"
+                           "    base_url: https://api.openai.com/v1\n"
+                           "    api_key: sk-customer\n",
+                    managed={"watcher_provider": "edge"})
+                self.assertEqual(calls, "")
+        finally:
+            server.close()
+
+    def test_non_finite_minutes_leaves_the_provider_alone(self):
+        """json.loads accepts bare NaN/Infinity; nan <= 0 is False which
+        used to read as 'credit restored' — fail closed instead."""
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                server = UsageServer()
+                server.document["voice_minutes_left_est"] = value
+                try:
+                    with tempfile.TemporaryDirectory() as d:
+                        result, calls, _ = run_watch(Path(d), base=server.base)
+                        self.assertEqual(result.returncode, 0)
+                        self.assertEqual(calls, "")
+                finally:
+                    server.close()
+
+    def test_flow_style_tts_block_is_read(self):
+        """`tts: {provider: edge}` is the same selection as a block —
+        missing it used to read as unset, which the watcher then owned."""
+        server = UsageServer()
+        server.document["voice_minutes_left_est"] = 7
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result, calls, _ = run_watch(
+                    Path(d), base=server.base,
+                    config="tts: {provider: elevenlabs}\n")
+                self.assertEqual(calls, "")
+                self.assertIn("operator-owned", result.stdout)
         finally:
             server.close()
 
@@ -131,7 +244,7 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, _ = run_watch(
                     Path(d), base=server.base,
                     config="tts:\n  provider: edge\n")
                 self.assertEqual(calls, "")
@@ -142,7 +255,7 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(Path(d), base=server.base)
+                result, calls, _ = run_watch(Path(d), base=server.base)
                 self.assertIn("hermes config set tts.provider edge", calls)
         finally:
             server.close()
@@ -153,7 +266,7 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, _ = run_watch(
                     Path(d), base=server.base,
                     config="tts:\n  provider: elevenlabs\n")
                 self.assertEqual(result.returncode, 0)
@@ -166,7 +279,7 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, _ = run_watch(
                     Path(d), base=server.base,
                     config="tts:\n  use_gateway: true\n  provider: openai\n")
                 self.assertEqual(calls, "")
@@ -180,9 +293,11 @@ class WatcherTests(unittest.TestCase):
         server.document["voice_minutes_left_est"] = 5
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, _ = run_watch(
                     Path(d), base=server.base,
-                    config="tts:\n  provider: edge\n  openai:\n    provider: nested\n")
+                    config=relay_config(server.base, provider="edge")
+                           + "    provider: nested\n",
+                    managed={"watcher_provider": "edge"})
                 self.assertIn("hermes config set tts.provider openai", calls)
         finally:
             server.close()
@@ -194,7 +309,7 @@ class WatcherTests(unittest.TestCase):
                 server.status = status
                 try:
                     with tempfile.TemporaryDirectory() as d:
-                        result, calls = run_watch(Path(d), base=server.base)
+                        result, calls, _ = run_watch(Path(d), base=server.base)
                         self.assertEqual(result.returncode, 0)
                         self.assertEqual(calls, "")
                 finally:
@@ -206,7 +321,7 @@ class WatcherTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d:
                 # Malformed payload: the field is absent.
                 server.document = {"resets_at": "2026-11-01T00:00:00Z"}
-                result, calls = run_watch(Path(d), base=server.base)
+                result, calls, _ = run_watch(Path(d), base=server.base)
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(calls, "")
         finally:
@@ -217,7 +332,7 @@ class WatcherTests(unittest.TestCase):
         base = server.base
         server.close()  # port now refuses connections
         with tempfile.TemporaryDirectory() as d:
-            result, calls = run_watch(Path(d), base=base)
+            result, calls, _ = run_watch(Path(d), base=base)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(calls, "")
 
@@ -225,7 +340,7 @@ class WatcherTests(unittest.TestCase):
         server = UsageServer()
         try:
             with tempfile.TemporaryDirectory() as d:
-                result, calls = run_watch(
+                result, calls, _ = run_watch(
                     Path(d), base="http://ignored.invalid/rel",
                     token="file-token",
                     env_extra={"ALAN_RELAY_BASE": server.base,
