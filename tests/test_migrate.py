@@ -322,6 +322,38 @@ exit "${FAKE_SUPERVISORCTL_RC:-0}"
             self.assertLess(local.index("signal USR1 hermes-gateway"),
                             local.index("stop hermes-gateway"))
 
+    def test_a_drained_gateway_is_stopped_even_while_its_respawn_is_pending(self):
+        """Between the old gateway's exit and autorestart's respawn the pid
+        reads 0. The migration must still `stop` the program, or supervisord
+        relaunches a gateway that opens state.db mid-snapshot (issue #65)."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) if grep -q "signal USR1" "$FAKE_LOCAL_CALLS"; then echo 0; else echo 4242; fi;;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+            self.assertLess(local.index("signal USR1 hermes-gateway"),
+                            local.index("stop hermes-gateway"))
+
     def test_a_daemon_without_the_signal_verb_still_stops(self):
         """A supervisord too old for `signal` refuses it; the migration
         falls back to the plain stop path."""

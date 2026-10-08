@@ -526,13 +526,13 @@ if have supervisorctl; then
                 || die "the old gateway is still draining ${GONE_WAIT}s after SIGUSR1; it was left alone, retry the migration when it exits"
             sleep 1
         done
-        # autorestart relaunches it; a conf without autorestart leaves the
-        # program down, which is already the end state `stop` was after.
-        case "$(supervisorctl pid hermes-gateway 2>/dev/null || true)" in
-            ''|*[!0-9]*|0)
-                stopped="supervisorctl signal USR1 hermes-gateway"
-                start_old="supervisorctl start hermes-gateway";;
-        esac
+        # autorestart may be about to relaunch it (pid reads 0 between the
+        # exit and the respawn), so always `stop` now: it takes down a fresh
+        # respawn cleanly and keeps supervisord from starting one mid-snapshot.
+        # "not running" is the end state we want, so its exit code is ignored.
+        supervisorctl stop hermes-gateway >/dev/null 2>&1 || true
+        stopped="supervisorctl signal USR1 hermes-gateway"
+        start_old="supervisorctl start hermes-gateway"
     fi
 fi
 if [ -z "$stopped" ] && have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
