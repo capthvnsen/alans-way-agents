@@ -25,7 +25,7 @@ TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
 SETUP_URL_BASE="https://raw.githubusercontent.com/capthvnsen/alans-way-agents"
 TAILSCALE_URL_TIMEOUT="${ALAN_TAILSCALE_URL_TIMEOUT:-120}"
 WAIT_PAIRED_INTERVAL="${ALAN_WAIT_PAIRED_INTERVAL:-5}"
-WAIT_PAIRED_TIMEOUT="${ALAN_WAIT_PAIRED_TIMEOUT:-0}"
+WAIT_PAIRED_TIMEOUT="${ALAN_WAIT_PAIRED_TIMEOUT:-600}"
 LOGIN_URL_RE='https://login\.tailscale\.com/a/[A-Za-z0-9]+'
 
 CALLBACK="" SECRET="" ID="" REPO_REF="main"
@@ -250,11 +250,20 @@ step_alans_way() {
         log "alans-way already installed"
         return 0
     fi
-    local flags="--non-interactive --repo-ref '$REPO_REF'"
+    # Flags ride as real argv — folding $REPO_REF into a run_sh string would
+    # let a quote or $(...) in it break out of the command.
+    local setup_args=(--non-interactive)
     if [ "$needs_supervisor" = 1 ]; then
-        flags="--non-interactive --skip-services --repo-ref '$REPO_REF'"
+        setup_args+=(--skip-services)
     fi
-    run_sh "curl -fsSL '$SETUP_URL_BASE/$REPO_REF/setup.sh' | bash -s -- $flags"
+    setup_args+=(--repo-ref "$REPO_REF")
+    if [ "$DRY_RUN" = 1 ]; then
+        log "would run: curl -fsSL $SETUP_URL_BASE/$REPO_REF/setup.sh | bash -s -- ${setup_args[*]}"
+    else
+        printf '+ %s\n' "curl -fsSL $SETUP_URL_BASE/$REPO_REF/setup.sh | bash -s -- ${setup_args[*]}" >>"$LOG_FILE"
+        curl -fsSL "$SETUP_URL_BASE/$REPO_REF/setup.sh" 2>>"$LOG_FILE" \
+            | bash -s -- "${setup_args[@]}" >>"$LOG_FILE" 2>&1
+    fi
     if [ "$needs_supervisor" = 1 ]; then
         alans_way_conf
         run supervisorctl reread
@@ -287,6 +296,7 @@ alans_way_conf() {
 ; browser services setup.sh --skip-services skipped live here.
 [program:alans-way-chromium]
 command=$node $desktop_dir/desktop/scripts/vps-chromium-host.cjs
+user=$(id -un)
 environment=HOME="$HOME",DISPLAY=":99",HERMES_VPS_BROWSER_DATA="$HOME/.local/share/hermes-alans-way/browser"
 priority=40
 autorestart=unexpected
@@ -296,6 +306,7 @@ stdout_logfile_maxbytes=10MB
 
 [program:alans-way-browser]
 command=$node $desktop_dir/desktop/scripts/vps-browser-host.cjs serve
+user=$(id -un)
 environment=HOME="$HOME",DISPLAY=":99",HERMES_VPS_BROWSER_DATA="$HOME/.local/share/hermes-alans-way/browser"
 priority=41
 autorestart=unexpected
@@ -501,7 +512,10 @@ import json, sys
 print(json.dumps({"id": sys.argv[1], "secret": sys.argv[2], "url": sys.argv[3]}))
 PY
 )"
-        run_sh "curl -fsSL -X POST -H 'Content-Type: application/json' -d '$payload' '$CALLBACK'"
+        # The payload carries the provisioning secret — send it on stdin so
+        # it lands neither in the log's `+ ...` line nor in argv for ps.
+        printf '%s' "$payload" | run curl -fsSL -X POST \
+            -H 'Content-Type: application/json' --data @- "$CALLBACK"
         log "posted the login URL to the callback"
     else
         printf '%s\n' "$url"
@@ -521,6 +535,10 @@ wait_paired() {
     if [ "$DRY_RUN" = 1 ]; then
         log "would poll tailscale status --json until BackendState=Running"
         return 0
+    fi
+    if ! have tailscale; then
+        log "tailscale is not installed — run the bootstrap first"
+        return 1
     fi
     log "waiting for tailscale pairing"
     local deadline=0 now

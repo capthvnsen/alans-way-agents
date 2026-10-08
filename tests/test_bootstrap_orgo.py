@@ -71,6 +71,11 @@ def curl_stub(stub_bin: Path, fail_on=""):
     fail_case = f'*{fail_on}*) echo "stub: network dropped mid-install" >&2; exit 1;;' if fail_on else ""
     stub(stub_bin, "curl", f'''
 echo "curl $*" >> "$STUB_LOG"
+# Bodies posted via --data @- are captured so tests can check them while
+# argv (what ps would show) stays secret-free.
+case "$*" in
+  *" -d @-"*|*"--data @-"*) cat > "$STUB_LOG.body";;
+esac
 case "$*" in
   {fail_case}
 esac
@@ -173,10 +178,16 @@ class InstallStepTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             calls = log.read_text(encoding="utf-8")
             self.assertIn("https://example.test/api/computer/tailscale-url", calls)
-            self.assertIn("https://login.tailscale.com/a/abc123", calls)
-            self.assertIn("s3cret", calls)
-            self.assertIn("c-42", calls)
             self.assertIn("tailscale up --hostname alan-c-42", calls)
+            # The secret rides on stdin, never argv — so neither the calls
+            # log nor bootstrap.log may contain it.
+            self.assertNotIn("s3cret", calls)
+            body = Path(str(log) + ".body").read_text(encoding="utf-8")
+            self.assertIn("s3cret", body)
+            self.assertIn("c-42", body)
+            self.assertIn("https://login.tailscale.com/a/abc123", body)
+            bootlog = (directory / "state" / "bootstrap.log").read_text(encoding="utf-8")
+            self.assertNotIn("s3cret", bootlog)
 
     def test_login_url_printed_after_a_delay_on_stdout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -377,6 +388,52 @@ class InstallStepTests(unittest.TestCase):
             run(env=env)
             self.assertTrue((bin_dest / "orgo-hermes-gateway").exists())
             self.assertFalse((directory / "svconf" / "hermes-gateway.conf").exists())
+
+    def test_repo_ref_is_never_interpreted_as_shell(self):
+        """--repo-ref comes from the provisioning backend; a quote or $(...)
+        in it must not break out of a composed command string."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            marker = directory / "pwned"
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/i1")
+            run("--repo-ref", f"x';touch {marker};'", env=env)
+            self.assertFalse(marker.exists())
+
+    def test_alans_way_conf_runs_as_the_invoking_user(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            curl_stub(stub_bin)
+            tailscale_stub(stub_bin, url="https://login.tailscale.com/a/u1")
+            run(env=env)
+            conf = (directory / "svconf" / "alans-way.conf").read_text(encoding="utf-8")
+            self.assertEqual(conf.count("user="), 2)
+
+    def test_wait_paired_fails_fast_when_tailscale_is_missing(self):
+        """No tailscale stub on PATH — a poller hitting --wait-paired before
+        bootstrap ran must fail, not spin forever."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            result = run("--wait-paired", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
+            self.assertEqual(doc["step"], "wait_paired")
+
+    def test_wait_paired_times_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = fixture(directory)
+            env["ALAN_WAIT_PAIRED_TIMEOUT"] = "1"
+            env["ALAN_WAIT_PAIRED_INTERVAL"] = "1"
+            tailscale_stub(stub_bin, backend="NeedsLogin")
+            result = run("--wait-paired", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["state"], "failed")
 
     def test_wait_paired_writes_ready_paired(self):
         with tempfile.TemporaryDirectory() as d:
