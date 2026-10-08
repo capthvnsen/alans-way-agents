@@ -159,11 +159,11 @@ be.capture(mode="som", app="Notes")
 m = mark(); be.set_value("hello", element=2); R["set_value"] = action_calls(m)
 m = mark(); be.key("cmd+s"); R["key_combo"] = action_calls(m)
 m = mark(); be.key("return"); R["key_plain"] = action_calls(m)
+m = mark(); be.type_text("hi"); R["type_text"] = action_calls(m)
 
 # --- unsupported actions never reach the router
 m = mark()
 R["unsupported"] = {
-    "type_text": plain(be.type_text("x")),
     "middle": plain(be.click(x=1, y=1, button="middle")),
     "modifier": plain(be.click(x=1, y=1, modifiers=["shift"])),
     "triple": plain(be.click(x=1, y=1, click_count=3)),
@@ -518,6 +518,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["set_value"], [{"pid": 101, "action": "type", "ref": "c2", "text": "hello", "generation": generation}])
         self.assertEqual(self.r["key_combo"], [{"pid": 101, "action": "hotkey", "keys": "cmd+s"}])
         self.assertEqual(self.r["key_plain"], [{"pid": 101, "action": "key", "key": "return"}])
+        # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
+        self.assertEqual(self.r["type_text"], [{"pid": 101, "action": "type", "text": "hi"}])
 
     def test_unsupported_actions_are_refused_without_reaching_the_router(self):
         for name, result in self.r["unsupported"].items():
@@ -525,7 +527,6 @@ class ProviderTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "unsupported_action")
         self.assertEqual(self.r["unsupported_calls"], [])
-        self.assertIn("set_value", self.r["unsupported"]["type_text"]["message"])
 
     def test_policy_refusals_surface_with_their_codes(self):
         self.assertIn("in front", self.r["in_front"])
@@ -605,7 +606,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Save", r["e2e_capture"])
         self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101], ["workspace_computer_screenshot", 101]])
         self.assertIn('"ok": true', r["e2e_click"].lower().replace('\\"', '"'))
-        self.assertIn("unsupported_action", r["e2e_type"])
+        self.assertNotIn("unsupported_action", r["e2e_type"])
 
 
 @NEEDS_HERMES
