@@ -785,12 +785,13 @@ function continuationDetail(c, label = 'Mac') {
       `Restored ${tabs.length} tab${tabs.length === 1 ? '' : 's'} (${label} tab to VPS tab): ` +
       `${tabs.map(([a, b]) => `${a} -> ${b}`).join(', ')}. ` +
       'Work in the VPS tabs from now on. Cookies were restored for tabs that had them, so a signed-in site should still be signed in; ' +
-      'if a page shows a sign-in wall, say so and stop only that page. A restored tab may still be loading, so snapshot it before acting.' +
+      'if a page shows a sign-in wall, tell the user rather than working past it. A restored tab may still be loading, so snapshot it before acting.' +
       (review.length ? ` Look at these before acting, their scroll or drafts were not confirmed: ${review.join(', ')}.` : '')
     );
   }
   if (c && c.status === 'pending') {
-    return 'The VPS browser is still restoring the tabs. List tabs again in a few seconds and work in the tab ids it shows.';
+    return 'The VPS browser is still restoring the tabs. List tabs again in a few seconds and work in the tab ids it shows. ' +
+      'A login may not have carried over; if a page shows a sign-in wall, tell the user rather than working past it.';
   }
   if (c && c.status === 'down') {
     return `The VPS browser is not responding, so no tabs could be restored and ${label} is unreachable too. Try listing tabs again shortly; if it still fails, report that no browser is reachable.`;
@@ -799,7 +800,7 @@ function continuationDetail(c, label = 'Mac') {
   if (page && idOk(c.continued.tabId)) {
     return (
       `Continued ${page} as VPS tab ${c.continued.tabId}. Keep working in that tab. ` +
-      'Logins did not carry over; if the page asks you to sign in, say so and stop only that page.'
+      'Logins did not carry over; if the page asks you to sign in, tell the user rather than working past the login wall.'
     );
   }
   return null;
@@ -807,8 +808,9 @@ function continuationDetail(c, label = 'Mac') {
 
 function continuationNotice(c, label = 'Mac') {
   const detail = continuationDetail(c, label)
-    || 'No tabs were mirrored, so reopen the page you were on in the VPS browser and snapshot it before acting.';
-  return `[workspace] ${label} connection lost; work moved to the VPS browser. ${detail}`;
+    || 'No tabs were mirrored, so reopen the page you were on in the VPS browser and snapshot it before acting. ' +
+       'Logins did not carry over; if a page shows a sign-in wall, tell the user rather than working past it.';
+  return `[workspace] the ${label} browser did not answer in time; work moved to the VPS browser. ${detail}`;
 }
 
 const workspaceMeta = (host, mac, ms) => (ms === undefined ? { host, mac } : { host, mac, ms });
