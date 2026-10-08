@@ -141,15 +141,18 @@ different bot's route silently.
 
 ## Moved your agent to a new VM?
 
-The VM's address is saved in several places and none update the others.
-After a move, check each one; a stale copy fails quietly:
+The VM's address is saved in several places and they mostly do not update
+each other. After a move, check each one; a stale copy fails quietly:
 
 - **The app's Settings** on the user's computer: the VM SSH host and the
-  Remote desktop URL are independent fields (`vpsBrowser.sshHost` and
+  Remote desktop URL are separate fields (`vpsBrowser.sshHost` and
   `remoteUrl` in the app's `preferences.json`, under `Hermes Workspace` in
   the app-data directory, readable over the same ssh path the workspace
-  uses). Updating the SSH host does not rewrite the URL: repoint it to
-  `http://<new tailnet IP>:<websockify port>/vnc.html`.
+  uses). Current builds re-derive the URL when it was empty or still on
+  the old host; repoint it only if it was meant to follow the VM and
+  stayed stale: `http://<new tailnet IP>:<websockify port>/vnc.html`. A
+  URL that names the same VM differently (a MagicDNS name where the SSH
+  host uses the tailnet IP) never auto-follows, so check it by eye.
 - **The Hermes desktop app's saved remote**, on each computer that runs
   it: `connection.json` and `connections.json` under the `Hermes` app-data
   directory keep the old VM's URL until a new remote is saved. A stale
