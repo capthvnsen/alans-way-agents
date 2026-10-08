@@ -4,6 +4,7 @@ import os
 import sys
 
 from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
+from .voice_call import VoiceCall
 
 
 def _owning_home() -> Path:
@@ -42,7 +43,8 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
     if not _primary_profile(ctx):
         return None
-    runtime = Proactivity(ctx, legacy_home=legacy_home or _owning_home())
+    home = legacy_home or _owning_home()
+    runtime = Proactivity(ctx, legacy_home=home)
     ctx.register_tool(name="proactivity", toolset="proactivity", schema=SCHEMA,
                       handler=runtime.tool, check_fn=lambda: True)
     ctx.register_hook("pre_llm_call", runtime.on_turn_start)
@@ -50,8 +52,14 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_command("proactivity", runtime.command,
                          description="Check-in settings: status, less, normal, more, pause [until], resume, hours 9-21, tz Area/City",
                          args_hint="[status|less|normal|more|pause|resume|hours|tz]")
+    calls = VoiceCall(ctx, home)
+    ctx.register_hook("post_llm_call", calls.on_turn_end)
+    ctx.register_command("call", calls.command,
+                         description="Post the 📞 Call button (needs ALAN_CALL_APP_URL)")
+    ctx.register_platform_handler("api_server", calls.api_routes)
     if background:
         ctx.register_platform_handler("telegram", runtime.on_telegram_connect)
+        ctx.register_platform_handler("telegram", calls.on_telegram_connect)
     if hasattr(ctx, "register_cli_command"):
         ctx.register_cli_command("proactivity", "Idle check-ins from the primary bot", cli_setup,
                                  lambda args: cli_run(runtime, args))
