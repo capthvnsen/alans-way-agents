@@ -830,6 +830,13 @@ else
   bad "node not on PATH: Node $MIN_NODE_MAJOR+ required for the browser connector"
 fi
 [ -d "$HERMES_HOME" ] && ok "HERMES_HOME: $HERMES_HOME" || warn "HERMES_HOME $HERMES_HOME does not exist yet (created on first hermes run)"
+# Hermes resolves a bare skill name from a profile's own skills directory before
+# any plugin, so a copied workspace-operations skill shadows the plugin's and
+# never gets its updates. Setup only reports it: the copy may hold the user's edits.
+for _shadow in "$HERMES_HOME"/skills/workspace-operations "$HERMES_HOME"/profiles/*/skills/workspace-operations; do
+  [ -f "$_shadow/SKILL.md" ] || continue
+  warn "$_shadow shadows the $PLUGIN_NAME plugin's workspace-operations skill: move anything you want to keep out of it, then delete it"
+done
 
 if [ "$VERIFY" = 1 ]; then
   # --verify: report state without changing anything
