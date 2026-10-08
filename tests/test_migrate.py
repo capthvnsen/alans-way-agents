@@ -282,6 +282,109 @@ class MigrateTests(unittest.TestCase):
             # No secrets-bearing debris left on the remote.
             self.assertFalse(list(remote_home.glob("*.tgz")))
 
+    def test_the_old_gateway_is_signaled_to_drain_before_the_stop(self):
+        """`stop` escalates SIGTERM to SIGKILL after the program's
+        stopwaitsecs — the stock 10s on confs that predate the new value —
+        which can kill the gateway mid-drain and corrupt state.db (issue
+        #65). Signal USR1 first: the drain gets no kill timer, the
+        autorestart respawn is a fresh process, and `stop` on that stops
+        cleanly. pid answers the old pid until `signal` flips it to the
+        relaunched one."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_GW_DRAINED"] = str(directory / "gw-drained")
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid)
+      [ -f "$FAKE_GW_DRAINED" ] && echo 7777 || echo 4242;;
+    signal)
+      [ "$2" = USR1 ] && touch "$FAKE_GW_DRAINED";;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+            self.assertLess(local.index("signal USR1 hermes-gateway"),
+                            local.index("stop hermes-gateway"))
+
+    def test_a_daemon_without_the_signal_verb_still_stops(self):
+        """A supervisord too old for `signal` refuses it; the migration
+        falls back to the plain stop path."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) echo 4242;;
+    signal) exit 1;;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+
+    def test_a_drain_that_never_finishes_dies_before_the_snapshot(self):
+        """The USR1 drain wait is bounded: a gateway that never exits must
+        stop the migration before the db snapshot, never escalate to a
+        kill."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["ALAN_GATEWAY_GONE_WAIT"] = "3"
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) echo 4242;;
+    signal) exit 0;;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("still draining", result.stderr)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertNotIn("stop hermes-gateway", local)
+            self.assertNotIn("start", read(remote_calls))
+
     def test_failing_to_stop_the_old_gateway_is_fatal(self):
         """If no local supervisor can stop the old gateway, starting the
         remote one would leave both polling the same bot — hard error."""

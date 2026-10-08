@@ -506,16 +506,45 @@ log "remote unpack and move succeeded on $TO"
 # runs leaves both polling the same bot. Remember how to start it again in
 # case the remote side never comes up.
 stopped="" start_old=""
-if have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
+if have supervisorctl; then
+    # `stop` escalates SIGTERM to SIGKILL once the program's stopwaitsecs
+    # lapses — the stock 10s on Orgo's own hermes-gateway conf and every
+    # install from before the 180s value — which can kill the gateway
+    # mid-drain and corrupt state.db (issue #65). A Hermes gateway drains
+    # on SIGUSR1 instead: signal it and wait for the old pid to exit (no
+    # kill timer applies to a signaled exit), then let the plain `stop`
+    # below take down the autorestart respawn — a fresh process stops
+    # cleanly inside even 10s. A daemon too old for `signal` skips to the
+    # same stop.
+    gw_pid="$(supervisorctl pid hermes-gateway 2>/dev/null || true)"
+    case "$gw_pid" in ''|*[!0-9]*|0) gw_pid="";; esac
+    if [ -n "$gw_pid" ] && supervisorctl signal USR1 hermes-gateway >/dev/null 2>&1; then
+        tries=0
+        while [ "$(supervisorctl pid hermes-gateway 2>/dev/null || true)" = "$gw_pid" ]; do
+            tries=$((tries + 1))
+            [ "$tries" -lt "$GONE_WAIT" ] \
+                || die "the old gateway is still draining ${GONE_WAIT}s after SIGUSR1; it was left alone, retry the migration when it exits"
+            sleep 1
+        done
+        # autorestart relaunches it; a conf without autorestart leaves the
+        # program down, which is already the end state `stop` was after.
+        case "$(supervisorctl pid hermes-gateway 2>/dev/null || true)" in
+            ''|*[!0-9]*|0)
+                stopped="supervisorctl signal USR1 hermes-gateway"
+                start_old="supervisorctl start hermes-gateway";;
+        esac
+    fi
+fi
+if [ -z "$stopped" ] && have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="supervisorctl stop hermes-gateway"
     start_old="supervisorctl start hermes-gateway"
-elif have systemctl && systemctl --user stop hermes-gateway >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have systemctl && systemctl --user stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl --user stop hermes-gateway"
     start_old="systemctl --user start hermes-gateway"
-elif have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl stop hermes-gateway"
     start_old="systemctl start hermes-gateway"
-elif have hermes && hermes gateway stop >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have hermes && hermes gateway stop >/dev/null 2>&1; then
     stopped="hermes gateway stop"
     # `hermes gateway start` exists in v0.21 but only revives a gateway
     # installed as a service via `hermes gateway install` — `status`
@@ -539,7 +568,7 @@ tries=0
 while pgrep -f 'hermes .*gatewa[y] run' >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -lt "$GONE_WAIT" ] \
-        || die "the old gateway is still running ${GONE_WAIT}s after the stop — it was left alone; retry the migration when it exits"
+        || die "the old gateway is still running ${GONE_WAIT}s after the stop; it was left alone, retry the migration when it exits"
     sleep 1
 done
 

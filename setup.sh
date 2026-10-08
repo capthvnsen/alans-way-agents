@@ -179,8 +179,8 @@ overseer_bot_ids() {
   [ -z "${HERMES_OVERSEER_BOT_IDS:-}" ] || { printf '%s' "$HERMES_OVERSEER_BOT_IDS"; return 0; }
   for _f in "$@"; do
     [ -f "$_f" ] || continue
-    _v="$(sed -n -e 's/.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' \
-               -e 's/^Environment=HERMES_OVERSEER_BOT_IDS=\(.*\)$/\1/p' "$_f" | head -1)"
+    _v="$(sed -n -e 's/^[[:space:]]*[Ee]nvironment=.*HERMES_OVERSEER_BOT_IDS="\([^"]*\)".*/\1/p' \
+               -e 's/^[[:space:]]*Environment=HERMES_OVERSEER_BOT_IDS=\(.*\)$/\1/p' "$_f" | head -1)"
     if [ -n "$_v" ]; then printf '%s' "$_v"; return 0; fi
   done
   return 0
@@ -350,7 +350,7 @@ websockify_port() {
 # own pid whenever it answers.
 supervisord_usable() {
   have supervisorctl || return 1
-  case "$(supervisorctl pid 2>/dev/null)" in ''|*[!0-9]*|0) return 1;; esac
+  case "$(supervisorctl_call pid 2>/dev/null)" in ''|*[!0-9]*|0) return 1;; esac
 }
 
 # The directory a [program:*] drop-in goes in: the include glob of the running
@@ -430,7 +430,10 @@ supervisor_gateway_program() {
         *hermes*"gateway run"*)
           case "$(argv_profile $_args)" in
             "${PROFILE:-default}") echo "$_prog"; return 0;;
-            default) [ -n "$_any" ] || _any="$_prog";;   # unprofiled candidate
+            # An unprofiled argv is only a candidate when the default
+            # profile is the target — the strict match the conf-scan
+            # fallback below applies too.
+            default) if [ "${PROFILE:-default}" = default ]; then [ -n "$_any" ] || _any="$_prog"; fi;;
           esac;;
       esac
     done

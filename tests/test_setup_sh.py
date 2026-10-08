@@ -2643,6 +2643,16 @@ class SupervisordServiceTests(unittest.TestCase):
         self.run_setup()
         self.assertIn('HERMES_OVERSEER_BOT_IDS="777"', self.conf())
 
+    def test_a_commented_out_overseer_value_stays_disabled(self):
+        # An operator who commented the pair out disabled it on purpose; the
+        # read-back must not resurrect the value on the next run.
+        (self.confd / "alans-way.conf").write_text(
+            '[program:alans-way-browser]\n'
+            ';environment=HERMES_OVERSEER_BOT_IDS="777"\n'
+            '#environment=HERMES_OVERSEER_BOT_IDS="888"\n', encoding="utf-8")
+        self.run_setup()
+        self.assertNotIn("HERMES_OVERSEER_BOT_IDS", self.conf())
+
     def test_a_re_run_is_idempotent_and_starts_stopped_programs(self):
         self.run_setup()
         conf = self.confd / "alans-way.conf"
@@ -2816,6 +2826,22 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
         self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
 
+    def test_a_profiled_restart_never_signals_the_unprofiled_gateway(self):
+        # The unprofiled candidate only serves a default target, same strict
+        # rule as the conf scan: `--profile alt --restart` on a host whose
+        # only RUNNING gateway is the default one must not drain it — the
+        # restart falls through to `hermes -p alt gateway restart`.
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "gateway restart" not in read_log(self.root / "log") and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertNotIn("signal USR1", read_log(self.supervisor_log))
+        self.assertIn("-p alt gateway restart", read_log(self.root / "log"))
+
     def test_gateway_restart_ignores_a_non_hermes_gateway_program(self):
         (self.root / "supervisor.state").write_text(
             sup_line("api-gateway", "RUNNING", "pid 780, uptime 1:00:00"), encoding="utf-8")
@@ -2963,6 +2989,18 @@ class SupervisordServiceTests(unittest.TestCase):
         calls = read_log(self.supervisor_log)
         self.assertIn("reread", calls)
         self.assertIn("start alans-way-chromium", calls)
+
+    def test_a_root_only_socket_still_counts_as_usable(self):
+        """The detection probe must use supervisorctl_call's sudo -n retry
+        like every other call — otherwise a socket that needs root reads as
+        no daemon and the install skips with a misleading warn."""
+        (self.root / "need-sudo").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "sudo",
+             'shift; rm -f "%s"\nexec "$@"\n' % (self.root / "need-sudo"))
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("no live systemd or supervisord", result.stdout)
+        self.assertIn("[program:alans-way-browser]", self.conf())
 
     def test_supervisord_counts_as_usable_while_another_program_is_down(self):
         # A real `supervisorctl status` exits 3 when any program is not RUNNING
