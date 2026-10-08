@@ -382,7 +382,8 @@ EOF
 # Orgo's hermes-agent template already supervises sshd; reuse any existing
 # program and only install openssh-server when the binary is absent.
 sshd_conf() {
-    if grep -l 'sshd' "$SUPERVISOR_CONF_DIR"/*.conf >/dev/null 2>&1; then
+    if grep -l -e '^\[program:sshd\]' -e '^command=.*sshd' \
+        "$SUPERVISOR_CONF_DIR"/*.conf >/dev/null 2>&1; then
         log "sshd already defined under $SUPERVISOR_CONF_DIR"
         return 0
     fi
