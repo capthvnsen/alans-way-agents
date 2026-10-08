@@ -1161,11 +1161,11 @@ async function main() {
     const old = activeChild;
     superseded.add(old);
     try { old.kill('SIGKILL'); } catch { /* already gone */ }
+    annotCtx.failedOver = true;
     if (!provedAlive) {
       startVpsBackend();
       return;
     }
-    annotCtx.failedOver = true;
     flushResumes();
     const lost = [];
     const replay = [];
