@@ -12,10 +12,10 @@ SCRIPT = ROOT / "bootstrap-orgo.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 
 
-def run(*args, env=None, check=True, input_text=None):
+def run(*args, env=None, check=True):
     result = subprocess.run(
         [BASH, str(SCRIPT)] + list(args), capture_output=True, text=True,
-        env=env, input=input_text)
+        env=env)
     if check and result.returncode != 0:
         raise AssertionError(f"exit {result.returncode}: {result.stderr}\n{result.stdout}")
     return result

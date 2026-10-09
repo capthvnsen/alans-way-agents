@@ -175,12 +175,12 @@ state() {
         return 0
     fi
     local tmp="$STATE_DIR/.state.json.$$"
-    python3 - "$tmp" "$STATE_FILE" "$s" "$step" "$err" <<'PY'
+    python3 - "$tmp" "$s" "$step" "$err" <<'PY'
 import datetime
 import json
 import sys
 
-path, dest, state, step, err = sys.argv[1:6]
+path, state, step, err = sys.argv[1:5]
 doc = {
     "state": state,
     "step": step,

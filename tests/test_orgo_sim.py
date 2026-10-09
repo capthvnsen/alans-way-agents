@@ -195,12 +195,10 @@ class OrgoSim(unittest.TestCase):
 
     # -- helpers -----------------------------------------------------------
 
-    def start(self, name: str, mounts: tuple = ()) -> str:
+    def start(self, name: str) -> str:
         name = f"{name}-{RUN_ID}"
         cmd = [DOCKER, "run", "-d", "--name", name, "--network", NETWORK,
                "-v", f"{self.repo_src}:{REPO_MOUNT}"]
-        for src, dst in mounts:
-            cmd += ["-v", f"{src}:{dst}:ro"]
         cmd.append(IMAGE)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
