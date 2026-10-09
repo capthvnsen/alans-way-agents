@@ -1975,7 +1975,11 @@ if [ "$SKIP_BROWSER" = 0 ]; then
           && chmod 644 "$_debdir/google-chrome.deb" && sys_install "$_debdir/google-chrome.deb" ""; then rm -rf "$_debdir"; return 0; fi
       rm -rf "$_debdir"
     fi
-    sys_install chromium chromium && return 0
+    # Ubuntu's chromium package is a snap stub: only a real browser counts.
+    if sys_install chromium chromium; then
+      find_linux_chromium
+      [ -z "$CHROMIUM" ] || return 0
+    fi
     if have npx && [ -z "${ALANS_WAY_NO_INSTALL:-}" ] && [ "$(id -u)" = 0 ]; then
       ( cd "${TMPDIR:-/tmp}" && HOME="$BROWSER_HOME" npx -y playwright@1.49.1 install --with-deps chromium ) >/dev/null 2>&1 || return 1
       [ "$BROWSER_USER" = root ] || chown -R "$BROWSER_USER" "$BROWSER_HOME/.cache/ms-playwright" 2>/dev/null || true
@@ -1986,7 +1990,8 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   find_linux_chromium
   if [ -z "$CHROMIUM" ] && [ -z "$SNAP_CHROMIUM" ]; then
     say "  no Chrome or Chromium found: installing one"
-    if install_linux_chromium; then find_linux_chromium; fi
+    install_linux_chromium || true
+    find_linux_chromium
   fi
   if [ -z "$CHROMIUM" ] && [ -n "$SNAP_CHROMIUM" ]; then
     CHROMIUM="$SNAP_CHROMIUM"; CHROMIUM_IS_SNAP=1
