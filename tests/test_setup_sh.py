@@ -3182,10 +3182,11 @@ class LiveGatewayRefusalTests(unittest.TestCase):
              '[ "$1" = --user ] && shift\n'
              'case "$1" in\n'
              '  is-system-running) echo offline;;\n'
+             '  is-active) [ "$(cat "%s" 2>/dev/null)" = running ] || exit 1;;\n'
              '  stop) [ "$(cat "%s" 2>/dev/null)" = running ] || exit 1\n'
              '        echo stopped > "%s";;\n'
              '  start) echo running > "%s";;\n'
-             'esac\nexit 0\n' % (self.log, state, state, state))
+             'esac\nexit 0\n' % (self.log, state, state, state, state))
         self.live_gate('[ "$(cat "%s" 2>/dev/null)" = running ]' % state)
         result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3254,6 +3255,52 @@ class LiveGatewayRefusalTests(unittest.TestCase):
                         calls.index("-p default gateway stop"))
         self.assertLess(calls.index("-p default gateway stop"), retry)
         self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertEqual(gwstate.read_text().strip(), "running")
+
+    def test_an_inactive_unit_is_not_claimed_while_a_manual_gateway_runs(self):
+        """`systemctl stop` is a no-op success on an inactive unit: when the
+        live gateway is a manual `hermes gateway run`, claiming the unit
+        would report a stop that never happened, the retry would fail under
+        the still-live gateway, and `start` would spawn a second poller
+        beside it. Only an active unit may be claimed; anything else falls
+        through to `hermes gateway stop`, which reaches the real process."""
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        unitstate = self.root / "unit.state"
+        unitstate.write_text("inactive\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             '[ "$1" = --user ] && shift\n'
+             'case "$1" in\n'
+             '  is-system-running) echo running; exit 0;;\n'
+             '  is-active) [ "$(cat "%s")" = active ] || exit 1;;\n'
+             '  stop) echo stopped > "%s";;\n'
+             '  start) echo active > "%s";;\n'
+             'esac\nexit 0\n' % (self.log, unitstate, unitstate, unitstate))
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertNotIn("stop hermes-gateway", calls)
+        self.assertNotIn("start hermes-gateway", calls)
+        self.assertNotIn("still failed", result.stdout)
+        self.assertEqual(unitstate.read_text().strip(), "inactive")
         self.assertEqual(gwstate.read_text().strip(), "running")
 
     def test_a_registered_but_stopped_program_is_not_claimed_as_the_gateway(self):

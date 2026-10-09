@@ -542,9 +542,17 @@ stop_profile_gateway() {
   fi
   if [ -z "$_sg_start" ] && [ -z "$_sg_drain" ]; then
     _sg_unit="hermes-gateway${PROFILE:+-$PROFILE}"
-    if have systemctl && systemctl --user stop "$_sg_unit" >/dev/null 2>&1; then
+    # `systemctl stop` is a no-op success on an inactive unit, so the unit
+    # has to be active before its stop can be claimed as the stop the
+    # refusal came from. When the live gateway runs outside systemd (a
+    # manual `hermes gateway run`), a vacuous stop would report a stop that
+    # never happened, the retry would fail under the still-live gateway,
+    # and the matching start would spawn a second poller beside it.
+    if have systemctl && systemctl --user is-active --quiet "$_sg_unit" 2>/dev/null \
+        && systemctl --user stop "$_sg_unit" >/dev/null 2>&1; then
       _sg_start="sysu:$_sg_unit"
-    elif have systemctl && systemctl stop "$_sg_unit" >/dev/null 2>&1; then
+    elif have systemctl && systemctl is-active --quiet "$_sg_unit" 2>/dev/null \
+        && systemctl stop "$_sg_unit" >/dev/null 2>&1; then
       _sg_start="sys:$_sg_unit"
     elif hermes -p "$1" gateway stop >/dev/null 2>&1; then
       _sg_start="hermes:$1"
@@ -592,7 +600,12 @@ EOF
       shift
       if hermes -p "$_prof" "$@" >/dev/null 2>&1; then
         _applied=$((_applied + 1))
-        case "$*" in *"$COMPUTER_PLUGIN"*) _computer=1;; esac
+        # The last word names the plugin (a bare name, or the #fragment of a
+        # file:// URL): matching it, not the whole argv, keeps a checkout
+        # path that happens to contain the name from flagging a different
+        # plugin's op as the provider's.
+        _last=""; for _last do :; done
+        case "$_last" in "$COMPUTER_PLUGIN"|*"#$COMPUTER_PLUGIN") _computer=1;; esac
       else
         warn "still failed with the gateway stopped: hermes -p $_prof $*"
       fi
