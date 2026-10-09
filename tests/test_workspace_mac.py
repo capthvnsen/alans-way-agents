@@ -281,12 +281,12 @@ class MacBackendCommandTests(unittest.TestCase):
     """Non-interactive ssh never loads Homebrew's PATH, so a bare `node` misses."""
 
     def run_remote(self, home, node="", with_bundle=True):
-        bundle = Path(home) / "Apps" / "Open Alan.app"
+        bundle = Path(home) / "Apps" / "Alan's Workspace.app"
         script = bundle / "Contents" / "Resources" / "app" / "scripts" / "browser-mcp.cjs"
         script.parent.mkdir(parents=True)
         script.write_text("")
         if with_bundle:
-            exe = bundle / "Contents" / "MacOS" / "Open Alan"
+            exe = bundle / "Contents" / "MacOS" / "Alan's Workspace"
             exe.parent.mkdir(parents=True)
             exe.write_text('#!/bin/sh\necho "app-binary run-as-node=$ELECTRON_RUN_AS_NODE $*"\n')
             exe.chmod(0o755)
@@ -349,7 +349,7 @@ class MacBackendCommandTests(unittest.TestCase):
 
     def test_mac_node_path_with_spaces_is_quoted(self):
         with tempfile.TemporaryDirectory() as home:
-            bundle = Path(home) / "Apps" / "Open Alan.app"
+            bundle = Path(home) / "Apps" / "Alan's Workspace.app"
             script = bundle / "Contents" / "Resources" / "app" / "scripts" / "browser-mcp.cjs"
             script.parent.mkdir(parents=True)
             script.write_text("")
@@ -1348,6 +1348,57 @@ class HostCommandShellTests(unittest.TestCase):
         found = self.run_sh(self.command("posixProbeCommand", "linux"), XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"))
         self.assertEqual((found.returncode, found.stdout), (0, str(moved)), found.stderr)
 
+    def node_command(self, fn, host_os, *args, extra=()):
+        proc = subprocess.run(
+            [NODE, "-e", "process.stdout.write(require(process.argv[1])." + fn + "(" + ", ".join(args) + "))",
+             str(ROUTER), "--host-os", host_os, *extra],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def fake_app(self, bundle_name, exe_name):
+        bundle = self.home / "Apps" / bundle_name
+        script = bundle / "Contents" / "Resources" / "app" / "scripts" / "browser-mcp.cjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        exe = bundle / "Contents" / "MacOS" / exe_name
+        exe.parent.mkdir(parents=True)
+        exe.write_text('#!/bin/sh\necho "app-binary $*"\n')
+        exe.chmod(0o755)
+        return script
+
+    def test_mac_alans_workspace_bundle_with_apostrophe_probes_and_runs(self):
+        conn = self.home / "Library" / "Application Support" / "Hermes Workspace"
+        self.install(conn)
+        (conn / "connector" / "scripts" / "browser-mcp.cjs").unlink()
+        script = self.fake_app("Alan's Workspace.app", "Alan's Workspace")
+        extra = ("--mac-script", str(script))
+        probe = self.run_sh(self.node_command("posixProbeCommand", "mac", extra=extra))
+        self.assertEqual((probe.returncode, probe.stdout), (0, str(script)), probe.stderr)
+        run = self.run_sh(self.node_command("posixAutoBackendCommand", "mac", "''", "'bot-1'", "''", extra=extra))
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, f"app-binary {script} --bot-id bot-1"), run.stderr)
+
+    def test_default_mac_lists_include_alans_workspace_and_parse(self):
+        for fn, args in (("posixProbeCommand", ()), ("posixAutoBackendCommand", ("''", "'bot-1'", "''")),
+                         ("macBackendCommand", ("'/x/connector.cjs'", "''", "'bot-1'", "''"))):
+            command = self.node_command(fn, "mac", *args)
+            self.assertIn("'/Applications/Alan'\\''s Workspace.app", command)
+            self.assertIn("/Applications/alans-way-localapp.app", command)
+            self.assertEqual(subprocess.run([SH, "-n", "-c", command]).returncode, 0)
+
+    def test_linux_runs_an_alans_workspace_binary(self):
+        root = self.home / ".local" / "share" / "alans-workspace"
+        script = root / "resources" / "app" / "scripts" / "browser-mcp.cjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        exe = root / "alans-workspace"
+        exe.write_text('#!/bin/sh\necho "app-binary $*"\n')
+        exe.chmod(0o755)
+        conn = self.home / ".config" / "Hermes Workspace"
+        self.install(conn)
+        run = self.run_sh(self.node_command("posixAutoBackendCommand", "linux", "''", "'bot-1'", "''"))
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, f"app-binary {conn}/connector/scripts/browser-mcp.cjs --bot-id bot-1"), run.stderr)
+
     def test_probe_and_exec_runs_the_backend_or_exits_97(self):
         for host_os, conn in (("mac", "Library/Application Support/Hermes Workspace"), ("linux", ".config/Hermes Workspace")):
             with self.subTest(host_os=host_os):
@@ -1370,6 +1421,8 @@ class HostCommandShellTests(unittest.TestCase):
         self.assertIn("'/opt/alans-way-localapp-linux-x64'/alans-way-localapp", out)
         self.assertIn("'/opt/alans-way-localapp'/alans-way-localapp", out)
         self.assertIn('"$HOME/.local/share/alans-way-localapp-linux-x64"/alans-way-localapp', out)
+        self.assertIn("'/opt/alans-workspace-linux-x64'/alans-workspace", out)
+        self.assertIn('"$HOME/.local/share/alans-workspace"/alans-workspace', out)
         self.assertIn("XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json", out)
         self.assertIn("--bot-name 'o'\\''hara'", out)
         self.assertEqual(subprocess.run([SH, "-n", "-c", out]).returncode, 0)

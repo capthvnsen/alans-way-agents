@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
     --verify) VERIFY=1; shift;;
     -h|--help)
       cat <<'EOF'
-setup.sh: Alan's Way bootstrap for the Hermes gateway host (usually a VPS).
+setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
   --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP);
@@ -2610,7 +2610,7 @@ schedule_gateway_restart() {
 step "Done"
 cat <<EOF
   Next:
-  • On your computer: open Hermes: Alan's Way → Settings → Agent setup → save this
+  • On your computer: open Alan's Workspace → Settings → Agent setup → save this
     machine's SSH address → Test agent path.
   • In Telegram: message your primary bot: check-ins are on once bound, and are
     tuned by talking to the bot ("stop checking in" pauses them).

@@ -370,7 +370,7 @@ class DesktopAppsSkillTests(unittest.TestCase):
         self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
     def test_a_permission_error_names_the_app_and_both_switches(self):
-        self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)
+        self.assertIn("Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp)", self.normalized)
         self.assertIn("System Settings", self.normalized)
 
 

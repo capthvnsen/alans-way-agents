@@ -1,10 +1,10 @@
-# Hermes Alan's Way: agent plugin
+# Alan's Way Plugin
 
 [![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
 [Discord](https://discord.gg/jBQCPUsVE) · [X @alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
 
-**The plugin half of Hermes Alan's Way, the open-source Grokbot killer for stock Hermes.**
-The companion desktop app lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
+**The plugin half of Alan's Way, the open-source Grokbot killer for stock Hermes.**
+The companion desktop app, Alan's Workspace, lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
 (download at [openalan.com](https://openalan.com)). This repo is what you install
 *on the machine running your Hermes agents* (a Linux VPS, a macOS VM, or a Windows
 PC you keep on). The app runs on your own computer (macOS or Windows). This repo
@@ -107,7 +107,7 @@ The bootstrap runs every step in order and says what it did:
 - **Plugin** — installs `alans-way`, enables the `proactivity` toolset for
   Telegram sessions (without it, the `proactivity` tool never reaches the bound
   chat's tool list), and removes the stale 0.6 startup hook if one is installed
-- **VPS browser host** — fetches the companion repo, installs the connector's
+- **Alan's Tools (VPS browser host)** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
   systemd units on a Linux host where systemd is live, supervisord programs
   where it is not (VM images, Orgo computers — user units when you're not root;
@@ -183,7 +183,7 @@ the VPS and your computer over Tailscale with pinned SSH keys both ways, runs
 the same `setup.sh`, and proves both ends work. The
 `workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
 
-### 3. The desktop app
+### 3. Alan's Workspace (the desktop app)
 
 Download the one-click installer:
 
@@ -214,7 +214,7 @@ The agent setup prompt pins the plugin clone to a release tag (`v` + the
 it to the catalog-recorded commit instead. A bare `setup.sh` run with no
 `--repo-ref` follows `main`.
 
-The desktop app's update popup updates the app and the plugin on every saved VM
+Alan's Workspace's update popup updates the app and the plugin on every saved VM
 over SSH. Nothing to run by hand.
 
 Manual path: `git pull` (or re-run the `curl|bash` line), then restart the
@@ -276,7 +276,7 @@ Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
 color. Multi-bot setups: run `setup-workspace.sh` once per profile, each with
 its own bot id (the script replaces only its own managed block).
 
-Host path requirements: the alans-way-localapp app running on the user's
+Host path requirements: the Alan's Workspace app running on the user's
 computer, SSH from this host to it (BatchMode/key auth — the probe uses
 `StrictHostKeyChecking`), and the app's bundled `browser-mcp.cjs` (inside the
 installed app, or the copy this repo pushes to the connector directory). On a
@@ -351,7 +351,7 @@ migrate.sh            move an existing ~/.hermes to a new computer over ssh
 ## Roadmap
 
 The roadmap lives in the
-[Hermes Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
+[Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
 Fastest updates are on X: [@alexhvnsen](https://x.com/alexhvnsen).
 
 ## Tests
