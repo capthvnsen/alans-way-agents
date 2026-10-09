@@ -465,6 +465,168 @@ supervisor_gateway_program() {
   return 1
 }
 
+# Recent Hermes refuses to change plugin files while that profile's gateway
+# runs (Hermes #70473): `plugins install --force` (a reinstall), `plugins
+# update` and `plugins remove` exit nonzero with "while the messaging gateway
+# is running". plugins_op runs such a call; on that refusal the argv is queued
+# (its profile first, each word single-quoted for the eval-safe replay) and
+# PLUGINS_OP_REFUSED is set so the caller skips its failure path.
+# retry_refused_plugin_ops replays the queue after a drain-stop. Any other
+# failure behaves like an unwrapped call.
+REFUSED_OPS="" PLUGINS_OP_REFUSED=0
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+queue_plugin_op() {
+  _q="$(sq "${PROFILE:-default}")"
+  for _a do _q="$_q $(sq "$_a")"; done
+  REFUSED_OPS="$REFUSED_OPS$_q
+"
+}
+plugins_op() {
+  PLUGINS_OP_REFUSED=0
+  _rc=0
+  _out="$(hermes_p "$@" 2>&1)" || _rc=$?
+  if [ "$_rc" != 0 ]; then
+    case "$_out" in
+      *"while the messaging gateway is running"*)
+        PLUGINS_OP_REFUSED=1
+        queue_plugin_op "$@"
+        say "  refused while the messaging gateway is running: queued for a retry after the gateway is drain-stopped";;
+      *) [ -z "$_out" ] || printf '%s\n' "$_out" >&2;;
+    esac
+  fi
+  return "$_rc"
+}
+
+# Drain-stop the gateway serving profile $1 ("default" for the main one) and
+# print a spec start_profile_gateway replays to bring it back. The supervisord
+# branch is migrate.sh's sequence: SIGUSR1 drains the gateway out instead of
+# killing it mid-checkpoint, the old pid is waited on, then a plain stop keeps
+# autorestart from respawning it mid-install. Then a service stop, then
+# `hermes gateway stop`. Nothing printed and nonzero when it cannot stop it.
+stop_profile_gateway() {
+  _sg_save="$PROFILE" _sg_start="" _sg_drain=""
+  PROFILE="$1"; [ "$PROFILE" != default ] || PROFILE=""
+  _sg_prog="$(supervisor_gateway_program || true)"
+  if [ -n "$_sg_prog" ]; then
+    _sg_old="$(supervisorctl_call pid "$_sg_prog" 2>/dev/null || true)"
+    case "$_sg_old" in ''|*[!0-9]*|0) _sg_old="";; esac
+    if [ -n "$_sg_old" ]; then
+      if supervisorctl_call signal USR1 "$_sg_prog" >/dev/null 2>&1; then
+        _sg_w=0
+        while [ "$(supervisorctl_call pid "$_sg_prog" 2>/dev/null || true)" = "$_sg_old" ]; do
+          _sg_w=$((_sg_w + 1)); [ "$_sg_w" -ge "${ALANS_WAY_DRAIN_WAIT:-180}" ] && break
+          sleep 1
+        done
+        _sg_now="$(supervisorctl_call pid "$_sg_prog" 2>/dev/null || true)"
+        if [ "$_sg_now" = "$_sg_old" ]; then
+          # The drain outlived the wait: a stop now kills the gateway
+          # mid-checkpoint, the very thing USR1 exists to avoid. Leave it
+          # running and report the op still refused — and do not fall
+          # through to the other stops, which kill it just the same.
+          _sg_drain=1
+        else
+          # autorestart may have relaunched it during the wait: the plain
+          # stop parks a fresh respawn cleanly and is skipped when the
+          # program stayed down.
+          case "$_sg_now" in ''|*[!0-9]*|0) ;; *) supervisorctl_call stop "$_sg_prog" >/dev/null 2>&1 || true;; esac
+          _sg_start="sup:$_sg_prog"
+        fi
+      elif supervisorctl_call stop "$_sg_prog" >/dev/null 2>&1; then
+        _sg_start="sup:$_sg_prog"
+      fi
+    fi
+    # A registered-but-stopped program is not the live gateway the refusal
+    # came from (that one runs outside supervisord): claiming sup: here
+    # would skip every real stop and then spawn a second poller on start.
+    # Fall through to the real stops instead.
+  fi
+  if [ -z "$_sg_start" ] && [ -z "$_sg_drain" ]; then
+    _sg_unit="hermes-gateway${PROFILE:+-$PROFILE}"
+    # `systemctl stop` is a no-op success on an inactive unit, so the unit
+    # has to be active before its stop can be claimed as the stop the
+    # refusal came from. When the live gateway runs outside systemd (a
+    # manual `hermes gateway run`), a vacuous stop would report a stop that
+    # never happened, the retry would fail under the still-live gateway,
+    # and the matching start would spawn a second poller beside it.
+    if have systemctl && systemctl --user is-active --quiet "$_sg_unit" 2>/dev/null \
+        && systemctl --user stop "$_sg_unit" >/dev/null 2>&1; then
+      _sg_start="sysu:$_sg_unit"
+    elif have systemctl && systemctl is-active --quiet "$_sg_unit" 2>/dev/null \
+        && systemctl stop "$_sg_unit" >/dev/null 2>&1; then
+      _sg_start="sys:$_sg_unit"
+    elif hermes -p "$1" gateway stop >/dev/null 2>&1; then
+      _sg_start="hermes:$1"
+    fi
+  fi
+  PROFILE="$_sg_save"
+  [ -n "$_sg_start" ] || return 1
+  printf '%s\n' "$_sg_start"
+}
+
+start_profile_gateway() {
+  case "$1" in
+    sup:*) supervisorctl_call start "${1#sup:}";;
+    sysu:*) systemctl --user start "${1#sysu:}";;
+    sys:*) systemctl start "${1#sys:}";;
+    hermes:*) hermes -p "${1#hermes:}" gateway start;;
+  esac
+}
+
+# Replay every queued plugin op: each affected profile's gateway is
+# drain-stopped once, its queued calls rerun while it is down, and it is
+# started again in every case — a failed retry never strands a stopped
+# gateway. A run with nothing refused changes nothing here.
+retry_refused_plugin_ops() {
+  [ -n "$REFUSED_OPS" ] || return 0
+  _profs=""
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "set -- $_line"
+    case " $_profs " in *" $1 "*) ;; *) _profs="$_profs $1";; esac
+  done <<EOF
+$REFUSED_OPS
+EOF
+  for _prof in $_profs; do
+    _start="$(stop_profile_gateway "$_prof")" || _start=""
+    if [ -z "$_start" ]; then
+      warn "could not stop profile ${_prof}'s gateway for the plugin change it refused: apply it by hand with the gateway stopped"
+      continue
+    fi
+    _applied=0 _computer=""
+    while IFS= read -r _line; do
+      [ -n "$_line" ] || continue
+      eval "set -- $_line"
+      [ "$1" = "$_prof" ] || continue
+      shift
+      if hermes -p "$_prof" "$@" >/dev/null 2>&1; then
+        _applied=$((_applied + 1))
+        # The last word names the plugin (a bare name, or the #fragment of a
+        # file:// URL): matching it, not the whole argv, keeps a checkout
+        # path that happens to contain the name from flagging a different
+        # plugin's op as the provider's.
+        _last=""; for _last do :; done
+        case "$_last" in "$COMPUTER_PLUGIN"|*"#$COMPUTER_PLUGIN") _computer=1;; esac
+      else
+        warn "still failed with the gateway stopped: hermes -p $_prof $*"
+      fi
+    done <<EOF
+$REFUSED_OPS
+EOF
+    [ "$_applied" = 0 ] || ok "applied $_applied refused plugin change(s) for profile $_prof with its gateway stopped"
+    start_profile_gateway "$_start" >/dev/null 2>&1 \
+      && ok "profile ${_prof}'s gateway started again" \
+      || warn "profile ${_prof}'s gateway did not start again: bring it back by hand"
+    if [ -n "$_computer" ]; then
+      # The COMPUTER_READY-gated select ran before this replay, so a
+      # provider that only just landed would stay installed but unselected.
+      _pc_save="$PROFILE"
+      PROFILE="$_prof"; [ "$PROFILE" != default ] || PROFILE=""
+      select_computer_backend
+      PROFILE="$_pc_save"
+    fi
+  done
+}
+
 # GNU stat -c %Y, BSD stat -f %m.
 file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
@@ -1345,17 +1507,22 @@ elif plugin_listed "$PLUGIN_NAME"; then
     # Never install --force over the catalog pin: the reviewed build stays
     # the only plugin source, updated only through the catalog itself.
     ok "plugin installed from the Hermes catalog: leaving its pin in place"
-    say "  to move it forward: hermes${PROFILE:+ -p $PROFILE} plugins update $PLUGIN_NAME"
+    say "  to move it forward: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins update $PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program)"
   elif diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$PROFILE_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
-  else
-    hermes_p plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1 \
-      && ok "plugin updated from $REPO_DIR (restart the gateway to load it)" \
-      || warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} plugins install --force $REPO_FILE_URL#$PLUGIN_NAME"
+  elif plugins_op plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME"; then
+    ok "plugin updated from $REPO_DIR (restart the gateway to load it)"
+  elif [ "$PLUGINS_OP_REFUSED" = 0 ]; then
+    warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program)"
   fi
 else
-  hermes_p plugins install "$REPO_FILE_URL#$PLUGIN_NAME" && ok "plugin installed from $REPO_DIR" \
-    || { bad "plugin install failed"; exit 1; }
+  if plugins_op plugins install "$REPO_FILE_URL#$PLUGIN_NAME"; then
+    ok "plugin installed from $REPO_DIR"
+  elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
+    queue_plugin_op plugins enable "$PLUGIN_NAME"
+  else
+    bad "plugin install failed"; exit 1
+  fi
 fi
 hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
 # The plugin's gateway-injection capability is granted at enable time — it is
@@ -1430,19 +1597,23 @@ ensure_computer_provider() {
     # Developer path only: from this clone instead of the catalog. Nothing in
     # the skill or docs passes --dev-plugin-install, so catalog users never
     # land here.
-    if hermes_p plugins install --force "$REPO_FILE_URL#$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+    if plugins_op plugins install --force "$REPO_FILE_URL#$COMPUTER_PLUGIN"; then
       hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
       ok "computer-use provider installed from $REPO_DIR"
       COMPUTER_READY=1
+    elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
+      queue_plugin_op plugins enable "$COMPUTER_PLUGIN"
     else
       warn "could not install the computer-use provider from $REPO_DIR (is $COMPUTER_PLUGIN in this checkout?). Desktop control keeps using Hermes' built-in backend"
     fi
-  elif hermes_p plugins install "$COMPUTER_PLUGIN" >/dev/null 2>&1; then
+  elif plugins_op plugins install "$COMPUTER_PLUGIN"; then
     hermes_p plugins enable "$COMPUTER_PLUGIN" >/dev/null 2>&1 || true
     ok "computer-use provider installed from the Hermes catalog"
     COMPUTER_READY=1
+  elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
+    queue_plugin_op plugins enable "$COMPUTER_PLUGIN"
   else
-    warn "could not install the computer-use provider: run: hermes${PROFILE:+ -p $PROFILE} plugins install $COMPUTER_PLUGIN. Desktop control keeps using Hermes' built-in backend"
+    warn "could not install the computer-use provider: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install $COMPUTER_PLUGIN && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program). Desktop control keeps using Hermes' built-in backend"
   fi
 }
 if [ "$COMPUTER_API" = 1 ]; then
@@ -2168,6 +2339,30 @@ PY
   warn "profile ${PROFILE:-default} has a cua-driver MCP server of its own: the agent sees two computer-use paths (it was left in place). To remove it: hermes${PROFILE:+ -p $PROFILE} mcp remove $_name"
 }
 
+# The provider is only useful once it is the configured backend: select it
+# (read back what was set, so a stale write or an overruled value leaves the
+# provider installed but unselected loudly, not silently) and switch the
+# gated toolset on for the platforms desktop input reaches.
+# workspace_for_profile calls this when the provider was ready at
+# workspace-setup time; retry_refused_plugin_ops calls it again when the
+# provider's install was a refused op that only landed on the replay.
+select_computer_backend() {
+  if hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
+      && [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = "$COMPUTER_PLUGIN" ]; then
+    COMPUTER_SELECTED=1
+    ok "computer use runs through $COMPUTER_PLUGIN"
+  else
+    warn "the computer-use provider is installed but could not be selected: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
+  fi
+  # The gated toolset is now the only desktop-input path: undo an older
+  # setup's tools disable so the provider can serve it.
+  for platform in telegram cron; do
+    hermes_p tools enable computer_use --platform "$platform" >/dev/null 2>&1 \
+      && ok "computer_use toolset enabled for $platform (approval-gated; actions run through $COMPUTER_PLUGIN)" \
+      || warn "could not enable computer_use for $platform: desktop input stays unavailable there (run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform)"
+  done
+}
+
 # One profile: its workspace_browser block under its own bot id, then the
 # per-profile switches that go with it.
 workspace_for_profile() {
@@ -2190,22 +2385,7 @@ workspace_for_profile() {
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     if [ "$COMPUTER_READY" = 1 ]; then
-      # Read back what was set: a stale write or an overruled value leaves the
-      # provider installed but unselected, which must be loud, not silent.
-      if hermes_p config set computer_use.backend "$COMPUTER_PLUGIN" >/dev/null 2>&1 \
-          && [ "$(hermes_p config get computer_use.backend 2>/dev/null | tail -1)" = "$COMPUTER_PLUGIN" ]; then
-        COMPUTER_SELECTED=1
-        ok "computer use runs through $COMPUTER_PLUGIN"
-      else
-        warn "the computer-use provider is installed but could not be selected: run hermes${PROFILE:+ -p $PROFILE} config set computer_use.backend $COMPUTER_PLUGIN"
-      fi
-      # The gated toolset is now the only desktop-input path: undo an older
-      # setup's tools disable so the provider can serve it.
-      for platform in telegram cron; do
-        hermes_p tools enable computer_use --platform "$platform" >/dev/null 2>&1 \
-          && ok "computer_use toolset enabled for $platform (approval-gated; actions run through $COMPUTER_PLUGIN)" \
-          || warn "could not enable computer_use for $platform: desktop input stays unavailable there (run: hermes${PROFILE:+ -p $PROFILE} tools enable computer_use --platform $platform)"
-      done
+      select_computer_backend
     else
       # No provider to select (this Hermes lacks the pluggable API, or the
       # install was skipped): the built-in computer_use toolset is the desktop
@@ -2270,14 +2450,16 @@ fi
 install_plugin_for_bot_profile() {
   if plugin_listed "$PLUGIN_NAME" || plugin_is_catalog_installed; then
     ok "plugin already installed in profile $PROFILE; leaving it as it is"
-    say "  to move it forward: hermes -p $PROFILE plugins update $PLUGIN_NAME"
+    say "  to move it forward: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins update $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
   elif [ "$SKIP_PLUGIN" = 1 ]; then
-    warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE plugins install $PLUGIN_NAME"
-  elif hermes_p plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME" >/dev/null 2>&1; then
+    warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
+  elif plugins_op plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME"; then
     hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
     ok "plugin installed in profile $PROFILE"
+  elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
+    queue_plugin_op plugins enable "$PLUGIN_NAME"
   else
-    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME"
+    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
   fi
 }
 if [ "$ONLY_PROFILE" = 0 ]; then
@@ -2300,6 +2482,11 @@ if [ "$ONLY_PROFILE" = 0 ]; then
   done
   BOT_ID="$_primary_bot" BOT_NAME="$_primary_name" PROFILE="" PROFILE_HOME="$HERMES_HOME" COMPUTER_READY="$_primary_ready"
 fi
+
+# Plugin file changes Hermes refused because a profile's gateway was live are
+# replayed here: that gateway is drain-stopped once, the queued calls rerun,
+# and it is started again either way.
+retry_refused_plugin_ops
 
 # Desktop actions ask for approval in Telegram each time. Seeded only when asked.
 if [ "$ALLOW_DESKTOP" = 1 ]; then
