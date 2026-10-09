@@ -232,11 +232,11 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
 
-## Hosted / Orgo
+## Orgo / fresh Linux hosts
 
-Two scripts in this repo serve the hosted tier (Hermes + alans-way on an
-[Orgo](https://orgo.ai) computer) and DIY users who want the same hands-off
-path on any fresh Linux box with supervisord.
+Two scripts in this repo serve [Orgo](https://orgo.ai) computers and DIY
+users who want the same hands-off path on any fresh Linux box with
+supervisord.
 
 `bootstrap-orgo.sh` takes a fresh Orgo computer to a running Hermes plus
 alans-way plus Tailscale, then waits for pairing. It installs Hermes with
