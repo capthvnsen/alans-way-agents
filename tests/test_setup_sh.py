@@ -1179,13 +1179,32 @@ class BrowserHostServiceTests(unittest.TestCase):
             self.path.insert(0, str(self.root / "snap" / "bin"))
         env = env_for(self.root, self.bin_dir, self.home, HERMES_VPS_BROWSER_DATA=str(self.data),
                       ALANS_WAY_UNIT_DIR=str(self.units), **env_extra)
-        env["PATH"] = os.pathsep.join(self.path + [os.environ["PATH"]])
+        env["PATH"] = os.pathsep.join(self.path + [env_extra.get("PATH_BASE", os.environ["PATH"])])
+        env.pop("PATH_BASE", None)
         env["ALANS_WAY_BROWSER_PATH"] = os.pathsep.join(self.path)
         return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
                    "--hermes-home", str(self.home), env=env, check=False)
 
     def config(self):
         return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
+
+    def hermetic_probes(self, *absent):
+        """Same result on any host: not amd64 (no Chrome deb download), no network,
+        and a PATH that lacks the named real tools (a CI runner may ship Xvfb)."""
+        fake(self.bin_dir, "dpkg", 'echo arm64\n')
+        fake(self.bin_dir, "curl", "exit 22\n")
+        farm = self.root / "hostbin"
+        farm.mkdir(exist_ok=True)
+        for directory in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                link = farm / name
+                if name in absent or link.exists() or link.is_symlink():
+                    continue
+                if os.access(os.path.join(directory, name), os.X_OK):
+                    link.symlink_to(os.path.join(directory, name))
+        return str(farm)
 
     def fake_apt_get(self, *binaries):
         """An apt-get whose install drops the named binaries into the fake bin dir."""
@@ -1195,6 +1214,7 @@ class BrowserHostServiceTests(unittest.TestCase):
              % (self.root, makes or ":"))
 
     def test_a_server_without_a_browser_installs_one(self):
+        self.hermetic_probes()
         self.fake_apt_get("chromium")
         result = self.run_setup(root_user=True, owner="root", ALANS_WAY_NO_INSTALL="")
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -1202,16 +1222,18 @@ class BrowserHostServiceTests(unittest.TestCase):
         self.assertTrue(self.config()["browserCommand"].endswith("chromium"))
 
     def test_a_server_that_cannot_install_a_browser_fails_instead_of_writing_a_dead_config(self):
+        self.hermetic_probes()
         result = self.run_setup()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertRegex(result.stdout, r"FAIL no Chrome or Chromium")
         self.assertFalse((self.data / "config.json").exists())
 
     def test_a_server_without_a_display_gets_a_managed_xvfb_ordered_before_the_browser(self):
+        host_path = self.hermetic_probes("Xvfb")
         self.fake_apt_get("Xvfb")
         fake(self.bin_dir, "pgrep", "exit 1\n")
         result = self.run_setup(root_user=True, owner="root", browsers=("google-chrome",), ALANS_WAY_NO_INSTALL="",
-                                ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+                                ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("--no-install-recommends xvfb", (self.root / "apt.log").read_text())
         self.assertIn(":99 -screen", (self.units / "hermes-alans-way-xvfb.service").read_text())
@@ -1220,13 +1242,14 @@ class BrowserHostServiceTests(unittest.TestCase):
         self.assertRegex(self.systemctl_log.read_text(), r"enable --now hermes-alans-way-xvfb.service hermes-alans-way-chromium")
         # the first run's Xvfb now exists; a re-run keeps managing it
         (self.root / "no-x11").mkdir()
-        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_X11_DIR=live_x11(self.root))
+        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_X11_DIR=live_x11(self.root), PATH_BASE=host_path)
         self.assertTrue((self.units / "hermes-alans-way-xvfb.service").exists())
         self.assertIn("hermes-alans-way-xvfb.service", (self.units / "hermes-alans-way-chromium.service").read_text())
 
     def test_a_server_that_cannot_install_a_display_fails(self):
+        host_path = self.hermetic_probes("Xvfb")
         fake(self.bin_dir, "pgrep", "exit 1\n")
-        result = self.run_setup(browsers=("google-chrome",), ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+        result = self.run_setup(browsers=("google-chrome",), ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertRegex(result.stdout, r"FAIL the browser needs an X display")
 
