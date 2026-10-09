@@ -20,7 +20,7 @@ holds what your agents need to think and act:
   when the user's computer is not a Mac (default `mac`).
 - **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
-- **`alans-way-computer/`**: a second plugin (v0.7.0): a computer-use provider
+- **`alans-way-computer/`**: a second plugin (v0.21.0): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
