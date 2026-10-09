@@ -3219,6 +3219,155 @@ class LiveGatewayRefusalTests(unittest.TestCase):
         self.assertLess(calls.index("-p default gateway stop"), retry)
         self.assertLess(retry, calls.index("-p default gateway start"))
 
+    def test_a_failed_systemctl_stop_falls_back_to_hermes_gateway_stop(self):
+        """On a systemd host whose unit stop fails (a unit that is not really
+        there, while a manual `hermes gateway run` holds the profile), the
+        drain-stop still has `hermes gateway stop` to try."""
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             '[ "$1" = --user ] && shift\n'
+             'case "$1" in\n'
+             '  is-system-running) echo running; exit 0;;\n'
+             '  stop) exit 1;;\n'
+             'esac\nexit 0\n' % self.log)
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("systemctl --user stop hermes-gateway"),
+                        calls.index("-p default gateway stop"))
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertEqual(gwstate.read_text().strip(), "running")
+
+    def test_a_registered_but_stopped_program_is_not_claimed_as_the_gateway(self):
+        """The supervisor program is STOPPED yet the install was refused: the
+        live gateway runs outside supervisord. Claiming the program anyway
+        would skip every real stop, retry under the still-live gateway, and
+        `supervisorctl start` a second poller beside it. Fall through to the
+        real stops instead."""
+        confd = self.root / "conf.d"
+        confd.mkdir()
+        (confd / "gw.conf").write_text(
+            "[program:main-gateway]\ncommand=/usr/local/bin/hermes gateway run --no-supervise\n",
+            encoding="utf-8")
+        self.supervisor_log = fake_supervisord(
+            self.bin_dir, self.root,
+            state=sup_line("main-gateway", "STOPPED"))
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             'case "$1" in is-system-running) echo offline;; esac\nexit 1\n' % self.log)
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_SUPERVISOR_CONF_DIR=str(confd))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertNotIn("still failed", result.stdout)
+        sup = read_log(self.supervisor_log)
+        self.assertNotIn("stop main-gateway", sup)
+        self.assertNotIn("start main-gateway", sup)
+
+    def test_a_drain_that_outlives_the_wait_is_left_running_and_refused(self):
+        """USR1 was delivered but the old pid is still there when the wait
+        ends: a stop now is the mid-checkpoint kill USR1 exists to avoid, so
+        no stop runs at all and the op reports as still refused."""
+        state_file = self.root / "supervisor.state"
+        state_file.write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        supervisor_log = self.root / "supervisorctl.log"
+        fake(self.bin_dir, "supervisorctl", '''echo "$*" >> "%s"
+state="%s"
+case "$1" in
+  status) cat "$state" 2>/dev/null || true;;
+  pid) [ -n "${2:-}" ] || { echo 4321; exit 0; }
+    awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state";;
+  signal) [ "$2" = USR1 ] || exit 1;;
+esac
+exit 0
+''' % (supervisor_log, state_file))
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.live_gate('grep "^main-gateway " "%s" | grep -q " RUNNING "' % state_file)
+        result = self.run_setup(ALANS_WAY_DRAIN_WAIT="2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sup = read_log(supervisor_log)
+        self.assertIn("signal USR1 main-gateway", sup)
+        self.assertNotIn("stop main-gateway", sup)
+        calls = read_log(self.log)
+        self.assertEqual(calls.count("plugins install --force file://"), 1, calls)
+        self.assertNotIn("gateway stop", calls)
+        self.assertIn("could not stop profile default's gateway", result.stdout)
+        self.assertNotIn("systemctl", read_log(self.root / "systemctl.log"))
+
+    def test_a_replayed_computer_provider_install_selects_the_backend(self):
+        """The COMPUTER_READY-gated select runs before the replay, so a
+        provider whose catalog install was only applied under the drain-stop
+        would stay installed but unselected. The replay selects it."""
+        self.supervised_gateway()
+        cfg = self.root / "cfg.state"
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             'echo "hermes $*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        if grep "^main-gateway " "%s" | grep -q " RUNNING "; then\n'
+             '          echo "%s" >&2; exit 1\n'
+             '        fi;;\n'
+             '    esac;;\n'
+             '  config) case "$2" in\n'
+             '      set) [ "$3" = computer_use.backend ] && echo "$4" > "%s";;\n'
+             '      get) cat "%s" 2>/dev/null;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n'
+             % (self.log, self.supervisor_log, self.root / "supervisor.state",
+                self.REFUSAL, cfg, cfg))
+        fake(self.bin_dir, "fake-python", "exit 0\n")
+        result = self.run_setup(HERMES_PYTHON=str(self.bin_dir / "fake-python"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.supervisor_log)
+        retry = calls.rindex("hermes -p default plugins install alans-way-computer")
+        self.assertLess(calls.index("stop main-gateway"), retry)
+        select = calls.index("hermes -p default config set computer_use.backend alans-way-computer")
+        self.assertLess(calls.index("start main-gateway"), select)
+        self.assertIn("computer use runs through alans-way-computer", result.stdout)
+        self.assertEqual(cfg.read_text().strip(), "alans-way-computer")
+
 
 class CdpPortTests(unittest.TestCase):
     """The managed browser's CDP port is configurable, preserved on re-run,
