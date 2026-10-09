@@ -1,7 +1,7 @@
-# Alan's Way computer-use provider
+# Alan's Way Plugin: computer-use provider
 
 A computer-use provider for Hermes. Select it and the stock `computer_use` tool drives desktop apps on the
-user's own computer through the Alan's Way app. When that computer is offline it drives the VM's desktop
+user's own computer through the Alan's Workspace app. When that computer is offline it drives the VM's desktop
 instead, with no change on the Hermes side.
 
 It needs a Hermes build with the pluggable computer-use API (pull request 133556, merged after 0.21.5). On older

@@ -1090,6 +1090,15 @@ class BrowserHostServiceTests(unittest.TestCase):
     def config(self):
         return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
 
+    def test_a_standalone_workspace_skill_that_shadows_the_plugin_is_warned_about(self):
+        for skills in (self.home / "skills", self.home / "profiles" / "work" / "skills"):
+            (skills / "workspace-operations").mkdir(parents=True)
+            (skills / "workspace-operations" / "SKILL.md").write_text("---\nname: workspace-operations\n---\n")
+        out = self.run_setup(browsers=("google-chrome",)).stdout
+        self.assertIn("warn %s/skills/workspace-operations shadows" % self.home, out)
+        self.assertIn("warn %s/profiles/work/skills/workspace-operations shadows" % self.home, out)
+        self.assertTrue((self.home / "skills" / "workspace-operations" / "SKILL.md").exists(), "setup only warns; it never deletes")
+
     def test_non_root_run_needs_no_sandbox_flag_and_no_user_line(self):
         result = self.run_setup(browsers=("google-chrome",))
         self.assertNotIn("--no-sandbox", self.config()["browserArgs"])
