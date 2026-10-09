@@ -157,6 +157,17 @@ esac
 # profile is named too, so a sticky active_profile can never redirect a call.
 PROFILE_HOME="${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"; PROFILE_HOME="${PROFILE_HOME:-$HERMES_HOME}"
 hermes_p() { hermes -p "${PROFILE:-default}" "$@"; }
+# A fingerprint of what a running gateway has loaded: config, .env and plugin
+# files of every profile (bytecode caches excluded, they change on any import).
+gateway_state_sig() {
+  {
+    for _f in "$HERMES_HOME/.env" "$HERMES_HOME/config.yaml" "$HERMES_HOME"/profiles/*/.env "$HERMES_HOME"/profiles/*/config.yaml ${CONFIG:+"$CONFIG"}; do
+      [ -f "$_f" ] && cksum "$_f"
+    done
+    find "$HERMES_HOME/plugins" "$HERMES_HOME"/profiles/*/plugins \( -name __pycache__ -o -name '*.pyc' \) -prune -o -type f -exec cksum {} + 2>/dev/null
+  } 2>/dev/null | sort | cksum
+}
+GW_SIG_START="$(gateway_state_sig)"
 # Whole-name match: "alans-way" must not be satisfied by "alans-way-computer".
 plugin_listed() { hermes_p plugins list 2>/dev/null | grep -qE "(^|[^A-Za-z0-9_-])$1([^A-Za-z0-9_-]|\$)"; }
 
@@ -256,6 +267,36 @@ confirm() { # confirm <prompt>: empty means no
 have() {
   case " ${ALANS_WAY_MISSING:-} " in *" $1 "*) return 1;; esac
   command -v "$1" >/dev/null 2>&1
+}
+
+# sys_install <apt packages> <dnf packages>: install with the distro's package
+# manager, as root or through passwordless sudo. Fails (printing why) when it
+# cannot. ALANS_WAY_NO_INSTALL=1 refuses, for tests.
+sys_install() {
+  [ -z "${ALANS_WAY_NO_INSTALL:-}" ] || return 1
+  _si_mgr=""
+  if have apt-get; then _si_mgr=apt; elif have dnf; then _si_mgr=dnf; elif have yum; then _si_mgr=yum; else return 1; fi
+  _si_as=""
+  if [ "$(id -u)" != 0 ]; then
+    if have sudo && sudo -n true 2>/dev/null; then _si_as="sudo -n"; else return 1; fi
+  fi
+  _si_log="$(mktemp "${TMPDIR:-/tmp}/alans-way-install.XXXXXX")" || return 1
+  _si_rc=0
+  case "$_si_mgr" in
+    apt) { $_si_as apt-get update -qq && $_si_as env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $1; } >"$_si_log" 2>&1 || _si_rc=$?;;
+    *) $_si_as "$_si_mgr" install -y -q $2 >"$_si_log" 2>&1 || _si_rc=$?;;
+  esac
+  [ "$_si_rc" = 0 ] || tail -3 "$_si_log" | sed 's/^/       /'
+  rm -f "$_si_log"
+  return "$_si_rc"
+}
+
+# An X server that is actually running, not merely installed.
+display_live() {
+  for _sock in "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}"/X[0-9]*; do
+    [ -S "$_sock" ] && return 0
+  done
+  pgrep -f 'Xtigervnc|Xvfb|Xvnc|x0vncserver|Xephyr' >/dev/null 2>&1
 }
 
 # write_if_changed <file> [backup]: content on stdin; sets WROTE=1 only when the
@@ -1202,13 +1243,33 @@ add_line_once() { # add_line_once <file> <line>
   grep -qxF "$2" "$1" 2>/dev/null || printf '%s\n' "$2" >> "$1"
   if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then chown "$BROWSER_USER" "$(dirname "$1")" "$1" 2>/dev/null || true; fi
 }
+# The computer's key may only log in from the tailnet, as the reverse direction
+# already does. A plain line for the same key (an older run, or the user's own)
+# is rewritten with the restriction, never duplicated.
+TAILNET_FROM='from="100.64.0.0/10,fd7a:115c:a1e0::/48"'
+restrict_key_line() { # restrict_key_line <file> <key line>
+  mkdir -p "$(dirname "$1")" && chmod 700 "$(dirname "$1")"
+  [ -f "$1" ] || { : > "$1"; chmod 600 "$1"; }
+  _rk_tmp="$(mktemp "${TMPDIR:-/tmp}/alans-way-keys.XXXXXX")" || return 1
+  awk -v want="$TAILNET_FROM $2" -v type="${2%% *}" -v blob="$(printf '%s' "$2" | cut -d' ' -f2)" '
+    $0 == want { if (!seen) print; seen = 1; next }
+    $1 == type && $2 == blob { if (!seen) print want; seen = 1; next }
+    { print }
+    END { if (!seen) print want }' "$1" > "$_rk_tmp" \
+    && { cmp -s "$_rk_tmp" "$1" || cat "$_rk_tmp" > "$1"; }
+  _rk_rc=$?
+  rm -f "$_rk_tmp"
+  if [ "$(id -u)" = 0 ] && [ "$BROWSER_USER" != root ]; then chown "$BROWSER_USER" "$(dirname "$1")" "$1" 2>/dev/null || true; fi
+  return "$_rk_rc"
+}
 if [ -n "$MAC_KEY" ] || [ -n "$MAC_HOST_KEY" ]; then
   step "Trust your computer"
   if [ -n "$MAC_HOST_KEY" ]; then
     add_line_once "$BROWSER_HOME/.ssh/known_hosts" "$MAC_HOST $MAC_HOST_KEY" && ok "pinned the host key for $MAC_HOST"
   fi
   if [ -n "$MAC_KEY" ]; then
-    add_line_once "$BROWSER_HOME/.ssh/authorized_keys" "$MAC_KEY" && ok "your computer's key can log in to this machine"
+    restrict_key_line "$BROWSER_HOME/.ssh/authorized_keys" "$MAC_KEY" \
+      && ok "your computer's key can log in to this machine, from the tailnet only"
   fi
 fi
 
@@ -1296,12 +1357,11 @@ EOF
   fi
   if [ "$_role" = admin ] && [ -n "$MAC_KEY" ]; then
     _adm="$(cygpath -u "${PROGRAMDATA:-C:/ProgramData}")/ssh/administrators_authorized_keys"
-    if [ -d "$(dirname "$_adm")" ] && { grep -qxF "$MAC_KEY" "$_adm" 2>/dev/null \
-        || { printf '%s\n' "$MAC_KEY" >> "$_adm" 2>/dev/null \
-             && icacls "$(cygpath -w "$_adm")" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' >/dev/null 2>&1; }; }; then
+    if [ -d "$(dirname "$_adm")" ] && restrict_key_line "$_adm" "$MAC_KEY" 2>/dev/null \
+        && icacls "$(cygpath -w "$_adm")" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' >/dev/null 2>&1; then
       ok "your computer's key can log in to this administrator account"
     else
-      warn "this account is an administrator, so sshd reads C:\ProgramData\ssh\administrators_authorized_keys, not ~/.ssh/authorized_keys. In an elevated PowerShell run: Add-Content -Path \"\$env:ProgramData\ssh\administrators_authorized_keys\" -Value '$MAC_KEY'; icacls \"\$env:ProgramData\ssh\administrators_authorized_keys\" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'"
+      warn "this account is an administrator, so sshd reads C:\ProgramData\ssh\administrators_authorized_keys, not ~/.ssh/authorized_keys. In an elevated PowerShell run: Add-Content -Path \"\$env:ProgramData\ssh\administrators_authorized_keys\" -Value '$TAILNET_FROM $MAC_KEY'; icacls \"\$env:ProgramData\ssh\administrators_authorized_keys\" /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'"
     fi
   fi
 }
@@ -1887,25 +1947,61 @@ if [ "$SKIP_BROWSER" = 0 ]; then
   else
   # google-chrome-stable first: a host image can shadow google-chrome with a
   # wrapper that injects its own debugging port and profile (Orgo does).
-  for _name in google-chrome-stable google-chrome chromium chromium-browser; do
-    _found="$(PATH="${ALANS_WAY_BROWSER_PATH:-$PATH}" command -v "$_name" 2>/dev/null || true)"
-    [ -n "$_found" ] || continue
-    if is_snap_browser "$_found"; then
-      [ -n "$SNAP_CHROMIUM" ] || SNAP_CHROMIUM="$_found"
-    else
-      CHROMIUM="$_found"; break
-    fi
-  done
-  if [ -z "$CHROMIUM" ]; then
-    for _found in "$BROWSER_HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
-      [ -x "$_found" ] && CHROMIUM="$_found"
+  find_linux_chromium() {
+    CHROMIUM="" SNAP_CHROMIUM=""
+    for _name in google-chrome-stable google-chrome chromium chromium-browser; do
+      _found="$(PATH="${ALANS_WAY_BROWSER_PATH:-$PATH}" command -v "$_name" 2>/dev/null || true)"
+      [ -n "$_found" ] || continue
+      if is_snap_browser "$_found"; then
+        [ -n "$SNAP_CHROMIUM" ] || SNAP_CHROMIUM="$_found"
+      else
+        CHROMIUM="$_found"; break
+      fi
     done
+    if [ -z "$CHROMIUM" ]; then
+      for _found in "$BROWSER_HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+        [ -x "$_found" ] && CHROMIUM="$_found"
+      done
+    fi
+    return 0
+  }
+  # Chrome's own deb on amd64 (Ubuntu's chromium package is a snap stub), the
+  # distro's chromium elsewhere, Playwright's build when neither exists.
+  install_linux_chromium() {
+    if have apt-get && [ "$(dpkg --print-architecture 2>/dev/null)" = amd64 ] && have curl; then
+      _debdir="$(mktemp -d "${TMPDIR:-/tmp}/alans-way-chrome.XXXXXX")" || return 1
+      chmod 755 "$_debdir"
+      if curl -fsSL -o "$_debdir/google-chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+          && chmod 644 "$_debdir/google-chrome.deb" && sys_install "$_debdir/google-chrome.deb" ""; then rm -rf "$_debdir"; return 0; fi
+      rm -rf "$_debdir"
+    fi
+    # Ubuntu's chromium package is a snap stub: only a real browser counts.
+    if sys_install chromium chromium; then
+      find_linux_chromium
+      [ -z "$CHROMIUM" ] || return 0
+    fi
+    if have npx && [ -z "${ALANS_WAY_NO_INSTALL:-}" ] && [ "$(id -u)" = 0 ]; then
+      ( cd "${TMPDIR:-/tmp}" && HOME="$BROWSER_HOME" npx -y playwright@1.49.1 install --with-deps chromium ) >/dev/null 2>&1 || return 1
+      [ "$BROWSER_USER" = root ] || chown -R "$BROWSER_USER" "$BROWSER_HOME/.cache/ms-playwright" 2>/dev/null || true
+      return 0
+    fi
+    return 1
+  }
+  find_linux_chromium
+  if [ -z "$CHROMIUM" ] && [ -z "$SNAP_CHROMIUM" ]; then
+    say "  no Chrome or Chromium found: installing one"
+    install_linux_chromium || true
+    find_linux_chromium
   fi
   if [ -z "$CHROMIUM" ] && [ -n "$SNAP_CHROMIUM" ]; then
     CHROMIUM="$SNAP_CHROMIUM"; CHROMIUM_IS_SNAP=1
     warn "only snap Chromium found; using a profile under ~/snap/chromium/common. A deb Chrome or Chromium is more reliable (apt-get install chromium, or google-chrome-stable)"
   elif [ -z "$CHROMIUM" ]; then
     CHROMIUM=/usr/bin/google-chrome
+    if [ "$SKIP_SERVICES" = 0 ]; then
+      bad "no Chrome or Chromium on this machine, and setup could not install one (it needs root or passwordless sudo, and apt or dnf). Install google-chrome-stable or chromium (or: npx playwright install chromium), then re-run setup.sh"
+      exit 1
+    fi
     warn "no Chrome or Chromium found; install one (apt-get install chromium, or google-chrome-stable, or: npx playwright install chromium) and re-run setup"
   fi
   fi
@@ -2000,6 +2096,29 @@ EOF
       warn "no systemd user session here (not root, and systemctl --user is unavailable), so the browser services were not installed. Start them yourself after logging in with a full session, or run setup as root. See desktop/docs/vps-browser.md in the alans-way repo"
     fi
   fi
+  # The browser needs a running X server. When there is none, install Xvfb and
+  # run it beside the browser services (fixed :99, so it never collides with a
+  # VNC desktop added later). $1=1: an earlier run already manages one.
+  XVFB_WANTED=0 SERVICES_INSTALLED=0
+  prepare_xvfb() {
+    if [ "${1:-0}" = 1 ]; then XVFB_WANTED=1; return 0; fi
+    ! display_live || return 0
+    if ! have Xvfb; then
+      say "  no X display and no Xvfb: installing xvfb"
+      if ! { sys_install xvfb xorg-x11-server-Xvfb && have Xvfb; }; then
+        bad "the browser needs an X display, and none is running or installable here. Install one (apt-get install xvfb, or a VNC desktop on :99) and re-run setup.sh"
+        exit 1
+      fi
+    fi
+    XVFB_WANTED=1
+  }
+  XVFB_DISPLAY=":99"
+  XVFB_ARGS="$XVFB_DISPLAY -screen 0 1280x800x24 -nolisten tcp"
+  wait_for_display() {
+    _w=0
+    while [ "$_w" -lt 10 ] && [ ! -S "${ALANS_WAY_X11_DIR:-/tmp/.X11-unix}/X${XVFB_DISPLAY#:}" ]; do sleep 1; _w=$((_w + 1)); done
+    return 0
+  }
   # The supervisord counterpart of the systemd units: same programs, same
   # environment, RestartPreventExitStatus mapped to exitcodes (with
   # autorestart=unexpected, listing a code keeps its exit down; a clean exit 0
@@ -2052,8 +2171,23 @@ EOFW
 )"
     fi
     _conf="$_confdir/alans-way.conf"
+    _xvfb_prev=0; ! grep -q '^\[program:alans-way-xvfb\]' "$_conf" 2>/dev/null || _xvfb_prev=1
+    prepare_xvfb "$_xvfb_prev"
+    XVFB_SECTION=""
+    if [ "$XVFB_WANTED" = 1 ]; then
+      XVFB_SECTION="[program:alans-way-xvfb]
+command=$(command -v Xvfb || echo /usr/bin/Xvfb) $XVFB_ARGS
+$_sup_user
+priority=100
+autorestart=true
+stdout_logfile=$SUP_LOG_DIR/xvfb.log
+stderr_logfile=$SUP_LOG_DIR/xvfb.err.log
+
+"
+    fi
+    SERVICES_INSTALLED=1
     write_if_changed "$_conf" <<EOF || { warn "could not write $_conf: service install skipped"; return 0; }
-[program:alans-way-chromium]
+${XVFB_SECTION}[program:alans-way-chromium]
 command=$NODE_BIN $DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs
 $_sup_user
 environment=$_env_browser
@@ -2084,12 +2218,13 @@ EOF
     fi
     # `update` restarts programs whose conf changed; start whatever is still
     # stopped (a fresh install, or a program that exited cleanly).
-    for _p in alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
+    for _p in ${XVFB_SECTION:+alans-way-xvfb} alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
       case "$(supervisorctl_call status "$_p" 2>/dev/null || true)" in
         *" RUNNING "*) ok "$_p running under supervisord";;
         *) supervisorctl_call start "$_p" >/dev/null 2>&1 \
              && ok "$_p started under supervisord" \
-             || warn "could not start $_p via supervisorctl: start it once the desktop stack is up (needs DISPLAY=$BROWSER_DISPLAY)";;
+             || warn "could not start $_p via supervisorctl: start it once the desktop stack is up (needs DISPLAY=$BROWSER_DISPLAY)"
+           [ "$_p" != alans-way-xvfb ] || wait_for_display;;
       esac
     done
     if [ "${BROWSER_UPDATED:-0}" = 1 ]; then
@@ -2118,13 +2253,17 @@ EOF
     _overseer="$(overseer_bot_ids "$UNIT_DIR/hermes-alans-way-browser.service")"
     [ -z "$_overseer" ] || OVERSEER_UNIT_ENV="Environment=HERMES_OVERSEER_BOT_IDS=\"$_overseer\""
     UNITS_CHANGED="" UNITS_UPDATED=""
+    _xvfb_prev=0; [ ! -f "$UNIT_DIR/hermes-alans-way-xvfb.service" ] || _xvfb_prev=1
+    prepare_xvfb "$_xvfb_prev"
+    XVFB_AFTER="" XVFB_UNIT=""
+    SERVICES_INSTALLED=1
     write_unit() { # write_unit <name> <exec> <extra>
       _f="$UNIT_DIR/$1"
       _existed=0; [ -f "$_f" ] && _existed=1
       write_if_changed "$_f" <<EOF
 [Unit]
 Description=Hermes Alan's Way $1
-After=network.target
+After=network.target$XVFB_AFTER
 
 [Service]
 Type=simple
@@ -2146,10 +2285,35 @@ EOF
         [ "$_existed" = 0 ] || UNITS_UPDATED="$UNITS_UPDATED $1"
       fi
     }
+    if [ "$XVFB_WANTED" = 1 ]; then
+      XVFB_AFTER=" hermes-alans-way-xvfb.service" XVFB_UNIT="hermes-alans-way-xvfb.service"
+      _xf="$UNIT_DIR/$XVFB_UNIT"; _existed=0; [ ! -f "$_xf" ] || _existed=1
+      write_if_changed "$_xf" <<EOF
+[Unit]
+Description=Hermes Alan's Way Xvfb display
+After=network.target
+
+[Service]
+Type=simple
+$UNIT_USER
+ExecStart=$(command -v Xvfb || echo /usr/bin/Xvfb) $XVFB_ARGS
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=$([ "$SYSCTL" = "systemctl" ] && echo multi-user.target || echo default.target)
+EOF
+      if [ "$WROTE" = 1 ]; then
+        ok "wrote $_xf"
+        UNITS_CHANGED="$UNITS_CHANGED $XVFB_UNIT"
+        [ "$_existed" = 0 ] || UNITS_UPDATED="$UNITS_UPDATED $XVFB_UNIT"
+      fi
+    fi
     write_unit hermes-alans-way-chromium.service "$DESKTOP_DIR/desktop/scripts/vps-chromium-host.cjs" ""
     write_unit hermes-alans-way-browser.service "$DESKTOP_DIR/desktop/scripts/vps-browser-host.cjs serve" "RestartPreventExitStatus=78"
     [ -z "$UNITS_CHANGED" ] || $SYSCTL daemon-reload 2>/dev/null || true
-    $SYSCTL enable --now hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
+    # shellcheck disable=SC2086
+    $SYSCTL enable --now $XVFB_UNIT hermes-alans-way-chromium.service hermes-alans-way-browser.service >/dev/null 2>&1 \
       && ok "browser services enabled" \
       || warn "units written but not started: start them after your X11/VNC desktop is up (needs DISPLAY=$BROWSER_DISPLAY)"
     # User units stop at logout unless the account is allowed to linger.
@@ -2220,6 +2384,20 @@ EOF
     install_supervisor_programs
   else
     [ "$SKIP_SERVICES" = 1 ] || [ "$SYSTEMD_WARNED" = 1 ] || warn "no live systemd or supervisord here, so the browser services were not installed: see desktop/docs/vps-browser.md in the alans-way repo for manual setup"
+  fi
+  # Never report success with a dead browser: the services must answer on the
+  # CDP port. ALANS_WAY_SETTLE_SECS=0 skips the wait, for tests.
+  if [ "$SERVICES_INSTALLED" = 1 ] && [ "${ALANS_WAY_SETTLE_SECS:-20}" != 0 ]; then
+    _w=0 _alive=0
+    while [ "$_w" -le "${ALANS_WAY_SETTLE_SECS:-20}" ]; do
+      if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1; then _alive=1; break; fi
+      sleep 1; _w=$((_w + 1))
+    done
+    if [ "$_alive" = 1 ]; then
+      ok "the browser answers on 127.0.0.1:$CDP_PORT"
+    else
+      bad "the browser did not come up on 127.0.0.1:$CDP_PORT. Look at: supervisorctl status, or systemctl status hermes-alans-way-chromium; the logs are in $BROWSER_HOME/.local/state/hermes-alans-way (supervisord) or journalctl -u hermes-alans-way-chromium"
+    fi
   fi
   fi
   fi
@@ -2384,6 +2562,7 @@ workspace_for_profile() {
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
   if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
+    WORKSPACE_CONFIGURED=1
     if [ "$COMPUTER_READY" = 1 ]; then
       select_computer_backend
     else
@@ -2430,6 +2609,7 @@ workspace_for_profile() {
     bad "setup-workspace.sh failed"
   fi
 }
+NO_PRIMARY_BOT=0 WORKSPACE_CONFIGURED=0
 if [ -z "$BOT_ID" ]; then
   _rc=0
   derive_bot_id "$PROFILE_HOME" || _rc=$?
@@ -2441,7 +2621,7 @@ fi
 if [ -n "$BOT_ID" ]; then
   workspace_for_profile
 else
-  say "  skipped (no --bot-id). Re-run with --bot-id <numeric-telegram-bot-id>."
+  NO_PRIMARY_BOT=1
 fi
 
 # Every other profile with a Telegram bot of its own gets the plugin (for the
@@ -2481,6 +2661,11 @@ if [ "$ONLY_PROFILE" = 0 ]; then
     workspace_for_profile
   done
   BOT_ID="$_primary_bot" BOT_NAME="$_primary_name" PROFILE="" PROFILE_HOME="$HERMES_HOME" COMPUTER_READY="$_primary_ready"
+fi
+# No bot anywhere means no workspace_browser block, so the browser cannot be
+# used from Telegram: that is a failed setup, not a quiet skip.
+if [ "$NO_PRIMARY_BOT" = 1 ] && [ "$WORKSPACE_CONFIGURED" = 0 ]; then
+  bad "workspace_browser is not configured: no Telegram bot found for this Hermes. Run: hermes${PROFILE:+ -p $PROFILE} gateway setup (choose Telegram, then Automatic), then re-run setup.sh (or pass --bot-id <numeric-telegram-bot-id>)"
 fi
 
 # Plugin file changes Hermes refused because a profile's gateway was live are
@@ -2699,7 +2884,13 @@ check_computer_provider
 step "Gateway restart"
 GW_HINT="A running gateway holds already-imported code, so restart it to load the plugin."
 WANT_RESTART=0
-if [ "$DO_RESTART" = 1 ] || { has_tty && confirm "  Restart the Hermes gateway when setup finishes?"; }; then
+# A restart drops in-flight chats, so it is for a gateway that is behind: setup
+# changed what it loads, or an earlier run's restart never happened (the marker).
+GW_PENDING="$HERMES_HOME/.alans-way-gateway-restart-pending"
+[ "$(gateway_state_sig)" = "$GW_SIG_START" ] || : > "$GW_PENDING" 2>/dev/null || true
+if [ ! -e "$GW_PENDING" ]; then
+  say "  no restart needed: setup changed nothing the gateway loads."
+elif [ "$DO_RESTART" = 1 ] || { has_tty && confirm "  Restart the Hermes gateway when setup finishes?"; }; then
   WANT_RESTART=1
 else
   say "  $GW_HINT"
@@ -2811,6 +3002,7 @@ if [ "$FAILS" != 0 ]; then
 fi
 if [ "$WANT_RESTART" = 1 ]; then
   schedule_gateway_restart
+  rm -f "$GW_PENDING"
   say ""
   say "  Restarting the gateway in ${GW_DELAY}s, detached (log: $GW_LOG). If you are reading this inside a chat on that gateway, the chat pauses for a moment; send your last message now."
 fi

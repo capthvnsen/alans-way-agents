@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import signal
@@ -16,7 +17,20 @@ SCRIPT = ROOT / "setup.sh"
 SH = shutil.which("sh") or "/bin/sh"
 
 
+def has_telegram_bot(args, env):
+    """True when the run names a bot or its Hermes home already carries one."""
+    if "--bot-id" in args:
+        return True
+    home = Path(args[args.index("--hermes-home") + 1]) if "--hermes-home" in args else Path((env or os.environ).get("HERMES_HOME", "/nonexistent"))
+    return any("TELEGRAM_BOT_TOKEN" in f.read_text(errors="replace") or "token:" in f.read_text(errors="replace")
+               for name in (".env", "config.yaml") for f in home.rglob(name) if f.is_file())
+
+
 def run(*args, env=None, check=True, script=SCRIPT):
+    # Setup refuses to finish without a Telegram bot; these runs are about other things.
+    if not has_telegram_bot(args, env) and "--no-default-bot" not in args:
+        args = ("--bot-id", "111222333") + args
+    args = tuple(a for a in args if a != "--no-default-bot")
     cmd = [SH, str(script)] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and result.returncode != 0:
@@ -294,8 +308,26 @@ def tooling(directory: Path, log: Path, **kwargs):
     return bin_dir
 
 
+def live_x11(directory):
+    """A directory holding an X99 socket: what setup sees on a host with a display."""
+    x11 = Path(directory) / "x11"
+    x11.mkdir(exist_ok=True)
+    if not (x11 / "X99").exists():
+        sock, cwd = socket.socket(socket.AF_UNIX), os.getcwd()
+        try:
+            os.chdir(x11)  # a temp path can exceed the unix socket path limit
+            sock.bind("X99")
+        finally:
+            os.chdir(cwd)
+            sock.close()
+    return str(x11)
+
+
 def env_for(directory, bin_dir, home, **extra):
-    return dict(os.environ, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
+    # A host with a live display, no installs and no wait for a real browser:
+    # the tests fake the service managers, so nothing here can answer on a port.
+    base = dict(os.environ, ALANS_WAY_X11_DIR=live_x11(directory), ALANS_WAY_NO_INSTALL="1", ALANS_WAY_SETTLE_SECS="0")
+    return dict(base, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
                 PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], ALANS_WAY_BROWSER_PATH=str(bin_dir), **extra)
 
 
@@ -827,6 +859,55 @@ class RestartOrderTests(unittest.TestCase):
             self.assertNotIn("gateway restart", read_log(log))
 
 
+class NoBotTests(unittest.TestCase):
+    def test_a_server_with_no_telegram_bot_fails_with_the_fix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            bin_dir = tooling(root, root / "log")
+            result = run("--no-default-bot", "--skip-browser", "--skip-services", "--non-interactive",
+                         "--hermes-home", str(home), env=env_for(root, bin_dir, home), check=False)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("FAIL workspace_browser is not configured: no Telegram bot found", result.stdout)
+            self.assertIn("hermes gateway setup", result.stdout)
+
+
+class GatewayRestartOnlyWhenBehindTests(unittest.TestCase):
+    def test_a_rerun_that_changed_nothing_leaves_the_gateway_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            env = env_for(root, bin_dir, home, ALANS_WAY_RESTART_DELAY="0")
+            args = ("--restart", "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
+            first = run(*args, env=env)
+            self.assertIn("Restarting the gateway", first.stdout)
+            deadline = time.time() + 15
+            while "gateway restart" not in read_log(log) and time.time() < deadline:
+                time.sleep(0.2)
+            log.write_text("")
+            second = run(*args, env=env)
+            self.assertIn("no restart needed", second.stdout)
+            self.assertNotIn("Restarting the gateway", second.stdout)
+            time.sleep(1)
+            self.assertNotIn("gateway restart", read_log(log))
+
+    def test_a_restart_that_never_happened_is_still_owed_on_the_next_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            bin_dir = tooling(root, root / "log")
+            env = env_for(root, bin_dir, home, ALANS_WAY_RESTART_DELAY="0")
+            args = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
+            run(*args, env=env)  # no --restart: the gateway stays behind
+            second = run("--restart", *args, env=env)
+            self.assertIn("Restarting the gateway", second.stdout)
+
+
 class StockBrowserTests(unittest.TestCase):
     def setup_run(self, *flags):
         directory = tempfile.TemporaryDirectory()
@@ -861,7 +942,7 @@ class StockBrowserTests(unittest.TestCase):
         home.mkdir()
         log = root / "log"
         bin_dir = tooling(root, log)
-        run("--skip-browser", "--skip-services", "--non-interactive", env=env_for(root, bin_dir, home), check=False)
+        run("--no-default-bot", "--skip-browser", "--skip-services", "--non-interactive", env=env_for(root, bin_dir, home), check=False)
         self.assertNotIn("tools disable browser", read_log(log))
 
     def test_verify_does_not_warn_under_keep_browser(self):
@@ -1014,6 +1095,9 @@ class HostCopyTests(unittest.TestCase):
         self.assertNotIn("tar -xf", calls)
 
 
+TAILNET_ONLY = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48" '
+
+
 class HostKeyTests(unittest.TestCase):
     KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGWj8Wb1mYxlC0oS1U3cOQ0f1qVv7xH3m5T1kZ4r0w2L me@mac"
     HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOoO8Wb1mYxlC0oS1U3cOQ0f1qVv7xH3m5T1kZ4r0w2M"
@@ -1024,20 +1108,33 @@ class HostKeyTests(unittest.TestCase):
         self.root = Path(directory.name)
         home = self.root / "home"
         home.mkdir()
-        bin_dir = tooling(self.root, self.root / "log")
-        fake(bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
-        result = run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net", "--skip-browser",
-                     "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
-                     env=env_for(self.root, bin_dir, home), check=False)
-        return result
+        self.bin_dir = tooling(self.root, self.root / "log")
+        fake(self.bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
+        return self.attempt_in_place(*flags)
+
+    def attempt_in_place(self, *flags):
+        home = self.root / "home"
+        return run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net", "--skip-browser",
+                   "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
+                   env=env_for(self.root, self.bin_dir, home), check=False)
 
     def test_valid_keys_are_appended_once(self):
         for _ in range(2):
             result = self.attempt("--mac-key", self.KEY, "--mac-host-key", self.HOST_KEY)
         ssh = self.root / ".ssh"
-        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [self.KEY])
+        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [TAILNET_ONLY + self.KEY])
         self.assertEqual((ssh / "known_hosts").read_text().splitlines(), ["mac.tail1234.ts.net " + self.HOST_KEY])
         self.assertEqual(oct((ssh / "authorized_keys").stat().st_mode & 0o777), oct(0o600))
+
+    def test_a_plain_line_for_the_same_key_is_tightened_not_duplicated(self):
+        other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherKeyOtherKeyOtherKeyOtherKeyOtherKeyOt me@other"
+        self.attempt()
+        ssh = self.root / ".ssh"
+        ssh.mkdir(exist_ok=True)
+        (ssh / "authorized_keys").write_text(other + "\n" + self.KEY + "\n")
+        self.attempt_in_place("--mac-key", self.KEY)
+        self.attempt_in_place("--mac-key", self.KEY)
+        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [other, TAILNET_ONLY + self.KEY])
 
     def test_anything_but_a_public_key_line_is_rejected_untouched(self):
         for bad in ('command="touch /tmp/x" ' + self.KEY, self.KEY + "\nssh-rsa AAAA", "not a key",
@@ -1070,7 +1167,7 @@ class BrowserHostServiceTests(unittest.TestCase):
         linux_with_systemd(self.bin_dir, self.systemctl_log)
         self.path = [str(self.bin_dir)]
 
-    def run_setup(self, *, root_user=False, owner="alice", browsers=(), snap_browsers=()):
+    def run_setup(self, *, root_user=False, owner="alice", browsers=(), snap_browsers=(), **env_extra):
         if root_user:
             fake(self.bin_dir, "id", 'case "$1" in -u) echo 0;; -un) echo root;; *) exec /usr/bin/id "$@";; esac\n')
             fake(self.bin_dir, "stat", "echo %s\n" % owner)
@@ -1081,14 +1178,80 @@ class BrowserHostServiceTests(unittest.TestCase):
             fake(self.root / "snap" / "bin", name, "exit 0\n")
             self.path.insert(0, str(self.root / "snap" / "bin"))
         env = env_for(self.root, self.bin_dir, self.home, HERMES_VPS_BROWSER_DATA=str(self.data),
-                      ALANS_WAY_UNIT_DIR=str(self.units))
-        env["PATH"] = os.pathsep.join(self.path + [os.environ["PATH"]])
+                      ALANS_WAY_UNIT_DIR=str(self.units), **env_extra)
+        env["PATH"] = os.pathsep.join(self.path + [env_extra.get("PATH_BASE", os.environ["PATH"])])
+        env.pop("PATH_BASE", None)
         env["ALANS_WAY_BROWSER_PATH"] = os.pathsep.join(self.path)
         return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
                    "--hermes-home", str(self.home), env=env, check=False)
 
     def config(self):
         return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
+
+    def hermetic_probes(self, *absent):
+        """Same result on any host: not amd64 (no Chrome deb download), no network,
+        and a PATH that lacks the named real tools (a CI runner may ship Xvfb)."""
+        fake(self.bin_dir, "dpkg", 'echo arm64\n')
+        fake(self.bin_dir, "curl", "exit 22\n")
+        farm = self.root / "hostbin"
+        farm.mkdir(exist_ok=True)
+        for directory in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                link = farm / name
+                if name in absent or link.exists() or link.is_symlink():
+                    continue
+                if os.access(os.path.join(directory, name), os.X_OK):
+                    link.symlink_to(os.path.join(directory, name))
+        return str(farm)
+
+    def fake_apt_get(self, *binaries):
+        """An apt-get whose install drops the named binaries into the fake bin dir."""
+        makes = "".join('printf "#!/bin/sh\\nexit 0\\n" > "%s/%s"; chmod +x "%s/%s"\n' % (self.bin_dir, b, self.bin_dir, b)
+                        for b in binaries)
+        fake(self.bin_dir, "apt-get", 'echo "$*" >> "%s/apt.log"\ncase "$*" in *install*) %s;; esac\nexit 0\n'
+             % (self.root, makes or ":"))
+
+    def test_a_server_without_a_browser_installs_one(self):
+        self.hermetic_probes()
+        self.fake_apt_get("chromium")
+        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_NO_INSTALL="")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("install -y -qq --no-install-recommends chromium", (self.root / "apt.log").read_text())
+        self.assertTrue(self.config()["browserCommand"].endswith("chromium"))
+
+    def test_a_server_that_cannot_install_a_browser_fails_instead_of_writing_a_dead_config(self):
+        self.hermetic_probes()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertRegex(result.stdout, r"FAIL no Chrome or Chromium")
+        self.assertFalse((self.data / "config.json").exists())
+
+    def test_a_server_without_a_display_gets_a_managed_xvfb_ordered_before_the_browser(self):
+        host_path = self.hermetic_probes("Xvfb")
+        self.fake_apt_get("Xvfb")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        result = self.run_setup(root_user=True, owner="root", browsers=("google-chrome",), ALANS_WAY_NO_INSTALL="",
+                                ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("--no-install-recommends xvfb", (self.root / "apt.log").read_text())
+        self.assertIn(":99 -screen", (self.units / "hermes-alans-way-xvfb.service").read_text())
+        self.assertIn("After=network.target hermes-alans-way-xvfb.service",
+                      (self.units / "hermes-alans-way-chromium.service").read_text())
+        self.assertRegex(self.systemctl_log.read_text(), r"enable --now hermes-alans-way-xvfb.service hermes-alans-way-chromium")
+        # the first run's Xvfb now exists; a re-run keeps managing it
+        (self.root / "no-x11").mkdir()
+        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_X11_DIR=live_x11(self.root), PATH_BASE=host_path)
+        self.assertTrue((self.units / "hermes-alans-way-xvfb.service").exists())
+        self.assertIn("hermes-alans-way-xvfb.service", (self.units / "hermes-alans-way-chromium.service").read_text())
+
+    def test_a_server_that_cannot_install_a_display_fails(self):
+        host_path = self.hermetic_probes("Xvfb")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        result = self.run_setup(browsers=("google-chrome",), ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertRegex(result.stdout, r"FAIL the browser needs an X display")
 
     def test_a_standalone_workspace_skill_that_shadows_the_plugin_is_warned_about(self):
         for skills in (self.home / "skills", self.home / "profiles" / "work" / "skills"):
@@ -1597,7 +1760,8 @@ class WindowsGuestSetupTests(unittest.TestCase):
         fake(self.bin_dir, "uname", "echo Linux\n")
         linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
         fake(self.bin_dir, "tailscale", TAILSCALE_UP)
-        result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units")))
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+        result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units"), ALANS_WAY_X11_DIR=live_x11(self.root), ALANS_WAY_SETTLE_SECS="0"))
         self.assertEqual(self.tasks(), {})
         self.assertFalse(self.ps_log.exists())
         self.assertTrue((self.root / "units" / "hermes-alans-way-browser.service").exists(), result.stdout)
@@ -1672,7 +1836,7 @@ class RestartSurvivalTests(unittest.TestCase):
     def test_the_restarter_outlives_the_session_that_ran_setup(self):
         env = self.setup_run()
         proc = subprocess.Popen(
-            [SH, str(SCRIPT), "--restart", "--skip-browser", "--skip-services", "--non-interactive",
+            [SH, str(SCRIPT), "--bot-id", "111222333", "--restart", "--skip-browser", "--skip-services", "--non-interactive",
              "--hermes-home", str(self.home)],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True)
@@ -1764,7 +1928,7 @@ class RootOwnedSshFilesTests(unittest.TestCase):
             run("--mac-ssh", "me@mac.tail1234.ts.net", "--mac-key", HostKeyTests.KEY, "--mac-host-key",
                 HostKeyTests.HOST_KEY, "--skip-browser", "--skip-services", "--non-interactive",
                 "--hermes-home", str(hermes_home), env=env, check=False)
-            self.assertEqual((owner_home / ".ssh" / "authorized_keys").read_text().strip(), HostKeyTests.KEY)
+            self.assertEqual((owner_home / ".ssh" / "authorized_keys").read_text().strip(), TAILNET_ONLY + HostKeyTests.KEY)
             self.assertTrue((owner_home / ".ssh" / "known_hosts").exists())
             self.assertFalse((home / ".ssh").exists())
             chowned = chown_log.read_text()
@@ -2822,6 +2986,7 @@ class SupervisordServiceTests(unittest.TestCase):
                      '  *772*) echo "hermes %s gateway run --no-supervise";;\n'
                      'esac\n' % form)
                 self.supervisor_log.write_text("")
+                (self.home / ".alans-way-gateway-restart-pending").write_text("")  # each form is a fresh behind-gateway
                 self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
                 deadline = time.time() + 15
                 while "signal USR1 alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
