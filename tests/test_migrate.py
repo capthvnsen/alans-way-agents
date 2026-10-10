@@ -1,6 +1,5 @@
 """migrate.sh: pack, ship, path rewriting and gateway handover."""
 from pathlib import Path
-import json
 import os
 import shutil
 import subprocess
@@ -182,6 +181,13 @@ exit "${FAKE_SUPERVISORCTL_RC:-0}"
 ''')
     stub(stub_bin, "systemctl",
          'echo "local: systemctl $*" >> "$FAKE_LOCAL_CALLS"\nexit "${FAKE_SYSTEMCTL_RC:-0}"\n')
+    # pgrep is consulted twice: locally for the post-stop wait and remotely
+    # via the ssh stub's eval for remote_gateway_running. The default stub
+    # answers "no match" so neither can see the real machine's process
+    # table — a stray `... hermes gateway run` argv (e.g. a detached
+    # restarter left over from another suite) would otherwise fake a live
+    # remote gateway. Tests that model a draining gateway stub it again.
+    stub(stub_bin, "pgrep", "exit 1\n")
     # `gateway status` gets its own knob: v0.21 only answers it when the
     # gateway was installed as a service via `hermes gateway install`.
     stub(stub_bin, "hermes", '''
@@ -275,6 +281,141 @@ class MigrateTests(unittest.TestCase):
             # No secrets-bearing debris left on the remote.
             self.assertFalse(list(remote_home.glob("*.tgz")))
 
+    def test_the_old_gateway_is_signaled_to_drain_before_the_stop(self):
+        """`stop` escalates SIGTERM to SIGKILL after the program's
+        stopwaitsecs — the stock 10s on confs that predate the new value —
+        which can kill the gateway mid-drain and corrupt state.db (issue
+        #65). Signal USR1 first: the drain gets no kill timer, the
+        autorestart respawn is a fresh process, and `stop` on that stops
+        cleanly. pid answers the old pid until `signal` flips it to the
+        relaunched one."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["FAKE_GW_DRAINED"] = str(directory / "gw-drained")
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid)
+      [ -f "$FAKE_GW_DRAINED" ] && echo 7777 || echo 4242;;
+    signal)
+      [ "$2" = USR1 ] && touch "$FAKE_GW_DRAINED";;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+            self.assertLess(local.index("signal USR1 hermes-gateway"),
+                            local.index("stop hermes-gateway"))
+
+    def test_a_drained_gateway_is_stopped_even_while_its_respawn_is_pending(self):
+        """Between the old gateway's exit and autorestart's respawn the pid
+        reads 0. The migration must still `stop` the program, or supervisord
+        relaunches a gateway that opens state.db mid-snapshot (issue #65)."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) if grep -q "signal USR1" "$FAKE_LOCAL_CALLS"; then echo 0; else echo 4242; fi;;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+            self.assertLess(local.index("signal USR1 hermes-gateway"),
+                            local.index("stop hermes-gateway"))
+
+    def test_a_daemon_without_the_signal_verb_still_stops(self):
+        """A supervisord too old for `signal` refuses it; the migration
+        falls back to the plain stop path."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) echo 4242;;
+    signal) exit 1;;
+    start) exit "${FAKE_SUPERVISORCTL_START_RC:-${FAKE_SUPERVISORCTL_RC:-0}}";;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertIn("stop hermes-gateway", local)
+
+    def test_a_drain_that_never_finishes_dies_before_the_snapshot(self):
+        """The USR1 drain wait is bounded: a gateway that never exits must
+        stop the migration before the db snapshot, never escalate to a
+        kill."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["ALAN_GATEWAY_GONE_WAIT"] = "3"
+            stub(directory / "stubbin", "supervisorctl", '''
+if [ "$HOME" = "$FAKE_REMOTE_HOME" ]; then
+  echo "remote: supervisorctl $*" >> "$FAKE_REMOTE_CALLS"
+  case "$1" in
+    stop) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo STOPPED > "$FAKE_REMOTE_STATE_FILE";;
+    start) [ -n "$FAKE_REMOTE_STATE_FILE" ] && echo RUNNING > "$FAKE_REMOTE_STATE_FILE";;
+    status) cat "$FAKE_REMOTE_STATE_FILE" 2>/dev/null || echo "${FAKE_REMOTE_STATE:-RUNNING}";;
+  esac
+else
+  echo "local: supervisorctl $*" >> "$FAKE_LOCAL_CALLS"
+  case "$1" in
+    pid) echo 4242;;
+    signal) exit 0;;
+  esac
+fi
+exit "${FAKE_SUPERVISORCTL_RC:-0}"
+''')
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("still draining", result.stderr)
+            local = read(local_calls)
+            self.assertIn("signal USR1 hermes-gateway", local)
+            self.assertNotIn("stop hermes-gateway", local)
+            self.assertNotIn("start", read(remote_calls))
+
     def test_failing_to_stop_the_old_gateway_is_fatal(self):
         """If no local supervisor can stop the old gateway, starting the
         remote one would leave both polling the same bot — hard error."""
@@ -292,6 +433,52 @@ class MigrateTests(unittest.TestCase):
             self.assertNotIn("supervisorctl start", remote_log)
             # Nothing restarted the old gateway either.
             self.assertNotIn("start", read(local_calls))
+
+    def test_db_snapshot_waits_until_the_old_gateway_is_gone(self):
+        """A stop verb can return while the gateway is still draining; the
+        snapshot must wait for the process to actually exit — a mid-drain
+        copy of state.db is not guaranteed recoverable (issue #65). The
+        remote-side pgrep pattern (no `.*`) stays answered 'no match'."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            polls = directory / "gw-polls"
+            polls.write_text("2\n", encoding="utf-8")
+            env["FAKE_GW_POLLS"] = str(polls)
+            stub(directory / "stubbin", "pgrep", '''
+echo "pgrep $*" >> "$STUB_LOG"
+case "$*" in
+  *".*"*)
+    n="$(cat "$FAKE_GW_POLLS")"
+    [ "$n" -le 0 ] && exit 1
+    echo $((n - 1)) > "$FAKE_GW_POLLS"
+    echo 4242;;
+  *) exit 1;;
+esac
+''')
+            result = run("--to", "fakehost", "--yes", env=env)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("pgrep -f hermes", read(calls))
+            self.assertEqual(read(polls).strip(), "0")
+            self.assertTrue((remote_home / ".hermes" / "state.db").exists())
+
+    def test_a_gateway_that_never_exits_fails_before_the_snapshot(self):
+        """A gateway still there when the wait bound runs out is a hard
+        stop before the db snapshot — never a mid-drain copy."""
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
+            env["ALAN_GATEWAY_GONE_WAIT"] = "3"
+            stub(directory / "stubbin", "pgrep", '''
+case "$*" in
+  *".*"*) echo 4242;;
+  *) exit 1;;
+esac
+''')
+            result = run("--to", "fakehost", "--yes", env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("still running", result.stderr)
+            self.assertNotIn("start hermes-gateway", read(remote_calls))
 
     def test_remote_gateway_not_running_rolls_back_to_the_old(self):
         """supervisorctl accepting the start is not proof the gateway came
@@ -662,133 +849,6 @@ exec /bin/cat "$@"
             self.assertEqual(len(backups), 1)
             self.assertEqual(read(backups[0] / "config.yaml"), "old: true\n")
             self.assertIn("data_dir:", read(existing / "config.yaml"))
-
-
-RELAY_ENV_SOURCE = (
-    "ALAN_RELAY_BASE=https://openalan.com/api/relay\n"
-    "ALAN_RELAY_TOKEN=source-relay-token\n"
-    "VOICE_TOOLS_OPENAI_KEY=source-relay-token\n"
-    "TYPESAFE_BASE_URL=https://openalan.com/api/relay/jev\n"
-    "TYPESAFE_API_KEY=source-relay-token\n"
-    "JEV_PROXY_API_KEY=source-relay-token\n")
-RELAY_ENV_TARGET = (
-    "ALAN_RELAY_BASE=https://openalan.com/api/relay\n"
-    "ALAN_RELAY_TOKEN=target-relay-token\n"
-    "VOICE_TOOLS_OPENAI_KEY=target-relay-token\n"
-    "TYPESAFE_BASE_URL=https://openalan.com/api/relay/jev\n"
-    "TYPESAFE_API_KEY=target-relay-token\n"
-    "JEV_PROXY_API_KEY=target-relay-token\n")
-RELAY_TTS_SOURCE = (
-    "tts:\n  provider: openai\n  openai:\n    model: gpt-4o-mini-tts\n"
-    "    base_url: https://openalan.com/api/relay/openai/v1\n"
-    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n")
-# The target's watcher already flipped this computer to edge.
-RELAY_TTS_TARGET = (
-    "tts:\n  provider: edge\n  openai:\n    model: gpt-4o-mini-tts\n"
-    "    base_url: https://openalan.com/api/relay/openai/v1\n"
-    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n"
-    "stt:\n  enabled: true\n  provider: openai\n  openai:\n"
-    "    base_url: https://openalan.com/api/relay/openai/v1\n"
-    "    api_key: ${VOICE_TOOLS_OPENAI_KEY}\n")
-
-
-def wire_relay(hermes_dir: Path, env_text: str, tts: str, marker=None):
-    """Make a hermes home look hosted: relay .env keys, relay audio config,
-    and the bootstrap's managed marker."""
-    env_path = hermes_dir / ".env"
-    env_path.write_text(
-        (env_path.read_text(encoding="utf-8") if env_path.exists() else "")
-        + env_text, encoding="utf-8")
-    cfg = hermes_dir / "config.yaml"
-    cfg.write_text(
-        (cfg.read_text(encoding="utf-8") if cfg.exists() else "") + tts,
-        encoding="utf-8")
-    if marker is None:
-        marker = {"managed": {"tts.provider": "openai"},
-                  "watcher_provider": "edge"}
-    (hermes_dir / ".alan-relay-managed").write_text(
-        json.dumps(marker), encoding="utf-8")
-
-
-class MigrateRelayTests(unittest.TestCase):
-    def test_hosted_to_hosted_keeps_the_targets_relay_account(self):
-        """hosted->hosted: the source's relay token must NOT land on the
-        target — the watcher would flip this computer's TTS on the old
-        account's balance. Target wins for the managed keys only."""
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d)
-            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
-            wire_relay(hermes, RELAY_ENV_SOURCE, RELAY_TTS_SOURCE,
-                       marker={"managed": {"tts.provider": "openai"},
-                               "watcher_provider": None})
-            target = remote_home / ".hermes"
-            target.mkdir()
-            wire_relay(target, RELAY_ENV_TARGET, RELAY_TTS_TARGET)
-            result = run("--to", "fakehost", "--yes", env=env)
-            self.assertEqual(result.returncode, 0)
-
-            env_text = read(target / ".env")
-            self.assertIn("ALAN_RELAY_TOKEN=target-relay-token", env_text)
-            self.assertNotIn("source-relay-token", env_text)
-            self.assertIn("VOICE_TOOLS_OPENAI_KEY=target-relay-token",
-                          env_text)
-            self.assertIn("JEV_PROXY_API_KEY=target-relay-token", env_text)
-            self.assertIn("TYPESAFE_API_KEY=target-relay-token", env_text)
-            # Non-relay keys still migrated.
-            self.assertIn("TELEGRAM_BOT_TOKEN", env_text)
-
-            cfg = read(target / "config.yaml")
-            # The watcher had flipped the target to edge — that live value
-            # is preserved, not the source's openai.
-            self.assertIn("tts:\n  provider: edge", cfg)
-            # And the migrated content survived around it.
-            self.assertIn("data_dir:", cfg)
-
-            # The provenance marker is the target's, not the source's.
-            marker = json.loads(read(target / ".alan-relay-managed"))
-            self.assertEqual(marker["watcher_provider"], "edge")
-
-    def test_diy_to_hosted_keeps_the_targets_relay_wiring(self):
-        """DIY->hosted (the flagship flow): the source has no relay keys at
-        all, so the target's credentials and managed audio config must be
-        carried across the swap wholesale."""
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d)
-            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
-            target = remote_home / ".hermes"
-            target.mkdir()
-            wire_relay(target, RELAY_ENV_TARGET, RELAY_TTS_TARGET)
-            result = run("--to", "fakehost", "--yes", env=env)
-            self.assertEqual(result.returncode, 0)
-
-            env_text = read(target / ".env")
-            self.assertIn("ALAN_RELAY_TOKEN=target-relay-token", env_text)
-            self.assertIn("TYPESAFE_BASE_URL=", env_text)
-            self.assertIn("TELEGRAM_BOT_TOKEN", env_text)  # migrated
-
-            cfg = read(target / "config.yaml")
-            self.assertIn("provider: edge", cfg)
-            self.assertIn("base_url: https://openalan.com/api/relay/openai/v1",
-                          cfg)
-            self.assertIn("api_key: ${VOICE_TOOLS_OPENAI_KEY}", cfg)
-            self.assertIn("enabled: true", cfg)
-            self.assertIn("data_dir:", cfg)  # migrated yaml still rewritten
-            self.assertTrue(
-                (target / ".alan-relay-managed").exists())
-
-    def test_a_diy_target_keeps_the_migrated_config_untouched(self):
-        """hosted->DIY has no target wiring to preserve — the relay keys
-        are owned by whichever home has them, so an unwired target changes
-        nothing."""
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d)
-            env, home, hermes, remote_home, local_calls, remote_calls, calls = fixture(directory)
-            wire_relay(hermes, RELAY_ENV_SOURCE, RELAY_TTS_SOURCE,
-                       marker={"managed": {"tts.provider": "openai"},
-                               "watcher_provider": None})
-            run("--to", "fakehost", "--yes", env=env)
-            env_text = read(remote_home / ".hermes" / ".env")
-            self.assertIn("ALAN_RELAY_TOKEN=source-relay-token", env_text)
 
 
 if __name__ == "__main__":

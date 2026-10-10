@@ -36,9 +36,13 @@ NAME = "alans-way-computer"
 START_TIMEOUT = 30
 CALL_TIMEOUT = 110  # above the router's own hard caps (80s, batch 100s), so its answer wins
 PAGES_PER_TICK = 0.25  # the stock tool scrolls in wheel ticks, the app in pages
+# DISPLAY, XAUTHORITY and DBUS_SESSION_BUS_ADDRESS are not secrets: the router
+# child's VM-desktop fallback needs the X display and session bus the gateway
+# runs under (a dbus-daemon socket outside /run/user on hosts without one).
 _SAFE_ENV = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "ALLUSERSPROFILE", "APPDATA",
              "COMSPEC", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATHEXT", "PROGRAMDATA", "PROGRAMFILES",
-             "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERNAME", "USERPROFILE", "WINDIR"}
+             "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERNAME", "USERPROFILE", "WINDIR",
+             "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"}
 _CODES = {"stale_ref", "unsupported_action", "off_limits", "in_front", "no_window", "not_found", "bad_request", "failed"}
 _INFER = (("off limits", "off_limits"), ("in front", "in_front"), ("no window", "no_window"), ("no control at that point", "not_found"),
           ("not found", "not_found"), ("stale", "stale_ref"))
@@ -537,9 +541,15 @@ class AlansWayComputerBackend(ComputerUseBackend):
             return self._run("scroll", step)
         return self._by_element_or_point("scroll", step, element, x, y)
 
+    # A VM desktop the agent owns types at the focused window; a host whose
+    # apps never take focus refuses in its helper and points to set_value.
     def type_text(self, text, *, delivery_mode=None, bring_to_front=False):
-        return self._fail("type", "unsupported_action", "Typing needs a target field here, because the app never takes focus. "
-                          "Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
+        if bad := self._limits("type", delivery_mode, bring_to_front):
+            return bad
+        result = self._run("type", {"action": "type", "text": text})
+        if not result.ok and "needs a ref" in (result.message or ""):
+            return self._fail("type", result.code, result.message + " Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
+        return result
 
     def set_value(self, value, element=None):
         if element is None:

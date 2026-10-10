@@ -116,6 +116,35 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertNotIn("workspace_vps_browser", desktop)
         self.assertNotIn("Cua Driver", desktop)
 
+    def test_vps_desktop_degraded_mode_is_reported_once(self):
+        # Without an accessibility stack or screenshot tool on the VM the
+        # desktop calls fail outright; the agent must say so once rather
+        # than retry-loop or improvise with shell screenshot tools.
+        desktop = (SKILL_PATH.parent / "references" / "vps-desktop.md").read_text(encoding="utf-8")
+        self.assertIn("VM desktop accessibility unavailable", desktop)
+        self.assertIn("once", desktop)
+
+    def test_skill_gives_the_names_hermes_registers(self):
+        # Hermes registers MCP tools as mcp__<server>__<tool>; a bare
+        # cua_alans_way_snapshot does not exist, and calling it costs a turn.
+        block = re.search(r"^  (\w+):\n    command: \"node\"", (ROOT / "setup-workspace.sh").read_text(encoding="utf-8"), re.M)
+        self.assertIsNotNone(block, "setup-workspace.sh no longer writes the MCP server block this test reads")
+        server = block.group(1)
+        for tool in ["cua_alans_way_status", "cua_alans_way_tabs", "cua_alans_way_open", "cua_alans_way_snapshot",
+                     "cua_alans_way_screenshot", "cua_alans_way_action", "cua_alans_way_close",
+                     "workspace_computer_apps", "workspace_computer_snapshot", "workspace_computer_menu", "workspace_computer_screenshot"]:
+            with self.subTest(tool=tool):
+                self.assertIn(f"mcp__{server}__{tool}", self.text)
+        self.assertNotIn("call the tools by these exact names: `cua_alans_way", self.normalized)
+        self.assertIn("`workspace_computer_*` for short", self.normalized)
+        self.assertIn("tool_call", self.normalized)
+
+    def test_the_app_api_is_never_driven_directly(self):
+        # Tabs opened by curl against connection.json belong to another bot id,
+        # so the browser tools refuse them afterwards.
+        self.assertIn("connection.json", self.normalized)
+        self.assertRegex(self.normalized, r"[Nn]ever (call|drive) the app's HTTP API")
+
     def test_the_ungated_desktop_input_tool_is_never_named_as_callable(self):
         # Desktop input goes through Hermes' approval-gated computer_use tool.
         # The raw MCP action must not appear in any skill or reference as
@@ -341,7 +370,7 @@ class DesktopAppsSkillTests(unittest.TestCase):
         self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
     def test_a_permission_error_names_the_app_and_both_switches(self):
-        self.assertIn("Accessibility and Screen Recording for the Alan's Way app (alans-way-localapp)", self.normalized)
+        self.assertIn("Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp)", self.normalized)
         self.assertIn("System Settings", self.normalized)
 
 

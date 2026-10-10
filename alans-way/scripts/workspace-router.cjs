@@ -69,10 +69,14 @@ const hostOs = hostOsArg === 'windows' || hostOsArg === 'linux' ? hostOsArg : 'm
 const hostName = { windows: 'Windows host', linux: 'Linux host', mac: 'Mac' }[hostOs];
 const configuredMacScript = arg('--mac-script') || process.env.HERMES_WORKSPACE_MAC_MCP;
 // `npm run package:linux` (electron-packager, x64, no asar) writes
-// alans-way-localapp-linux-x64/ with the executable beside resources/app. No
+// alans-way-localapp-linux-x64/ (alans-workspace once renamed) with the executable beside resources/app. No
 // installer exists for Linux, so these are the places such a folder is
 // expected, as-built or renamed.
 const linuxAppRoots = [
+  '/opt/alans-workspace-linux-x64',
+  '/opt/alans-workspace',
+  '$HOME/.local/share/alans-workspace-linux-x64',
+  '$HOME/.local/share/alans-workspace',
   '/opt/alans-way-localapp-linux-x64',
   '/opt/alans-way-localapp',
   '$HOME/.local/share/alans-way-localapp-linux-x64',
@@ -85,6 +89,7 @@ const macScripts = configuredMacScript
   : hostOs !== 'mac'
     ? []
     : [
+        "/Applications/Alan's Workspace.app/Contents/Resources/app/scripts/browser-mcp.cjs",
         '/Applications/alans-way-localapp.app/Contents/Resources/app/scripts/browser-mcp.cjs',
         '/Applications/Open Alan.app/Contents/Resources/app/scripts/browser-mcp.cjs',
         "/Applications/Hermes- Alan's way.app/Contents/Resources/app/scripts/browser-mcp.cjs",
@@ -340,6 +345,7 @@ function macBackendCommand(script, node, id, name, scriptWord = shQuote(script))
   // A connector copied into the home directory is newer than the app bundle.
   // Run it with the app's own Node and modules so a rebuild is not required.
   const apps = [
+    "/Applications/Alan's Workspace.app",
     '/Applications/alans-way-localapp.app',
     '/Applications/Open Alan.app',
     "/Applications/Hermes- Alan's way.app",
@@ -366,8 +372,10 @@ function linuxBackendCommand(script, node, id, name, scriptWord = shQuote(script
   const args = tail.join(' ');
   const env = 'HERMES_WORKSPACE_CONNECTION="${XDG_CONFIG_HOME:-$HOME/.config}/Hermes Workspace/connection.json"; export HERMES_WORKSPACE_CONNECTION; ';
   if (node) return `${env}exec ${shQuote(node)} ${args}`;
-  const checks = linuxAppRoots.map(shellWord).map((root) =>
-    `if [ -x ${root}/alans-way-localapp ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/alans-way-localapp ${args}; fi;`,
+  const checks = linuxAppRoots.map(shellWord).flatMap((root) =>
+    ['alans-workspace', 'alans-way-localapp'].map((exe) =>
+      `if [ -x ${root}/${exe} ]; then NODE_PATH=${root}/resources/app/node_modules ELECTRON_RUN_AS_NODE=1 exec ${root}/${exe} ${args}; fi;`,
+    ),
   ).join(' ');
   return `${env}${checks} if [ -x "$HOME/.local/bin/node" ]; then exec "$HOME/.local/bin/node" ${args}; fi; exec node ${args}`;
 }
@@ -436,9 +444,11 @@ function windowsBackendCommand(script, id, name) {
 }
 
 // The posix probe (above) finds the newest installed bundle AND proves the
-// app is serving and accepts our token. Same probe over PowerShell: connection.json proves the app is serving
-// (any HTTP response, even 401, means the API is up), then emit the newest
-// connector script path — the pushed home copy wins over the install.
+// app is serving and accepts our token. Same probe over PowerShell: like
+// wsr_alive, connection.json must hold a token the API accepts — a 401 from a
+// stale file means this host is not usable, so only a success counts —
+// then emit the newest connector script path; the pushed home copy wins over
+// the install.
 function windowsProbeCommand() {
   return [
     // Invoke-WebRequest's progress stream can reach stdout over ssh and would
@@ -447,10 +457,12 @@ function windowsProbeCommand() {
     '$conn = "$env:APPDATA\\Hermes Workspace\\connection.json"',
     'if (-not (Test-Path $conn)) { exit 1 }',
     '$port = 9464',
-    'try { $port = ([uri](Get-Content $conn -Raw | ConvertFrom-Json).url).Port } catch {}',
+    '$token = ""',
+    'try { $doc = Get-Content $conn -Raw | ConvertFrom-Json; $token = [string]$doc.token; $port = ([uri]$doc.url).Port } catch {}',
+    'if ([string]::IsNullOrWhiteSpace($token)) { exit 1 }',
     '$alive = $false',
-    `try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Uri "http://127.0.0.1:$port/v1/status"; $alive = $true }`,
-    'catch { $alive = ($null -ne $_.Exception.Response) }',
+    `try { $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 4 -Headers @{ Authorization = "Bearer $token" } -Uri "http://127.0.0.1:$port/v1/status"; $alive = $true }`,
+    'catch { $alive = $false }',
     'if (-not $alive) { exit 1 }',
     'foreach ($s in @(' +
       '"$env:APPDATA\\Hermes Workspace\\connector\\scripts\\browser-mcp.cjs",' +

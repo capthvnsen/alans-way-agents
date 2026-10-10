@@ -1,6 +1,6 @@
 name: alans-way
-version: "0.7.0"
-description: "Idle check-ins from your primary Hermes bot, plus the workspace browser skills. The desktop app is a separate repo; the workspace-setup skill walks the agent through it."
+version: "0.21.0"
+description: "Idle check-ins from your primary Hermes bot, plus the workspace browser skills. The desktop app, Alan's Workspace, is a separate repo; the workspace-setup skill walks the agent through it."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"

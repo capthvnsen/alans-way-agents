@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import signal
@@ -16,7 +17,20 @@ SCRIPT = ROOT / "setup.sh"
 SH = shutil.which("sh") or "/bin/sh"
 
 
+def has_telegram_bot(args, env):
+    """True when the run names a bot or its Hermes home already carries one."""
+    if "--bot-id" in args:
+        return True
+    home = Path(args[args.index("--hermes-home") + 1]) if "--hermes-home" in args else Path((env or os.environ).get("HERMES_HOME", "/nonexistent"))
+    return any("TELEGRAM_BOT_TOKEN" in f.read_text(errors="replace") or "token:" in f.read_text(errors="replace")
+               for name in (".env", "config.yaml") for f in home.rglob(name) if f.is_file())
+
+
 def run(*args, env=None, check=True, script=SCRIPT):
+    # Setup refuses to finish without a Telegram bot; these runs are about other things.
+    if not has_telegram_bot(args, env) and "--no-default-bot" not in args:
+        args = ("--bot-id", "111222333") + args
+    args = tuple(a for a in args if a != "--no-default-bot")
     cmd = [SH, str(script)] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and result.returncode != 0:
@@ -245,7 +259,7 @@ class TimezoneFallbackTests(unittest.TestCase):
             self.assertNotIn("America/Denver", result.stdout)
 
 
-def logging_hermes_bin(directory: Path, log: Path, version="0.21.5"):
+def logging_hermes_bin(directory: Path, log: Path, version="0.21.5", proactivity_status=""):
     bin_dir = directory / "bin"
     bin_dir.mkdir(exist_ok=True)
     hermes = bin_dir / "hermes"
@@ -255,6 +269,7 @@ echo "$*" >> "{log}"
 case "$1" in
   --version) echo "hermes {version}";;
   plugins) [ "$2" = list ] && echo "alans-way";;
+  proactivity) [ "$2" = status ] && echo '{proactivity_status}';;
 esac
 exit 0
 """, encoding="utf-8")
@@ -293,8 +308,26 @@ def tooling(directory: Path, log: Path, **kwargs):
     return bin_dir
 
 
+def live_x11(directory):
+    """A directory holding an X99 socket: what setup sees on a host with a display."""
+    x11 = Path(directory) / "x11"
+    x11.mkdir(exist_ok=True)
+    if not (x11 / "X99").exists():
+        sock, cwd = socket.socket(socket.AF_UNIX), os.getcwd()
+        try:
+            os.chdir(x11)  # a temp path can exceed the unix socket path limit
+            sock.bind("X99")
+        finally:
+            os.chdir(cwd)
+            sock.close()
+    return str(x11)
+
+
 def env_for(directory, bin_dir, home, **extra):
-    return dict(os.environ, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
+    # A host with a live display, no installs and no wait for a real browser:
+    # the tests fake the service managers, so nothing here can answer on a port.
+    base = dict(os.environ, ALANS_WAY_X11_DIR=live_x11(directory), ALANS_WAY_NO_INSTALL="1", ALANS_WAY_SETTLE_SECS="0")
+    return dict(base, HOME=str(directory), HERMES_HOME=str(home), TMPDIR=str(directory),
                 PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], ALANS_WAY_BROWSER_PATH=str(bin_dir), **extra)
 
 
@@ -462,6 +495,39 @@ class AgentShellTests(unittest.TestCase):
             calls = log.read_text(encoding="utf-8")
             self.assertIn("bound primary route: delta", result.stdout)
             self.assertIn("-p delta proactivity bind --session-key agent:delta:telegram:dm:42", calls)
+
+    def test_an_already_bound_profile_keeps_its_binding(self):
+        """A re-run where the target profile is already bound must say so and
+        skip the route list, not claim check-ins stay silent until a bind."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log, proactivity_status='{"bound": true}')
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run("--non-interactive", "--skip-browser", "--skip-services",
+                         "--hermes-home", str(home), env=env, check=False)
+            self.assertIn("already bound", result.stdout)
+            self.assertNotIn("stays silent", result.stdout)
+            self.assertNotIn("pick which bot", result.stdout)
+            self.assertNotIn("proactivity bind", log.read_text(encoding="utf-8"))
+
+    def test_bind_still_rebinds_an_already_bound_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes_home"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions" / "sessions.json").write_text(
+                '{"agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"}}', encoding="utf-8")
+            log = Path(directory) / "log"
+            bin_dir = logging_hermes_bin(Path(directory), log, proactivity_status='{"bound": true}')
+            env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            result = run("--bind", "--non-interactive", "--skip-browser", "--skip-services",
+                         "--hermes-home", str(home), env=env, check=False)
+            self.assertIn("bound primary route", result.stdout)
+            self.assertIn("proactivity bind --session-key agent:main:telegram:dm:1",
+                          log.read_text(encoding="utf-8"))
 
 
 class PinAndListTests(unittest.TestCase):
@@ -793,6 +859,55 @@ class RestartOrderTests(unittest.TestCase):
             self.assertNotIn("gateway restart", read_log(log))
 
 
+class NoBotTests(unittest.TestCase):
+    def test_a_server_with_no_telegram_bot_fails_with_the_fix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            bin_dir = tooling(root, root / "log")
+            result = run("--no-default-bot", "--skip-browser", "--skip-services", "--non-interactive",
+                         "--hermes-home", str(home), env=env_for(root, bin_dir, home), check=False)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("FAIL workspace_browser is not configured: no Telegram bot found", result.stdout)
+            self.assertIn("hermes gateway setup", result.stdout)
+
+
+class GatewayRestartOnlyWhenBehindTests(unittest.TestCase):
+    def test_a_rerun_that_changed_nothing_leaves_the_gateway_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            env = env_for(root, bin_dir, home, ALANS_WAY_RESTART_DELAY="0")
+            args = ("--restart", "--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
+            first = run(*args, env=env)
+            self.assertIn("Restarting the gateway", first.stdout)
+            deadline = time.time() + 15
+            while "gateway restart" not in read_log(log) and time.time() < deadline:
+                time.sleep(0.2)
+            log.write_text("")
+            second = run(*args, env=env)
+            self.assertIn("no restart needed", second.stdout)
+            self.assertNotIn("Restarting the gateway", second.stdout)
+            time.sleep(1)
+            self.assertNotIn("gateway restart", read_log(log))
+
+    def test_a_restart_that_never_happened_is_still_owed_on_the_next_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            bin_dir = tooling(root, root / "log")
+            env = env_for(root, bin_dir, home, ALANS_WAY_RESTART_DELAY="0")
+            args = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
+            run(*args, env=env)  # no --restart: the gateway stays behind
+            second = run("--restart", *args, env=env)
+            self.assertIn("Restarting the gateway", second.stdout)
+
+
 class StockBrowserTests(unittest.TestCase):
     def setup_run(self, *flags):
         directory = tempfile.TemporaryDirectory()
@@ -827,7 +942,7 @@ class StockBrowserTests(unittest.TestCase):
         home.mkdir()
         log = root / "log"
         bin_dir = tooling(root, log)
-        run("--skip-browser", "--skip-services", "--non-interactive", env=env_for(root, bin_dir, home), check=False)
+        run("--no-default-bot", "--skip-browser", "--skip-services", "--non-interactive", env=env_for(root, bin_dir, home), check=False)
         self.assertNotIn("tools disable browser", read_log(log))
 
     def test_verify_does_not_warn_under_keep_browser(self):
@@ -980,6 +1095,9 @@ class HostCopyTests(unittest.TestCase):
         self.assertNotIn("tar -xf", calls)
 
 
+TAILNET_ONLY = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48" '
+
+
 class HostKeyTests(unittest.TestCase):
     KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGWj8Wb1mYxlC0oS1U3cOQ0f1qVv7xH3m5T1kZ4r0w2L me@mac"
     HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOoO8Wb1mYxlC0oS1U3cOQ0f1qVv7xH3m5T1kZ4r0w2M"
@@ -990,20 +1108,33 @@ class HostKeyTests(unittest.TestCase):
         self.root = Path(directory.name)
         home = self.root / "home"
         home.mkdir()
-        bin_dir = tooling(self.root, self.root / "log")
-        fake(bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
-        result = run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net", "--skip-browser",
-                     "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
-                     env=env_for(self.root, bin_dir, home), check=False)
-        return result
+        self.bin_dir = tooling(self.root, self.root / "log")
+        fake(self.bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
+        return self.attempt_in_place(*flags)
+
+    def attempt_in_place(self, *flags):
+        home = self.root / "home"
+        return run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net", "--skip-browser",
+                   "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
+                   env=env_for(self.root, self.bin_dir, home), check=False)
 
     def test_valid_keys_are_appended_once(self):
         for _ in range(2):
             result = self.attempt("--mac-key", self.KEY, "--mac-host-key", self.HOST_KEY)
         ssh = self.root / ".ssh"
-        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [self.KEY])
+        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [TAILNET_ONLY + self.KEY])
         self.assertEqual((ssh / "known_hosts").read_text().splitlines(), ["mac.tail1234.ts.net " + self.HOST_KEY])
         self.assertEqual(oct((ssh / "authorized_keys").stat().st_mode & 0o777), oct(0o600))
+
+    def test_a_plain_line_for_the_same_key_is_tightened_not_duplicated(self):
+        other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherKeyOtherKeyOtherKeyOtherKeyOtherKeyOt me@other"
+        self.attempt()
+        ssh = self.root / ".ssh"
+        ssh.mkdir(exist_ok=True)
+        (ssh / "authorized_keys").write_text(other + "\n" + self.KEY + "\n")
+        self.attempt_in_place("--mac-key", self.KEY)
+        self.attempt_in_place("--mac-key", self.KEY)
+        self.assertEqual((ssh / "authorized_keys").read_text().splitlines(), [other, TAILNET_ONLY + self.KEY])
 
     def test_anything_but_a_public_key_line_is_rejected_untouched(self):
         for bad in ('command="touch /tmp/x" ' + self.KEY, self.KEY + "\nssh-rsa AAAA", "not a key",
@@ -1033,10 +1164,10 @@ class BrowserHostServiceTests(unittest.TestCase):
         self.bin_dir = tooling(self.root, self.root / "log")
         self.systemctl_log = self.root / "systemctl.log"
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "systemctl", 'echo "$*" >> "%s"\nexit 0\n' % self.systemctl_log)
+        linux_with_systemd(self.bin_dir, self.systemctl_log)
         self.path = [str(self.bin_dir)]
 
-    def run_setup(self, *, root_user=False, owner="alice", browsers=(), snap_browsers=()):
+    def run_setup(self, *, root_user=False, owner="alice", browsers=(), snap_browsers=(), **env_extra):
         if root_user:
             fake(self.bin_dir, "id", 'case "$1" in -u) echo 0;; -un) echo root;; *) exec /usr/bin/id "$@";; esac\n')
             fake(self.bin_dir, "stat", "echo %s\n" % owner)
@@ -1047,14 +1178,89 @@ class BrowserHostServiceTests(unittest.TestCase):
             fake(self.root / "snap" / "bin", name, "exit 0\n")
             self.path.insert(0, str(self.root / "snap" / "bin"))
         env = env_for(self.root, self.bin_dir, self.home, HERMES_VPS_BROWSER_DATA=str(self.data),
-                      ALANS_WAY_UNIT_DIR=str(self.units))
-        env["PATH"] = os.pathsep.join(self.path + [os.environ["PATH"]])
+                      ALANS_WAY_UNIT_DIR=str(self.units), **env_extra)
+        env["PATH"] = os.pathsep.join(self.path + [env_extra.get("PATH_BASE", os.environ["PATH"])])
+        env.pop("PATH_BASE", None)
         env["ALANS_WAY_BROWSER_PATH"] = os.pathsep.join(self.path)
         return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
                    "--hermes-home", str(self.home), env=env, check=False)
 
     def config(self):
         return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
+
+    def hermetic_probes(self, *absent):
+        """Same result on any host: not amd64 (no Chrome deb download), no network,
+        and a PATH that lacks the named real tools (a CI runner may ship Xvfb)."""
+        fake(self.bin_dir, "dpkg", 'echo arm64\n')
+        fake(self.bin_dir, "curl", "exit 22\n")
+        farm = self.root / "hostbin"
+        farm.mkdir(exist_ok=True)
+        for directory in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                link = farm / name
+                if name in absent or link.exists() or link.is_symlink():
+                    continue
+                if os.access(os.path.join(directory, name), os.X_OK):
+                    link.symlink_to(os.path.join(directory, name))
+        return str(farm)
+
+    def fake_apt_get(self, *binaries):
+        """An apt-get whose install drops the named binaries into the fake bin dir."""
+        makes = "".join('printf "#!/bin/sh\\nexit 0\\n" > "%s/%s"; chmod +x "%s/%s"\n' % (self.bin_dir, b, self.bin_dir, b)
+                        for b in binaries)
+        fake(self.bin_dir, "apt-get", 'echo "$*" >> "%s/apt.log"\ncase "$*" in *install*) %s;; esac\nexit 0\n'
+             % (self.root, makes or ":"))
+
+    def test_a_server_without_a_browser_installs_one(self):
+        self.hermetic_probes()
+        self.fake_apt_get("chromium")
+        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_NO_INSTALL="")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("install -y -qq --no-install-recommends chromium", (self.root / "apt.log").read_text())
+        self.assertTrue(self.config()["browserCommand"].endswith("chromium"))
+
+    def test_a_server_that_cannot_install_a_browser_fails_instead_of_writing_a_dead_config(self):
+        self.hermetic_probes()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertRegex(result.stdout, r"FAIL no Chrome or Chromium")
+        self.assertFalse((self.data / "config.json").exists())
+
+    def test_a_server_without_a_display_gets_a_managed_xvfb_ordered_before_the_browser(self):
+        host_path = self.hermetic_probes("Xvfb")
+        self.fake_apt_get("Xvfb")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        result = self.run_setup(root_user=True, owner="root", browsers=("google-chrome",), ALANS_WAY_NO_INSTALL="",
+                                ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("--no-install-recommends xvfb", (self.root / "apt.log").read_text())
+        self.assertIn(":99 -screen", (self.units / "hermes-alans-way-xvfb.service").read_text())
+        self.assertIn("After=network.target hermes-alans-way-xvfb.service",
+                      (self.units / "hermes-alans-way-chromium.service").read_text())
+        self.assertRegex(self.systemctl_log.read_text(), r"enable --now hermes-alans-way-xvfb.service hermes-alans-way-chromium")
+        # the first run's Xvfb now exists; a re-run keeps managing it
+        (self.root / "no-x11").mkdir()
+        result = self.run_setup(root_user=True, owner="root", ALANS_WAY_X11_DIR=live_x11(self.root), PATH_BASE=host_path)
+        self.assertTrue((self.units / "hermes-alans-way-xvfb.service").exists())
+        self.assertIn("hermes-alans-way-xvfb.service", (self.units / "hermes-alans-way-chromium.service").read_text())
+
+    def test_a_server_that_cannot_install_a_display_fails(self):
+        host_path = self.hermetic_probes("Xvfb")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        result = self.run_setup(browsers=("google-chrome",), ALANS_WAY_X11_DIR=str(self.root / "no-x11"), PATH_BASE=host_path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertRegex(result.stdout, r"FAIL the browser needs an X display")
+
+    def test_a_standalone_workspace_skill_that_shadows_the_plugin_is_warned_about(self):
+        for skills in (self.home / "skills", self.home / "profiles" / "work" / "skills"):
+            (skills / "workspace-operations").mkdir(parents=True)
+            (skills / "workspace-operations" / "SKILL.md").write_text("---\nname: workspace-operations\n---\n")
+        out = self.run_setup(browsers=("google-chrome",)).stdout
+        self.assertIn("warn %s/skills/workspace-operations shadows" % self.home, out)
+        self.assertIn("warn %s/profiles/work/skills/workspace-operations shadows" % self.home, out)
+        self.assertTrue((self.home / "skills" / "workspace-operations" / "SKILL.md").exists(), "setup only warns; it never deletes")
 
     def test_non_root_run_needs_no_sandbox_flag_and_no_user_line(self):
         result = self.run_setup(browsers=("google-chrome",))
@@ -1084,6 +1290,13 @@ class BrowserHostServiceTests(unittest.TestCase):
         config = self.config()
         self.assertTrue(config["browserCommand"].endswith("google-chrome"), config["browserCommand"])
         self.assertIn("--user-data-dir=%s/chromium" % self.data, config["browserArgs"])
+
+    def test_the_packaged_chrome_wins_over_a_bare_google_chrome_wrapper(self):
+        # A host image (Orgo) puts a google-chrome wrapper on PATH that adds its
+        # own debugging port and profile ahead of ours.
+        self.run_setup(browsers=("google-chrome", "google-chrome-stable"))
+        config = self.config()
+        self.assertTrue(config["browserCommand"].endswith("google-chrome-stable"), config["browserCommand"])
 
     def test_args_match_the_exec_deploy_example(self):
         self.run_setup(browsers=("google-chrome",))
@@ -1202,7 +1415,7 @@ class WatcherServiceTests(unittest.TestCase):
                    env=env, check=False)
 
     def linux_root(self):
-        fake(self.bin_dir, "systemctl", "exit 0\n")
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
         fake(self.bin_dir, "id", 'case "$1" in -u) echo 0;; -un) echo root;; *) exec /usr/bin/id "$@";; esac\n')
         fake(self.bin_dir, "stat", "echo alice\n")
         fake(self.bin_dir, "chown", "exit 0\n")
@@ -1246,6 +1459,30 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertRegex(plist, r"<key>HERMES_WORKSPACE_HOST_OS</key>\s*<string>linux</string>")
         self.assertRegex(plist, r"<key>PATH</key>\s*<string>[^<]*%s[^<]*</string>" % re.escape(str(Path(shutil.which("node")).parent)))
 
+    def test_overseer_bot_ids_survive_a_rerun_without_the_env(self):
+        # The systemd path must preserve HERMES_OVERSEER_BOT_IDS the way the
+        # supervisord conf does: a re-run without the variable keeps the
+        # value the first run wrote, instead of silently dropping it.
+        env = self.linux_root()
+        self.run_setup("Linux", HERMES_OVERSEER_BOT_IDS="4242", **env)
+        unit = self.units / "hermes-alans-way-browser.service"
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="4242"', unit.read_text())
+        self.run_setup("Linux", **env)
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="4242"', unit.read_text())
+
+    def test_an_unquoted_overseer_value_in_an_existing_unit_is_kept_and_quoted(self):
+        # Units written before the value was quoted carry a bare
+        # `Environment=HERMES_OVERSEER_BOT_IDS=...`; the read-back keeps the
+        # value and the rewrite quotes it (a space-separated list would
+        # otherwise parse as stray tokens).
+        env = self.linux_root()
+        self.units.mkdir(parents=True)
+        (self.units / "hermes-alans-way-browser.service").write_text(
+            "[Service]\nEnvironment=HERMES_OVERSEER_BOT_IDS=777\n", encoding="utf-8")
+        self.run_setup("Linux", **env)
+        self.assertIn('Environment=HERMES_OVERSEER_BOT_IDS="777"',
+                      (self.units / "hermes-alans-way-browser.service").read_text())
+
     def test_the_watcher_and_the_managed_block_run_the_installed_plugin_copy(self):
         # With a catalog install the router Hermes loaded lives in the
         # profile's plugins dir, not in this clone: services and the managed
@@ -1274,6 +1511,27 @@ class WatcherServiceTests(unittest.TestCase):
         self.run_setup("Linux", **self.linux_root())
         watch = (self.units / "mac-watch.service").read_text()
         self.assertIn(str(ROOT / "alans-way" / "scripts" / "workspace-router.cjs"), watch)
+
+    def test_a_non_catalog_install_still_prefers_the_installed_router(self):
+        # A plugin installed from a checkout (file://, no catalog metadata)
+        # still lands its own workspace-router.cjs in the profile's plugins
+        # dir. That installed copy wins: the checkout may be a temp directory
+        # (issue #63).
+        plugins = self.home / "plugins"
+        router = plugins / "alans-way" / "scripts" / "workspace-router.cjs"
+        router.parent.mkdir(parents=True)
+        router.write_text("// installed copy\n", encoding="utf-8")
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        env = env_for(self.root, self.bin_dir, self.home, **self.linux_root())
+        self.assertEqual(
+            run("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net",
+                "--host-os", "linux", "--desktop-dir", str(self.app), "--non-interactive",
+                "--hermes-home", str(self.home), env=env, check=False).returncode, 0)
+        watch = (self.units / "mac-watch.service").read_text()
+        self.assertIn(str(router), watch)
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn(str(router), block)
+        self.assertNotIn(str(ROOT / "alans-way" / "scripts" / "workspace-router.cjs"), block)
 
 
 FAKE_POWERSHELL = r"""script="$(cat)"
@@ -1500,9 +1758,10 @@ class WindowsGuestSetupTests(unittest.TestCase):
 
     def test_wsl_is_linux_not_native_windows(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "systemctl", "exit 0\n")
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
         fake(self.bin_dir, "tailscale", TAILSCALE_UP)
-        result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units")))
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+        result = self.setup(env=self.env(WSL_DISTRO_NAME="Ubuntu", ALANS_WAY_UNIT_DIR=str(self.root / "units"), ALANS_WAY_X11_DIR=live_x11(self.root), ALANS_WAY_SETTLE_SECS="0"))
         self.assertEqual(self.tasks(), {})
         self.assertFalse(self.ps_log.exists())
         self.assertTrue((self.root / "units" / "hermes-alans-way-browser.service").exists(), result.stdout)
@@ -1577,7 +1836,7 @@ class RestartSurvivalTests(unittest.TestCase):
     def test_the_restarter_outlives_the_session_that_ran_setup(self):
         env = self.setup_run()
         proc = subprocess.Popen(
-            [SH, str(SCRIPT), "--restart", "--skip-browser", "--skip-services", "--non-interactive",
+            [SH, str(SCRIPT), "--bot-id", "111222333", "--restart", "--skip-browser", "--skip-services", "--non-interactive",
              "--hermes-home", str(self.home)],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True)
@@ -1628,7 +1887,9 @@ class UserSystemdTests(unittest.TestCase):
         fake(bin_dir, "uname", "echo Linux\n")
         fake(bin_dir, "google-chrome", "exit 0\n")
         fake(bin_dir, "loginctl", 'printf "%%s\\n" "$*" >> "%s"\nexit 0\n' % self.loginctl)
-        fake(bin_dir, "systemctl", 'case "$*" in *--user*) exit %d;; esac\nexit 0\n' % (0 if user_systemd else 1))
+        fake(bin_dir, "systemctl",
+             'case "$*" in\n  is-system-running) echo running;;\n  *--user*) exit %d;;\nesac\nexit 0\n'
+             % (0 if user_systemd else 1))
         env = env_for(self.root, bin_dir, home, HERMES_VPS_BROWSER_DATA=str(self.root / "data"))
         return run("--skip-plugin", "--desktop-dir", str(app), "--non-interactive", "--hermes-home", str(home),
                    env=env, check=False)
@@ -1667,7 +1928,7 @@ class RootOwnedSshFilesTests(unittest.TestCase):
             run("--mac-ssh", "me@mac.tail1234.ts.net", "--mac-key", HostKeyTests.KEY, "--mac-host-key",
                 HostKeyTests.HOST_KEY, "--skip-browser", "--skip-services", "--non-interactive",
                 "--hermes-home", str(hermes_home), env=env, check=False)
-            self.assertEqual((owner_home / ".ssh" / "authorized_keys").read_text().strip(), HostKeyTests.KEY)
+            self.assertEqual((owner_home / ".ssh" / "authorized_keys").read_text().strip(), TAILNET_ONLY + HostKeyTests.KEY)
             self.assertTrue((owner_home / ".ssh" / "known_hosts").exists())
             self.assertFalse((home / ".ssh").exists())
             chowned = chown_log.read_text()
@@ -1710,10 +1971,17 @@ class IntegrationBase:
         self.home = home
         self.log = self.root / "log"
         bin_dir = tooling(self.root, self.log)
+        # `config` is a stateful key store: setup reads back what it wrote, so a
+        # `set` must be visible to a later `get` (an unset key returns the
+        # test-supplied default, same as before).
         fake(bin_dir, "hermes", 'echo "$*" >> "%s"\n[ "$1" = -p ] && shift 2\ncase "$1" in\n'
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && echo "alans-way";;\n'
              '  tools) [ "$2" = list ] && { echo \'%s\'; };;\n'
-             '  config) [ "$2" = get ] && { echo \'%s\'; };;\nesac\nexit 0\n' % (self.log, tools_list, config_get))
+             '  config) case "$2" in\n'
+             '      set) printf \'%%s=%%s\\n\' "$3" "$4" >> "%s.config";;\n'
+             '      get) _v="$(awk -v k="$3" \'index($0, k "=") == 1 { v = substr($0, length(k) + 2) }'
+             ' END { printf "%%s", v }\' "%s.config" 2>/dev/null)"; [ -n "$_v" ] && echo "$_v" || echo \'%s\';;\n'
+             '    esac;;\nesac\nexit 0\n' % (self.log, tools_list, self.log, self.log, config_get))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
         self.env = env_for(self.root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
         return run("--bot-id", "111222333", "--skip-browser", "--skip-services", "--non-interactive",
@@ -2338,6 +2606,1229 @@ class AgentSshReuseTests(unittest.TestCase):
         run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home),
             env=env_for(root, tooling(root, root / "log"), home), check=False)
         self.assertFalse((root / ".ssh" / "config").exists())
+
+
+def linux_without_systemd(bin_dir, log):
+    """A VM image or container: the systemctl binary exists but PID 1 is not systemd."""
+    fake(bin_dir, "uname", "echo Linux\n")
+    fake(bin_dir, "systemctl",
+         'echo "$*" >> "%s"\ncase "$1" in is-system-running) echo offline;; esac\nexit 0\n' % log)
+
+
+def linux_with_systemd(bin_dir, log):
+    fake(bin_dir, "uname", "echo Linux\n")
+    fake(bin_dir, "systemctl",
+         'echo "$*" >> "%s"\ncase "$1" in is-system-running) echo running;; esac\nexit 0\n' % log)
+
+
+def sup_line(name, state, desc=""):
+    """One `supervisorctl status` line as the real tool prints it: the name
+    column padded to 33, the state column padded to 10."""
+    return "%-33s%-10s%s\n" % (name, state, desc)
+
+
+def fake_supervisord(bin_dir, root, state=""):
+    """A working supervisorctl; program states live in a state file the test
+    owns, in the real padded status format. Exit codes mirror the real tool:
+    status is nonzero when a queried program is not RUNNING (a bare `status`
+    exits 3 if any is down), and `pid` prints the daemon's own pid when no
+    program is named. `signal USR1` plays Hermes's drain-and-respawn: the
+    program keeps reporting its old pid for the next two queries (the drain),
+    then the supervisor relaunches it under a new pid. Plant <root>/no-respawn
+    to leave it STOPPED instead, <root>/no-signal for a daemon old enough to
+    lack the signal verb, or <root>/need-sudo for a socket only root can use
+    (a fake sudo must remove the flag and exec the verb)."""
+    state_file = Path(root) / "supervisor.state"
+    state_file.write_text(state, encoding="utf-8")
+    log = Path(root) / "supervisorctl.log"
+    fake(bin_dir, "supervisorctl", '''echo "$*" >> "%s"
+state="%s"
+nosignal="%s"
+norespawn="%s"
+needsudo="%s"
+[ ! -f "$needsudo" ] || exit 1
+_fmtline() { printf '%%-33s%%-10s%%s\\n' "$1" "$2" "${3:-}"; }
+_respawn() {
+  [ -f "$state.respawn-$1" ] || return 0
+  _n="$(cat "$state.respawn-$1" 2>/dev/null)"; _n="${_n:-1}"
+  if [ "$_n" -gt 0 ]; then echo $((_n - 1)) > "$state.respawn-$1"; return 0; fi
+  rm -f "$state.respawn-$1"
+  grep -v "^$1 " "$state" > "$state.tmp" 2>/dev/null || true
+  _fmtline "$1" RUNNING "pid 888, uptime 0:00:01" >> "$state.tmp"
+  mv "$state.tmp" "$state"
+}
+case "$1" in
+  status)
+    if [ -n "${2:-}" ]; then
+      _line="$(grep "^$2 " "$state" 2>/dev/null)"; [ -n "$_line" ] || _line="$(_fmtline "$2" STOPPED)"
+      echo "$_line"
+      _respawn "$2"
+      case "$_line" in *" RUNNING "*) exit 0;; *) exit 3;; esac
+    fi
+    cat "$state" 2>/dev/null || true
+    grep -v " RUNNING " "$state" >/dev/null 2>&1 && exit 3
+    exit 0;;
+  pid)
+    if [ -z "${2:-}" ]; then echo 4321; exit 0; fi
+    _p="$(awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state" 2>/dev/null)"
+    echo "${_p:-0}"
+    _respawn "$2"
+    [ -n "$_p" ] || exit 7;;
+  start)
+    rm -f "$state.respawn-$2"
+    grep -v "^$2 " "$state" > "$state.tmp" 2>/dev/null || true
+    _fmtline "$2" RUNNING "pid 777, uptime 0:00:01" >> "$state.tmp"
+    mv "$state.tmp" "$state";;
+  signal)
+    [ ! -f "$nosignal" ] || exit 1
+    [ "$2" = USR1 ] || exit 1
+    grep "^$3 " "$state" 2>/dev/null | grep -q " RUNNING " || exit 1
+    rm -f "$state.respawn-$3"
+    if [ -f "$norespawn" ]; then
+      grep -v "^$3 " "$state" > "$state.tmp" 2>/dev/null || true
+      _fmtline "$3" STOPPED >> "$state.tmp"
+      mv "$state.tmp" "$state"
+    else
+      echo 1 > "$state.respawn-$3"
+    fi;;
+  stop)
+    _line="$(grep "^$2 " "$state" 2>/dev/null || true)"
+    case "$_line" in
+      *" RUNNING "*)
+        grep -v "^$2 " "$state" > "$state.tmp" 2>/dev/null || true
+        _fmtline "$2" STOPPED >> "$state.tmp"
+        mv "$state.tmp" "$state"
+        echo "$2: stopped";;
+      *) echo "$2: ERROR (not running)" >&2; exit 1;;
+    esac;;
+esac
+exit 0
+''' % (log, state_file, root / "no-signal", root / "no-respawn", root / "need-sudo"))
+    return log
+
+
+class SupervisordServiceTests(unittest.TestCase):
+    """A Linux guest with no live systemd but a working supervisord gets the
+    services as supervisor programs in a conf.d drop-in, not dead units."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.data = self.root / "data"
+        self.units = self.root / "units"
+        self.units.mkdir()
+        self.confd = self.root / "conf.d"
+        self.confd.mkdir()
+        self.app = desktop_tree(self.root / "app")
+        self.bin_dir = tooling(self.root, self.root / "log")
+        linux_without_systemd(self.bin_dir, self.root / "systemctl.log")
+        self.supervisor_log = fake_supervisord(self.bin_dir, self.root)
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+        fake(self.bin_dir, "ssh", "cat >/dev/null 2>&1 </dev/null; exit 0\n")
+        fake(self.bin_dir, "scp", "exit 0\n")
+
+    def env(self, **extra):
+        return env_for(self.root, self.bin_dir, self.home,
+                       HERMES_VPS_BROWSER_DATA=str(self.data),
+                       ALANS_WAY_UNIT_DIR=str(self.units),
+                       ALANS_WAY_SUPERVISOR_CONF_DIR=str(self.confd), **extra)
+
+    def run_setup(self, *flags, **env):
+        if "--restart" in flags:
+            # The detached restarter outlives setup.sh; wait for it before
+            # the temp dir is torn down (see wait_for_restarter).
+            self.addCleanup(self.wait_for_restarter)
+        return run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
+                   "--hermes-home", str(self.home), *flags, env=self.env(**env), check=False)
+
+    def conf(self):
+        return (self.confd / "alans-way.conf").read_text(encoding="utf-8")
+
+    def test_writes_supervisor_programs_instead_of_dead_systemd_units(self):
+        result = self.run_setup("--mac-ssh", "me@mac.tail1234.ts.net")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(self.units.glob("*.service")), [])
+        conf = self.conf()
+        for prog in ("alans-way-chromium", "alans-way-browser", "alans-way-mac-watch"):
+            self.assertIn("[program:%s]" % prog, conf)
+        self.assertIn("vps-chromium-host.cjs", conf)
+        self.assertIn("vps-browser-host.cjs serve", conf)
+        self.assertIn("workspace-router.cjs --watch --interval 10", conf)
+        self.assertIn("autorestart=unexpected", conf)
+        # exitcodes mirrors the units' RestartPreventExitStatus: 0 is a clean
+        # exit under on-failure, so it must be "expected" too.
+        self.assertIn("exitcodes=0,78", conf)
+        self.assertIn("exitcodes=2", conf)
+        self.assertIn('HERMES_VPS_BROWSER_DATA="%s"' % self.data, conf)
+        self.assertIn('DISPLAY=', conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        self.assertIn('HERMES_WORKSPACE_HOST_OS="mac"', conf)
+
+    def test_a_rerun_without_mac_ssh_keeps_the_computer_and_the_watcher(self):
+        # Issue #62: omitting --mac-ssh on a re-run must keep the configured
+        # computer, not write the empty flag default over it.
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        conf = self.conf()
+        self.assertIn("[program:alans-way-mac-watch]", conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac.tail1234.ts.net"', block)
+
+    def test_mac_ssh_none_clears_the_computer_and_the_watcher(self):
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "me@mac.tail1234.ts.net").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333", "--mac-ssh", "none").returncode, 0)
+        self.assertNotIn("alans-way-mac-watch", self.conf())
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', block)
+
+    def test_a_computer_configured_only_in_a_profile_keeps_the_watcher(self):
+        # The #62 residual: `--profile alt --mac-ssh` writes the computer
+        # into alt's managed block only. A bare re-run must still keep the
+        # watcher, the shared state-file env and the managed ssh block —
+        # the computer is configured even though the main block has none.
+        prof = self.home / "profiles" / "alt"
+        prof.mkdir(parents=True)
+        (prof / ".env").write_text("TELEGRAM_BOT_TOKEN=111222333:alt-token\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_setup("--profile", "alt", "--mac-ssh", "me@mac.tail1234.ts.net",
+                           "--bot-id", "111222333").returncode, 0)
+        self.assertIn("[program:alans-way-mac-watch]", self.conf())
+        self.assertEqual(self.run_setup().returncode, 0)
+        conf = self.conf()
+        self.assertIn("[program:alans-way-mac-watch]", conf)
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH="me@mac.tail1234.ts.net"', conf)
+        block = (prof / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: "me@mac.tail1234.ts.net"', block)
+        self.assertIn("HERMES_MAC_STATE_FILE:", block)
+        self.assertIn("Host mac.tail1234.ts.net",
+                      (self.root / ".ssh" / "config").read_text())
+
+    def test_a_rerun_without_a_prior_block_stays_vps_only(self):
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        self.assertEqual(self.run_setup("--bot-id", "111222333").returncode, 0)
+        self.assertNotIn("alans-way-mac-watch", self.conf())
+        block = (self.home / "config.yaml").read_text()
+        self.assertIn('HERMES_WORKSPACE_MAC_SSH: ""', block)
+        calls = self.supervisor_log.read_text()
+        self.assertIn("reread", calls)
+        self.assertIn("update", calls)
+
+    def test_no_watcher_program_without_a_host(self):
+        self.run_setup()
+        conf = self.conf()
+        self.assertIn("alans-way-browser", conf)
+        self.assertNotIn("alans-way-mac-watch", conf)
+
+    def test_overseer_bot_ids_ride_along_when_configured(self):
+        self.run_setup(HERMES_OVERSEER_BOT_IDS="4242")
+        self.assertIn('HERMES_OVERSEER_BOT_IDS="4242"', self.conf())
+
+    def test_an_overseer_value_in_an_existing_conf_is_kept(self):
+        (self.confd / "alans-way.conf").write_text(
+            '[program:alans-way-browser]\nenvironment=HERMES_OVERSEER_BOT_IDS="777"\n', encoding="utf-8")
+        self.run_setup()
+        self.assertIn('HERMES_OVERSEER_BOT_IDS="777"', self.conf())
+
+    def test_a_commented_out_overseer_value_stays_disabled(self):
+        # An operator who commented the pair out disabled it on purpose; the
+        # read-back must not resurrect the value on the next run.
+        (self.confd / "alans-way.conf").write_text(
+            '[program:alans-way-browser]\n'
+            ';environment=HERMES_OVERSEER_BOT_IDS="777"\n'
+            '#environment=HERMES_OVERSEER_BOT_IDS="888"\n', encoding="utf-8")
+        self.run_setup()
+        self.assertNotIn("HERMES_OVERSEER_BOT_IDS", self.conf())
+
+    def test_a_re_run_is_idempotent_and_starts_stopped_programs(self):
+        self.run_setup()
+        conf = self.confd / "alans-way.conf"
+        before = conf.read_bytes()
+        self.supervisor_log.write_text("")
+        (self.root / "supervisor.state").write_text("")
+        self.run_setup()
+        self.assertEqual(conf.read_bytes(), before)
+        calls = self.supervisor_log.read_text()
+        self.assertNotIn("reread", calls)
+        self.assertNotIn("update", calls)
+        self.assertIn("start alans-way-chromium", calls)
+        self.assertIn("start alans-way-browser", calls)
+
+    def test_running_programs_are_not_restarted(self):
+        self.run_setup()
+        (self.root / "supervisor.state").write_text(
+            sup_line("alans-way-chromium", "RUNNING", "pid 11, uptime 1:00:00") +
+            sup_line("alans-way-browser", "RUNNING", "pid 12, uptime 1:00:00"), encoding="utf-8")
+        self.supervisor_log.write_text("")
+        self.run_setup()
+        calls = self.supervisor_log.read_text()
+        self.assertNotIn("start alans-way", calls)
+        self.assertNotIn("restart", calls)
+
+    def test_skip_services_writes_no_conf(self):
+        result = self.run_setup("--skip-services")
+        self.assertFalse((self.confd / "alans-way.conf").exists())
+        self.assertNotIn("reread", read_log(self.supervisor_log))
+
+    def test_neither_manager_warns_instead_of_half_installing(self):
+        (self.bin_dir / "supervisorctl").unlink()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"warn .*(systemd|supervisor)")
+        self.assertFalse((self.confd / "alans-way.conf").exists())
+        self.assertEqual(list(self.units.glob("*.service")), [])
+
+    def test_the_browser_display_matches_the_live_desktop(self):
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) exit 1;;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :98 -rfbport 5998 -localhost";;\nesac\n')
+        self.run_setup(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+        self.assertIn('DISPLAY=":98"', self.conf())
+
+    def test_a_live_display_stack_prints_the_viewer_url(self):
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n')
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        result = self.run_setup()
+        self.assertIn("6080", result.stdout)
+        self.assertIn("vnc.html", result.stdout)
+        self.assertIn(ip, result.stdout)
+        self.assertNotIn("apt-get install xvfb", result.stdout)
+
+    def test_a_running_vnc_display_beats_a_lower_numbered_socket(self):
+        import socket as socket_mod
+        sockdir = self.root / "x11"
+        sockdir.mkdir()
+        sock = socket_mod.socket(socket_mod.AF_UNIX)
+        try:
+            sock.bind(str(sockdir / "X0"))
+        except OSError:
+            self.skipTest("cannot bind a unix socket here")
+        self.addCleanup(sock.close)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) exit 1;;\n'
+             '  *) echo "548 /usr/bin/Xtigervnc :98 -rfbport 5998 -localhost";;\nesac\n')
+        self.run_setup(ALANS_WAY_X11_DIR=str(sockdir))
+        self.assertIn('DISPLAY=":98"', self.conf())
+
+    def test_a_skip_services_rerun_keeps_the_watcher_state_file_in_the_router_env(self):
+        args = ("--mac-ssh", "me@mac.tail1234.ts.net", "--bot-id", "111222333")
+        self.run_setup(*args)
+        self.run_setup(*args, "--skip-services")
+        config = (self.home / "config.yaml").read_text()
+        state = str(self.root / ".local/share/hermes-alans-way/mac-state.json")
+        self.assertIn('HERMES_MAC_STATE_FILE: "%s"' % state, config)
+
+    def test_gateway_restart_uses_the_supervisor_program_that_owns_it(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("custom-gateway", "RUNNING", "pid 777, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *777*) echo "/opt/venv/bin/python /usr/lib/hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 custom-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 custom-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("gateway restart", read_log(self.root / "log"))
+
+    def test_gateway_restart_prefers_the_program_running_the_selected_profile(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+            sup_line("alt-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes gateway run --no-supervise";;\n'
+             '  *772*) echo "hermes -p alt gateway run --no-supervise";;\n'
+             'esac\n')
+        self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 alt-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_without_a_profile_prefers_the_unprofiled_program(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("alt-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+            sup_line("main-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes -p alt gateway run --no-supervise";;\n'
+             '  *772*) echo "hermes gateway run --no-supervise";;\n'
+             'esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_matches_every_profile_flag_form(self):
+        # `hermes --profile alt gateway run`, `--profile=alt`, `-p=alt` and
+        # `-palt` name the same profile `-p alt` does — each must pick the
+        # alt program, not the unprofiled candidate.
+        for form in ("-p alt", "-p=alt", "-palt", "--profile alt", "--profile=alt"):
+            with self.subTest(form=form):
+                (self.root / "supervisor.state").write_text(
+                    sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+                    sup_line("alt-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+                for stale in self.root.glob("supervisor.state.respawn-*"):
+                    stale.unlink()
+                fake(self.bin_dir, "ps",
+                     'case "$*" in\n'
+                     '  *771*) echo "hermes gateway run --no-supervise";;\n'
+                     '  *772*) echo "hermes %s gateway run --no-supervise";;\n'
+                     'esac\n' % form)
+                self.supervisor_log.write_text("")
+                (self.home / ".alans-way-gateway-restart-pending").write_text("")  # each form is a fresh behind-gateway
+                self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+                deadline = time.time() + 15
+                while "signal USR1 alt-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+                    time.sleep(0.2)
+                self.assertIn("signal USR1 alt-gateway", read_log(self.supervisor_log))
+                self.assertNotIn("USR1 main-gateway", read_log(self.supervisor_log))
+                # Wait out each restarter before the next subTest rewrites
+                # supervisor.state and unlinks respawn-* — otherwise the
+                # previous form's restarter loses its respawn marker
+                # mid-drain and polls the full drain bound.
+                self.wait_for_restarter()
+
+    def test_a_glued_profile_flag_is_not_the_unprofiled_gateway(self):
+        # "-palt" used to fall through to the unprofiled candidate, so a
+        # default --restart could signal the wrong profile's gateway.
+        (self.root / "supervisor.state").write_text(
+            sup_line("alt-gateway", "RUNNING", "pid 771, uptime 1:00:00") +
+            sup_line("main-gateway", "RUNNING", "pid 772, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in\n'
+             '  *771*) echo "hermes -palt gateway run";;\n'
+             '  *772*) echo "hermes gateway run";;\n'
+             'esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("USR1 alt-gateway", read_log(self.supervisor_log))
+
+    def test_a_profiled_restart_never_signals_the_unprofiled_gateway(self):
+        # The unprofiled candidate only serves a default target, same strict
+        # rule as the conf scan: `--profile alt --restart` on a host whose
+        # only RUNNING gateway is the default one must not drain it — the
+        # restart falls through to `hermes -p alt gateway restart`.
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", "--profile", "alt", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "gateway restart" not in read_log(self.root / "log") and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertNotIn("signal USR1", read_log(self.supervisor_log))
+        self.assertIn("-p alt gateway restart", read_log(self.root / "log"))
+
+    def test_gateway_restart_ignores_a_non_hermes_gateway_program(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("api-gateway", "RUNNING", "pid 780, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps", 'case "$*" in *780*) echo "kong gateway run";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "gateway restart" not in read_log(self.root / "log") and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("gateway restart", read_log(self.root / "log"))
+        self.assertNotIn("restart api-gateway", read_log(self.supervisor_log))
+
+    def restart_log(self):
+        """The detached restarter's own log (its mktemp file lands in TMPDIR)."""
+        return "\n".join(p.read_text(encoding="utf-8")
+                         for p in self.root.glob("alans-way-gateway-restart.*"))
+
+    def wait_for_restarter(self, seconds=30):
+        """Teardown barrier for the detached restarter. It sleeps
+        ALANS_WAY_RESTART_DELAY, then polls supervisorctl — writing its log,
+        supervisorctl.log and the respawn/state tmp files, all inside this
+        test's temp dir — for up to the drain bound after setup.sh returns.
+        Without the wait, cleanup's rmtree races those writes on CI
+        (OSError: Directory not empty). Done when every restart log ends in
+        a final "restarted:"/"failed"/"by hand" line or no restarter is
+        left running."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if not self._restarter_running():
+                return
+            logs = list(self.root.glob("alans-way-gateway-restart.*"))
+            if logs and all(any(m in p.read_text(encoding="utf-8", errors="replace")
+                                for m in ("restarted:", "failed", "by hand"))
+                            for p in logs):
+                return
+            time.sleep(0.2)
+
+    def _restarter_running(self):
+        # The restarter's argv carries this test's bin dir (the fake hermes
+        # and supervisorctl paths it was launched with), so a real pgrep -f
+        # on the temp dir names it — the test's own PATH is untouched by the
+        # fixture's.
+        try:
+            return subprocess.run(["pgrep", "-f", str(self.root)],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0
+        except OSError:
+            return True  # no pgrep: keep waiting on the log markers alone
+
+    def test_gateway_restart_signals_usr1_and_waits_for_a_new_pid(self):
+        """A Hermes gateway drains its turns on SIGUSR1 and supervisord relaunches
+        it; `supervisorctl restart` would escalate SIGTERM to SIGKILL after
+        stopwaitsecs, which corrupts state.db mid-checkpoint."""
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1" not in self.restart_log() and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("signal USR1 main-gateway (new pid 888)", self.restart_log())
+        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_starts_a_program_that_did_not_come_back(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        (self.root / "no-respawn").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "start main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("start main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("restart main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_falls_back_to_restart_when_signal_is_unsupported(self):
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        (self.root / "no-signal").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("restart main-gateway", read_log(self.supervisor_log))
+
+    def test_gateway_restart_finds_a_stopped_program_by_its_conf_command(self):
+        """A STOPPED gateway has no argv to match, so its [program:] conf
+        command stands in; the restart then goes through supervisord, not
+        `hermes gateway restart`."""
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "STOPPED"), encoding="utf-8")
+        (self.confd / "gw.conf").write_text(
+            "[program:main-gateway]\ncommand=/usr/local/bin/hermes gateway run --no-supervise\n",
+            encoding="utf-8")
+        fake(self.bin_dir, "ps", "exit 0\n")
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "restart main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+        self.assertIn("restart main-gateway", read_log(self.supervisor_log))
+        self.assertNotIn("gateway restart", read_log(self.root / "log"))
+
+    def test_gateway_restart_retries_supervisorctl_under_sudo_n(self):
+        """A supervisor socket that needs root must not strand the gateway
+        restart on `hermes gateway restart`; the sudo retry is non-interactive."""
+        (self.root / "supervisor.state").write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        (self.root / "need-sudo").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "sudo",
+             'shift; rm -f "%s"\nexec "$@"\n' % (self.root / "need-sudo"))
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.run_setup("--restart", ALANS_WAY_RESTART_DELAY="1")
+        deadline = time.time() + 15
+        while "signal USR1 main-gateway" not in read_log(self.supervisor_log) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertIn("signal USR1 main-gateway", read_log(self.supervisor_log))
+
+    def test_install_retries_mutating_supervisorctl_calls_under_sudo_n(self):
+        """A socket that answers reads but needs root for reread/update/
+        start must not strand the install on a warn: supervisorctl_call's
+        `sudo -n` retry applies to the install verbs too."""
+        # Detection stays open; mutating verbs are gated until sudo unlocks
+        # them, like the fixture's need-sudo flag but per-verb.
+        real = self.bin_dir / "supervisorctl"
+        real.rename(self.bin_dir / "supervisorctl-real")
+        fake(self.bin_dir, "supervisorctl",
+             'case "$1" in\n'
+             '  reread|update|add|start|restart|signal) [ ! -f "%s" ] || exit 1;;\n'
+             'esac\n'
+             'exec "%s" "$@"\n' % (self.root / "verb-sudo", self.bin_dir / "supervisorctl-real"))
+        (self.root / "verb-sudo").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "sudo",
+             'shift; rm -f "%s"\nexec "$@"\n' % (self.root / "verb-sudo"))
+        result = self.run_setup("--mac-ssh", "me@mac.tail1234.ts.net")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("reread or update failed", result.stdout)
+        calls = read_log(self.supervisor_log)
+        self.assertIn("reread", calls)
+        self.assertIn("start alans-way-chromium", calls)
+
+    def test_a_root_only_socket_still_counts_as_usable(self):
+        """The detection probe must use supervisorctl_call's sudo -n retry
+        like every other call — otherwise a socket that needs root reads as
+        no daemon and the install skips with a misleading warn."""
+        (self.root / "need-sudo").write_text("", encoding="utf-8")
+        fake(self.bin_dir, "sudo",
+             'shift; rm -f "%s"\nexec "$@"\n' % (self.root / "need-sudo"))
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("no live systemd or supervisord", result.stdout)
+        self.assertIn("[program:alans-way-browser]", self.conf())
+
+    def test_supervisord_counts_as_usable_while_another_program_is_down(self):
+        # A real `supervisorctl status` exits 3 when any program is not RUNNING
+        # (a host with an EXITED one-shot program): detection must not rely on its
+        # exit code, only on the daemon answering.
+        (self.root / "supervisor.state").write_text(
+            sup_line("other-thing", "EXITED", "Oct 07 10:38 PM"), encoding="utf-8")
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[program:alans-way-browser]", self.conf())
+
+    def test_the_drop_in_dir_comes_from_the_live_daemons_conf_include(self):
+        custom = self.root / "sup"
+        (custom / "conf.d").mkdir(parents=True)
+        (custom / "supervisord.conf").write_text(
+            "[include]\nfiles = conf.d/*.conf\n", encoding="utf-8")
+        fake(self.bin_dir, "pgrep",
+             'case "$*" in\n'
+             '  *supervisord*) echo "499 python3 /usr/bin/supervisord -n -c %s/supervisord.conf";;\n'
+             '  *) exit 1;;\n'
+             'esac\n' % custom)
+        env = self.env()
+        del env["ALANS_WAY_SUPERVISOR_CONF_DIR"]
+        result = run("--skip-plugin", "--desktop-dir", str(self.app), "--non-interactive",
+                     "--hermes-home", str(self.home), env=env, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[program:alans-way-browser]",
+                      (custom / "conf.d" / "alans-way.conf").read_text(encoding="utf-8"))
+
+    def test_an_unwritable_drop_in_dir_warns_instead_of_claiming_a_write(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the permission bits")
+        self.confd.chmod(0o555)
+        self.addCleanup(self.confd.chmod, 0o755)
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("could not write", result.stdout)
+        self.assertNotIn("wrote %s" % (self.confd / "alans-way.conf"), result.stdout)
+        self.assertNotIn("reread", read_log(self.supervisor_log))
+
+
+class LiveGatewayRefusalTests(unittest.TestCase):
+    """Recent Hermes refuses `plugins install --force` (a reinstall),
+    `plugins update` and `plugins remove` while that profile's gateway runs
+    (Hermes #70473). The refused call is queued, the gateway is drain-stopped
+    once (supervisord USR1 + wait + stop, a service stop, else `hermes gateway
+    stop`), the calls are replayed, and the gateway is started again either
+    way. A run with nothing refused must not stop it."""
+
+    REFUSAL = ("Cannot reinstall plugin files while the messaging gateway is"
+               " running. Run hermes gateway stop, apply the change, then"
+               " hermes gateway start.")
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        # A stale installed copy, so the update path reaches install --force.
+        plugin = self.home / "plugins" / "alans-way"
+        plugin.mkdir(parents=True)
+        (plugin / "STALE").write_text("old\n", encoding="utf-8")
+        self.log = self.root / "log"
+        self.bin_dir = tooling(self.root, self.log)
+        linux_without_systemd(self.bin_dir, self.root / "systemctl.log")
+        fake(self.bin_dir, "hermes-python", "exit 1\n")
+
+    def live_gate(self, gate, retry_fails=False, extra_log=None):
+        """A hermes that plays the live-gateway guard: mutating plugins calls
+        fail with Hermes's own refusal while `gate` (a shell test) holds, and
+        with a plain error afterwards when retry_fails is set."""
+        lines = ['echo "$*" >> "%s"' % self.log]
+        if extra_log is not None:
+            lines.append('echo "hermes $*" >> "%s"' % extra_log)
+        lines += [
+            '[ "$1" = -p ] && shift 2',
+            'case "$1" in',
+            '  --version) echo "hermes 0.21.5";;',
+            '  plugins) case "$2" in',
+            '      list) echo "alans-way";;',
+            '      install|update|remove) if %s; then' % gate,
+            '          echo "%s" >&2' % self.REFUSAL,
+            '          exit 1',
+            '        fi%s;;' % ("; echo broken >&2; exit 1" if retry_fails else ""),
+            '    esac;;',
+            'esac',
+            'exit 0',
+        ]
+        fake(self.bin_dir, "hermes", "\n".join(lines) + "\n")
+
+    def run_setup(self, **env):
+        return run("--skip-browser", "--skip-services", "--non-interactive",
+                   "--hermes-home", str(self.home),
+                   env=env_for(self.root, self.bin_dir, self.home, **env),
+                   check=False)
+
+    def supervised_gateway(self):
+        self.supervisor_log = fake_supervisord(
+            self.bin_dir, self.root,
+            state=sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"))
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+
+    def test_a_refusal_drain_stops_retries_and_starts_the_gateway(self):
+        self.supervised_gateway()
+        self.live_gate('grep "^main-gateway " "%s" | grep -q " RUNNING "'
+                       % (self.root / "supervisor.state"),
+                       extra_log=self.supervisor_log)
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.supervisor_log)
+        self.assertEqual(calls.count("plugins install --force file://"), 2, calls)
+        self.assertLess(calls.index("signal USR1 main-gateway"),
+                        calls.index("stop main-gateway"))
+        retry = calls.rindex("hermes -p default plugins install --force")
+        self.assertLess(calls.index("stop main-gateway"), retry)
+        self.assertLess(retry, calls.index("start main-gateway"))
+        self.assertNotIn("restart main-gateway", calls)
+        self.assertIn(" RUNNING ", (self.root / "supervisor.state").read_text())
+        self.assertIn("started again", result.stdout)
+
+    def test_a_run_with_nothing_refused_never_stops_the_gateway(self):
+        self.supervised_gateway()
+        # tooling()'s logging hermes never refuses: install --force goes through.
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("plugin updated", result.stdout)
+        sup = read_log(self.supervisor_log)
+        self.assertNotIn("stop", sup)
+        self.assertNotIn("signal", sup)
+        self.assertNotIn("start", sup)
+
+    def test_a_failed_retry_still_starts_the_gateway(self):
+        self.supervised_gateway()
+        self.live_gate('grep "^main-gateway " "%s" | grep -q " RUNNING "'
+                       % (self.root / "supervisor.state"),
+                       retry_fails=True, extra_log=self.supervisor_log)
+        result = self.run_setup()
+        calls = read_log(self.supervisor_log)
+        self.assertIn("stop main-gateway", calls)
+        self.assertIn("start main-gateway", calls)
+        self.assertLess(calls.index("stop main-gateway"),
+                        calls.index("start main-gateway"))
+        self.assertIn(" RUNNING ", (self.root / "supervisor.state").read_text())
+        self.assertIn("still failed", result.stdout)
+
+    def test_the_systemd_branch_stops_the_unit_and_starts_it_again(self):
+        state = self.root / "unit.state"
+        state.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             '[ "$1" = --user ] && shift\n'
+             'case "$1" in\n'
+             '  is-system-running) echo offline;;\n'
+             '  is-active) [ "$(cat "%s" 2>/dev/null)" = running ] || exit 1;;\n'
+             '  stop) [ "$(cat "%s" 2>/dev/null)" = running ] || exit 1\n'
+             '        echo stopped > "%s";;\n'
+             '  start) echo running > "%s";;\n'
+             'esac\nexit 0\n' % (self.log, state, state, state, state))
+        self.live_gate('[ "$(cat "%s" 2>/dev/null)" = running ]' % state)
+        result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("systemctl --user stop hermes-gateway"), retry)
+        self.assertLess(retry, calls.index("systemctl --user start hermes-gateway"))
+        self.assertEqual(state.read_text().strip(), "running")
+
+    def test_without_a_service_manager_the_hermes_stop_start_pair_is_used(self):
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_MISSING="systemctl supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+
+    def test_a_failed_systemctl_stop_falls_back_to_hermes_gateway_stop(self):
+        """On a systemd host whose unit stop fails (a unit that is not really
+        there, while a manual `hermes gateway run` holds the profile), the
+        drain-stop still has `hermes gateway stop` to try."""
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             '[ "$1" = --user ] && shift\n'
+             'case "$1" in\n'
+             '  is-system-running) echo running; exit 0;;\n'
+             '  stop) exit 1;;\n'
+             'esac\nexit 0\n' % self.log)
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("systemctl --user stop hermes-gateway"),
+                        calls.index("-p default gateway stop"))
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertEqual(gwstate.read_text().strip(), "running")
+
+    def test_an_inactive_unit_is_not_claimed_while_a_manual_gateway_runs(self):
+        """`systemctl stop` is a no-op success on an inactive unit: when the
+        live gateway is a manual `hermes gateway run`, claiming the unit
+        would report a stop that never happened, the retry would fail under
+        the still-live gateway, and `start` would spawn a second poller
+        beside it. Only an active unit may be claimed; anything else falls
+        through to `hermes gateway stop`, which reaches the real process."""
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        unitstate = self.root / "unit.state"
+        unitstate.write_text("inactive\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             '[ "$1" = --user ] && shift\n'
+             'case "$1" in\n'
+             '  is-system-running) echo running; exit 0;;\n'
+             '  is-active) [ "$(cat "%s")" = active ] || exit 1;;\n'
+             '  stop) echo stopped > "%s";;\n'
+             '  start) echo active > "%s";;\n'
+             'esac\nexit 0\n' % (self.log, unitstate, unitstate, unitstate))
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertNotIn("stop hermes-gateway", calls)
+        self.assertNotIn("start hermes-gateway", calls)
+        self.assertNotIn("still failed", result.stdout)
+        self.assertEqual(unitstate.read_text().strip(), "inactive")
+        self.assertEqual(gwstate.read_text().strip(), "running")
+
+    def test_a_registered_but_stopped_program_is_not_claimed_as_the_gateway(self):
+        """The supervisor program is STOPPED yet the install was refused: the
+        live gateway runs outside supervisord. Claiming the program anyway
+        would skip every real stop, retry under the still-live gateway, and
+        `supervisorctl start` a second poller beside it. Fall through to the
+        real stops instead."""
+        confd = self.root / "conf.d"
+        confd.mkdir()
+        (confd / "gw.conf").write_text(
+            "[program:main-gateway]\ncommand=/usr/local/bin/hermes gateway run --no-supervise\n",
+            encoding="utf-8")
+        self.supervisor_log = fake_supervisord(
+            self.bin_dir, self.root,
+            state=sup_line("main-gateway", "STOPPED"))
+        gwstate = self.root / "gw.state"
+        gwstate.write_text("running\n", encoding="utf-8")
+        fake(self.bin_dir, "systemctl",
+             'echo "systemctl $*" >> "%s"\n'
+             'case "$1" in is-system-running) echo offline;; esac\nexit 1\n' % self.log)
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "%s"\n'
+             '    [ "$2" = start ] && echo running > "%s";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        [ "$(cat "%s")" = running ] || exit 0\n'
+             '        echo "%s" >&2; exit 1;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n' % (self.log, gwstate, gwstate, gwstate, self.REFUSAL))
+        result = self.run_setup(ALANS_WAY_SUPERVISOR_CONF_DIR=str(confd))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        retry = calls.rindex("plugins install --force file://")
+        self.assertLess(calls.index("-p default gateway stop"), retry)
+        self.assertLess(retry, calls.index("-p default gateway start"))
+        self.assertNotIn("still failed", result.stdout)
+        sup = read_log(self.supervisor_log)
+        self.assertNotIn("stop main-gateway", sup)
+        self.assertNotIn("start main-gateway", sup)
+
+    def test_a_drain_that_outlives_the_wait_is_left_running_and_refused(self):
+        """USR1 was delivered but the old pid is still there when the wait
+        ends: a stop now is the mid-checkpoint kill USR1 exists to avoid, so
+        no stop runs at all and the op reports as still refused."""
+        state_file = self.root / "supervisor.state"
+        state_file.write_text(
+            sup_line("main-gateway", "RUNNING", "pid 771, uptime 1:00:00"), encoding="utf-8")
+        supervisor_log = self.root / "supervisorctl.log"
+        fake(self.bin_dir, "supervisorctl", '''echo "$*" >> "%s"
+state="%s"
+case "$1" in
+  status) cat "$state" 2>/dev/null || true;;
+  pid) [ -n "${2:-}" ] || { echo 4321; exit 0; }
+    awk -v n="$2" '$1 == n { gsub(",", "", $4); print $4 }' "$state";;
+  signal) [ "$2" = USR1 ] || exit 1;;
+esac
+exit 0
+''' % (supervisor_log, state_file))
+        fake(self.bin_dir, "ps",
+             'case "$*" in *771*) echo "hermes gateway run --no-supervise";; esac\n')
+        self.live_gate('grep "^main-gateway " "%s" | grep -q " RUNNING "' % state_file)
+        result = self.run_setup(ALANS_WAY_DRAIN_WAIT="2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sup = read_log(supervisor_log)
+        self.assertIn("signal USR1 main-gateway", sup)
+        self.assertNotIn("stop main-gateway", sup)
+        calls = read_log(self.log)
+        self.assertEqual(calls.count("plugins install --force file://"), 1, calls)
+        self.assertNotIn("gateway stop", calls)
+        self.assertIn("could not stop profile default's gateway", result.stdout)
+        self.assertNotIn("systemctl", read_log(self.root / "systemctl.log"))
+
+    def test_a_replayed_computer_provider_install_selects_the_backend(self):
+        """The COMPUTER_READY-gated select runs before the replay, so a
+        provider whose catalog install was only applied under the drain-stop
+        would stay installed but unselected. The replay selects it."""
+        self.supervised_gateway()
+        cfg = self.root / "cfg.state"
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%s"\n'
+             'echo "hermes $*" >> "%s"\n'
+             '[ "$1" = -p ] && shift 2\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        if grep "^main-gateway " "%s" | grep -q " RUNNING "; then\n'
+             '          echo "%s" >&2; exit 1\n'
+             '        fi;;\n'
+             '    esac;;\n'
+             '  config) case "$2" in\n'
+             '      set) [ "$3" = computer_use.backend ] && echo "$4" > "%s";;\n'
+             '      get) cat "%s" 2>/dev/null;;\n'
+             '    esac;;\n'
+             'esac\nexit 0\n'
+             % (self.log, self.supervisor_log, self.root / "supervisor.state",
+                self.REFUSAL, cfg, cfg))
+        fake(self.bin_dir, "fake-python", "exit 0\n")
+        result = self.run_setup(HERMES_PYTHON=str(self.bin_dir / "fake-python"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.supervisor_log)
+        retry = calls.rindex("hermes -p default plugins install alans-way-computer")
+        self.assertLess(calls.index("stop main-gateway"), retry)
+        select = calls.index("hermes -p default config set computer_use.backend alans-way-computer")
+        self.assertLess(calls.index("start main-gateway"), select)
+        self.assertIn("computer use runs through alans-way-computer", result.stdout)
+        self.assertEqual(cfg.read_text().strip(), "alans-way-computer")
+
+
+class CdpPortTests(unittest.TestCase):
+    """The managed browser's CDP port is configurable, preserved on re-run,
+    and moves off the default when another process already owns it."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.data = self.root / "data"
+        self.app = desktop_tree(self.root / "app")
+        self.bin_dir = tooling(self.root, self.root / "log")
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "google-chrome", "exit 0\n")
+
+    def run_setup(self, *flags, **env):
+        return run("--skip-plugin", "--skip-services", "--desktop-dir", str(self.app),
+                   "--non-interactive", "--hermes-home", str(self.home), *flags,
+                   env=env_for(self.root, self.bin_dir, self.home,
+                               HERMES_VPS_BROWSER_DATA=str(self.data), **env),
+                   check=False)
+
+    def config(self):
+        return json.loads((self.data / "config.json").read_text(encoding="utf-8"))
+
+    def config_port(self):
+        config = self.config()
+        port = int(config["cdpUrl"].rsplit(":", 1)[1])
+        self.assertIn("--remote-debugging-port=%d" % port, config["browserArgs"])
+        return port
+
+    def test_the_default_port_is_9223(self):
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9223)
+
+    def test_an_existing_port_is_preserved_on_rerun(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+        # And a second re-run keeps it stable.
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+
+    def test_a_cdpurl_with_a_trailing_slash_is_still_preserved(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224/",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
+        self.run_setup()
+        self.assertEqual(self.config_port(), 9224)
+
+    def test_cdp_port_flag_overrides_an_existing_config(self):
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:9224",
+            "browserCommand": "/usr/bin/google-chrome",
+            "browserArgs": ["--remote-debugging-port=9224"]}), encoding="utf-8")
+        self.run_setup("--cdp-port", "9330")
+        self.assertEqual(self.config_port(), 9330)
+
+    def test_cdp_port_env_overrides_the_default(self):
+        self.run_setup(ALANS_WAY_CDP_PORT="9331")
+        self.assertEqual(self.config_port(), 9331)
+
+    def test_a_busy_default_port_moves_to_the_next_free_one(self):
+        import socket
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", 9223))
+        except OSError:
+            self.skipTest("port 9223 is already bound on this machine")
+        sock.listen()
+        try:
+            result = self.run_setup()
+        finally:
+            sock.close()
+        self.assertNotEqual(self.config_port(), 9223)
+        self.assertIn("9223 is already in use", result.stdout)
+
+    def test_an_invalid_port_is_rejected(self):
+        result = self.run_setup("--cdp-port", "abc")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--cdp-port", result.stderr)
+
+
+class AgentSshProxyTests(unittest.TestCase):
+    """On a userspace-networking Tailscale host (no tailscale0 interface) the
+    managed ssh block reaches tailnet addresses through `tailscale nc`."""
+
+    HOST = "mac.tail1234.ts.net"
+
+    def setup_run(self, tun):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        bin_dir = tooling(self.root, self.root / "log")
+        fake(bin_dir, "uname", "echo Linux\n")
+        ts = TAILSCALE_UP
+        if tun is not None:
+            ts = ts.replace('"BackendState":"Running"',
+                            '"BackendState":"Running","TUN":%s' % tun)
+        fake(bin_dir, "tailscale", ts)
+        self.config = self.root / ".ssh" / "config"
+        sysnet = self.root / "sysnet"
+        sysnet.mkdir()
+        if tun == "true":
+            (sysnet / "tailscale0").touch()
+        env = env_for(self.root, bin_dir, self.home,
+                      ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        return run("--mac-ssh", "me@" + self.HOST, "--skip-browser", "--skip-services",
+                   "--non-interactive", "--hermes-home", str(self.home), env=env, check=False)
+
+    def test_userspace_tailscale_gets_a_proxycommand(self):
+        result = self.setup_run(tun="false")
+        text = self.config.read_text()
+        # The ProxyCommand must be its own line ending after %p: a literal "\n"
+        # would merge it with the ControlMaster line and break ssh outright.
+        self.assertIn("  ProxyCommand tailscale nc %h %p\n", text)
+        self.assertIn("nc %h %p\n  ControlMaster auto", text)
+
+    def test_kernel_tailscale_gets_no_proxycommand(self):
+        for tun in ("true", None):
+            self.setup_run(tun=tun)
+            self.assertNotIn("ProxyCommand", self.config.read_text(), tun)
+
+
+class ProviderVerifyTests(unittest.TestCase):
+    """--verify reports a provider that is installed but not selected, and the
+    Linux desktop pieces its VM-side path needs."""
+
+    def setup_env(self, directory, *, linux=False, provider_dir=False, backend="",
+                  tools="enabled proactivity"):
+        root = Path(directory)
+        home = root / "home"
+        home.mkdir()
+        if provider_dir:
+            (home / "plugins" / "alans-way-computer").mkdir(parents=True)
+        (home / "config.yaml").write_text(
+            "mcp_servers:\n"
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    tools:\n      exclude:\n        - workspace_computer_action\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir()
+        hermes = bin_dir / "hermes"
+        plugin_list = "alans-way\\n" + ("alans-way-computer\\n" if provider_dir else "")
+        hermes.write_text("""#!/bin/sh
+[ "$1" = -p ] && shift 2
+case "$1" in
+  --version) echo "hermes 0.21.5";;
+  plugins) [ "$2" = list ] && printf '%%b' '%s';;
+  tools) [ "$2" = list ] && echo "%s";;
+  config) [ "$2" = get ] && [ "$3" = computer_use.backend ] && echo "%s";;
+  proactivity) [ "$2" = status ] && echo '{"bound":true,"paused":false,"timezone_known":true}';;
+esac
+exit 0
+""" % (plugin_list, tools, backend), encoding="utf-8")
+        hermes.chmod(0o755)
+        if linux:
+            fake(bin_dir, "uname", "echo Linux\n")
+        return env_for(root, bin_dir, home)
+
+    def test_installed_but_unselected_provider_is_flagged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, provider_dir=True, backend="")
+            result = run("--verify", env=env, check=False)
+            self.assertIn("installed but", result.stdout)
+            self.assertIn("config set computer_use.backend alans-way-computer", result.stdout)
+
+    def test_a_selected_provider_runs_the_doctor_not_the_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, provider_dir=True, backend="alans-way-computer")
+            result = run("--verify", env=env, check=False)
+            self.assertNotIn("installed but", result.stdout)
+
+    def test_linux_desktop_deps_are_checked_when_the_provider_is_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, linux=True, provider_dir=True, backend="alans-way-computer")
+            # A real at-spi bus running on the dev host would mask the warning.
+            fake(Path(directory) / "bin", "pgrep", "exit 1\n")
+            env["ALANS_WAY_MISSING"] = "at-spi-bus-launcher xdotool scrot import maim"
+            result = run("--verify", env=env, check=False)
+            self.assertIn("at-spi", result.stdout)
+            self.assertIn("xdotool", result.stdout)
+
+    def test_no_desktop_dep_warnings_without_the_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.setup_env(directory, linux=True, provider_dir=False, backend="")
+            result = run("--verify", env=env, check=False)
+            self.assertNotIn("at-spi", result.stdout)
+
+
+class VerifyExtrasTests(unittest.TestCase):
+    """--verify surfaces a missing proactivity timezone and a stale watcher."""
+
+    def setup_env(self, directory, proactivity_status):
+        root = Path(directory)
+        home = root / "home"
+        home.mkdir()
+        bin_dir = fake_hermes_bin(root, plugins="alans-way", tools="enabled proactivity",
+                                  proactivity_status=proactivity_status)
+        return env_for(root, bin_dir, home), home
+
+    def test_verify_warns_when_the_timezone_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":false}')
+            result = run("--verify", "--skip-browser", env=env, check=False)
+            self.assertIn("timezone", result.stdout)
+            self.assertRegex(result.stdout, r"warn .*timezone")
+
+    def test_no_timezone_warning_when_known_or_unreported(self):
+        for status in ('{"bound":true,"paused":false,"timezone_known":true}',
+                       '{"bound":true,"paused":false}'):
+            with tempfile.TemporaryDirectory() as directory:
+                env, _ = self.setup_env(directory, status)
+                result = run("--verify", "--skip-browser", env=env, check=False)
+                self.assertNotRegex(result.stdout, r"warn .*timezone", status)
+
+    def test_verify_warns_on_a_stale_watcher_state_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, home = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":true}')
+            state = Path(directory) / "mac-state.json"
+            state.write_text('{"state":"online"}', encoding="utf-8")
+            old = time.time() - 3600
+            os.utime(state, (old, old))
+            env["HERMES_MAC_STATE_FILE"] = str(state)
+            result = run("--verify", "--skip-browser", "--mac-ssh", "me@mac.tail1234.ts.net",
+                         env=env, check=False)
+            self.assertIn("stale", result.stdout)
+
+    def test_verify_is_quiet_about_a_fresh_watcher_state_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env, home = self.setup_env(directory, '{"bound":true,"paused":false,"timezone_known":true}')
+            state = Path(directory) / "mac-state.json"
+            state.write_text('{"state":"online"}', encoding="utf-8")
+            env["HERMES_MAC_STATE_FILE"] = str(state)
+            result = run("--verify", "--skip-browser", "--mac-ssh", "me@mac.tail1234.ts.net",
+                         env=env, check=False)
+            self.assertNotIn("stale", result.stdout)
 
 
 class GitAttributesTests(unittest.TestCase):

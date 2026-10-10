@@ -3,6 +3,7 @@
 Hermes runs in a subprocess (HERMES_MAIN=<hermes checkout with .venv>), so the rest of the suite stays free of
 Hermes internals. Without HERMES_MAIN the Hermes-backed tests skip; the static checks always run."""
 from pathlib import Path
+import importlib.util
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "alans-way-computer"
@@ -74,6 +76,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     else if (args.pid === 104) result = fail('off_limits: That app is off limits.');
     else if (args.ref !== undefined && args.generation !== s.generation) result = fail('stale_ref: The app changed since your snapshot. Take a fresh snapshot.');
     else if (args.action === 'drag' && args.x2 === undefined) result = fail('bad_request: drag needs x2 and y2.');
+    else if (args.action === 'type' && args.ref === undefined && !c.desktop) result = fail('bad_request: type needs a ref.');
     else { s.generation += 1; save(s); result = text({ ok: true, generation: s.generation, elements: tree(s.generation).elements }); }
   } else result = fail('Unknown browser tool.');
   if (c.notice) result.content.push({ type: 'text', text: c.notice });
@@ -159,11 +162,11 @@ be.capture(mode="som", app="Notes")
 m = mark(); be.set_value("hello", element=2); R["set_value"] = action_calls(m)
 m = mark(); be.key("cmd+s"); R["key_combo"] = action_calls(m)
 m = mark(); be.key("return"); R["key_plain"] = action_calls(m)
+m = mark(); R["type_text_mac"] = plain(be.type_text("hi")); R["type_text"] = action_calls(m)
 
 # --- unsupported actions never reach the router
 m = mark()
 R["unsupported"] = {
-    "type_text": plain(be.type_text("x")),
     "middle": plain(be.click(x=1, y=1, button="middle")),
     "modifier": plain(be.click(x=1, y=1, modifiers=["shift"])),
     "triple": plain(be.click(x=1, y=1, click_count=3)),
@@ -244,6 +247,8 @@ b.capture(mode="ax", app="Notes")
 for key in ("nowindow", "nocontrol", "coded"):
     CTL.write_text(json.dumps({key: True}))
     R["code_" + key] = plain(b.click(x=1, y=1))
+CTL.write_text(json.dumps({"desktop": True}))
+R["type_text_desktop"] = plain(b.type_text("hi"))
 
 # --- vision is screenshot only; a cached pid skips apps; snapshot and screenshot run in parallel
 m = mark()
@@ -380,6 +385,24 @@ class StaticTests(unittest.TestCase):
                        *(f"cua:{a}:background" for a in ("click", "double_click", "right_click", "drag", "scroll", "key", "set_value", "focus_app"))):
             self.assertIn(needle, readme)
         self.assertNotIn("\u2014", readme)
+
+    def test_router_child_env_passes_the_desktop_session_vars(self):
+        # The provider's private router child also serves the VM desktop
+        # fallback, which needs the X display and the session bus the gateway
+        # was started with; the env whitelist must not strip them. Tokens and
+        # keys stay out either way.
+        spec = importlib.util.spec_from_file_location("alans_way_computer_env", PLUGIN / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        env = {"PATH": os.environ["PATH"], "HOME": "/tmp", "DISPLAY": ":99",
+               "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/dbus-test", "XAUTHORITY": "/home/user/.Xauthority",
+               "TELEGRAM_BOT_TOKEN": "11:secret", "AWS_SECRET_ACCESS_KEY": "secret"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            _, child_env = mod._launch({"command": sys.executable, "args": []})
+        for key in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"):
+            self.assertEqual(child_env[key], env[key])
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", child_env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", child_env)
 
     def test_catalog_draft_pins_docs_to_the_sha_and_lists_known_issues(self):
         entry = (ROOT / "docs/catalog/alans-way-computer.yaml").read_text()
@@ -518,6 +541,11 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["set_value"], [{"pid": 101, "action": "type", "ref": "c2", "text": "hello", "generation": generation}])
         self.assertEqual(self.r["key_combo"], [{"pid": 101, "action": "hotkey", "keys": "cmd+s"}])
         self.assertEqual(self.r["key_plain"], [{"pid": 101, "action": "key", "key": "return"}])
+        # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
+        self.assertEqual(self.r["type_text"], [{"pid": 101, "action": "type", "text": "hi"}])
+        self.assertEqual(self.r["type_text_mac"]["code"], "bad_request")
+        self.assertIn("set_value", self.r["type_text_mac"]["message"])
+        self.assertTrue(self.r["type_text_desktop"]["ok"])
 
     def test_unsupported_actions_are_refused_without_reaching_the_router(self):
         for name, result in self.r["unsupported"].items():
@@ -525,7 +553,6 @@ class ProviderTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "unsupported_action")
         self.assertEqual(self.r["unsupported_calls"], [])
-        self.assertIn("set_value", self.r["unsupported"]["type_text"]["message"])
 
     def test_policy_refusals_surface_with_their_codes(self):
         self.assertIn("in front", self.r["in_front"])
@@ -605,7 +632,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Save", r["e2e_capture"])
         self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101], ["workspace_computer_screenshot", 101]])
         self.assertIn('"ok": true', r["e2e_click"].lower().replace('\\"', '"'))
-        self.assertIn("unsupported_action", r["e2e_type"])
+        self.assertNotIn("unsupported_action", r["e2e_type"])
 
 
 @NEEDS_HERMES

@@ -1,10 +1,10 @@
-# Hermes Alan's Way: agent plugin
+# Alan's Way Plugin
 
 [![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
 [Discord](https://discord.gg/jBQCPUsVE) · [X @alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
 
-**The plugin half of Hermes Alan's Way, the open-source Grokbot killer for stock Hermes.**
-The companion desktop app lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
+**The plugin half of Alan's Way: fast, reliable browser and computer control for stock Hermes.**
+The companion desktop app, Alan's Workspace, lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
 (download at [openalan.com](https://openalan.com)). This repo is what you install
 *on the machine running your Hermes agents* (a Linux VPS, a macOS VM, or a Windows
 PC you keep on). The app runs on your own computer (macOS or Windows). This repo
@@ -20,7 +20,7 @@ holds what your agents need to think and act:
   when the user's computer is not a Mac (default `mac`).
 - **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
   inside the plugin so agents know how to use the tools correctly.
-- **`alans-way-computer/`**: a second plugin (v0.7.0): a computer-use provider
+- **`alans-way-computer/`**: a second plugin (v0.21.0): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
@@ -107,12 +107,13 @@ The bootstrap runs every step in order and says what it did:
 - **Plugin** — installs `alans-way`, enables the `proactivity` toolset for
   Telegram sessions (without it, the `proactivity` tool never reaches the bound
   chat's tool list), and removes the stale 0.6 startup hook if one is installed
-- **VPS browser host** — fetches the companion repo, installs the connector's
+- **Alan's Tools (VPS browser host)** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
-  systemd units on Linux (user units when you're not root; as root they run as
-  the account that owns `HERMES_HOME`, and as root with `--no-sandbox` only when
-  Hermes itself runs as root), LaunchAgents on a macOS guest via
-  `mac-guest-services.sh`, Scheduled Tasks on a Windows guest. Chrome or Chromium from a deb is preferred over snap
+  systemd units on a Linux host where systemd is live, supervisord programs
+  where it is not (VM images, Orgo computers — user units when you're not root;
+  as root they run as the account that owns `HERMES_HOME`, and as root with
+  `--no-sandbox` only when Hermes itself runs as root), LaunchAgents on a macOS
+  guest via `mac-guest-services.sh`, Scheduled Tasks on a Windows guest. Chrome or Chromium from a deb is preferred over snap
   Chromium, and an upgrade rewrites units and `config.json` whose content changed
 - **Desktop prerequisites** — on Linux, detects whether an X11/VNC stack
   exists and prints the exact packages to install if not; on a macOS guest it
@@ -151,6 +152,7 @@ Useful flags:
 - `--keep-browser`: leave Hermes' built-in browser toolset on.
 - `--keep-computer-use`: deprecated no-op. Setup never disables `computer_use`.
 - `--repo-ref SHA` / `--desktop-ref SHA`: pin this repo and the app repo to a reviewed commit or tag.
+- `--cdp-port PORT`: the managed browser's CDP port (default: keep the configured one, else the first free port from 9223 up; `ALANS_WAY_CDP_PORT` works too).
 - `--mac-key` / `--mac-host-key`: add your computer's pasted SSH key and host key after checking their format.
 - `--dev-plugin-install`: developers only. Installs the computer-use provider from this clone instead of the Hermes catalog.
 
@@ -181,7 +183,7 @@ the VPS and your computer over Tailscale with pinned SSH keys both ways, runs
 the same `setup.sh`, and proves both ends work. The
 `workspace-setup` skill (bundled in the plugin) teaches it the same playbook.
 
-### 3. The desktop app
+### 3. Alan's Workspace (the desktop app)
 
 Download the one-click installer:
 
@@ -212,7 +214,7 @@ The agent setup prompt pins the plugin clone to a release tag (`v` + the
 it to the catalog-recorded commit instead. A bare `setup.sh` run with no
 `--repo-ref` follows `main`.
 
-The desktop app's update popup updates the app and the plugin on every saved VM
+Alan's Workspace's update popup updates the app and the plugin on every saved VM
 over SSH. Nothing to run by hand.
 
 Manual path: `git pull` (or re-run the `curl|bash` line), then restart the
@@ -230,11 +232,11 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
 
-## Hosted / Orgo
+## Orgo / fresh Linux hosts
 
-Two scripts in this repo serve the hosted tier (Hermes + alans-way on an
-[Orgo](https://orgo.ai) computer) and DIY users who want the same hands-off
-path on any fresh Linux box with supervisord.
+Two scripts in this repo serve [Orgo](https://orgo.ai) computers and DIY
+users who want the same hands-off path on any fresh Linux box with
+supervisord.
 
 `bootstrap-orgo.sh` takes a fresh Orgo computer to a running Hermes plus
 alans-way plus Tailscale, then waits for pairing. It installs Hermes with
@@ -274,7 +276,7 @@ Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
 color. Multi-bot setups: run `setup-workspace.sh` once per profile, each with
 its own bot id (the script replaces only its own managed block).
 
-Host path requirements: the alans-way-localapp app running on the user's
+Host path requirements: the Alan's Workspace app running on the user's
 computer, SSH from this host to it (BatchMode/key auth — the probe uses
 `StrictHostKeyChecking`), and the app's bundled `browser-mcp.cjs` (inside the
 installed app, or the copy this repo pushes to the connector directory). On a
@@ -314,8 +316,11 @@ Run a dedicated Chromium there via `deploy/browser-exec-chromium.service`
 reusing the same `vps-chromium-host.cjs` supervisor with
 `deploy/browser-exec-config.json` under
 `$HERMES_VPS_BROWSER_DATA/config.json`. It keeps its own
-`--user-data-dir`; never point browser_exec at :9223, which the workspace
-VPS browser owns.
+`--user-data-dir`. The workspace VPS browser's CDP port is not fixed at
+9223: `setup.sh` honors `--cdp-port`/`ALANS_WAY_CDP_PORT` and picks the
+first free port at or above 9223 when that port is already taken, and the
+chosen port is the `cdpUrl` in that config.json. Never point browser_exec
+at it.
 
 ## Safety model (short version)
 
@@ -346,7 +351,7 @@ migrate.sh            move an existing ~/.hermes to a new computer over ssh
 ## Roadmap
 
 The roadmap lives in the
-[Hermes Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
+[Alan's Way GitHub project](https://github.com/users/capthvnsen/projects/5).
 Fastest updates are on X: [@alexhvnsen](https://x.com/alexhvnsen).
 
 ## Tests

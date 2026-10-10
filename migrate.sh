@@ -12,6 +12,9 @@ set -eEuo pipefail
 TO="" YES=0 DRY_RUN=0
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 REMOTE_HERMES=""
+# Upper bound for the post-stop wait below: Hermes drains up to
+# agent.restart_drain_timeout plus the 30s cron drain (issue #65).
+GONE_WAIT="${ALAN_GATEWAY_GONE_WAIT:-190}"
 
 usage() {
     cat <<'EOF'
@@ -282,205 +285,6 @@ fi
 mv "$staging" "$rhermes"
 touch "$rhermes/.migrated"
 
-# The hosted-relay wiring belongs to THIS computer, not the migrated home:
-# the staged .env/config.yaml carry the source's relay account (or none),
-# which would have the watcher flipping this computer's TTS on the wrong
-# balance. Restore the target's own relay .env keys, its .alan-relay-managed
-# provenance marker, and the marker-managed tts/stt values — everything
-# else in the migrated home still wins.
-if [ -n "$backup" ]; then
-    python3 - "$backup" "$rhermes" <<'PY'
-import json
-import os
-import re
-import shutil
-import sys
-
-backup, target = sys.argv[1:3]
-ENV_KEY = re.compile(
-    r"^\s*(?:export\s+)?(?:ALAN_RELAY_[A-Za-z0-9_]*|VOICE_TOOLS_OPENAI_KEY|"
-    r"TYPESAFE_[A-Za-z0-9_]*|JEV_PROXY_API_KEY)\s*=")
-KEY = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$")
-
-
-def read_lines(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().splitlines()
-    except OSError:
-        return []
-
-
-def unquote(v):
-    v = v.split(" #", 1)[0].strip()
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-        v = v[1:-1]
-    return v
-
-
-def flat_yaml(lines):
-    out = {}
-    stack = []
-    for line in lines:
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip())
-        m = KEY.match(s)
-        if not m:
-            continue
-        while stack and indent <= stack[-1][0]:
-            stack.pop()
-        key, val = m.group(1), m.group(2)
-        path = tuple(k for _, k in stack) + (key,)
-        if val.startswith("{") and val.endswith("}"):
-            for part in val[1:-1].split(","):
-                pm = KEY.match(part.strip())
-                if pm:
-                    out[path + (pm.group(1),)] = unquote(pm.group(2))
-        elif val:
-            out[path] = unquote(val)
-        else:
-            stack.append((indent, key))
-    return out
-
-
-def indent_of(line):
-    return len(line) - len(line.lstrip())
-
-
-def children(lines, start, end):
-    """(index, name) of the first-level keys within [start, end), plus the
-    child indent."""
-    level = None
-    found = []
-    for i in range(start, end):
-        s = lines[i].strip()
-        if not s or s.startswith("#"):
-            continue
-        ind = indent_of(lines[i])
-        if level is None:
-            level = ind
-        if ind != level:
-            continue
-        m = KEY.match(s)
-        if m:
-            found.append((i, m.group(1)))
-    return found, level
-
-
-def block_end(lines, start, parent_indent):
-    """Exclusive end of the block nested deeper than parent_indent."""
-    last = start
-    for i in range(start, len(lines)):
-        s = lines[i].strip()
-        if not s or s.startswith("#"):
-            continue
-        if indent_of(lines[i]) <= parent_indent:
-            break
-        last = i + 1
-    return last
-
-
-def set_key(lines, path, value):
-    """Set a depth-2 or depth-3 block-mapping key, appending whatever part
-    of the path is missing. The managed values are all plain scalars."""
-    lines = list(lines)
-    kids, _ = children(lines, 0, len(lines))
-    ti = next((i for i, name in kids if name == path[0]), None)
-    if ti is None:
-        if len(path) == 2:
-            lines += [f"{path[0]}:", f"  {path[1]}: {value}"]
-        else:
-            lines += [f"{path[0]}:", f"  {path[1]}:",
-                      f"    {path[2]}: {value}"]
-        return lines
-    end = block_end(lines, ti + 1, 0)
-    kids, level = children(lines, ti + 1, end)
-    pad = " " * (level if level is not None else 2)
-    si = next((i for i, name in kids if name == path[1]), None)
-    if len(path) == 2:
-        if si is not None:
-            lines[si] = f"{' ' * indent_of(lines[si])}{path[1]}: {value}"
-        else:
-            lines.insert(end, f"{pad}{path[1]}: {value}")
-        return lines
-    if si is None:
-        lines[end:end] = [f"{pad}{path[1]}:", f"{pad}  {path[2]}: {value}"]
-        return lines
-    si_indent = indent_of(lines[si])
-    if KEY.match(lines[si].strip()).group(2):
-        # `openai: <scalar>` cannot hold children — make it a block.
-        lines[si] = f"{' ' * si_indent}{path[1]}:"
-        lines.insert(si + 1, f"{' ' * (si_indent + 2)}{path[2]}: {value}")
-        return lines
-    sub_end = block_end(lines, si + 1, si_indent)
-    kids, level = children(lines, si + 1, sub_end)
-    li = next((i for i, name in kids if name == path[2]), None)
-    if li is not None:
-        lines[li] = f"{' ' * indent_of(lines[li])}{path[2]}: {value}"
-    else:
-        pad2 = " " * (level if level is not None else si_indent + 2)
-        lines.insert(sub_end, f"{pad2}{path[2]}: {value}")
-    return lines
-
-
-# .env: the target's relay/jev lines replace the migrated ones.
-kept = [l for l in read_lines(os.path.join(backup, ".env"))
-        if ENV_KEY.match(l)]
-t_env = os.path.join(target, ".env")
-if kept:
-    out = [l for l in read_lines(t_env) if not ENV_KEY.match(l)] + kept
-    tmp = t_env + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(out) + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, t_env)
-    print(f"migrate: kept {len(kept)} relay .env key(s) from the target",
-          file=sys.stderr)
-
-# The provenance marker is the target's.
-b_marker = os.path.join(backup, ".alan-relay-managed")
-marker = {}
-try:
-    with open(b_marker, encoding="utf-8") as f:
-        marker = json.load(f)
-    if not isinstance(marker, dict):
-        marker = {}
-except (OSError, ValueError):
-    marker = {}
-if marker:
-    shutil.copyfile(b_marker,
-                    os.path.join(target, ".alan-relay-managed"))
-
-# config.yaml: for a relay-wired target, the managed tts/stt keys keep the
-# target's live values — the watcher may have flipped tts.provider to edge
-# since bootstrap wrote them.
-if kept or marker:
-    MANAGED = ("tts.provider", "tts.openai.model", "tts.openai.base_url",
-               "tts.openai.api_key", "stt.enabled", "stt.provider",
-               "stt.openai.model", "stt.openai.base_url",
-               "stt.openai.api_key")
-    b_flat = flat_yaml(read_lines(os.path.join(backup, "config.yaml")))
-    t_cfg = os.path.join(target, "config.yaml")
-    lines = read_lines(t_cfg)
-    changed = False
-    for key in MANAGED:
-        path = key.split(".")
-        value = b_flat.get(tuple(path))
-        if value is not None:
-            lines = set_key(lines, path, value)
-            changed = True
-    if changed:
-        tmp = t_cfg + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-        os.replace(tmp, t_cfg)
-        print("migrate: kept the target's relay tts/stt config",
-              file=sys.stderr)
-PY
-fi
-
 # The hermes launcher execs $HERMES_HOME/tools/<runtime>/bin/python3 — a path
 # baked into this machine's install. A home packed on another arch carries the
 # source's foreign tool binaries, so the runtimes the launcher needs can be
@@ -503,16 +307,45 @@ log "remote unpack and move succeeded on $TO"
 # runs leaves both polling the same bot. Remember how to start it again in
 # case the remote side never comes up.
 stopped="" start_old=""
-if have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
+if have supervisorctl; then
+    # `stop` escalates SIGTERM to SIGKILL once the program's stopwaitsecs
+    # lapses — the stock 10s on Orgo's own hermes-gateway conf and every
+    # install from before the 180s value — which can kill the gateway
+    # mid-drain and corrupt state.db (issue #65). A Hermes gateway drains
+    # on SIGUSR1 instead: signal it and wait for the old pid to exit (no
+    # kill timer applies to a signaled exit), then let the plain `stop`
+    # below take down the autorestart respawn — a fresh process stops
+    # cleanly inside even 10s. A daemon too old for `signal` skips to the
+    # same stop.
+    gw_pid="$(supervisorctl pid hermes-gateway 2>/dev/null || true)"
+    case "$gw_pid" in ''|*[!0-9]*|0) gw_pid="";; esac
+    if [ -n "$gw_pid" ] && supervisorctl signal USR1 hermes-gateway >/dev/null 2>&1; then
+        tries=0
+        while [ "$(supervisorctl pid hermes-gateway 2>/dev/null || true)" = "$gw_pid" ]; do
+            tries=$((tries + 1))
+            [ "$tries" -lt "$GONE_WAIT" ] \
+                || die "the old gateway is still draining ${GONE_WAIT}s after SIGUSR1; it was left alone, retry the migration when it exits"
+            sleep 1
+        done
+        # autorestart may be about to relaunch it (pid reads 0 between the
+        # exit and the respawn), so always `stop` now: it takes down a fresh
+        # respawn cleanly and keeps supervisord from starting one mid-snapshot.
+        # "not running" is the end state we want, so its exit code is ignored.
+        supervisorctl stop hermes-gateway >/dev/null 2>&1 || true
+        stopped="supervisorctl signal USR1 hermes-gateway"
+        start_old="supervisorctl start hermes-gateway"
+    fi
+fi
+if [ -z "$stopped" ] && have supervisorctl && supervisorctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="supervisorctl stop hermes-gateway"
     start_old="supervisorctl start hermes-gateway"
-elif have systemctl && systemctl --user stop hermes-gateway >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have systemctl && systemctl --user stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl --user stop hermes-gateway"
     start_old="systemctl --user start hermes-gateway"
-elif have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have systemctl && systemctl stop hermes-gateway >/dev/null 2>&1; then
     stopped="systemctl stop hermes-gateway"
     start_old="systemctl start hermes-gateway"
-elif have hermes && hermes gateway stop >/dev/null 2>&1; then
+elif [ -z "$stopped" ] && have hermes && hermes gateway stop >/dev/null 2>&1; then
     stopped="hermes gateway stop"
     # `hermes gateway start` exists in v0.21 but only revives a gateway
     # installed as a service via `hermes gateway install` — `status`
@@ -526,6 +359,19 @@ if [ -z "$stopped" ]; then
     die "could not stop the old gateway — the copy is in place on $TO with its gateway left stopped; stop the old one, then: ssh $TO supervisorctl start hermes-gateway"
 fi
 log "stopped the old gateway: $stopped"
+
+# `supervisorctl stop`, `systemctl stop` and `hermes gateway stop` are not
+# all wait-until-gone — a verb can return while the gateway still drains and
+# checkpoints, and a mid-write copy of state.db is not guaranteed
+# recoverable (issue #65). Wait for the process to actually exit before the
+# snapshot below; the bound covers the whole drain budget plus margin.
+tries=0
+while pgrep -f 'hermes .*gatewa[y] run' >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt "$GONE_WAIT" ] \
+        || die "the old gateway is still running ${GONE_WAIT}s after the stop; it was left alone, retry the migration when it exits"
+    sleep 1
+done
 
 rollback() {
     log "WARNING: $1"
