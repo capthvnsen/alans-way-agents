@@ -3,7 +3,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
 [Discord](https://discord.gg/jBQCPUsVE) · [X @alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
 
-**The plugin half of Alan's Way, the open-source Grokbot killer for stock Hermes.**
+**The plugin half of Alan's Way: fast, reliable browser and computer control for stock Hermes.**
 The companion desktop app, Alan's Workspace, lives at [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way)
 (download at [openalan.com](https://openalan.com)). This repo is what you install
 *on the machine running your Hermes agents* (a Linux VPS, a macOS VM, or a Windows
