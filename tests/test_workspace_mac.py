@@ -1270,6 +1270,36 @@ process.stdout.write(JSON.stringify([
         for text in (mirrored, continued, bare, pending, down):
             self.assertNotIn("—", text)
 
+    def test_changed_tab_ids_ride_every_vps_result_meta(self):
+        out = self.js(r"""
+const r = require(process.argv[1]);
+const fs = require('fs'), os = require('os'), path = require('path');
+const state = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wsr-')), 'mac-state.json');
+fs.writeFileSync(state, JSON.stringify({ state: 'offline', since: 'T0' }));
+const changed = r.tabIdChanges({ map: { 'h-1': 'v-1', 'h-2': 'v-2', 'bad id': 'v-3' } }, 'h-1', 'handoff');
+const small = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'ok' }] } });
+const big = JSON.stringify({ result: { content: [{ type: 'image', data: 'A'.repeat(3000000), mimeType: 'image/png' }] }, jsonrpc: '2.0', id: 2 });
+const meta = (host, line) => JSON.parse(r.makeAnnotator(host, true, state, 'Mac', { tabIdChanged: changed })(line)).result._meta.workspace;
+process.stdout.write(JSON.stringify({
+  changed,
+  continued: r.tabIdChanges({ continued: { url: 'https://docs.example/d', tabId: 'v-9' } }, 'h-4', 'host unreachable'),
+  noLastTab: r.tabIdChanges({ continued: { url: 'https://docs.example/d', tabId: 'v-9' } }, '', 'handoff'),
+  none: r.tabIdChanges({ status: 'pending' }, 'h-1', 'handoff'),
+  small: meta('vps', small).tabIdChanged,
+  big: meta('vps', big).tabIdChanged,
+  mac: meta('mac', small).tabIdChanged || null,
+}));
+""")
+        data = json.loads(out)
+        self.assertEqual(data["changed"], ["[workspace] tab id changed: h-1 -> v-1, reason: handoff",
+                                           "[workspace] tab id changed: h-2 -> v-2, reason: handoff"])
+        self.assertEqual(data["continued"], ["[workspace] tab id changed: h-4 -> v-9, reason: host unreachable"])
+        self.assertEqual(data["noLastTab"], [])
+        self.assertEqual(data["none"], [])
+        self.assertEqual(data["small"], data["changed"])
+        self.assertEqual(data["big"], data["changed"])
+        self.assertIsNone(data["mac"])
+
     def test_only_the_connection_file_error_counts_toward_failover(self):
         out = self.js(r"""
 const r = require(process.argv[1]);

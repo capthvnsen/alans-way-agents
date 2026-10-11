@@ -825,7 +825,23 @@ function continuationNotice(c, label = 'Mac') {
   return `[workspace] the ${label} browser did not answer in time; work moved to the VPS browser. ${detail}`;
 }
 
-const workspaceMeta = (host, mac, ms) => (ms === undefined ? { host, mac } : { host, mac, ms });
+// One line per tab whose id the handoff changed. A mirror restore names each
+// pair; a single continued page stands in for the tab the agent last used,
+// since the VPS connector carries calls aimed at a host tab onto it.
+function tabIdChanges(c, lastTab, reason) {
+  const idOk = (v) => typeof v === 'string' && /^[\w-]{1,100}$/.test(v);
+  const pairs = Object.entries((c && c.map) || {}).filter(([a, b]) => idOk(a) && idOk(b) && a !== b).slice(0, 20);
+  if (!pairs.length && c && c.continued && idOk(c.continued.tabId) && idOk(lastTab) && lastTab !== c.continued.tabId) {
+    pairs.push([lastTab, c.continued.tabId]);
+  }
+  return pairs.map(([a, b]) => `[workspace] tab id changed: ${a} -> ${b}, reason: ${reason}`);
+}
+
+function workspaceMeta(host, mac, ms, tabIdChanged) {
+  const meta = ms === undefined ? { host, mac } : { host, mac, ms };
+  if (host === 'vps' && tabIdChanged && tabIdChanged.length) meta.tabIdChanged = tabIdChanged;
+  return meta;
+}
 
 // Older connectors still declare open's `host` as Ignored; the router routes
 // it now, so the advertised schema says what it does.
@@ -867,14 +883,14 @@ function rewriteTabDefaults(result) {
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
-function annotateResult(msg, host, mac, notice, ms) {
+function annotateResult(msg, host, mac, notice, ms, tabIdChanged) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
     msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
   }
-  msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms) };
+  msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms, tabIdChanged) };
   if (notice && Array.isArray(msg.result.content)) {
     msg.result.content = [...msg.result.content, { type: 'text', text: notice }];
   }
@@ -895,9 +911,9 @@ function resultShape(line) {
   return null;
 }
 
-function appendResultMeta(line, shape, host, mac, notice, ms) {
+function appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged) {
   const extra = notice ? `,${JSON.stringify({ type: 'text', text: notice })}` : '';
-  const meta = `],"_meta":${JSON.stringify({ workspace: workspaceMeta(host, mac, ms) })}}`;
+  const meta = `],"_meta":${JSON.stringify({ workspace: workspaceMeta(host, mac, ms, tabIdChanged) })}}`;
   if (shape === 'id-first') return `${line.slice(0, -3)}${extra}${meta}}`;
   const tail = RESULT_SDK_TAIL.exec(line.slice(-120))[0];
   return `${line.slice(0, line.length - tail.length)}${extra}${meta}${tail.slice(2)}`;
@@ -908,7 +924,9 @@ function appendResultMeta(line, shape, host, mac, notice, ms) {
 // fires once per online transition while the offline one rides every tool
 // result, since either may be the agent's only signal that host changed.
 // ctx.botId scopes the resume file; ctx.takeMoveNotice() yields the one-shot
-// failover notice; ctx.restoredNote says which tabs the VPS browser restored.
+// failover notice; ctx.restoredNote says which tabs the VPS browser restored;
+// ctx.tabIdChanged rides every VPS result's _meta so an agent holding an old
+// host tab id learns of the change before it acts on that id.
 function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) {
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile, ctx.botId);
@@ -948,8 +966,8 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
       }
     }
     if (notice && ms !== undefined) notice += ` (took ${ms}ms)`;
-    if (shape) return appendResultMeta(line, shape, host, mac, notice, ms);
-    return JSON.stringify(annotateResult(msg, host, mac, notice, ms));
+    if (shape) return appendResultMeta(line, shape, host, mac, notice, ms, ctx.tabIdChanged);
+    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, ctx.tabIdChanged));
   };
 }
 
@@ -1089,6 +1107,7 @@ async function main() {
     botId,
     failedOver: false,
     restoredNote: null,
+    tabIdChanged: null,
     moveNotice: null,
     takeMoveNotice() {
       const notice = this.moveNotice;
@@ -1332,7 +1351,7 @@ async function main() {
         `This action was in flight when the ${hostName} connection dropped. It may or may not have happened and was NOT retried. ` +
         `${notice} Check the page in the VPS tab before repeating it.`;
       const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
-      process.stdout.write(`${JSON.stringify(annotateResult(msg, 'vps', mac, null))}\n`);
+      process.stdout.write(`${JSON.stringify(annotateResult(msg, 'vps', mac, null, undefined, annotCtx.tabIdChanged))}\n`);
     }
   }
 
@@ -1356,6 +1375,7 @@ async function main() {
         replayHandshake(spawnVps(continuation.args), pending);
       }
       annotCtx.restoredNote = continuationDetail(continuation, hostName);
+      annotCtx.tabIdChanged = tabIdChanges(continuation, currentTabId, annotCtx.failedOver ? 'handoff' : 'host unreachable');
       if (annotCtx.failedOver) {
         const notice = continuationNotice(continuation, hostName);
         if (lostSent || !lost.length) annotCtx.moveNotice = notice;
@@ -2127,6 +2147,7 @@ module.exports = {
   readMacState,
   freshMacState,
   workspaceNotice,
+  tabIdChanges,
   pageUrlFromMessage,
   readResume,
   readResumeRecord,
