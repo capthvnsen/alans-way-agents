@@ -63,6 +63,13 @@ _NEXT = {
     "focus_unverified": "Capture again, then retry once.",
 }
 CHANGES_SHOWN = 12
+# Only the mac helper keeps a ref on its own control across generations; Windows and the VPS number refs by
+# position and guard them with a whole-tree generation check, so there a reply is described, never folded in.
+_STABLE_REFS = {"mac"}
+# ponytail: one share and one reach for every app, tune them if real apps misjudge. Measured coverage: the bench
+# fixture 0.41, Calculator 0.52, Messages 0.61, Finder 0.88, and Preview showing a PDF (pixels) 0.31.
+MIN_COVERAGE = 0.35  # share of the window named controls must cover for som to leave the screenshot out
+NEAR = 120  # screen points around the acted-on control in which a change counts as the action's effect
 _LOST = ("NOT retried", "connection dropped")
 _MANAGED = {"node", "npm", "npx", "uv", "uvx"}
 
@@ -281,6 +288,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         self._tree = None  # {"pid", "gen", "els"}: the elements the model's indexes refer to
         self._shot = None  # window geometry of the last screenshot; None means coordinates are screen pixels
         self._last_target = self._last_app = None
+        self._os = None  # the apps reply's host: mac, windows, linux or vps; None until list_apps answers
 
     def _seen(self, host):
         """Note which machine answered. True when it is not the one the current state came from (state is dropped)."""
@@ -323,8 +331,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
             raise RuntimeError(str(e)) from e
         except _Dead as e:
             raise RuntimeError(f"workspace router: {e}") from e
+        body = _json(texts[0] if texts else "")
+        self._os = body.get("host") if isinstance(body.get("host"), str) else None
         return [{"name": a.get("name", ""), "bundle_id": a.get("bundleId", ""), "pid": a.get("pid"),
-                 "frontmost": bool(a.get("frontmost"))} for a in _json(texts[0] if texts else "").get("apps", [])]
+                 "frontmost": bool(a.get("frontmost"))} for a in body.get("apps", [])]
 
     def _resolve(self, app):
         wanted = app.strip().lower()
@@ -388,12 +398,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 els, gen = self._tree["els"], self._tree["gen"]
             else:
                 els, gen, kept = body.get("elements") or [], body.get("generation"), _tree_notes(body)
-        # Named controls are enough to act on, and a screenshot costs ~1.2k tokens: som takes one only when the
-        # tree names nothing (empty, another Space, a canvas app).
-        tree_only = mode == "ax" or (mode == "som" and any(e and e.get("name") for e in els))
+        named = any(map(_readable, els))
         png = mime = shot = None
         width = height = 0
-        if not tree_only:
+        if mode != "ax":
             try:
                 items, shot_texts, _ = self._read("workspace_computer_screenshot", {"pid": pid}, before)
                 image = next(i for i in items if i.get("type") == "image")
@@ -407,17 +415,24 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 why = _coded(str(e), e.code)[1] if isinstance(e, _ToolError) else str(e)
                 if mode == "vision":
                     raise RuntimeError(f"screenshot failed: {why}") from e
-                png = mime = None
-                width = height = 0
-                notes.append(f"Screenshot unavailable: {why}" + (" Use the element list." if els else ""))
+                if not named:
+                    notes.append(f"Screenshot unavailable: {why}")
+        # The screenshot is fetched for its window size; the model gets it (~1.2k tokens) only when named
+        # controls leave most of the window unexplained: a canvas, a game, a web area.
+        coverage = _coverage(els, shot) if mode == "som" and png and named else None
+        if coverage is not None and coverage >= MIN_COVERAGE:
+            png = mime = shot = None
+            width = height = 0
         self._target(pid, name)
         self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els, "notes": kept} if mode != "vision" else self._tree), shot
         if shot:
             notes.insert(0, "No numbered overlays are drawn: use the element numbers listed. Coordinates are screenshot pixels."
                          if mode != "vision" else "Coordinates are screenshot pixels; bounds in earlier element lists were screen pixels.")
-        elif mode == "som" and tree_only:
-            notes.insert(0, "No screenshot was taken: the list names the controls, so act on element numbers. Bounds and coordinate= "
-                         "are screen pixels. capture(mode='vision') shows the window if you need to see it.")
+            if coverage is not None:
+                notes.insert(0, f"Named controls cover only {coverage:.0%} of the window, so the screenshot is attached.")
+        elif mode == "som" and named:
+            notes.insert(0, "No screenshot is attached: act on element numbers. Bounds and coordinate= are screen pixels. "
+                         "capture(mode='vision') shows the window if you need to see it.")
         elif mode == "ax":
             notes.insert(0, "No screenshot: element bounds and coordinate= are screen pixels.")
         if mode != "vision":
@@ -477,10 +492,11 @@ class AlansWayComputerBackend(ComputerUseBackend):
 
     def _merge(self, body):
         """Fold an action reply into the element list the model's numbers refer to; returns [(number, element)] that
-        are new or changed, and how many disappeared. A gone element leaves a None slot so no number ever shifts."""
+        are new or changed, and [(number, element)] that disappeared. A gone element leaves a None slot so no number
+        ever shifts. Only for hosts in _STABLE_REFS."""
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree is None or body.get("unchanged") or not isinstance(body.get("generation"), int):
-            return [], 0
+            return [], []
         els = tree["els"]
         at = {e["ref"]: i for i, e in enumerate(els) if e is not None}
         if isinstance(body.get("elements"), list):
@@ -490,8 +506,11 @@ class AlansWayComputerBackend(ComputerUseBackend):
         else:
             gone = [ref for ref in body.get("removed") or [] if ref in at]
             changed = body.get("changed") or []
+        lost = []
         for ref in gone:
-            els[at.pop(ref)] = None
+            i = at.pop(ref)
+            lost.append((i + 1, els[i]))
+            els[i] = None
         out = []
         for e in changed:
             if e["ref"] in at:
@@ -501,13 +520,34 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 at[e["ref"]] = len(els) - 1
             out.append((at[e["ref"]] + 1, e))
         tree["gen"], tree["notes"] = body["generation"], _tree_notes(body)
-        return out, len(gone)
+        return out, lost
+
+    def _diff(self, body):
+        """For hosts whose refs follow position: ([appeared], [vanished]) by role and label against the held list,
+        which stays as it is, generation included, so the helper's whole-tree check still refuses an old number."""
+        tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
+        if tree is None or body.get("unchanged") or not isinstance(body.get("generation"), int):
+            return [], []
+        old = [e for e in tree["els"] if e is not None]
+        if isinstance(body.get("elements"), list):
+            new = body["elements"]
+        else:
+            by_ref = {e["ref"]: e for e in old}
+            for ref in body.get("removed") or []:
+                by_ref.pop(ref, None)
+            by_ref.update((e["ref"], e) for e in body.get("changed") or [])
+            new = list(by_ref.values())
+        was, now = collections.Counter(map(_key, old)), collections.Counter(map(_key, new))
+        return _pick(new, now - was), _pick(old, was - now)
 
     def _run(self, action, step):
         if self._pid is None:
             return self._no_target(action)
-        if self._tree and self._tree["pid"] == self._pid and self._tree["gen"] is not None:
-            step["generation"] = self._tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
+        tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
+        if tree and tree["gen"] is not None:
+            step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
+        acted = next((e for e in tree["els"] if e and e["ref"] == step["ref"]), None) if tree and "ref" in step else None
+        box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
         before = self._host
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
@@ -523,20 +563,25 @@ class AlansWayComputerBackend(ComputerUseBackend):
                               "at an app that no longer exists there and may not have happened. App ids and element numbers are gone: "
                               "call list_apps and capture again.")
         body = _json(texts[0] if texts else "")
-        held = self._tree["notes"] if self._tree and self._tree["pid"] == self._pid else []
-        changed, gone = self._merge(body)
-        parts = [f"{action} sent to {self._app}."]
-        if changed or gone:
-            shown = "; ".join(f"#{i} {e.get('role', '')} {_label(e)[:80]!r}" for i, e in changed[:CHANGES_SHOWN])
-            parts.append("The element list is updated, so no capture is needed to read the result.")
-            parts += [f"Changed: {shown}." if changed else "",
-                      f"{len(changed) - CHANGES_SHOWN} more changed; capture to list them." if len(changed) > CHANGES_SHOWN else "",
-                      f"{gone} element(s) disappeared; their numbers are gone." if gone else ""]
-        elif body.get("unchanged"):
+        held = tree["notes"] if tree else []
+        parts, effect = [f"{action} sent to {self._app}."], None
+        if self._os in _STABLE_REFS:
+            changed, gone = self._merge(body)
+            if changed or gone:
+                parts.append("The element list is updated, so no capture is needed to read the result.")
+                parts += [f"Changed: {_listed(changed)}." if changed else "", f"Gone: {_listed(gone)}." if gone else ""]
+                # A ticking clock elsewhere also changes: only a change at or near the target confirms the action.
+                if any(e.get("ref") == step.get("ref") or _near(e, box) for _, e in changed + gone):
+                    effect = "confirmed"
+        else:
+            appeared, vanished = self._diff(body)
+            if appeared or vanished:
+                parts += [f"Now shown: {_listed(appeared)}." if appeared else "", f"Gone: {_listed(vanished)}." if vanished else "",
+                          "Element numbers here follow position and may now point at other controls: capture before acting by number."]
+        if body.get("unchanged"):
             parts.append("The app's element tree did not change. If the effect only shows in pixels, capture(mode='vision') to check before retrying.")
         parts += [*(n for n in _tree_notes(body) if n not in held), *texts[1:]]
-        return ActionResult(ok=True, action=action, message=" ".join(p for p in parts if p),
-                            effect="confirmed" if changed or gone else None,
+        return ActionResult(ok=True, action=action, message=" ".join(p for p in parts if p), effect=effect,
                             meta={k: v for k, v in (("host", host), ("generation", body.get("generation"))) if v is not None})
 
     def _by_element_or_point(self, action, step, element, x, y):
@@ -624,6 +669,50 @@ def _coded(text, code=None):
     else:
         code, message = next((c for needle, c in _INFER if needle in text.lower()), "failed"), text
     return code, f"{message} {_NEXT[code]}" if code in _NEXT else message
+
+
+def _readable(e):
+    return bool(e and (e.get("name") or e.get("value")))
+
+
+def _key(e):
+    return e.get("role", ""), _label(e)
+
+
+def _pick(els, extra):
+    """The elements of els that account for the counts in extra, a Counter of _key."""
+    out = []
+    for e in els:
+        if extra[_key(e)] > 0:
+            extra[_key(e)] -= 1
+            out.append(e)
+    return out
+
+
+def _box(e):
+    return (e["x"], e["y"], e["x"] + e["width"], e["y"] + e["height"]) if all(k in e for k in ("x", "y", "width", "height")) else None
+
+
+def _near(e, box):
+    """True when e lies within NEAR screen points of the acted-on box."""
+    b = _box(e)
+    return bool(box and b) and b[0] < box[2] + NEAR and box[0] - NEAR < b[2] and b[1] < box[3] + NEAR and box[1] - NEAR < b[3]
+
+
+def _coverage(els, shot):
+    """Share of the window, sampled on a 40x40 grid, that readable elements cover; 0 without window geometry."""
+    if not shot:
+        return 0.0
+    boxes = [b for b in (_box(e) for e in els if _readable(e)) if b]
+    points = [(shot["wx"] + (i + .5) * shot["ww"] / 40, shot["wy"] + (j + .5) * shot["wh"] / 40) for i in range(40) for j in range(40)]
+    return sum(any(x0 <= x < x1 and y0 <= y < y1 for x0, y0, x1, y1 in boxes) for x, y in points) / len(points)
+
+
+def _listed(pairs_or_els):
+    """'#3 AXRow 'name'; ...' for (number, element) pairs, or 'AXRow 'name'' for bare elements, at most CHANGES_SHOWN."""
+    shown = [(f"#{x[0]} ", x[1]) if isinstance(x, tuple) else ("", x) for x in pairs_or_els]
+    text = "; ".join(f"{n}{e.get('role', '')} {_label(e)[:80]!r}" for n, e in shown[:CHANGES_SHOWN])
+    return text + (f"; and {len(shown) - CHANGES_SHOWN} more (capture to list them)" if len(shown) > CHANGES_SHOWN else "")
 
 
 def _tree_notes(body):

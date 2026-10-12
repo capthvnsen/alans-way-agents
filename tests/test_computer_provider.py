@@ -63,8 +63,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (c.host) { s.host = c.host; save(s); }
   if (c.bump) { s.generation += 1; save(s); }
   if (c.noshot !== undefined) { s.noshot = c.noshot; save(s); }
+  if (c.os) { s.os = c.os; save(s); }
   let result;
-  if (name === 'workspace_computer_apps') result = text({ apps: APPS });
+  if (name === 'workspace_computer_apps') result = text({ host: s.os || 'mac', apps: APPS });
   else if (c.error) result = fail(c.error);
   else if (args.pid === 103) result = fail('That app is the one in front. Leave it there; the pointer stays where it is.');
   else if (name === 'workspace_computer_snapshot') result = c.snap ? text({ ...tree(s.generation), ...c.snap })
@@ -177,6 +178,9 @@ m = mark(); R["type_text_mac"] = plain(be.type_text("hi")); R["type_text"] = act
 def captured(cap, m):
     return {"png": bool(cap.png_b64), "w": cap.width, "elements": [[e.index, e.label, list(e.bounds)] for e in cap.elements],
             "note": cap.note, "calls": [c["name"] for c in calls(m)]}
+full = [{"ref": "c1", "role": "AXTextArea", "name": "Body", "x": 100, "y": 100, "width": 960, "height": 600}]
+CTL.write_text(json.dumps({"snap": {"generation": 89, "elements": full}}))
+m = mark(); R["som_full"] = captured(be.capture(mode="som", pid=101), m)
 unnamed = [{"ref": "c1", "role": "AXGroup", "name": "", "x": 300, "y": 250, "width": 100, "height": 40}]
 CTL.write_text(json.dumps({"snap": {"generation": 90, "elements": unnamed, "hidden": 12}}))
 m = mark(); R["som_unnamed"] = captured(be.capture(mode="som", pid=101), m)
@@ -199,6 +203,9 @@ CTL.write_text(json.dumps({"reply": {"changed": [], "removed": [], "hidden": 4}}
 m = mark(); be.click(element=4); R["delta_new_call"] = action_calls(m)
 m = mark(); R["delta_capture"] = captured(be.capture(mode="ax"), m)
 R["delta_gen"] = [gen, be._tree["gen"]]
+CTL.write_text(json.dumps({"reply": {"removed": [], "changed": [
+    {"ref": "c2", "role": "AXTextField", "name": "Title", "value": "tick", "x": 1000, "y": 650, "width": 50, "height": 20}]}}))
+R["far"] = plain(be.click(element=1))
 CTL.write_text(json.dumps({"reply": {"unchanged": True}}))
 R["unchanged"] = plain(be.click(element=1))
 CTL.write_text(json.dumps({"reply": {"elements": [
@@ -222,6 +229,20 @@ try:
     be.capture(mode="som", pid=101); R["err_capture"] = None
 except Exception as e:
     R["err_capture"] = str(e)
+
+# --- Windows and the VM desktop number refs by position: a reply is described, the old generation is kept
+CTL.write_text(json.dumps({"os": "windows"})); be.list_apps()
+rows = [{"ref": f"c{i}", "role": "AXRow", "name": n, "x": 100, "y": 100 + 30 * i, "width": 300, "height": 30}
+        for i, n in enumerate(["a.txt", "b.txt", "c.txt", "d.txt"], 1)]
+CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
+win_gen = be._tree["gen"]
+CTL.write_text(json.dumps({"reply": {"elements": [dict(r, name=n) for r, n in zip(rows, ["a.txt", "c.txt", "d.txt"])]}}))
+m = mark()
+R["win_delete"] = plain(be.click(element=2))  # deletes b.txt: c.txt is now c2, d.txt is c3
+R["win_third"] = plain(be.click(element=3))  # the model's #3 was c.txt; c3 is now d.txt
+R["win_calls"] = action_calls(m)
+R["win_gen"] = [win_gen, be._tree["gen"], [e["name"] for e in be._tree["els"]]]
+CTL.write_text(json.dumps({"os": "mac"})); be.list_apps()
 
 # --- unsupported actions never reach the router
 m = mark()
@@ -488,7 +509,7 @@ class ReplyFoldingTests(unittest.TestCase):
         changed, gone = be._merge({"generation": 2, "changed": [{"ref": "b", "role": "AXButton", "name": "B2"},
                                                                 {"ref": "d", "role": "AXButton", "name": "D"}], "removed": ["a"]})
         self.assertEqual([(i, e["name"]) for i, e in changed], [(2, "B2"), (4, "D")])
-        self.assertEqual(gone, 1)
+        self.assertEqual([(i, e["name"]) for i, e in gone], [(1, "A")])
         self.assertEqual([e and e["name"] for e in be._tree["els"]], [None, "B2", "C", "D"])
         self.assertEqual(be._tree["gen"], 2)
         self.assertIsNone(be._element(1))
@@ -500,17 +521,38 @@ class ReplyFoldingTests(unittest.TestCase):
                                                                  {"ref": "a", "role": "AXButton", "name": "A!"},
                                                                  {"ref": "e", "role": "AXButton", "name": "E"}]})
         self.assertEqual([(i, e["name"]) for i, e in changed], [(1, "A!"), (4, "E")])
-        self.assertEqual(gone, 1)
+        self.assertEqual([i for i, _ in gone], [2])
         self.assertEqual([e and e["name"] for e in be._tree["els"]], ["A!", None, "C", "E"])
 
     def test_unchanged_a_missing_tree_or_another_app_leaves_the_list_alone(self):
         for body in ({"unchanged": True, "generation": 1}, {"note": "unresponsive: no tree"}):
             be = self.backend(["a"])
-            self.assertEqual(be._merge(body), ([], 0))
+            self.assertEqual(be._merge(body), ([], []))
             self.assertEqual((be._tree["gen"], len(be._tree["els"])), (1, 1))
         be = self.backend(["a"])
         be._pid = 202
-        self.assertEqual(be._merge({"generation": 2, "changed": [{"ref": "z", "name": "Z"}], "removed": []}), ([], 0))
+        self.assertEqual(be._merge({"generation": 2, "changed": [{"ref": "z", "name": "Z"}], "removed": []}), ([], []))
+
+    def test_positional_hosts_get_a_label_diff_and_keep_their_list(self):
+        be = self.backend(["c1", "c2", "c3", "c4"])
+        for e, name in zip(be._tree["els"], ["a", "b", "c", "d"]):
+            e["name"] = name
+        shifted = [{"ref": r, "role": "AXButton", "name": n} for r, n in (("c1", "a"), ("c2", "c"), ("c3", "d"))]
+        appeared, vanished = be._diff({"generation": 2, "elements": shifted})
+        self.assertEqual((appeared, [e["name"] for e in vanished]), ([], ["b"]))
+        self.assertEqual(([e["name"] for e in be._tree["els"]], be._tree["gen"]), (["a", "b", "c", "d"], 1))
+        appeared, vanished = be._diff({"generation": 2, "changed": [{"ref": "c2", "role": "AXButton", "name": "B!"}], "removed": ["c4"]})
+        self.assertEqual(([e["name"] for e in appeared], sorted(e["name"] for e in vanished)), (["B!"], ["b", "d"]))
+
+    def test_coverage_and_nearness(self):
+        shot = {"wx": 0, "wy": 0, "ww": 100, "wh": 100}
+        half = [{"name": "Left", "x": 0, "y": 0, "width": 50, "height": 100}, {"name": "", "x": 50, "y": 0, "width": 50, "height": 100}]
+        self.assertAlmostEqual(self.mod._coverage(half, shot), 0.5)
+        self.assertEqual(self.mod._coverage(half, None), 0.0)
+        near = self.mod._near
+        self.assertTrue(near({"x": 200, "y": 0, "width": 10, "height": 10}, (0, 0, 100, 10)))
+        self.assertFalse(near({"x": 300, "y": 0, "width": 10, "height": 10}, (0, 0, 100, 10)))
+        self.assertFalse(near({"name": "no geometry"}, (0, 0, 100, 10)))
 
     def test_error_texts_map_to_codes_with_a_next_step(self):
         coded = self.mod._coded
@@ -601,15 +643,22 @@ class ProviderTests(unittest.TestCase):
     def test_list_apps(self):
         self.assertEqual(self.r["apps"][0], {"name": "Notes", "bundle_id": "com.apple.Notes", "pid": 101, "frontmost": False})
 
-    def test_som_capture_of_a_named_tree_skips_the_screenshot(self):
+    def test_som_capture_attaches_the_screenshot_when_named_controls_cover_little_of_the_window(self):
         som = self.r["som"]
-        self.assertEqual((som["mode"], som["w"], som["h"], som["mime"], som["png"], som["app"]), ("som", 0, 0, None, False, "Notes"))
-        self.assertEqual(som["elements"][0], [1, "AXButton", "Save", [300, 250, 100, 40]])
+        self.assertEqual((som["mode"], som["w"], som["h"], som["mime"], som["png"], som["app"]), ("som", 480, 300, "image/jpeg", True, "Notes"))
+        # screen (300,250,100,40) in a window at (100,100) 960x600 shown at 480x300 is (100,75,50,20)
+        self.assertEqual(som["elements"][0], [1, "AXButton", "Save", [100, 75, 50, 20]])
         self.assertEqual(som["elements"][2][3], [0, 0, 0, 0])
-        self.assertEqual([name for name, _ in som["calls"]], ["workspace_computer_apps", "workspace_computer_snapshot"])
-        self.assertIn("capture(mode='vision')", som["note"])
-        self.assertIn("screen pixels", som["note"])
+        self.assertEqual([name for name, _ in som["calls"]], ["workspace_computer_apps", "workspace_computer_snapshot", "workspace_computer_screenshot"])
+        self.assertIn("Named controls cover only 2% of the window, so the screenshot is attached.", som["note"])
         self.assertEqual(self.r["target"], [{"pid": 101, "window_id": 0}, "Notes"])
+
+    def test_som_capture_of_a_tree_that_fills_the_window_leaves_the_screenshot_out(self):
+        som = self.r["som_full"]
+        self.assertEqual((som["png"], som["w"]), (False, 0))
+        self.assertEqual(som["elements"], [[1, "Body", [100, 100, 960, 600]]])
+        self.assertIn("No screenshot is attached", som["note"])
+        self.assertIn("capture(mode='vision')", som["note"])
 
     def test_som_capture_of_an_unnamed_tree_adds_the_screenshot_and_converts_bounds(self):
         som = self.r["som_unnamed"]
@@ -636,8 +685,11 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(delta["effect"], "confirmed")
         self.assertIn("#2 AXTextField 'Title = bye'", delta["message"])
         self.assertIn("#4 AXButton 'Done'", delta["message"])
-        self.assertIn("1 element(s) disappeared", delta["message"])
+        self.assertIn("Gone: #3 AXStaticText 'No geometry'.", delta["message"])
         self.assertIn("4 more controls are scrolled out of view", delta["message"])
+        far = self.r["far"]
+        self.assertIn("#2 AXTextField 'Title = tick'", far["message"])
+        self.assertIsNone(far["effect"])  # only a change far from the pressed control: not proof it landed
         self.assertIn("no capture is needed", delta["message"])
         gen, held = self.r["delta_gen"]
         self.assertEqual(self.r["delta_call"][0]["generation"], gen)
@@ -657,9 +709,23 @@ class ProviderTests(unittest.TestCase):
         whole = self.r["whole"]
         self.assertIn("#1 AXButton 'Saved'", whole["message"])
         self.assertNotIn("Done", whole["message"])  # c4 is the same, so it is not listed as changed
-        self.assertIn("1 element(s) disappeared", whole["message"])
+        self.assertIn("Gone: #2 AXTextField 'Title = tick'.", whole["message"])
         self.assertIn("unresponsive", self.r["no_tree"]["message"])
         self.assertIsNone(self.r["no_tree"]["effect"])
+
+    def test_positional_refs_keep_the_old_generation_so_a_shifted_number_is_refused(self):
+        r = self.r
+        delete = r["win_delete"]
+        self.assertTrue(delete["ok"])
+        self.assertIn("Gone: AXRow 'b.txt'.", delete["message"])
+        self.assertIn("capture before acting by number", delete["message"])
+        self.assertNotIn("#", delete["message"])
+        self.assertIsNone(delete["effect"])
+        gen, held, names = r["win_gen"]
+        self.assertEqual(held, gen)
+        self.assertEqual(names, ["a.txt", "b.txt", "c.txt", "d.txt"])
+        self.assertEqual(r["win_calls"][1], {"pid": 101, "action": "press", "ref": "c3", "generation": gen})
+        self.assertEqual((r["win_third"]["ok"], r["win_third"]["code"]), (False, "stale_ref"))
 
     def test_each_error_code_says_the_next_step(self):
         r = self.r
@@ -815,7 +881,7 @@ class ProviderTests(unittest.TestCase):
     def test_tool_handler_end_to_end(self):
         r = self.r
         self.assertIn("Save", r["e2e_capture"])
-        self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101]])
+        self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101], ["workspace_computer_screenshot", 101]])
         self.assertIn('"ok": true', r["e2e_click"].lower().replace('\\"', '"'))
         self.assertNotIn("unsupported_action", r["e2e_type"])
 

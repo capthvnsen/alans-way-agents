@@ -24,10 +24,13 @@ Hermes the plugin installs and logs that it did nothing.
   falls back to the VM desktop when that fails. A dead or silent router is restarted on the next call.
 - Never takes focus. Input is delivered in the background, `focus_app` only chooses which app later actions
   target, and foreground delivery is refused. Keychains, password managers and password fields are off limits.
-- `capture` (`mode="som"`) returns the element list alone when it names controls; it adds a window screenshot only
-  when the list names nothing. `mode="vision"` is the screenshot alone.
-- Each action's reply says which element numbers changed or disappeared and updates the list in place, so a number
-  keeps meaning the same control and no capture is needed to read the result.
+- `capture` (`mode="som"`) returns the element list alone when its named controls cover most of the window; when
+  they don't (a canvas, a game, a web area) it attaches the window screenshot and says why. `mode="vision"` is the
+  screenshot alone.
+- On a Mac, each action's reply says which element numbers changed or disappeared and updates the list in place, so
+  a number keeps meaning the same control and no capture is needed to read the result. Windows and the VM desktop
+  number controls by position, so there the reply describes the change and asks for a capture before acting by
+  number again.
 - Errors carry a code and, where there is one, the next step: `locked`, `in_front` and `no_window` mean asking the
   user; `stale_ref` means capture again. A capture of an app whose windows are on another Space says so in its note.
 - After a switch between the computer and the VM, app ids and element numbers no longer mean anything. The

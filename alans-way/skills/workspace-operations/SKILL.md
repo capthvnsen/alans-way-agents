@@ -285,11 +285,12 @@ Desktop apps, on the Mac and on the Linux machine, are driven by the
 that approval gate is the only desktop-input path, so never look for a way
 around it. `computer_use` `list_apps` names the running apps; `capture` with
 `app` returns one app's numbered element list, with a small window
-screenshot only when the list names nothing (`mode="vision"` asks for one);
+screenshot only when its named controls leave most of the window unexplained
+(`mode="vision"` asks for one);
 `click`, `double_click`, `right_click`, `drag`, `scroll`, `key`,
 `set_value` and `focus_app` act on element numbers or coordinates. Each
-action's reply lists the element numbers that changed, so do not capture
-again just to read the result. `set_value` replaces a field's text; free typing with no target
+action's reply lists what changed, so do not capture again just to read
+the result; on Windows and the VM desktop, capture before acting by number again. `set_value` replaces a field's text; free typing with no target
 element is not available because nothing takes focus. A stale element
 number comes back `stale_ref`, and a switch between the computer and the VM
 comes back `host_changed`: `list_apps` and `capture` again. To look without
