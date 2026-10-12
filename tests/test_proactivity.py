@@ -1,5 +1,5 @@
 """Idle nudge: schedule math, activity, runtime and tool contracts."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -99,7 +99,8 @@ class ValidateTests(unittest.TestCase):
                     {"base_minutes": 5}, {"base_minutes": True}, {"base_minutes": 2000},
                     {"active_start": 24}, {"active_start": 8, "active_end": 8},
                     {"paused_until": "tomorrow"}, {"paused_until": "2026-10-08T09:00"},
-                    {"level": "max"}, {"nonsense": 1}, "not a dict"):
+                    {"level": "max"}, {"nonsense": 1}, {"morning_brief": "yes"},
+                    {"morning_brief": 1}, "not a dict"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 P.validate(P.Settings(), bad)
 
@@ -127,9 +128,13 @@ class LoosensTests(unittest.TestCase):
             (P.Settings(active_start=9, active_end=21), None),
             (P.Settings(active_start=7), "/proactivity hours 7-22"),
             (P.Settings(active_end=23), "/proactivity hours 8-23"),
+            (P.Settings(morning_brief=True), "/proactivity brief on"),
         ):
             with self.subTest(new=new):
                 self.assertEqual(P.loosens(s, new, self.NOW), expected)
+
+    def test_turning_the_brief_off_is_quieter(self):
+        self.assertIsNone(P.loosens(P.Settings(morning_brief=True), P.Settings(), self.NOW))
 
     def test_a_lower_base_suggests_the_nearest_level(self):
         self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(),
@@ -500,10 +505,11 @@ class ToolTests(unittest.TestCase):
             out = json.loads(p.tool({"action": "set"}))
         self.assertEqual(out, {"ok": False, "error": "set needs at least one setting"})
 
-    def test_schema_exposes_the_six_fields_beside_action(self):
+    def test_schema_exposes_the_seven_fields_beside_action(self):
         props = P.SCHEMA["parameters"]["properties"]
         self.assertNotIn("settings", props)
-        for name in ("level", "base_minutes", "active_start", "active_end", "timezone", "paused_until"):
+        for name in ("level", "base_minutes", "active_start", "active_end", "timezone", "paused_until",
+                     "morning_brief"):
             self.assertIn(name, props)
         self.assertEqual(props["level"]["enum"], list(P.LEVELS))
         self.assertEqual((props["base_minutes"]["minimum"], props["base_minutes"]["maximum"]), (15, 1440))
@@ -570,6 +576,19 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(out["ask_user_to_send"], "/proactivity resume")
         self.assertEqual(p.settings(p.load()).paused_until, "off")
 
+    def test_set_cannot_turn_the_brief_on_but_can_turn_it_off(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "morning_brief": True}))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["ask_user_to_send"], "/proactivity brief on")
+        self.assertFalse(p.settings(p.load()).morning_brief)
+        p.update({"morning_brief": True})
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "morning_brief": False}))
+        self.assertTrue(out["ok"])
+        self.assertFalse(p.settings(p.load()).morning_brief)
+
 
 class CommandTests(unittest.TestCase):
     """`/proactivity ...`: the operator path inside the chat. Plain text, never raises."""
@@ -595,6 +614,8 @@ class CommandTests(unittest.TestCase):
             ("hours 9-21", {}, lambda s: (s.active_start, s.active_end) == (9, 21)),
             ("tz Asia/Tokyo", {}, lambda s: s.timezone == "Asia/Tokyo"),
             ("pause", {}, lambda s: s.paused_until == "off"),
+            ("brief on", {}, lambda s: s.morning_brief),
+            ("brief OFF", {"morning_brief": True}, lambda s: not s.morning_brief),
         ):
             with self.subTest(args=args):
                 p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
@@ -610,7 +631,7 @@ class CommandTests(unittest.TestCase):
 
     def test_garbage_is_a_usage_line(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
-        for args in ("fly me to the moon", "hours", "hours nine-ten", "tz"):
+        for args in ("fly me to the moon", "hours", "hours nine-ten", "tz", "brief", "brief maybe"):
             with self.subTest(args=args):
                 self.assertIn("/proactivity", self.command(p, args))
 
@@ -663,6 +684,14 @@ class CommandTests(unittest.TestCase):
         # the change confirmations say it the same way
         self.assertIn("next at 4:01 PM today", self.command(p, "hours 8-21"))
 
+    def test_status_shows_the_next_brief_only_when_on(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T14:01", "America/Denver"),
+                       timezone="America/Denver")
+        self.assertNotIn("brief", self.command(p, "status"))
+        out = self.command(p, "brief on")
+        # 2026-10-08's jitter is 10 minutes
+        self.assertIn("Morning brief next at 8:10 AM tomorrow.", out)
+
     def test_next_check_in_wording_across_days(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T23:00", "America/Denver"),
                        timezone="America/Denver")
@@ -688,6 +717,172 @@ class CommandTests(unittest.TestCase):
         self.assertIn("paused_until", out)
         out = self.command(p, "hours 9-9")
         self.assertIn("differ", out)
+
+
+class BriefTests(unittest.TestCase):
+    """The opt-in morning brief, on a fake clock ticking like the 60-second timer."""
+    SAFETY = ("This is not new authorization: never send external messages, spend money, change"
+              " credentials or permissions, touch production, or delete anything without asking first.")
+
+    def run_ticks(self, p, clock, start, end, step=timedelta(minutes=1)):
+        """Tick from start to end; return the UTC times a brief was injected."""
+        sent = []
+        clock.now = start
+        while clock.now <= end:
+            before = len(p.ctx.sent)
+            p.tick()
+            sent += [clock.now for text, _ in p.ctx.sent[before:] if text.startswith(P.BRIEF_MARKER)]
+            clock.now += step
+        return sent
+
+    def test_off_by_default(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T20:00"))
+        self.assertEqual(self.run_ticks(p, clock, at("2026-10-08T07:00"), at("2026-10-08T12:00")), [])
+
+    def test_one_brief_a_local_day_at_its_jittered_time(self):
+        tz = "America/Chicago"
+        p, clock = runtime(FakeCtx(), at("2026-10-06T20:00", tz), timezone=tz, morning_brief=True)
+        sent = self.run_ticks(p, clock, at("2026-10-07T00:00", tz), at("2026-10-09T23:59", tz))
+        s = p.settings(p.load())
+        self.assertEqual(sent, [P.brief_at(s, d) for d in
+                                (date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9))])
+        self.assertEqual([t.astimezone(ZoneInfo(tz)).strftime("%H:%M") for t in sent],
+                         ["08:17", "08:10", "08:20"])
+
+    def test_the_brief_leaves_the_backoff_alone_and_holds_the_window_start_check_in(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-06T20:00"), morning_brief=True)
+        state = p.load()
+        state.update(nudges=2, last_nudge_ts=at("2026-10-06T21:00").timestamp())
+        p.save(state)
+        clock.now = at("2026-10-07T08:00")   # the overnight check-in is due now...
+        self.assertIsNone(p.tick())          # ...but waits for the 08:17 brief
+        clock.now = at("2026-10-07T08:17")
+        self.assertTrue(p.tick())
+        text = ctx.sent[-1][0]
+        self.assertTrue(text.startswith(P.BRIEF_MARKER))
+        turn(p, clock, at("2026-10-07T08:18"), text=text)   # the bot answers the brief
+        state = p.load()
+        self.assertEqual((state["nudges"], state["last_nudge_ts"]),
+                         (2, at("2026-10-06T21:00").timestamp()))
+        self.assertEqual(state["last_brief_date"], "2026-10-07")
+        self.assertNotIn("last_user_ts", state)
+        clock.now = at("2026-10-07T08:19")
+        self.assertIsNone(p.tick())          # the next check-in counts from the brief
+        self.assertEqual(len(ctx.sent), 1)
+
+    def test_dst_keeps_the_brief_at_8am_local_once_a_day(self):
+        tz = "America/Chicago"
+        for first, last in (("2026-10-31", "2026-11-02"),    # clocks go back Nov 1
+                            ("2027-03-13", "2027-03-15")):   # clocks go forward Mar 14
+            with self.subTest(first=first):
+                p, clock = runtime(FakeCtx(), at(f"{first}T00:00", tz), timezone=tz, morning_brief=True)
+                sent = self.run_ticks(p, clock, at(f"{first}T06:00", tz), at(f"{last}T23:59", tz),
+                                      step=timedelta(minutes=5))
+                local = [t.astimezone(ZoneInfo(tz)) for t in sent]
+                self.assertEqual(len({t.date() for t in local}), 3)
+                self.assertEqual(len(local), 3)
+                self.assertTrue(all(t.hour == 8 and t.minute <= 20 for t in local), local)
+
+    def test_timezone_changes_never_brief_the_same_local_date_twice(self):
+        # East: a Chicago brief on the 7th, then Tokyo, where it is already the 7th's evening.
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T00:00", "America/Chicago"),
+                           timezone="America/Chicago", morning_brief=True)
+        self.assertEqual(len(self.run_ticks(p, clock, at("2026-10-07T08:00", "America/Chicago"),
+                                            at("2026-10-07T09:00", "America/Chicago"))), 1)
+        p.update({"timezone": "Asia/Tokyo"})
+        sent = self.run_ticks(p, clock, at("2026-10-07T23:00", "Asia/Tokyo"),
+                              at("2026-10-08T09:00", "Asia/Tokyo"))
+        self.assertEqual(sent, [P.brief_at(P.Settings(timezone="Asia/Tokyo"), date(2026, 10, 8))])
+        # West: a Tokyo brief on the 8th, then Chicago, where it is still the 7th
+        # and inside active hours.
+        p.update({"timezone": "America/Chicago"})
+        self.assertEqual(clock.now.astimezone(ZoneInfo("America/Chicago")).hour, 19)
+        sent = self.run_ticks(p, clock, clock.now, at("2026-10-08T12:00", "America/Chicago"),
+                              step=timedelta(minutes=5))
+        self.assertEqual(sent, [])
+        sent = self.run_ticks(p, clock, clock.now, at("2026-10-09T12:00", "America/Chicago"),
+                              step=timedelta(minutes=5))
+        self.assertEqual([t.astimezone(ZoneInfo("America/Chicago")).date() for t in sent],
+                         [date(2026, 10, 9)])
+
+    def test_turned_on_mid_day_the_first_brief_is_the_next_morning(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T06:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = p.command("brief on")
+        self.assertIn("Morning brief next at 8:17 AM today.", out)
+        p, clock = runtime(FakeCtx(), at("2026-10-07T15:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = p.command("brief on")
+        self.assertIn("Morning brief next at 8:10 AM tomorrow.", out)
+        sent = self.run_ticks(p, clock, clock.now, at("2026-10-08T12:00"), step=timedelta(minutes=5))
+        self.assertEqual(sent, [at("2026-10-08T08:10")])
+
+    def test_none_while_paused(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-06T20:00"), morning_brief=True, paused_until="off")
+        self.assertEqual(self.run_ticks(p, clock, at("2026-10-07T07:00"), at("2026-10-07T09:00"),
+                                        step=timedelta(minutes=5)), [])
+        p.update({"paused_until": ""})   # resumed mid-morning: still a morning brief
+        self.assertEqual(self.run_ticks(p, clock, clock.now, at("2026-10-07T21:00"),
+                                        step=timedelta(minutes=5)), [at("2026-10-07T09:05")])
+
+    def test_recent_user_activity_skips_the_day(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-06T20:00"), morning_brief=True)
+        turn(p, clock, at("2026-10-07T07:30"))
+        self.assertEqual(self.run_ticks(p, clock, at("2026-10-07T08:00"), at("2026-10-07T21:59"),
+                                        step=timedelta(minutes=5)), [])
+        self.assertEqual(p.load()["last_brief_date"], "2026-10-07")
+        self.assertEqual(len(self.run_ticks(p, clock, at("2026-10-08T08:00"), at("2026-10-08T09:00"))), 1)
+
+    def test_a_busy_turn_delays_the_brief_until_it_ends(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-06T20:00"), morning_brief=True)
+        turn(p, clock, at("2026-10-07T08:10"), text=P.MARKER + " earlier check-in", finish=False)
+        clock.now = at("2026-10-07T08:17")
+        self.assertIsNone(p.tick())
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            p.on_turn_end()
+        clock.now = at("2026-10-07T08:30")
+        self.assertTrue(p.tick())
+        self.assertTrue(ctx.sent[-1][0].startswith(P.BRIEF_MARKER))
+
+
+class PromptTests(unittest.TestCase):
+    """Golden checks that the prompts carry the tone rules. Model output isn't tested."""
+    NOW = at("2026-10-07T11:00")
+
+    def prompts(self):
+        p, s = P.Proactivity(FakeCtx()), P.Settings(timezone="UTC")
+        return {"check-in": p.prompt(s, timedelta(hours=3), self.NOW),
+                "asked": p.prompt(s, timedelta(hours=3), self.NOW, asked=True),
+                "brief": p.brief_prompt(s, self.NOW)}
+
+    def test_every_prompt_keeps_the_safety_sentence_and_the_voice(self):
+        for name, text in self.prompts().items():
+            with self.subTest(name):
+                self.assertIn(BriefTests.SAFETY, text)
+                for rule in ("texting them on Telegram", "lead with the concrete thing",
+                             "No headings, bullet lists or tables", "numbered list only for decisions",
+                             "emoji only if they use them",
+                             "Never mention timers, schedules, check-ins or being prompted",
+                             "Open differently from your recent messages"):
+                    self.assertIn(rule, text)
+
+    def test_check_ins_are_short_and_name_one_open_thread(self):
+        text = self.prompts()["check-in"]
+        self.assertIn("1-3 short sentences", text)
+        self.assertIn("one specific open thread", text)
+        self.assertIn("reply with exactly [SILENT]", text)
+
+    def test_the_brief_asks_for_the_four_parts(self):
+        text = self.prompts()["brief"]
+        self.assertTrue(text.startswith(P.BRIEF_MARKER))
+        for part in ("what you did or learned since your last exchange", "time-sensitive today",
+                     "calendar and email read-only", "failed", "up to 3 decisions",
+                     "numbered questions", "reply with exactly [SILENT]"):
+            self.assertIn(part, text)
 
 
 class RegisterTests(unittest.TestCase):

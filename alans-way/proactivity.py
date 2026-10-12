@@ -1,16 +1,20 @@
 """Idle nudge: when the bound chat has gone quiet during the user's waking hours,
-ask the primary bot to reach out once. One rule, one state file, one tool."""
+ask the primary bot to reach out once; plus an opt-in morning brief. One rule,
+one state file, one tool."""
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 import sqlite3
 import threading
+import zlib
 
 LEVELS = {"less": 240, "normal": 120, "more": 60}
 MAX_WAIT = timedelta(days=7)
 BUSY_CAP = timedelta(hours=3)
+BRIEF_QUIET = timedelta(hours=2)
+BRIEF_LATE = timedelta(hours=2)   # past brief time plus this, it's no longer a morning brief
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,7 @@ class Settings:
     active_start: int = 8
     active_end: int = 22
     paused_until: str = ""  # "", "off", or an ISO time with a UTC offset
+    morning_brief: bool = False
 
 
 def zone(s):
@@ -48,6 +53,17 @@ def due_at(s, anchor, nudges):
     """One rule: base wait, doubled per unanswered nudge, capped at a week."""
     wait = min(timedelta(minutes=s.base_minutes) * 2 ** min(nudges, 16), MAX_WAIT)
     return next_active(s, anchor + wait)
+
+
+def day_start(s, day):
+    return datetime.combine(day, time(s.active_start), zone(s)).astimezone(timezone.utc)
+
+
+def brief_at(s, day):
+    """The local day's brief time: active_start plus 0-20 minutes of jitter, fixed per date
+    so a restart or a status call agrees with the timer."""
+    jitter = zlib.crc32(day.isoformat().encode()) % 21
+    return day_start(s, day) + timedelta(minutes=jitter)
 
 
 def is_paused(s, now):
@@ -97,6 +113,8 @@ def validate(s, changes, *, min_base=15):
             aware = False
         if not aware:
             raise ValueError("paused_until must be '', 'off', or an ISO time with a UTC offset")
+    if type(out.morning_brief) is not bool:
+        raise ValueError("morning_brief must be true or false")
     return out
 
 
@@ -128,13 +146,23 @@ def loosens(current, new, now):
                 return "/proactivity resume"
     if _window_hours(new) - _window_hours(current):
         return f"/proactivity hours {new.active_start}-{new.active_end}"
+    if new.morning_brief and not current.morning_brief:
+        return "/proactivity brief on"
     return None
 
 
 MARKER = "[Proactive check-in]"
+BRIEF_MARKER = "[Morning brief]"
 STATE_KEY = "idle"
 USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|"
-         "hours <start>-<end>|tz <IANA zone>]")
+         "hours <start>-<end>|tz <IANA zone>|brief on|off]")
+SAFETY = (" This is not new authorization: never send external messages, spend money, change"
+          " credentials or permissions, touch production, or delete anything without asking first.")
+VOICE = (" Write like a sharp person texting them on Telegram: lead with the concrete thing, no"
+         " greeting or preamble. No headings, bullet lists or tables; a numbered list only for"
+         " decisions you need from them. Plain text or light formatting Telegram renders; emoji only"
+         " if they use them. Never mention timers, schedules, check-ins or being prompted. Open"
+         " differently from your recent messages to them.")
 
 
 def caller_session_key():
@@ -225,7 +253,7 @@ class Proactivity:
             now = self.clock()
             self.busy_since = now
             state["last_activity_ts"] = now.timestamp()
-            if not str(user_message or "").startswith(MARKER):
+            if not str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
                 state.update(last_user_ts=now.timestamp(), nudges=0)
             self.save(state)
         return None
@@ -290,15 +318,32 @@ class Proactivity:
             if not state.get("session_key") or is_paused(s, now) or self._busy(now):
                 return None
             anchor, nudges = self._anchor(state), state.get("nudges", 0)
-            if now < due_at(s, anchor, nudges) or not in_window(s, now):
+            day = now.astimezone(zone(s)).date()
+            # ISO dates sort as strings; "<" rather than "!=" so flying west, which
+            # moves the local date back, can't earn a second brief.
+            brief = (s.morning_brief and state.get("last_brief_date", "") < day.isoformat()
+                     and in_window(s, now) and day_start(s, day) <= now < brief_at(s, day) + BRIEF_LATE)
+            if brief and now < brief_at(s, day):
+                return None   # the window-start check-in waits for the brief
+            if brief:
+                state["last_brief_date"] = day.isoformat()
+                if now.timestamp() - (state.get("last_user_ts") or 0) < BRIEF_QUIET.total_seconds():
+                    state["last_result"] = "brief skipped: user active"
+                    self.save(state)
+                    return None
+                state["last_result"] = "pending"
+                text = self.brief_prompt(s, now)
+            elif now < due_at(s, anchor, nudges) or not in_window(s, now):
                 return None
-            # ponytail: a refused check-in still advances the back-off, so a missing
-            # injection permission costs one attempt per wait, not one per minute.
+            else:
+                # ponytail: a refused check-in still advances the back-off, so a missing
+                # injection permission costs one attempt per wait, not one per minute.
+                state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result="pending")
+                text = self.prompt(s, now - anchor, now)
             # Decide and persist before calling into Hermes: inject_message can run
             # the injected turn's hooks on another thread, so it must run unlocked.
-            state.update(last_nudge_ts=now.timestamp(), nudges=nudges + 1, last_result="pending")
             self.save(state)
-            text, session_key = self.prompt(s, now - anchor, now), state["session_key"]
+            session_key = state["session_key"]
         try:
             accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
             result = "accepted" if accepted is True else "refused"
@@ -330,21 +375,31 @@ class Proactivity:
         hours = elapsed.total_seconds() / 3600
         ago = (f"{round(hours * 60)} minutes" if hours < 1.5 else
                f"{round(hours)} hours" if hours < 48 else f"{round(hours / 24)} days")
-        local = now.astimezone(zone(s))
-        learn = ("" if s.timezone else
-                 " You don't know their timezone yet: ask for it when it fits naturally and save it"
-                 " with the proactivity tool.")
         lead = "The user just asked you to check in now. " if asked else ""
         end = (" They asked, so reply with one of these; don't answer [SILENT]." if asked else
                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
         return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
-                f" it is {local:%A %H:%M} for them.{learn} Like a thoughtful employee, pick exactly one:"
-                " (a) do one safe, reversible thing that moves their goals forward, then report briefly;"
-                " (b) suggest something specific you could do for them; or (c) ask one useful question."
-                " Draw on your memory of their goals and open threads, and don't repeat a recent check-in."
-                " This is not new authorization: never send external messages, spend money, change"
-                " credentials or permissions, touch production, or delete anything without asking first."
-                + end)
+                f" {self._when(s, now)} Pick exactly one:"
+                " (a) do one safe, reversible thing that moves their goals forward, then say what you did;"
+                " (b) offer one specific thing you could do for them; or (c) ask one useful question."
+                " Build it around one specific open thread from your memory of their goals and recent"
+                " conversations, and name it." + VOICE + " Keep it to 1-3 short sentences." + SAFETY + end)
+
+    def brief_prompt(self, s, now):
+        return (f"{BRIEF_MARKER} The user's day is starting; {self._when(s, now)} Send a short morning"
+                " brief with only what applies: what you did or learned since your last exchange;"
+                " anything time-sensitive today (check their calendar and email read-only if you have"
+                " tools for them); anything you tried that failed, and why; and up to 3 decisions you"
+                " need from them as numbered questions. Name specific open threads from your memory."
+                + VOICE + " Keep it to a few short lines." + SAFETY +
+                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
+
+    @staticmethod
+    def _when(s, now):
+        learn = ("" if s.timezone else
+                 " You don't know their timezone yet: ask for it when it fits naturally and save it"
+                 " with the proactivity tool.")
+        return f"it is {now.astimezone(zone(s)):%A %H:%M} for them.{learn}"
 
     def status(self):
         with self._lock:
@@ -354,11 +409,17 @@ class Proactivity:
                    "level": next((k for k, v in LEVELS.items() if v == s.base_minutes), "custom"),
                    "timezone_known": bool(s.timezone), "paused": is_paused(s, now),
                    "busy": self._busy(now), "nudges_since_reply": state.get("nudges", 0),
-                   "next_check_in": None, "in_gateway": self.gateway,
+                   "next_check_in": None, "next_brief": None, "in_gateway": self.gateway,
                    "last_result": state.get("last_result"), "last_error": self.error}
             if out["bound"] and not out["paused"]:
                 due = due_at(s, self._anchor(state), out["nudges_since_reply"])
                 out["next_check_in"] = due.astimezone(zone(s)).isoformat(timespec="minutes")
+                if s.morning_brief:
+                    day = now.astimezone(zone(s)).date()
+                    while (day.isoformat() <= state.get("last_brief_date", "")
+                           or brief_at(s, day) + BRIEF_LATE <= now):
+                        day += timedelta(days=1)
+                    out["next_brief"] = brief_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
             return out
 
     def tool(self, args, **kwargs):
@@ -431,6 +492,8 @@ class Proactivity:
                 return {"active_start": int(start), "active_end": int(end)}
         if verb == "tz" and len(rest) == 1:
             return {"timezone": rest[0]}
+        if verb == "brief" and len(rest) == 1 and rest[0].lower() in ("on", "off"):
+            return {"morning_brief": rest[0].lower() == "on"}
         return None
 
     def _status_text(self, prefix=""):
@@ -445,8 +508,10 @@ class Proactivity:
         if st["paused"]:
             until = s["paused_until"]
             return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."
-        return text + (f", next {self._next_words(st['next_check_in'])}."
-                       if st["next_check_in"] else ".")
+        text += (f", next {self._next_words(st['next_check_in'])}."
+                 if st["next_check_in"] else ".")
+        return text + (f" Morning brief next {self._next_words(st['next_brief'])}."
+                       if st["next_brief"] else "")
 
     def _next_words(self, iso):
         """'at 4:01 PM today' — tomorrow, a weekday two to six days out, else the date."""
@@ -485,15 +550,17 @@ SCHEMA = {
     "description": (
         "Read or change how you proactively check in with the user. You check in after the chat has"
         " been quiet for base_minutes, doubling the wait after each check-in they don't answer (capped"
-        " at a week), and only between active_start and active_end in the USER's timezone. This tool"
+        " at a week), and only between active_start and active_end in the USER's timezone. If"
+        " morning_brief is on you also send one short brief a day near active_start. This tool"
         " can only make check-ins quieter: level 'less', a higher base_minutes, paused_until 'off' or"
         " a future ISO time, a later active_start or earlier active_end, or a new timezone. Anything"
         " that makes check-ins reach further — checking in more, resuming or wider hours — is refused"
         " with an ask_user_to_send command: tell the user to send that exact command. Map requests:"
         " 'check in less' -> level less; 'quiet until Monday' -> paused_until as ISO with their UTC"
         " offset; 'stop checking in' -> paused_until 'off'; 'I'm in Tokyo' -> timezone 'Asia/Tokyo';"
-        " 'not before 9am' -> active_start 9. After set, confirm the change from the returned status"
-        " in plain words."),
+        " 'not before 9am' -> active_start 9; 'stop the morning brief' -> morning_brief false. Only the"
+        " user can turn the morning brief on, with /proactivity brief on. After set, confirm the change"
+        " from the returned status in plain words."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {
@@ -504,6 +571,7 @@ SCHEMA = {
             "active_end": {"type": "integer", "minimum": 0, "maximum": 23},
             "timezone": {"type": "string"},
             "paused_until": {"type": "string"},
+            "morning_brief": {"type": "boolean"},
         },
     },
 }
