@@ -23,9 +23,13 @@ setup page and walks through the rest. It does not replace this plugin.
 - **Turn hooks see every session:** `pre_llm_call`/`post_llm_call` fire for every
   session's turns; the plugin only compares the bound chat and persists only its
   timestamps.
-- **Operator surfaces:** the plugin registers the `hermes proactivity` CLI and
-  the `/proactivity` slash command. The model tool can only reduce check-ins;
-  increasing them or resuming is operator-only (`/proactivity` or the CLI).
+- **Operator surfaces:** the plugin registers the `hermes proactivity` CLI, the
+  `/proactivity` and `/call` slash commands, and a `POST /api/voice/turn` route
+  on the local api_server (same Bearer auth as every other api_server route).
+  The route injects a text turn into a Telegram DM session through
+  `ctx.inject_message` and returns the reply; `/call` posts a Mini App button
+  via Telegram sendMessage — the plugin's one network call — and only when
+  `ALAN_CALL_APP_URL` is configured.
 - **Shell commands:** the plugin's Python runs none. The `workspace-setup` skill
   guides the agent through running `setup.sh`, which installs the workspace
   browser router and services over ssh on your own machines.

@@ -663,7 +663,8 @@ class RegisterTests(unittest.TestCase):
             profile_name="default", state=FakeState(),
             register_tool=lambda **kw: calls.append(("tool", kw["name"], kw["toolset"])),
             register_hook=lambda name, fn: calls.append(("hook", name)),
-            register_platform_handler=lambda platform, fn: factories.__setitem__(platform, fn),
+            register_platform_handler=lambda platform, fn:
+                factories.setdefault(platform, []).append(fn),
             register_skill=lambda name, path: calls.append(("skill", name)),
             register_cli_command=lambda name, *a: calls.append(("cli", name)),
             register_command=lambda name, fn, **kw: calls.append(("command", name)),
@@ -673,13 +674,15 @@ class RegisterTests(unittest.TestCase):
             runtime_ = package.register(ctx, legacy_home=d)
         for expected in (("tool", "proactivity", "proactivity"), ("hook", "pre_llm_call"),
                          ("hook", "post_llm_call"), ("cli", "proactivity"),
-                         ("command", "proactivity"),
+                         ("command", "proactivity"), ("command", "call"),
                          ("skill", "workspace-operations"), ("skill", "workspace-setup")):
             self.assertIn(expected, calls)
         self.assertNotIn(("skill", "proactive-primary"), calls)
+        self.assertIn("api_server", factories)
         self.assertFalse(runtime_.gateway)
         self.assertIsNone(runtime_.worker)
-        factories["telegram"](None, None)
+        for fn in factories["telegram"]:
+            fn(None, None)
         try:
             self.assertTrue(runtime_.gateway)
             self.assertTrue(runtime_.worker.is_alive())
