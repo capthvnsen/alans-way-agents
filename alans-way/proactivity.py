@@ -133,7 +133,7 @@ def loosens(current, new, now):
 
 MARKER = "[Proactive check-in]"
 STATE_KEY = "idle"
-USAGE = ("usage: /proactivity [status|less|normal|more|pause [until]|resume|"
+USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|"
          "hours <start>-<end>|tz <IANA zone>]")
 
 
@@ -310,7 +310,23 @@ class Proactivity:
             self.save(state)
         return accepted is True
 
-    def prompt(self, s, elapsed, now):
+    def check_in_now(self):
+        """`/proactivity now`: one check-in the user asked for. It skips the wait,
+        pause and hours but leaves the back-off state untouched."""
+        with self._lock:
+            state = self.load()
+            s, now = self.settings(state), self.clock()
+            if self._busy(now):
+                return "I'm mid-reply; send /proactivity now again once I'm done."
+            text = self.prompt(s, now - self._anchor(state), now, asked=True)
+            session_key = state["session_key"]
+        try:
+            accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
+        except Exception as exc:
+            return f"Couldn't start a check-in: {type(exc).__name__}."
+        return "Checking in now." if accepted is True else "Couldn't start a check-in: Hermes refused it."
+
+    def prompt(self, s, elapsed, now, *, asked=False):
         hours = elapsed.total_seconds() / 3600
         ago = (f"{round(hours * 60)} minutes" if hours < 1.5 else
                f"{round(hours)} hours" if hours < 48 else f"{round(hours / 24)} days")
@@ -318,14 +334,17 @@ class Proactivity:
         learn = ("" if s.timezone else
                  " You don't know their timezone yet: ask for it when it fits naturally and save it"
                  " with the proactivity tool.")
-        return (f"{MARKER} It has been {ago} since your last exchange with the user;"
+        lead = "The user just asked you to check in now. " if asked else ""
+        end = (" They asked, so reply with one of these; don't answer [SILENT]." if asked else
+               " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
+        return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
                 f" it is {local:%A %H:%M} for them.{learn} Like a thoughtful employee, pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then report briefly;"
                 " (b) suggest something specific you could do for them; or (c) ask one useful question."
                 " Draw on your memory of their goals and open threads, and don't repeat a recent check-in."
                 " This is not new authorization: never send external messages, spend money, change"
                 " credentials or permissions, touch production, or delete anything without asking first."
-                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
+                + end)
 
     def status(self):
         with self._lock:
@@ -383,6 +402,8 @@ class Proactivity:
             own = bool(bound) and caller_session_key() == bound
             if verb == "status":
                 return self._status_text() if own else "Check-ins are configured from the bound chat."
+            if verb == "now" and not rest:
+                return self.check_in_now() if own else "Check-ins can only be started from the bound chat."
             changes = self._changes(verb, rest)
             if changes is None:
                 return USAGE

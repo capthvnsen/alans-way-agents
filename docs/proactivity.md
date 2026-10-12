@@ -32,6 +32,12 @@ To check in more, start again or widen the hours, send `/proactivity more`,
 only make check-ins quieter, because anything the model reads can be
 prompt-injected. Only the bound chat can change these.
 
+Want a check-in right now, say to see what the bot could take on? Send
+`/proactivity now` from the bound chat. It runs one check-in immediately, even
+when paused or outside your hours, and tells the bot not to stay silent. It
+doesn't change your settings or the doubling wait, and only you can send it: the
+bot's tool can't.
+
 ## Setup
 
 `setup.sh` binds the primary bot (pick its Telegram chat from the list) and sets
