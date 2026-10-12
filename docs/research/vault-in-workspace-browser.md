@@ -71,7 +71,11 @@ that tab showed `example.com`. The host still lists it as that bot's agent tab.
 ```
 This was the full flow. The login was saved on the VPS, Hermes signed in to the TOTP site
 with no prompt, and the bot continued in a fresh workspace tab that was already signed in.
-The router's tab was not touched, and Hermes could neither see it nor attach to it.
+The router's tab was not touched, and through the proxy Hermes could neither see it nor
+attach to it. That makes the proxy a guard against collisions with a cooperative client
+(`agent-browser` and the supervisor). It is **not** a security boundary; see the gaps under (a).
+The model has no raw CDP access in this mode: `browser_cdp` is not offered for provider sessions
+**[doc user-guide/features/browser]**.
 
 What was **not** run live:
 - the Telegram path, because there was no gateway in the test and the live gateway was not
@@ -128,14 +132,29 @@ What the prototype leaves for a real build:
 - Ownership lives in memory, so a gateway restart orphans the session's tabs.
 - Hermes-made tabs sit outside the host. They are not in `/v1/tabs` and have no Take-control
   seal, tint or reaping.
+- Only `page`/`tab` targets are filtered. Workers, out-of-process iframes and `browser`
+  targets pass through, so a foreign tab's service worker can surface. Filtering should be an
+  allowlist that keeps only owned targets and their children.
+- `Target.*` and `Browser.*` should be an allowlist too. `Target.attachToBrowserTarget`,
+  `Target.sendMessageToTarget` and `Target.*` sent on a session are not checked today.
+- Ownership is shared across connections, but parking during a pending `createTarget` is
+  per connection. The supervisor's connection could detach a tab that agent-browser is still
+  creating. The run passed, so it was either lucky timing or the supervisor finding the tab
+  through `getTargets`. Parking should be proxy-wide.
+- When one side of a link closes, the other side is not torn down, so connections leak.
 - The host's URL barrier (pausing every request in Fetch) covers only the host's own agent
   tabs (*app* `vps-browser-host.cjs:181-186`). Hermes' tabs rely on Hermes' own private-URL
   guard (`browser.allow_private_urls: false`) instead.
 
 ## (b) Do origin-checked fill and auto TOTP work there, and how does the session reach the workspace tab?
 
-**Both work (run above). The session reaches the workspace tab through the shared profile; no
-cookie copy is needed.**
+**Both work on the positive path (run above). The session reaches the workspace tab through
+the shared profile; no cookie copy is needed.** The run did not exercise a wrong-origin refusal
+(that half is source-cited only). It also logged no signed-out baseline for step 4; the curl
+check while writing the spike showed the homepage nav reads "Sign In" without the session
+cookie. One more open question: whether the app's Mac→VPS cookie mirror can overwrite a
+login made on the VPS. It writes cookies for the tabs it restores, which is a reason to test
+it before shipping.
 
 - **The fill path.** Vault fills run only over the supervisor's CDP socket. They fail closed
   with `supervisor_required` rather than fall back to argv (`tools/browser_vault_tool.py:119-145`).
@@ -206,8 +225,8 @@ cookie copy is needed.**
 
 ## What shipping it would take (alans-way side)
 
-1. Harden the provider and proxy: refuse browser-level cookie and storage methods, close
-   owned tabs on `close_session`, and persist ownership. Ship it as a plugin installed by
+1. Harden the provider and proxy. Fix every gap listed under (a), then close owned tabs on
+   `close_session` and persist ownership. Ship it as a plugin installed by
    `setup.sh` for VPS hosts. The provider is a documented public plugin API, so this is
    allowed under *app* `docs/continuity.md:14`.
 2. Have setup unset `browser.cdp_url`, set `browser.cloud_provider: alans-way-workspace`, and

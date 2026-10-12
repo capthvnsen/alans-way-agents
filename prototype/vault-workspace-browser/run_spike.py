@@ -86,7 +86,8 @@ def main():
     try:
         # Workspace stand-in: Chromium + the real VPS browser host.
         profile = Path(args.profile) if args.profile else tmp / "profile"
-        shutil.rmtree(profile, ignore_errors=True)
+        if profile.exists():
+            raise SystemExit(f"{profile} already exists; pass a path the spike may create and delete")
         procs.append(subprocess.Popen([args.chrome, "--headless=new", "--no-sandbox", f"--remote-debugging-port={CDP_PORT}",
                                        "--remote-debugging-address=127.0.0.1", f"--user-data-dir={profile}",
                                        "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
@@ -170,9 +171,10 @@ def main():
     finally:
         for p in reversed(procs):
             p.terminate()
+            p.wait(10)
         log("host log tail", (tmp / "host.out").read_text()[-600:] if (tmp / "host.out").exists() else "")
         shutil.rmtree(tmp, ignore_errors=True)
-        if args.profile:
+        if args.profile and procs:  # only once this run created it
             shutil.rmtree(args.profile, ignore_errors=True)
 
 
