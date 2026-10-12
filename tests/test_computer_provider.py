@@ -63,6 +63,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (c.host) { s.host = c.host; save(s); }
   if (c.bump) { s.generation += 1; save(s); }
   if (c.noshot !== undefined) { s.noshot = c.noshot; save(s); }
+  if (c.win0 !== undefined) { s.win0 = c.win0; save(s); }
   if (c.os) { s.os = c.os; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ host: s.os || 'mac', apps: APPS });
@@ -72,7 +73,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     : args.since === s.generation ? text({ unchanged: true, generation: s.generation }) : text(tree(s.generation));
   else if (name === 'workspace_computer_screenshot' && s.noshot) result = fail('That app has no window to capture.');
   else if (name === 'workspace_computer_screenshot') result = { content: [{ type: 'image', data: Buffer.from('jpegbytes').toString('base64'), mimeType: 'image/jpeg' },
-    { type: 'text', text: JSON.stringify({ imageWidth: 480, imageHeight: 300, window: { x: 100, y: 100, width: 960, height: 600 } }) }] };
+    { type: 'text', text: JSON.stringify({ imageWidth: 480, imageHeight: 300, window: { x: 100, y: 100, width: s.win0 ? 0 : 960, height: s.win0 ? 0 : 600 } }) }] };
   else if (name === 'workspace_computer_action') {
     if (c.lost) result = fail('This action was in flight when the Mac connection dropped. It may or may not have happened and was NOT retried. Check the page in the VPS tab before repeating it.');
     else if (c.nowindow) result = fail('That app has no window to send keys to.');
@@ -188,7 +189,9 @@ CTL.write_text(json.dumps({"snap": {"generation": 91, "elements": [], "note": "N
 m = mark(); R["som_empty"] = captured(be.capture(mode="som", pid=101), m)
 CTL.write_text(json.dumps({"noshot": True, "snap": {"generation": 92, "elements": [], "note": "On another Space."}}))
 R["som_noshot"] = captured(be.capture(mode="som", pid=101), mark())
-CTL.write_text(json.dumps({"noshot": False, "snap": {"generation": 93}}))
+CTL.write_text(json.dumps({"noshot": False, "win0": True, "snap": {"generation": 94}}))
+R["som_win0"] = captured(be.capture(mode="som", pid=101), mark())
+CTL.write_text(json.dumps({"win0": False, "snap": {"generation": 93}}))
 be.capture(mode="ax", pid=101)
 
 # --- action replies: a delta folds into the element list, gone numbers stay gone, nothing shifts
@@ -230,30 +233,40 @@ try:
 except Exception as e:
     R["err_capture"] = str(e)
 
-# --- the VM desktop numbers refs by position: a reply is described, the old generation is kept
-CTL.write_text(json.dumps({"os": "vps"})); be.list_apps()
+def held():
+    tree = be._tree or {}
+    return [tree.get("gen"), [e and e.get("name") for e in tree.get("els", [])]]
 rows = [{"ref": f"c{i}", "role": "AXRow", "name": n, "x": 100, "y": 100 + 30 * i, "width": 300, "height": 30}
         for i, n in enumerate(["a.txt", "b.txt", "c.txt", "d.txt"], 1)]
-CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
-win_gen = be._tree["gen"]
-CTL.write_text(json.dumps({"reply": {"elements": [dict(r, name=n) for r, n in zip(rows, ["a.txt", "c.txt", "d.txt"])]}}))
-m = mark()
-R["win_delete"] = plain(be.click(element=2))  # deletes b.txt: c.txt is now c2, d.txt is c3
-R["win_third"] = plain(be.click(element=3))  # the model's #3 was c.txt; c3 is now d.txt
-R["win_calls"] = action_calls(m)
-R["win_gen"] = [win_gen, be._tree["gen"], [e["name"] for e in be._tree["els"]]]
+
+# --- the VM desktop numbers refs by position: a reply is described, the old generation is kept
+try:
+    CTL.write_text(json.dumps({"os": "vps"})); be.list_apps()
+    CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
+    win_gen = held()[0]
+    CTL.write_text(json.dumps({"reply": {"elements": [dict(r, name=n) for r, n in zip(rows, ["a.txt", "c.txt", "d.txt"])]}}))
+    m = mark()
+    R["win_delete"] = plain(be.click(element=2))  # deletes b.txt: c.txt is now c2, d.txt is c3
+    R["win_third"] = plain(be.click(element=3))  # the model's #3 was c.txt; c3 is now d.txt
+    R["win_calls"] = action_calls(m)
+    R["win_gen"] = [win_gen, *held()]
+except Exception as e:
+    R["win_error"] = repr(e)
 
 # --- Windows keeps refs on their own controls: the same delete folds in and #3 still means c.txt
-CTL.write_text(json.dumps({"os": "windows"})); be.list_apps()
-CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
-fold_gen = be._tree["gen"]
-CTL.write_text(json.dumps({"reply": {"changed": [], "removed": ["c2"]}}))
-m = mark()
-R["fold_delete"] = plain(be.click(element=2))
-CTL.write_text(json.dumps({"reply": {"changed": [], "removed": []}}))
-R["fold_third"] = plain(be.click(element=3))
-R["fold_calls"] = action_calls(m)
-R["fold_gen"] = [fold_gen, be._tree["gen"], [e and e["name"] for e in be._tree["els"]]]
+try:
+    CTL.write_text(json.dumps({"os": "windows"})); be.list_apps()
+    CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
+    fold_gen = held()[0]
+    CTL.write_text(json.dumps({"reply": {"changed": [], "removed": ["c2"]}}))
+    m = mark()
+    R["fold_delete"] = plain(be.click(element=2))
+    CTL.write_text(json.dumps({"reply": {"changed": [], "removed": []}}))
+    R["fold_third"] = plain(be.click(element=3))
+    R["fold_calls"] = action_calls(m)
+    R["fold_gen"] = [fold_gen, *held()]
+except Exception as e:
+    R["fold_error"] = repr(e)
 CTL.write_text(json.dumps({"os": "mac"})); be.list_apps()
 
 # --- unsupported actions never reach the router
@@ -556,6 +569,27 @@ class ReplyFoldingTests(unittest.TestCase):
         appeared, vanished = be._diff({"generation": 2, "changed": [{"ref": "c2", "role": "AXButton", "name": "B!"}], "removed": ["c4"]})
         self.assertEqual(([e["name"] for e in appeared], sorted(e["name"] for e in vanished)), (["B!"], ["b", "d"]))
 
+    def test_a_cut_reply_marks_nothing_gone(self):
+        be = self.backend(["a", "b", "c"])
+        changed, gone = be._merge({"generation": 2, "truncated": True, "elements": [{"ref": "a", "role": "AXButton", "name": "A!"}]})
+        self.assertEqual(([i for i, _ in changed], gone), ([1], []))
+        self.assertEqual([e and e["name"] for e in be._tree["els"]], ["A!", "B", "C"])
+        changed, gone = be._merge({"generation": 3, "truncated": True, "changed": [], "removed": ["b", "c"]})
+        self.assertEqual(gone, [])
+        self.assertEqual(len([e for e in be._tree["els"] if e]), 3)
+        be = self.backend(["c1", "c2"])
+        appeared, vanished = be._diff({"generation": 2, "truncated": True, "elements": [{"ref": "c1", "role": "AXButton", "name": "C1"}]})
+        self.assertEqual((appeared, vanished), ([], []))
+
+    def test_listed_names_every_number_past_the_shown_ones(self):
+        pairs = [(i, {"role": "AXRow", "name": f"r{i}"}) for i in range(1, 16)]
+        text = self.mod._listed(pairs)
+        self.assertEqual(text.count("AXRow"), self.mod.CHANGES_SHOWN)
+        self.assertTrue(text.endswith("; also #13, #14, #15"), text)
+        bare = self.mod._listed([e for _, e in pairs])
+        self.assertTrue(bare.endswith("; +3 more"), bare)
+        self.assertEqual(self.mod._listed(pairs[:2]), "#1 AXRow 'r1'; #2 AXRow 'r2'")
+
     def test_coverage_and_nearness(self):
         shot = {"wx": 0, "wy": 0, "ww": 100, "wh": 100}
         half = [{"name": "Left", "x": 0, "y": 0, "width": 50, "height": 100}, {"name": "", "x": 50, "y": 0, "width": 50, "height": 100}]
@@ -691,6 +725,14 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("ask the user", noshot["note"])
         self.assertNotIn("Use the element list", noshot["note"])
 
+    def test_a_zero_size_window_attaches_the_screenshot_and_says_so(self):
+        som = self.r["som_win0"]
+        self.assertTrue(som["png"])
+        self.assertIn("The window size is unknown, so the screenshot is attached.", som["note"])
+        self.assertIn("bounds and coordinate= are screen pixels", som["note"])
+        self.assertNotIn("No screenshot is attached", som["note"])
+        self.assertEqual(som["elements"][0][2], [300, 250, 100, 40])  # no geometry to convert with: screen pixels
+
     def test_a_delta_reply_folds_into_the_element_list_without_shifting_numbers(self):
         delta = self.r["delta"]
         self.assertTrue(delta["ok"])
@@ -727,27 +769,33 @@ class ProviderTests(unittest.TestCase):
 
     def test_windows_refs_are_stable_so_a_delete_folds_in_without_shifting_numbers(self):
         r = self.r
+        self.assertNotIn("fold_error", r)
         self.assertIn("Gone: #2 AXRow 'b.txt'.", r["fold_delete"]["message"])
         self.assertEqual(r["fold_delete"]["effect"], "confirmed")  # the pressed row itself went
         gen, held, names = r["fold_gen"]
+        self.assertIsInstance(gen, int)
         self.assertEqual(held, gen + 2)
         self.assertEqual(names, ["a.txt", None, "c.txt", "d.txt"])
-        self.assertEqual(r["fold_calls"][1], {"pid": 101, "action": "press", "ref": "c3", "generation": gen + 1})
-        self.assertTrue(r["fold_third"]["ok"])
+        self.assertEqual(r["fold_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen},
+                                           {"pid": 101, "action": "press", "ref": "c3", "generation": gen + 1}])
+        self.assertTrue(r["fold_third"]["ok"], r["fold_third"])
 
     def test_positional_refs_keep_the_old_generation_so_a_shifted_number_is_refused(self):
         r = self.r
+        self.assertNotIn("win_error", r)
         delete = r["win_delete"]
-        self.assertTrue(delete["ok"])
+        self.assertTrue(delete["ok"], delete)
         self.assertIn("Gone: AXRow 'b.txt'.", delete["message"])
         self.assertIn("capture before acting by number", delete["message"])
         self.assertNotIn("#", delete["message"])
         self.assertIsNone(delete["effect"])
         gen, held, names = r["win_gen"]
+        self.assertIsInstance(gen, int)
         self.assertEqual(held, gen)
         self.assertEqual(names, ["a.txt", "b.txt", "c.txt", "d.txt"])
-        self.assertEqual(r["win_calls"][1], {"pid": 101, "action": "press", "ref": "c3", "generation": gen})
-        self.assertEqual((r["win_third"]["ok"], r["win_third"]["code"]), (False, "stale_ref"))
+        self.assertEqual(r["win_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen},
+                                          {"pid": 101, "action": "press", "ref": "c3", "generation": gen}])
+        self.assertEqual((r["win_third"].get("ok"), r["win_third"].get("code")), (False, "stale_ref"), r["win_third"])
 
     def test_each_error_code_says_the_next_step(self):
         r = self.r

@@ -420,17 +420,20 @@ class AlansWayComputerBackend(ComputerUseBackend):
                     notes.append(f"Screenshot unavailable: {why}")
         # The screenshot is fetched for its window size; the model gets it (~1.2k tokens) only when named
         # controls leave most of the window unexplained: a canvas, a game, a web area.
-        coverage = _coverage(els, shot) if mode == "som" and png and named else None
+        coverage = _coverage(els, shot) if mode == "som" and png and named and shot else None
         if coverage is not None and coverage >= MIN_COVERAGE:
             png = mime = shot = None
             width = height = 0
         self._target(pid, name)
         self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els, "notes": kept} if mode != "vision" else self._tree), shot
-        if shot:
-            notes.insert(0, "No numbered overlays are drawn: use the element numbers listed. Coordinates are screenshot pixels."
-                         if mode != "vision" else "Coordinates are screenshot pixels; bounds in earlier element lists were screen pixels.")
+        if png:
+            space = ("Coordinates are screenshot pixels" + ("; bounds in earlier element lists were screen pixels." if mode == "vision" else ".")
+                     if shot else "The window size is unknown, so bounds and coordinate= are screen pixels.")
+            notes.insert(0, space if mode == "vision" else f"No numbered overlays are drawn: use the element numbers listed. {space}")
             if coverage is not None:
                 notes.insert(0, f"Named controls cover only {coverage:.0%} of the window, so the screenshot is attached.")
+            elif mode == "som" and named:
+                notes.insert(0, "The window size is unknown, so the screenshot is attached.")
         elif mode == "som" and named:
             notes.insert(0, "No screenshot is attached: act on element numbers. Bounds and coordinate= are screen pixels. "
                          "capture(mode='vision') shows the window if you need to see it.")
@@ -507,6 +510,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
         else:
             gone = [ref for ref in body.get("removed") or [] if ref in at]
             changed = body.get("changed") or []
+        if body.get("truncated"):
+            gone = []  # the app's walk hit its cap: a control missing from a cut list may still be there
         lost = []
         for ref in gone:
             i = at.pop(ref)
@@ -539,7 +544,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
             by_ref.update((e["ref"], e) for e in body.get("changed") or [])
             new = list(by_ref.values())
         was, now = collections.Counter(map(_key, old)), collections.Counter(map(_key, new))
-        return _pick(new, now - was), _pick(old, was - now)
+        return _pick(new, now - was), [] if body.get("truncated") else _pick(old, was - now)
 
     def _run(self, action, step):
         if self._pid is None:
@@ -710,10 +715,14 @@ def _coverage(els, shot):
 
 
 def _listed(pairs_or_els):
-    """'#3 AXRow 'name'; ...' for (number, element) pairs, or 'AXRow 'name'' for bare elements, at most CHANGES_SHOWN."""
-    shown = [(f"#{x[0]} ", x[1]) if isinstance(x, tuple) else ("", x) for x in pairs_or_els]
-    text = "; ".join(f"{n}{e.get('role', '')} {_label(e)[:80]!r}" for n, e in shown[:CHANGES_SHOWN])
-    return text + (f"; and {len(shown) - CHANGES_SHOWN} more (capture to list them)" if len(shown) > CHANGES_SHOWN else "")
+    """'#3 AXRow 'name'; ...' for (number, element) pairs, or 'AXRow 'name'' for bare elements. Past CHANGES_SHOWN
+    entries the remaining numbers are still named (a gone element is in no later capture); bare ones are counted."""
+    items = [x if isinstance(x, tuple) else (None, x) for x in pairs_or_els]
+    text = "; ".join(f"{'' if n is None else f'#{n} '}{e.get('role', '')} {_label(e)[:80]!r}" for n, e in items[:CHANGES_SHOWN])
+    rest = items[CHANGES_SHOWN:]
+    if not rest:
+        return text
+    return text + (f"; +{len(rest)} more" if rest[0][0] is None else "; also " + ", ".join(f"#{n}" for n, _ in rest))
 
 
 def _tree_notes(body):
