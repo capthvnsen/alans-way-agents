@@ -499,4 +499,4 @@ if result != original:
 PY
 
 echo "setup-workspace: wrote managed workspace_browser block to $CONFIG"
-echo "setup-workspace: restart the gateway to load it."
+echo "setup-workspace: restart the gateway to load it (on supervisord: supervisorctl signal USR1 <its program> and wait for the new pid — a plain restart/stop can SIGKILL it mid-drain)."

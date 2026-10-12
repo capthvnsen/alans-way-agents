@@ -112,6 +112,14 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_gateway_restart_through_owner(self):
         self.assertIn("never kill -9 a gateway", self.normalized)
 
+    def test_supervisord_restart_uses_the_usr1_drain(self):
+        """Issue #65: the skill must steer a hand restart on a supervisord
+        host to `signal USR1`, since `supervisorctl restart` escalates to
+        SIGKILL after stopwaitsecs and corrupts state.db mid-checkpoint."""
+        self.assertIn("signal USR1", self.normalized)
+        self.assertIn("stopwaitsecs", self.normalized)
+        self.assertIn("state.db", self.normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

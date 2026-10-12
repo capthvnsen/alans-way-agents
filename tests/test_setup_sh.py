@@ -684,6 +684,19 @@ class DocFlagTests(unittest.TestCase):
         for flag in re.findall(r"--[a-z-]+", section):
             self.assertIn(flag, declared, f"{flag} in README bootstrap is not in setup.sh --help")
 
+    def test_supervisord_hints_drain_the_gateway_on_usr1(self):
+        """Issue #65: `supervisorctl stop`/`restart` escalates TERM to SIGKILL
+        after stopwaitsecs and kills a mid-checkpoint drain, so the manual
+        plugin-op hints must print the USR1 drain path, not a bare stop."""
+        src = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("supervisorctl stop/start", src)
+        hint = re.search(r'^GW_SUP_STOP="([^"]+)"', src, re.M)
+        self.assertIsNotNone(hint, "setup.sh lost the supervised stop hint")
+        self.assertIn("signal USR1", hint.group(1))
+        self.assertIn("pid to change", hint.group(1))
+        workspace = (ROOT / "setup-workspace.sh").read_text(encoding="utf-8")
+        self.assertIn("signal USR1", workspace)
+
 
 class NodePreflightTests(unittest.TestCase):
     def test_preflight_fails_when_node_major_is_too_old(self):
@@ -1350,6 +1363,14 @@ class ReadmeTests(unittest.TestCase):
         self.assertNotIn("Node 18", readme)
         self.assertIn("Node 22", readme)
         self.assertIn("0.21.5", readme)
+
+    def test_readme_restarts_a_supervised_gateway_through_the_drain(self):
+        """Issue #65: the manual upgrade path must not leave the reader on
+        `supervisorctl restart`, which SIGKILLs a mid-checkpoint gateway."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("supervisorctl signal USR1", readme)
+        self.assertIn("stopwaitsecs", readme)
+        self.assertIn("state.db", readme)
 
 
 class HostTimezoneTests(unittest.TestCase):

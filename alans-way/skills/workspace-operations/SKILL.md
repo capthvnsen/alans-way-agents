@@ -304,6 +304,9 @@ and skills. Use Hermes' native conversation, model, approval and delegation
 interfaces. Discover currently available profiles before delegating; retire
 roster entries with their profiles, inventorying live work first. New bots
 receive distinct connector IDs. After a Hermes code update, use the
-installed CLI's gateway restart workflow, wait for Telegram to connect, and
+installed CLI's gateway restart workflow (on a supervisord host,
+`supervisorctl signal USR1 <program>` on the gateway's program and wait for
+the new pid — `supervisorctl restart` can SIGKILL it mid-drain and corrupt
+`state.db`), wait for Telegram to connect, and
 verify a full model turn with a delivered reply. Keep settings and recovery
 archives outside the shared repository.
