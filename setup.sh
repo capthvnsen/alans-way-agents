@@ -848,6 +848,131 @@ check_computer_provider() {
   fi
 }
 
+# The browser services answer to whichever service manager is actually
+# running: units written where PID 1 is not systemd are installed but dead,
+# so --verify reports the owning manager and each service's state rather than
+# whether the files exist.
+check_browser_services() {
+  [ "$GUEST_OS" = Linux ] || return 0
+  [ "$SKIP_BROWSER" = 0 ] || { skip "browser service manager (--skip-browser)"; return 0; }
+  if systemd_live; then
+    for _unit in hermes-alans-way-chromium hermes-alans-way-browser ${MAC_SSH:+mac-watch}; do
+      if systemctl is-active --quiet "$_unit.service" 2>/dev/null \
+          || systemctl --user is-active --quiet "$_unit.service" 2>/dev/null; then
+        ok "$_unit.service is running under systemd"
+      elif [ -f "/etc/systemd/system/$_unit.service" ] \
+          || [ -f "$HOME/.config/systemd/user/$_unit.service" ] \
+          || [ -f "$BROWSER_HOME/.config/systemd/user/$_unit.service" ] \
+          || { [ -n "${ALANS_WAY_UNIT_DIR:-}" ] && [ -f "$ALANS_WAY_UNIT_DIR/$_unit.service" ]; }; then
+        warn "$_unit.service is installed under systemd but not running (start it: systemctl start $_unit.service — a user unit: systemctl --user start $_unit.service)"
+      else
+        warn "$_unit.service is not installed under systemd: re-run setup.sh to install the browser services"
+      fi
+    done
+  elif supervisord_usable; then
+    for _prog in alans-way-chromium alans-way-browser ${MAC_SSH:+alans-way-mac-watch}; do
+      _st="$(supervisorctl_call status "$_prog" 2>/dev/null || true)"
+      case "$_st" in
+        *" RUNNING "*) ok "$_prog is running under supervisord";;
+        *"no such process"*) warn "$_prog is not a supervisord program: re-run setup.sh to install it";;
+        *) warn "$_prog is not running under supervisord (start it: supervisorctl start $_prog)";;
+      esac
+    done
+  else
+    warn "no live systemd or usable supervisord here: nothing supervises the browser services (re-run setup.sh once one is up; manual setup: desktop/docs/vps-browser.md in the alans-way repo)"
+  fi
+}
+
+# The managed browser's CDP port is settled at install time and kept on
+# re-runs: --verify reports the configured port and whether the browser
+# answers on it — a stopped service and a port another Chrome owns both show
+# here.
+check_browser_cdp() {
+  [ "$SKIP_BROWSER" = 0 ] || { skip "managed browser CDP port (--skip-browser)"; return 0; }
+  case "$GUEST_OS" in
+    Darwin) _data="$HOME/Library/Application Support/hermes-alans-way/browser";;
+    *) _data="$BROWSER_HOME/.local/share/hermes-alans-way/browser";;
+  esac
+  _data="${HERMES_VPS_BROWSER_DATA:-$_data}"
+  _cdp_cfg="$_data/config.json"
+  if [ ! -f "$_cdp_cfg" ]; then
+    warn "no managed browser config at $_cdp_cfg: re-run setup.sh"
+    return 0
+  fi
+  _cdp="$(configured_cdp_port "$_cdp_cfg")"
+  if [ -z "$_cdp" ]; then
+    warn "$_cdp_cfg has no cdpUrl for the managed browser: re-run setup.sh to repair it"
+  elif python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' "http://127.0.0.1:$_cdp/json/version" >/dev/null 2>&1; then
+    ok "the managed browser answers on CDP 127.0.0.1:$_cdp"
+  else
+    warn "the managed browser is configured for CDP 127.0.0.1:$_cdp but nothing answers there: it is down, or another process owns the port (re-run setup.sh to move to a free one)"
+  fi
+}
+
+# An X/VNC server that is running (or a websockify bridge that is serving) is
+# a display the browser can use; a server binary installed but stopped is
+# not. A live websockify gets its noVNC viewer URL printed.
+check_display_stack() {
+  [ "$GUEST_OS" = Linux ] || return 0
+  [ "$SKIP_BROWSER" = 0 ] || { skip "display stack (--skip-browser)"; return 0; }
+  _wsport="$(websockify_port || true)"
+  if display_live; then
+    ok "a desktop display is live (DISPLAY=$(detect_display))"
+  elif [ -n "$_wsport" ]; then
+    ok "websockify is bridging a desktop on port $_wsport"
+  elif display_stack_present; then
+    warn "a display server is installed but none is running: the managed browser has no live display (start it, or re-run setup.sh so the services run Xvfb)"
+    return 0
+  else
+    warn "no display stack detected (Xvfb, x11vnc, TigerVNC or websockify): re-run setup.sh to install one"
+    return 0
+  fi
+  if [ -n "$_wsport" ]; then
+    _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+    say "  the remote desktop viewer is at http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+  fi
+}
+
+# Userspace-networking Tailscale has no tailscale0 to route tailnet IPs, so
+# outbound ssh to the computer only works through `tailscale nc`: --verify
+# checks the Hermes account's ssh config sets one for the configured host.
+check_tailscale_ssh_proxy() {
+  [ -n "$MAC_SSH" ] || return 0
+  tailscale_userspace || return 0
+  _found="$(python3 - "$BROWSER_HOME/.ssh/config" "$MAC_HOST" <<'PY'
+import fnmatch, sys
+path, host = sys.argv[1], sys.argv[2].lower()
+try:
+    lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    lines = []
+# Options before the first Host are global, and ssh takes the first
+# ProxyCommand any matching block sets; a pattern negated with ! vetoes the
+# whole match for that block. Match stanzas are too expressive to audit here.
+active = True
+for line in lines:
+    words = line.split("#", 1)[0].split()
+    if not words:
+        continue
+    key, args = words[0].lower(), [w.lower() for w in words[1:]]
+    if key == "host":
+        active = (any(not p.startswith("!") and fnmatch.fnmatchcase(host, p) for p in args)
+                  and not any(p.startswith("!") and fnmatch.fnmatchcase(host, p[1:]) for p in args))
+    elif key == "match":
+        active = False
+    elif key == "proxycommand" and active:
+        print("found" if "tailscale" in " ".join(args) else "other")
+        sys.exit(0)
+print("none")
+PY
+)"
+  case "$_found" in
+    found) ok "ssh to $MAC_HOST tunnels through 'tailscale nc' (this host's tailscaled is userspace: no tailscale0)";;
+    other) warn "$BROWSER_HOME/.ssh/config has a ProxyCommand for $MAC_HOST that is not 'tailscale nc': this host's tailscaled is userspace, so tailnet addresses are unreachable without it";;
+    *) warn "this host's tailscaled is userspace (no tailscale0): ssh to $MAC_HOST needs a ProxyCommand — re-run setup.sh, or add 'ProxyCommand tailscale nc %h %p' under 'Host $MAC_HOST' in $BROWSER_HOME/.ssh/config";;
+  esac
+}
+
 # The numeric bot id of a profile's Telegram bot, read the way Hermes does: the
 # profile's .env TELEGRAM_BOT_TOKEN wins over config.yaml platforms.telegram.token
 # (or botToken). `token_bot_id home DIR` reads both, `token_bot_id env FILE` one
@@ -1041,6 +1166,15 @@ for _shadow in "$HERMES_HOME"/skills/workspace-operations "$HERMES_HOME"/profile
   warn "$_shadow shadows the $PLUGIN_NAME plugin's workspace-operations skill: move anything you want to keep out of it, then delete it"
 done
 
+# The tailscale binary the checks and ssh blocks below call — a Windows guest
+# may only have the installed exe, not a PATH entry. --verify needs this too:
+# it asks tailscale_userspace whether ssh needs a `tailscale nc` ProxyCommand.
+TAILSCALE=tailscale
+if [ "$GUEST_OS" = Windows ] && ! have tailscale; then
+  _ts="$(cygpath -u "${PROGRAMFILES:-C:/Program Files}")/Tailscale/tailscale.exe"
+  [ ! -x "$_ts" ] || TAILSCALE="$_ts"
+fi
+
 if [ "$VERIFY" = 1 ]; then
   # --verify: report state without changing anything
   step "Install state"
@@ -1109,6 +1243,10 @@ print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is T
       warn "no host availability watcher state at $_watch_state: the watcher service is not running (re-run setup so it is installed)"
     fi
   fi
+  check_browser_services
+  check_browser_cdp
+  check_display_stack
+  check_tailscale_ssh_proxy
   check_linux_desktop_deps
   PROFS="$HERMES_HOME ${PROFILE:+$HERMES_HOME/profiles/$PROFILE}"
   OTHER_PROFILES=""
@@ -1168,11 +1306,6 @@ tailnet_refuse() {
   printf '%s\n' "setup: Install Tailscale (https://tailscale.com/download) on this machine and on your computer, sign in to the same account on both, then pass your computer's Tailscale name (it ends in .ts.net) or IP (it starts with 100.) as --mac-ssh." >&2
   exit 1
 }
-TAILSCALE=tailscale
-if [ "$GUEST_OS" = Windows ] && ! have tailscale; then
-  _ts="$(cygpath -u "${PROGRAMFILES:-C:/Program Files}")/Tailscale/tailscale.exe"
-  [ ! -x "$_ts" ] || TAILSCALE="$_ts"
-fi
 check_tailnet() {
   have "$TAILSCALE" || tailnet_refuse "Tailscale is not installed on this machine."
   # Through a file, not argv: a big tailnet's status exceeds a Windows command line.

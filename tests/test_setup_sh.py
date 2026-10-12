@@ -3831,6 +3831,227 @@ class VerifyExtrasTests(unittest.TestCase):
             self.assertNotIn("stale", result.stdout)
 
 
+class VerifyHostStateTests(unittest.TestCase):
+    """--verify reports the host state the no-systemd fix depends on: which
+    service manager owns the browser services, the managed browser's CDP port,
+    the tailnet ssh ProxyCommand userspace Tailscale needs, and the display."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        (self.home / "config.yaml").write_text(
+            "mcp_servers:\n"
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "  workspace_browser:\n    command: node\n"
+            "    tools:\n      exclude:\n        - workspace_computer_action\n"
+            "# <<< alans-way workspace_browser managed block <<<\n", encoding="utf-8")
+        self.bin_dir = fake_hermes_bin(
+            self.root, plugins="alans-way", tools="enabled proactivity",
+            proactivity_status='{"bound":true,"paused":false,"timezone_known":true}',
+            config_get="true")
+        self.data = self.root / "data"
+
+    def env(self, **extra):
+        return env_for(self.root, self.bin_dir, self.home,
+                       HERMES_VPS_BROWSER_DATA=str(self.data),
+                       ALANS_WAY_SUPERVISOR_CONF_DIR=str(self.root / "conf.d"),
+                       **extra)
+
+    def verify(self, *args, **env):
+        return run("--verify", "--hermes-home", str(self.home), *args,
+                   env=self.env(**env), check=False)
+
+    def dead_systemd(self):
+        linux_without_systemd(self.bin_dir, self.root / "systemctl.log")
+
+    def test_verify_reports_supervisord_program_states(self):
+        self.dead_systemd()
+        fake_supervisord(self.bin_dir, self.root, state=(
+            sup_line("alans-way-chromium", "RUNNING", "pid 11, uptime 1:00:00")
+            + sup_line("alans-way-browser", "STOPPED")))
+        result = self.verify()
+        self.assertIn("alans-way-chromium is running under supervisord", result.stdout)
+        self.assertRegex(result.stdout, r"warn .*alans-way-browser is not running under supervisord")
+
+    def test_verify_flags_a_supervisor_program_that_does_not_exist(self):
+        self.dead_systemd()
+        fake(self.bin_dir, "supervisorctl",
+             'case "$1" in\n  pid) echo 4321;;\n  status) echo "$2: ERROR (no such process)";;\nesac\n')
+        result = self.verify()
+        self.assertRegex(result.stdout,
+                         r"warn .*alans-way-chromium is not a supervisord program")
+
+    def test_verify_reports_live_systemd_services_running(self):
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
+        result = self.verify()
+        self.assertIn("hermes-alans-way-chromium.service is running under systemd", result.stdout)
+        self.assertIn("hermes-alans-way-browser.service is running under systemd", result.stdout)
+
+    def test_verify_tells_installed_units_from_missing_ones(self):
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
+        # is-active fails while is-system-running stays "running".
+        (self.bin_dir / "systemctl").write_text(
+            '#!/bin/sh\necho "$*" >> "%s"\n'
+            'case " $* " in *" is-active "*) exit 4;; esac\n'
+            'case "$1" in is-system-running) echo running;; esac\n'
+            'exit 0\n' % (self.root / "systemctl.log"), encoding="utf-8")
+        (self.bin_dir / "systemctl").chmod(0o755)
+        unit_dir = self.root / "units"
+        unit_dir.mkdir()
+        (unit_dir / "hermes-alans-way-browser.service").write_text("[Service]\n", encoding="utf-8")
+        result = self.verify(ALANS_WAY_UNIT_DIR=str(unit_dir))
+        self.assertIn("hermes-alans-way-browser.service is installed under systemd but not running",
+                      result.stdout)
+        self.assertIn("hermes-alans-way-chromium.service is not installed under systemd",
+                      result.stdout)
+
+    def test_verify_warns_when_no_manager_supervises_the_services(self):
+        self.dead_systemd()
+        result = self.verify(ALANS_WAY_MISSING="supervisorctl")
+        self.assertIn("no live systemd or usable supervisord", result.stdout)
+
+    def test_verify_warns_when_the_browser_is_not_answering_its_cdp_port(self):
+        self.data.mkdir(parents=True)
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        finally:
+            sock.close()
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:%d" % port,
+            "browserCommand": "/usr/bin/google-chrome", "browserArgs": []}), encoding="utf-8")
+        result = self.verify()
+        self.assertIn("configured for CDP 127.0.0.1:%d but nothing answers" % port, result.stdout)
+
+    def test_verify_ok_when_the_browser_answers_on_its_cdp_port(self):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"Browser":"fake"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        self.data.mkdir(parents=True)
+        (self.data / "config.json").write_text(json.dumps({
+            "port": 9465, "cdpUrl": "http://127.0.0.1:%d" % port,
+            "browserCommand": "/usr/bin/google-chrome", "browserArgs": []}), encoding="utf-8")
+        result = self.verify()
+        self.assertIn("the managed browser answers on CDP 127.0.0.1:%d" % port, result.stdout)
+
+    def test_verify_warns_when_no_browser_config_exists(self):
+        result = self.verify()
+        self.assertIn("no managed browser config", result.stdout)
+
+    def userspace_tailscale(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "tailscale", TAILSCALE_UP.replace(
+            '"BackendState":"Running"', '"BackendState":"Running","TUN":false'))
+        sysnet = self.root / "sysnet"
+        sysnet.mkdir(exist_ok=True)
+        return sysnet
+
+    def test_verify_flags_a_missing_proxycommand_on_userspace_tailscale(self):
+        sysnet = self.userspace_tailscale()
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("needs a ProxyCommand", result.stdout)
+        self.assertIn("tailscale nc %h %p", result.stdout)
+
+    def test_verify_ok_when_the_proxycommand_is_set(self):
+        sysnet = self.userspace_tailscale()
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "config").write_text(
+            "# >>> alans-way >>>\nHost mac.tail1234.ts.net\n"
+            "  ProxyCommand tailscale nc %h %p\n  ControlMaster auto\n"
+            "# <<< alans-way <<<\n", encoding="utf-8")
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("tunnels through 'tailscale nc'", result.stdout)
+
+    def test_verify_accepts_a_wildcard_host_block_proxycommand(self):
+        # The bootstrap writes 'Host 100.*': a 100.x --mac-ssh is covered by it.
+        sysnet = self.userspace_tailscale()
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "config").write_text(
+            "Host 100.*\n  ProxyCommand tailscale nc %h %p\n", encoding="utf-8")
+        result = self.verify("--mac-ssh", "me@" + tailnet_ip(64, 0, 9),
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("tunnels through 'tailscale nc'", result.stdout)
+
+    def test_verify_flags_a_non_tailscale_proxycommand(self):
+        sysnet = self.userspace_tailscale()
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "config").write_text(
+            "Host mac.tail1234.ts.net\n  ProxyCommand socat - TCP:%h:22\n", encoding="utf-8")
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("not 'tailscale nc'", result.stdout)
+
+    def test_verify_skips_the_proxy_check_on_kernel_tailscale(self):
+        sysnet = self.userspace_tailscale()
+        (sysnet / "tailscale0").touch()
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertNotIn("ProxyCommand", result.stdout)
+
+    def test_verify_reports_a_live_display(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        result = self.verify()
+        self.assertIn("a desktop display is live (DISPLAY=:99)", result.stdout)
+
+    def test_verify_prints_the_websockify_viewer_url(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
+             '  *) exit 1;;\nesac\n')
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        result = self.verify()
+        self.assertIn("6080", result.stdout)
+        self.assertIn("vnc.html", result.stdout)
+        self.assertIn(ip, result.stdout)
+
+    def test_verify_reports_a_websockify_only_desktop(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+
+    def test_verify_warns_when_no_display_stack_exists(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", "exit 1\n")
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11),
+                             ALANS_WAY_MISSING="Xvfb x11vnc Xtigervnc x0vncserver Xvnc websockify")
+        self.assertIn("no display stack detected", result.stdout)
+
+
 class GitAttributesTests(unittest.TestCase):
     def test_scripts_setup_runs_are_lf_in_every_checkout(self):
         files = ["setup.sh", "setup-workspace.sh", "alans-way/scripts/mac-watch.sh", "alans-way/scripts/workspace-router.cjs",
