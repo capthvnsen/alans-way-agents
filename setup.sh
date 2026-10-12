@@ -436,6 +436,12 @@ SUPCTL_DEF='supervisorctl_call() {
 }'
 eval "$SUPCTL_DEF"
 
+# The supervised half of the manual "stop the gateway, run the plugin command,
+# start it" hints below. A bare `supervisorctl stop` escalates TERM to SIGKILL
+# after stopwaitsecs — mid-checkpoint that corrupts state.db (issue #65) — so
+# the gateway drains on USR1 first and `stop` only parks the fresh respawn.
+GW_SUP_STOP="drain it first (supervisorctl signal USR1 <program>, wait for its pid to change), then supervisorctl stop <program>; supervisorctl start <program> after"
+
 # The profile a hermes argv selects — every equivalent flag spelling: -p X,
 # -p=X, -pX, --profile X and --profile=X — else "default".
 argv_profile() {
@@ -1567,13 +1573,13 @@ elif plugin_listed "$PLUGIN_NAME"; then
     # Never install --force over the catalog pin: the reviewed build stays
     # the only plugin source, updated only through the catalog itself.
     ok "plugin installed from the Hermes catalog: leaving its pin in place"
-    say "  to move it forward: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins update $PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program)"
+    say "  to move it forward: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins update $PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: $GW_SUP_STOP)"
   elif diff -rq -x __pycache__ "$REPO_DIR/$PLUGIN_NAME" "$PROFILE_HOME/plugins/$PLUGIN_NAME" >/dev/null 2>&1; then
     ok "plugin already installed and current"
   elif plugins_op plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME"; then
     ok "plugin updated from $REPO_DIR (restart the gateway to load it)"
   elif [ "$PLUGINS_OP_REFUSED" = 0 ]; then
-    warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program)"
+    warn "could not update the installed plugin: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: $GW_SUP_STOP)"
   fi
 else
   if plugins_op plugins install "$REPO_FILE_URL#$PLUGIN_NAME"; then
@@ -1673,7 +1679,7 @@ ensure_computer_provider() {
   elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
     queue_plugin_op plugins enable "$COMPUTER_PLUGIN"
   else
-    warn "could not install the computer-use provider: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install $COMPUTER_PLUGIN && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: supervisorctl stop/start the gateway program). Desktop control keeps using Hermes' built-in backend"
+    warn "could not install the computer-use provider: run: hermes${PROFILE:+ -p $PROFILE} gateway stop && hermes${PROFILE:+ -p $PROFILE} plugins install $COMPUTER_PLUGIN && hermes${PROFILE:+ -p $PROFILE} gateway start (supervisord: $GW_SUP_STOP). Desktop control keeps using Hermes' built-in backend"
   fi
 }
 if [ "$COMPUTER_API" = 1 ]; then
@@ -2630,16 +2636,16 @@ fi
 install_plugin_for_bot_profile() {
   if plugin_listed "$PLUGIN_NAME" || plugin_is_catalog_installed; then
     ok "plugin already installed in profile $PROFILE; leaving it as it is"
-    say "  to move it forward: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins update $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
+    say "  to move it forward: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins update $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   elif [ "$SKIP_PLUGIN" = 1 ]; then
-    warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
+    warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   elif plugins_op plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME"; then
     hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
     ok "plugin installed in profile $PROFILE"
   elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
     queue_plugin_op plugins enable "$PLUGIN_NAME"
   else
-    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: supervisorctl stop/start the gateway program)"
+    warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   fi
 }
 if [ "$ONLY_PROFILE" = 0 ]; then

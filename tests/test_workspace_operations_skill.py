@@ -60,6 +60,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             self.normalized,
         )
 
+    def test_supervisord_restart_uses_the_usr1_drain(self):
+        """Issue #65: the post-update restart note must route a supervised
+        gateway through `signal USR1`, never `supervisorctl restart`."""
+        self.assertIn("signal USR1", self.normalized)
+        self.assertIn("state.db", self.normalized)
+
     def test_every_model_uses_refs_before_screenshots(self):
         self.assertIn("same for every Hermes model", self.normalized)
         self.assertIn("workspace_computer_snapshot", self.normalized)

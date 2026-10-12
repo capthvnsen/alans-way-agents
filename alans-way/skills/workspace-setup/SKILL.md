@@ -132,7 +132,12 @@ different bot's route silently.
    what to check next, and start no further tool calls: the restart can cut the
    conversation off. It goes through the gateway's real owner (`hermes gateway
    restart`, or the supervisor that owns it), so never kill -9 a gateway
-   mid-message. If the restart was skipped, a check failed: say which one.
+   mid-message. Restarting one by hand on a supervisord host: `supervisorctl
+   restart` escalates SIGTERM to SIGKILL after `stopwaitsecs` (10s by default)
+   and a kill mid-checkpoint corrupts the gateway's `state.db` — signal the drain
+   instead (`supervisorctl signal USR1 <program>` on the program whose command
+   runs `hermes gateway run`), wait for the new pid, and use `start`/`restart`
+   only as fallbacks. If the restart was skipped, a check failed: say which one.
 7. **Bind only after a real DM route exists.** If no routes are listed, the
    user messages the bot once, then `setup.sh --bind`. By hand:
    `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,

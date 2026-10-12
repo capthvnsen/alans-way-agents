@@ -155,7 +155,7 @@ if [ "$DRY_RUN" = 1 ]; then
     log "would pack $HERMES_HOME (excluding caches, logs, venvs, node_modules, profiles/.deleted)"
     log "would stream the archive to $TO over ssh"
     log "would park the remote gateway, unpack on $TO, rewrite $HERMES_HOME paths to $REMOTE_HERMES in *.yaml/*.yml, back up any existing remote home, and move it into place"
-    log "would stop the old gateway (supervisorctl stop, systemctl --user stop, systemctl stop, hermes gateway stop — first that works) or abort"
+    log "would stop the old gateway (supervisorctl signal USR1 then stop once the pid changes, systemctl --user stop, systemctl stop, hermes gateway stop — first that works) or abort"
     log "would ship a fresh sqlite snapshot, then run: ssh $TO supervisorctl start hermes-gateway (verified via status; the old gateway is restarted if it fails)"
     exit 0
 fi

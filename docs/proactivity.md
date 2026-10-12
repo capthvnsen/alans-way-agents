@@ -46,6 +46,12 @@ hermes gateway restart
 hermes proactivity status
 ```
 
+On a host where supervisord runs the gateway, `hermes gateway restart` does
+not reach it: drain it through the supervisor instead — `supervisorctl signal
+USR1 <program>` on the program whose command runs `hermes gateway run`, then
+wait for the new pid. `supervisorctl restart`/`stop` escalates SIGTERM to
+SIGKILL after `stopwaitsecs` and can corrupt `state.db` mid-checkpoint.
+
 `hermes proactivity set --settings '{"base_minutes": 2}'` makes a test check-in
 arrive two minutes after you stop chatting. Set it back with
 `'{"level": "normal"}'`.

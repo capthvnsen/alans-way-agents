@@ -126,7 +126,8 @@ The bootstrap runs every step in order and says what it did:
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)
 - **Verify** — prints a pass/fail summary of the whole install
-- **Gateway restart**: last, through the detected supervisor (a one-shot
+- **Gateway restart**: last, through the detected supervisor (a SIGUSR1 drain
+  under supervisord, a one-shot
   Scheduled Task on Windows), detached and a
   few seconds after the summary, so a restart never cuts setup short. If you
   run setup from a chat on that gateway, the chat pauses briefly
@@ -218,7 +219,14 @@ Alan's Workspace's update popup updates the app and the plugin on every saved VM
 over SSH. Nothing to run by hand.
 
 Manual path: `git pull` (or re-run the `curl|bash` line), then restart the
-gateway. A running gateway keeps already-imported code until restarted. Verify
+gateway. A running gateway keeps already-imported code until restarted.
+Restart it through its owner: `hermes gateway restart`, or on a host where
+supervisord runs the gateway `supervisorctl signal USR1 <program>` on the
+program whose command runs `hermes gateway run` — the gateway drains its
+turns, exits, and supervisord relaunches it; wait for the new pid, and use
+`start`/`restart` only as fallbacks. A plain `supervisorctl restart` or `stop`
+escalates SIGTERM to SIGKILL after `stopwaitsecs` (10s by default), which can
+kill the gateway mid-checkpoint and corrupt `state.db`. Verify
 one ordinary Telegram reply and one bounded browser action before relying on it.
 
 ### What each piece does
