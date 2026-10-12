@@ -571,6 +571,9 @@ function pageUrlFromMessage(msg) {
     // A tab list names every open page. Remembering the first one would
     // replace the page the agent was actually working on.
     if (/"tabs"\s*:/.test(part.text)) continue;
+    // A CAPTCHA or bot-check page (Google's /sorry/, a Cloudflare check) is
+    // not worth continuing: failover would reopen it in the VM browser.
+    if (/"challenge"\s*:\s*\{/.test(part.text)) continue;
     const match = part.text.match(/"url"\s*:\s*"(https:\/\/[^"\\]{8,500})"/);
     if (!match) continue;
     try {

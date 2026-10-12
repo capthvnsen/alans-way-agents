@@ -390,6 +390,26 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual(bool(msg["result"].get("isError")), is_error)
         return msg
 
+    # Reply shapes as the app sends them (capthvnsen/alans-way#138): the
+    # challenge rides top-level on snapshot and action replies, the automatic
+    # release on the reply's tab.handback, and the VM adds handback.viewerUrl.
+    SORRY_NOTE = 'Solve the Google "unusual traffic" check on www.google.com. The tab goes back to the agent once it clears.'
+    BACK_OFF = "www.google.com has challenged 2 times in 10 minutes. Stop retrying it and use another source."
+
+    def sorry_reply(self, tab_id, viewer=None, back_off=False):
+        challenge = {"kind": "google_sorry", "blocking": True}
+        handback = {"reason": "captcha", "note": self.SORRY_NOTE, "auto": True, "challenge": "google_sorry",
+                    "state": "awaiting_human", "botId": "bot1", "since": 1760000000000}
+        if back_off:
+            challenge.update(backOff=True, advice=self.BACK_OFF)
+            handback.update(backOff=True, advice=self.BACK_OFF)
+        if viewer:
+            handback["viewerUrl"] = viewer
+        return json.dumps({"effect": {"navigated": True, "url": "https://www.google.com/sorry/index?continue=x",
+                                      "title": "unusual traffic", "changed": True, "text": "Our systems have detected unusual traffic"},
+                           "challenge": challenge,
+                           "tab": {"id": tab_id, "epoch": 2, "controller": "human", "handback": handback}})
+
     def test_challenge_fields_and_refusals_reach_the_model_intact(self):
         # The CAPTCHA handback is driven entirely by what the app puts in its
         # replies; the router may add _meta and notices but never rewrite them.
@@ -398,15 +418,21 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.call("cua_alans_way_open", {"url": "https://www.google.com/search?q=lamps"})
         self.recv()
         replies = [
-            (json.dumps({"ok": True, "tab": {"id": "mac-tab-1", "epoch": 1},
-                         "effect": {"navigated": True, "url": "https://www.google.com/sorry/index"},
-                         "challenge": {"kind": "google_sorry", "blocking": True}}), False),
-            ("challenge_present: a CAPTCHA blocks this page. Release the tab with reason captcha.", True),
+            (json.dumps({"effect": {"navigated": True, "url": "https://shop.example/checkout"},
+                         "challenge": {"kind": "recaptcha", "blocking": False},
+                         "tab": {"id": "mac-tab-1", "epoch": 1, "controller": "agent", "handback": None}}), False),
+            (self.sorry_reply("mac-tab-1"), False),
+            (self.sorry_reply("mac-tab-1", back_off=True), False),
+            ('challenge_present: this page shows a recaptcha challenge and bots never solve one. Release the tab '
+             'with reason "captcha" (control: controller "human", reason "captcha") so the person can; it comes '
+             'back to you once the challenge clears.', True),
             ("awaiting_human: this tab was handed to the human (captcha). Wait until they give it back; "
              "read the tab state later.", True),
+            ("human_returned: the human finished and gave this tab back. Read the tab state for its fresh epoch "
+             "and current page.", True),
         ]
         for text, is_error in replies:
-            with self.subTest(text=text[:30]):
+            with self.subTest(text=text[:40]):
                 call = self.call("cua_alans_way_action", {"action": "click", "ref": "s1-2",
                                                           "echo": text, "isError": is_error})
                 msg = self.assert_intact(call, text, is_error)
@@ -417,15 +443,14 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://www.google.com/", "host": "vm"})
         self.recv()
-        text = json.dumps({"ok": True, "challenge": {"kind": "recaptcha", "blocking": True},
-                           "awaitingHuman": {"reason": "captcha", "viewerUrl": "http://vm.example:6080/vnc.html"}})
+        text = self.sorry_reply("vm-tab-1", viewer="http://vm.example:6080/vnc.html?autoconnect=1")
         call = self.call("cua_alans_way_action", {"action": "navigate", "echo": text, "isError": False})
         msg = self.assert_intact(call, text, False)
         self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "vm")
 
     def test_the_merged_tab_list_keeps_a_captcha_handback(self):
-        handback = {"state": "awaiting_human", "reason": "captcha", "note": "Google wants a CAPTCHA.",
-                    "botId": "bot1", "since": 1760000000000}
+        handback = {"reason": "captcha", "note": self.SORRY_NOTE, "auto": True, "challenge": "google_sorry",
+                    "state": "awaiting_human", "botId": "bot1", "since": 1760000000000}
         self.start(MAC_HANDBACK=json.dumps(handback))
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
@@ -436,6 +461,31 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         tabs = {tab["id"]: tab for tab in json.loads(msg["result"]["content"][0]["text"])["tabs"]}
         self.assertEqual(set(tabs), {"mac-tab-1", "vm-tab-1"})
         self.assertEqual(tabs["mac-tab-1"]["handback"], handback)
+
+    def test_a_challenge_page_is_never_the_resume_page(self):
+        # Failover reopens the remembered page in the VM browser, where a
+        # CAPTCHA page would only challenge again.
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        page = json.dumps({"effect": {"navigated": True, "url": "https://shop.example/lamps"},
+                           "tab": {"id": "mac-tab-1", "epoch": 1}})
+        self.call("cua_alans_way_action", {"action": "navigate", "echo": page})
+        self.recv()
+        resume = self.dir / "resume-url-bot1.json"
+        time.sleep(1.3)  # resume writes are debounced 1s
+        self.assertIn("shop.example/lamps", resume.read_text())
+        for text in [self.sorry_reply("mac-tab-1"),
+                     json.dumps({"effect": {"url": "https://shop.example/checkout"},
+                                 "challenge": {"kind": "turnstile", "blocking": False}})]:
+            self.call("cua_alans_way_action", {"action": "navigate", "echo": text})
+            self.recv()
+        time.sleep(1.3)
+        remembered = resume.read_text()
+        self.assertIn("shop.example/lamps", remembered)
+        self.assertNotIn("sorry", remembered)
+        self.assertNotIn("checkout", remembered)
 
     def test_no_duplicate_vm_backend_after_failover(self):
         self.start(mac_mode="die-on-call")

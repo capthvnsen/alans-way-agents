@@ -313,43 +313,60 @@ challenge widget to solve it, do not reach it with `eval` or `cdp`, and never
 use a solver service. The user solves it; you wait. A challenge is never
 something to approve either: do not ask the user to approve a click on one.
 
-A challenge shows up as a `challenge` field (`kind` and `blocking`) in a
-snapshot or action reply, as a `challenge_present` refusal, or as the tab
-handed to the human with reason `captcha` (calls answer `awaiting_human`, and
-the tab's `handback.reason` is `captcha`). `blocking:false` means the widget
-is on the page but not in your way: keep working and leave it alone. On a
-blocking challenge:
+A snapshot or action reply on a page with a challenge carries
+`challenge: {kind, blocking}`, where `kind` is `recaptcha`, `hcaptcha`,
+`turnstile`, `cloudflare`, `google_sorry` or `arkose`.
 
-1. The app normally hands the tab to the user with reason `captcha` itself.
-   If the tab is still yours (a `challenge_present` refusal says so), release
-   it: `{action:"release", reason:"captcha", note:"Solve the CAPTCHA, then give the tab back."}`.
-2. Tell the user once, as one short text before your next tool call; Hermes
+- `blocking:false` is a widget inside a page that stays yours, such as a
+  reCAPTCHA box in a form. Use the rest of the page. Input that would land on
+  the widget is refused with `challenge_present`. If you need the widget
+  solved to go on, release the tab:
+  `{action:"release", reason:"captcha", note:"Solve the CAPTCHA, then give the tab back."}`.
+- `blocking:true` (a whole-page check such as Google's "unusual traffic"
+  page or "Just a moment") is handed to the user by the app itself. The
+  reply's `tab` then has `controller:"human"` and a `handback` with
+  `state:"awaiting_human"`, `reason:"captcha"`, a `note` naming the site, and
+  on a VM tab the `viewerUrl` to solve it in. Until it comes back, calls on
+  that tab answer `awaiting_human`.
+
+Once the tab is the user's:
+
+1. Tell the user once, as one short text before your next tool call; Hermes
    delivers it to Telegram mid-turn. Name the site and what you were doing.
    For a tab on their computer, say it is waiting in Alan's Workspace. For a
-   VM tab, include the viewer link the reply gives; without one, say it is in
-   the VM viewer in Alan's Workspace, and ask them to say when they're
-   through. For example: "Google wants a CAPTCHA before I can search. Can you
-   tap through it in Alan's Workspace? I'll pick it back up."
-3. Wait. Check `cua_alans_way_tabs` at most once every 30 seconds (a
+   VM tab, include the handback's `viewerUrl`; without one, say it is in the
+   VM viewer in Alan's Workspace, and ask them to say when they're through.
+   Never paste a viewer link that has a password, token or key in it (a
+   `password=`, `token=`, `key=` or similar query parameter, a `user:pass@`
+   part, or anything after `#`): leave the link out and point them to the
+   viewer in Alan's Workspace instead. For example: "Google wants a CAPTCHA
+   before I can search. Can you tap through it in Alan's Workspace? I'll pick
+   it back up."
+2. Wait. Check `cua_alans_way_tabs` at most once every 30 seconds (a
    foreground `sleep 30` in the terminal between checks), for up to 30
-   minutes. Do not snapshot, act on, or claim the tab meanwhile. When the tab
-   is back with you (`controller` is `agent`, or its handback says
-   `human_returned`), read it for the fresh epoch and carry on without
-   another message. A VM tab can stay with the human after the challenge
-   clears, so there the user saying they're done also ends the wait.
-4. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
+   minutes. Do not snapshot, act on, or claim the tab meanwhile. The app
+   hands the tab back on its own once the challenge clears. When the tab is
+   back with you (`controller` is `agent` and its handback says
+   `human_returned`), carry on without another message: the epoch moved on,
+   and the tab list you just read gave you the fresh one. A tab you released
+   yourself on the VM can stay with the human after the challenge clears, so
+   there the user saying they're done also ends the wait.
+3. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
    message already said you will pick it back up. When the user says it's
    done, list your tabs; if the tab is still theirs, their reply is the
    agreement to claim it, so claim it and continue.
 
-**Back off.** If the same site challenges you twice within 10 minutes (when
-you cannot tell the time, twice in this task counts), or a reply says to stop
-retrying it, stop using that site for this task, and do not retry it in a
-fresh tab. Switch to another source: `web_search`, another site with the same
-answer, or, when the challenges came on the VM, the user's computer once it
-is online. This is a change of source, not a browser failure: say in your
-reply which source you used. If no other source can answer, ask the user how
-to go on.
+**Back off.** When a reply's `challenge` (or the tab's `handback`) has
+`backOff:true`, its `advice` says the site has challenged twice in 10 minutes:
+stop using that site for this task. Do the same when the same site
+challenges you twice within 10 minutes across tabs (when you cannot tell the
+time, twice in this task counts). Do not wait on that tab or retry the site
+in a fresh tab. Switch to another source: `web_search`, another site with
+the same answer, or, when the challenges came on the VM, the user's computer
+once it is online. Tell the user in one line that you moved on, so they can
+ignore that CAPTCHA. This is a change of source, not a browser failure: say
+in your reply which source you used. If no other source can answer, ask the
+user how to go on.
 
 ## Hand a task between computers
 
