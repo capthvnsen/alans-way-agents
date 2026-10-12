@@ -894,7 +894,35 @@ const COMMIT_VERBS = {
   delete: 'delete',
   account_change: 'change an account',
 };
-const COMMIT_NAME = /\b(?:place\s+(?:your\s+)?order|pay|buy\s+now|purchase|confirm\s+and\s+pay|complete\s+booking|book\s+now|reserve|send|post|publish|submit\s+application|delete)\b/i;
+// Control names that commit. Words may be split by spaces, dashes or
+// underscores ("Buy-now"); a match must not touch another letter or digit, in
+// any script. Japanese has no word breaks, so its phrases match anywhere.
+const SEP = '[\\s_-]+';
+const phrase = (text) => text.split(' ').join(SEP);
+const COMMIT_PHRASES = [
+  'place order', 'place your order', 'pay', 'buy now', 'purchase', 'confirm and pay',
+  'complete booking', 'book now', 'book', 'reserve', 'request to book', 'confirm order',
+  'confirm booking', 'complete order', 'submit order', 'order now', 'send', 'post', 'publish',
+  'submit application', 'easy apply', 'delete', 'subscribe', 'donate', 'transfer',
+  'zahlungspflichtig bestellen', 'jetzt kaufen', 'commander', 'comprar', 'pagar', 'réserver',
+].map(phrase);
+const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PHRASES.join('|')})(?![\\p{L}\\p{N}])|注文を確定する`, 'iu');
+// Look-alikes that do not commit, removed before matching: a login or 2FA
+// code, a payment-method picker, an order history link, a filter chip's
+// delete, a saved-address picker.
+const NOT_COMMIT = new RegExp([
+  `send(?:${SEP}(?:me|a|new|verification|security|login|sign${SEP}in|one${SEP}time|sms|text))*${SEP}(?:code|otp|passcode)`,
+  `pay${SEP}with(?![\\p{L}\\p{N}]).*`,
+  `purchase${SEP}history`,
+  `delete(?=.*filter)|(?<=filter.*)delete`,
+  `address${SEP}book`,
+].join('|'), 'giu');
+const isCommitName = (name) => COMMIT_NAME.test(String(name).replace(NOT_COMMIT, ' '));
+// A selector read as words: #placeOrderBtn and [data-test=place-order] both
+// say "place order".
+const selectorWords = (selector) => selector.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').replace(/[^\p{L}\p{N}]+/gu, ' ');
+const SUBMIT_SELECTOR = /type\s*=\s*["']?submit|:submit\b/i;
+const BLIND_KEYS = /^(?:enter|return|space| )$/i;
 const COMMIT_STEP_ACTIONS = new Set(['click', 'double_click', 'press']);
 const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
@@ -1631,27 +1659,41 @@ async function main() {
   const TAB_DEFAULTED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_snapshot']);
   const TAB_ID = /^[\w-]{1,100}$/;
 
-  // Per tab, the names behind the element refs replies have shown and the
-  // page's origin: what the commit gate matches a click against and shows the
-  // user. Refs are generation-scoped (s<base>-<n>), so names from earlier
-  // replies never relabel a newer element and merging is safe.
-  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin }
+  // Per tab, the names behind the element refs replies have shown, the
+  // page's origin, and the commit-looking controls the current page shows:
+  // what the commit gate matches a click against and shows the user. Refs are
+  // generation-scoped (s<base>-<n>), so names from earlier replies never
+  // relabel a newer element and merging is safe. `live` resets when the page
+  // URL changes; Enter, Space or a click by position on a page that still
+  // shows a commit control may set it off.
+  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name) }
   function learnTabPage(tabId, data) {
     if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
     let page = tabPages.get(tabId);
     if (!page) {
-      page = { names: new Map(), origin: '' };
+      page = { names: new Map(), origin: '', url: '', live: new Set() };
       tabPages.set(tabId, page);
     }
     const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
     try {
-      if (typeof url === 'string' && url) page.origin = new URL(url).origin;
-    } catch { /* keep the last origin a reply named */ }
+      if (typeof url === 'string' && url) {
+        const parsed = new URL(url);
+        page.origin = parsed.origin;
+        parsed.hash = '';
+        if (parsed.href !== page.url) {
+          page.url = parsed.href;
+          page.live = new Set();
+        }
+      }
+    } catch { /* keep the last page a reply named */ }
     const lists = [data.elements, ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
     for (const list of lists) {
       if (!Array.isArray(list)) continue;
       for (const el of list) {
-        if (el && typeof el.ref === 'string') page.names.set(el.ref, typeof el.name === 'string' ? el.name : '');
+        if (!el || typeof el.ref !== 'string') continue;
+        const name = typeof el.name === 'string' ? el.name : '';
+        page.names.set(el.ref, name);
+        if (name && isCommitName(name)) page.live.add(cardText(name, 80));
       }
     }
     for (const ref of page.names.keys()) {
@@ -1962,13 +2004,16 @@ async function main() {
     }
   }
 
-  // What this call (or any batch step) clicks by ref: the names of every
-  // control, the commit-looking ones, and the first page ref whose name this
-  // router never saw (a respawned router, or a ref from a reply it skipped).
-  // An unseen ref cannot be checked, so it is refused rather than let through.
+  // What this call (or any batch step) clicks or presses, read three ways:
+  // `acts` describes each for the approval card, `commits` says why one
+  // looks like a commit, and `unseen` why the router cannot tell (a ref it
+  // never saw a name for after a respawn, or a blind input on a tab it never
+  // read). A ref or selector is judged by its words; Enter, Space, a click by
+  // position, or a selector for "the submit button" cannot be, so they count
+  // as commits on a page that shows a commit control.
   const APP_REF = /^s\d+-\d+$/;
   function clickTargets(args) {
-    const found = { names: [], commits: [], unseen: null };
+    const found = { acts: [], commits: [], unseen: null };
     const walk = (step, tabId) => {
       if (!step || typeof step !== 'object') return;
       const tab = typeof step.tabId === 'string' ? step.tabId : tabId;
@@ -1976,23 +2021,44 @@ async function main() {
         if (Array.isArray(step.steps)) for (const inner of step.steps) walk(inner, tab);
         return;
       }
-      if (!COMMIT_STEP_ACTIONS.has(step.action) || typeof step.ref !== 'string') return;
+      if (!COMMIT_STEP_ACTIONS.has(step.action)) return;
       const page = tabPages.get(tab);
-      const name = page ? page.names.get(step.ref) : undefined;
-      if (name === undefined) {
-        if (!found.unseen && APP_REF.test(step.ref)) found.unseen = step.ref;
-        return;
+      const blind = [];
+      if (step.action === 'press' && typeof step.key === 'string' && BLIND_KEYS.test(step.key)) {
+        const key = step.key === ' ' ? 'Space' : cardText(step.key, 10);
+        found.acts.push(`presses ${key}`);
+        blind.push(`pressing ${key}`);
       }
-      if (!name) return;
-      found.names.push(cardText(name, 80));
-      if (COMMIT_NAME.test(name)) found.commits.push(cardText(name, 80));
+      if (typeof step.ref === 'string') {
+        const name = page ? page.names.get(step.ref) : undefined;
+        if (name === undefined) {
+          if (!found.unseen && APP_REF.test(step.ref)) found.unseen = `ref ${step.ref} is not from a page state this connector has seen`;
+        } else if (name) {
+          found.acts.push(`clicks "${cardText(name, 80)}"`);
+          if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
+        }
+      } else if (typeof step.selector === 'string' && step.selector) {
+        const selector = cardText(step.selector, 80);
+        found.acts.push(`clicks ${selector}`);
+        if (isCommitName(selectorWords(step.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
+        else if (SUBMIT_SELECTOR.test(step.selector)) blind.push(`clicking ${selector}`);
+      } else if (step.action !== 'press' && (typeof step.x === 'number' || typeof step.y === 'number')) {
+        found.acts.push(`clicks at ${step.x},${step.y}`);
+        blind.push('clicking by position');
+      }
+      if (!blind.length) return;
+      if (!page || !page.url) {
+        if (!found.unseen) found.unseen = `this connector has not read tab ${tab} yet, so it cannot tell what ${blind[0]} would do`;
+      } else if (page.live.size) {
+        found.commits.push(`${blind[0]} here could set off "${[...page.live][0]}"`);
+      }
     };
     walk(args, args.tabId);
     return found;
   }
 
   const APPROVAL_REFUSALS = {
-    declined: 'declined: the user did not approve this (or no one could be asked). It did not run. Do not retry it or reach the same result another way unless the user asks.',
+    declined: 'declined: the user did not approve this, or no one could be asked (in a scheduled job Hermes declines on its own). It did not run. Do not retry it or reach the same result another way. Leave everything staged up to this step and tell the user it is waiting for them.',
     approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
     approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
     host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
@@ -2012,11 +2078,11 @@ async function main() {
       return true;
     };
     if (targets.unseen) {
-      return refuse(`snapshot_required: ref ${targets.unseen} is not from a page state this connector has seen. It did not run. Take a snapshot and use its refs.`);
+      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs.`);
     }
     if (args.commit === undefined) {
       logDecision({ origin, target: targets.commits[0] }, 'commit_required');
-      return refuse(`commit_required: "${targets.commits[0]}" looks like it buys, books, sends, posts, submits or deletes. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
+      return refuse(`commit_required: ${targets.commits[0]}. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
     }
     const commit = cleanCommit(args.commit);
     if (!commit) {
@@ -2046,8 +2112,8 @@ async function main() {
     const what = [commit.summary, price, commit.counterparty].filter(Boolean).join(' · ');
     // The origin and the clicked controls are the router's own reading of
     // the page; everything before them is the agent's description.
-    const clicks = targets.names.length ? ` (clicks "${targets.names.join('", "')}")` : '';
-    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${clicks}`;
+    const acts = targets.acts.length ? ` (${targets.acts.join('; ')})` : '';
+    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${acts}`;
     const id = `wsr-commit-${++approvalSeq}`;
     const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), windowMs);
     timer.unref();
@@ -2064,7 +2130,7 @@ async function main() {
             approve: {
               type: 'boolean',
               title: 'Approve',
-              description: targets.names.length ? `Approve clicking "${targets.names.join('", "')}"` : 'Approve this action',
+              description: targets.acts.length ? `Approve: ${targets.acts.join('; ')}` : 'Approve this action',
             },
           },
           required: ['approve'],
@@ -2449,6 +2515,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isCommitName,
+  selectorWords,
   readMacState,
   freshMacState,
   workspaceNotice,

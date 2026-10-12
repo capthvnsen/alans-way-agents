@@ -17,15 +17,22 @@ from test_workspace_host import FAKE_SSH, ROUTER, VM_STUB  # noqa: E402
 NODE = shutil.which("node")
 SH = shutil.which("sh")
 
-# The user's computer on a checkout page: one commit button, two ordinary ones.
+# The user's computer: a checkout page (one commit button, a card field, two
+# ordinary controls) and, in a second tab, a search page with no commit control.
 MAC_STUB = r"""
 const fs = require('fs');
 const mode = process.env.MAC_MODE || 'ok';
-const page = { url: 'https://shop.example/checkout?step=2', elements: [
-  { ref: 's1-1', role: 'button', name: 'Place order' },
-  { ref: 's1-2', role: 'button', name: 'Add to cart' },
-  { ref: 's1-3', role: 'link', name: 'Delete' },
-] };
+const pages = {
+  'mac-tab-1': { url: 'https://shop.example/checkout?step=2', elements: [
+    { ref: 's1-1', role: 'button', name: 'Place order' },
+    { ref: 's1-2', role: 'button', name: 'Add to cart' },
+    { ref: 's1-3', role: 'link', name: 'Delete' },
+    { ref: 's1-4', role: 'input', name: 'Card number' },
+  ] },
+  'mac-tab-2': { url: 'https://shop.example/search', elements: [
+    { ref: 's2-1', role: 'input', name: 'Search' },
+  ] },
+};
 const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
   result: { content: [{ type: 'text', text }] } }) + '\n');
 require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
@@ -43,12 +50,17 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
   const a = (m.params && m.params.arguments) || {};
   if (m.method !== 'tools/call') return reply(m.id, 'mac');
   if (m.params.name === 'cua_alans_way_status' && mode === 'die-on-status') process.exit(1);
-  if (m.params.name === 'cua_alans_way_open')
-    return reply(m.id, JSON.stringify({ id: 'mac-tab-1', url: page.url, host: 'mac', epoch: 1 }));
+  if (m.params.name === 'cua_alans_way_open') {
+    const id = /search/.test(a.url || '') ? 'mac-tab-2' : 'mac-tab-1';
+    return reply(m.id, JSON.stringify({ id, url: pages[id].url, host: 'mac', epoch: 1 }));
+  }
   if (m.params.name === 'cua_alans_way_snapshot')
-    return reply(m.id, JSON.stringify({ generation: 1, ...page, tab: { id: a.tabId, epoch: 1 } }));
+    return reply(m.id, JSON.stringify({ generation: 1, ...pages[a.tabId], tab: { id: a.tabId, epoch: 1 } }));
   if (m.params.name === 'cua_alans_way_action') {
     if (mode === 'die-on-commit' && line.includes('s1-1')) process.exit(1);
+    if (a.action === 'navigate')
+      return reply(m.id, JSON.stringify({ effect: { navigated: true, url: a.url }, generation: 3,
+        elements: [{ ref: 's3-1', role: 'input', name: 'Search' }], tab: { id: a.tabId, epoch: 1 } }));
     return reply(m.id, JSON.stringify({ ok: true, tab: { id: a.tabId, epoch: 1 } }));
   }
   reply(m.id, 'mac');
@@ -216,6 +228,17 @@ class CommitGateTests(unittest.TestCase):
         self.answer(self.recv(), "accept", {"approve": False})
         self.refused(call, "declined")
 
+    def test_a_scheduled_job_is_declined_and_told_to_leave_it_staged(self):
+        # Hermes advertises elicitation to every MCP server and, with no user
+        # to ask (cron, -q), declines on its own.
+        self.open_checkout()
+        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        self.answer(self.recv(), "decline")
+        msg = self.refused(call, "declined")
+        self.assertIn("Leave everything staged", self.text(msg))
+        self.assertIn("tell the user", self.text(msg))
+        self.assertEqual(self.actions(), [])
+
     def test_without_elicitation_support_nothing_runs(self):
         self.open_checkout(elicitation=False)
         call = self.act(action="click", ref="s1-1", commit=PURCHASE)
@@ -243,6 +266,65 @@ class CommitGateTests(unittest.TestCase):
         self.assertFalse(done["result"].get("isError"))
         self.assertEqual([a["ref"] for a in self.actions()], ["s1-2"])
         self.assertEqual(self.decisions()[-1]["decision"], "commit_required")
+
+    def open_search(self):
+        self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/search"})
+        self.recv()
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-2"})
+        self.recv()
+
+    def ran(self, call):
+        done = self.recv()
+        self.assertEqual(done["id"], call)
+        self.assertFalse(done["result"].get("isError"), done)
+
+    def test_enter_or_space_on_a_page_with_a_commit_control_needs_commit(self):
+        self.open_checkout()
+        for args in ({"action": "press", "ref": "s1-4", "key": "Enter"},
+                     {"action": "press", "key": "Return"},
+                     {"action": "press", "key": " "},
+                     {"action": "batch", "steps": [{"action": "type", "ref": "s1-4", "text": "4242"},
+                                                   {"action": "press", "key": "Enter"}]}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(**args), "commit_required")
+                self.assertIn("Place order", self.text(msg))
+        self.assertEqual(self.actions(), [])
+        self.ran(self.act(action="press", ref="s1-4", key="Tab"))
+        call = self.act(action="press", ref="s1-4", key="Enter", commit=PURCHASE)
+        ask = self.recv()
+        self.assertIn('presses Enter; clicks "Card number"', ask["params"]["message"])
+        self.answer(ask, "accept", {})
+        self.ran(call)
+        self.assertEqual([a["key"] for a in self.actions()], ["Tab", "Enter"])
+
+    def test_enter_on_a_page_without_a_commit_control_runs(self):
+        self.open_checkout()
+        # The same tab, once it leaves the checkout page, no longer counts it.
+        self.ran(self.act(action="navigate", url="https://shop.example/thanks"))
+        self.ran(self.act(action="press", ref="s3-1", key="Enter"))
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="press", ref="s2-1", key="Enter"))
+        self.ran(self.act(tabId="mac-tab-2", action="click", x=10, y=20))
+
+    def test_clicks_by_selector_or_position_are_checked(self):
+        self.open_checkout()
+        for args in ({"action": "click", "selector": "#placeOrderBtn"},
+                     {"action": "click", "selector": "[data-test=buy-now]"},
+                     {"action": "click", "selector": "button[type=submit]"},
+                     {"action": "click", "x": 640, "y": 410},
+                     {"action": "batch", "steps": [{"action": "click", "selector": "form .submit-order"}]}):
+            with self.subTest(args=args):
+                self.refused(self.act(**args), "commit_required")
+        self.assertEqual(self.actions(), [])
+        self.ran(self.act(action="click", selector=".add-to-cart"))
+
+    def test_a_blind_press_on_a_tab_never_read_needs_a_snapshot(self):
+        self.start()
+        self.handshake()
+        self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/"})
+        self.recv()
+        self.refused(self.act(tabId="mac-tab-9", action="press", key="Enter"), "snapshot_required")
+        self.assertEqual(self.actions(), [])
 
     def test_a_ref_this_router_never_saw_is_refused_until_a_snapshot(self):
         self.start()
@@ -383,6 +465,46 @@ class CommitGateTests(unittest.TestCase):
         self.refused(call, "host_changed")
         self.assertEqual(self.actions(), [])
         self.assertEqual(self.actions("vm.log"), [])
+
+
+
+@unittest.skipUnless(NODE, "node is required for the commit name tests")
+class CommitNameTests(unittest.TestCase):
+    COMMITS = [
+        "Place order", "Place your order", "Pay $40.00", "Buy now", "Buy-now", "Purchase",
+        "Confirm and pay", "Complete booking", "Book now", "Book", "Reserve", "Request to book",
+        "Confirm order", "Confirm booking", "Complete order", "Submit order", "Order now",
+        "Send", "Send message", "Post", "Publish", "Submit application", "Easy Apply",
+        "Delete", "Delete account", "Subscribe", "Donate", "Transfer",
+        "Zahlungspflichtig bestellen", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
+        "注文を確定する", "ご注文を確定する", "Réserver", "RÉSERVER UNE TABLE",
+    ]
+    NOT_COMMITS = [
+        "Add to cart", "Send code", "Send verification code", "Send me a code",
+        "Pay with PayPal", "Pay with Apple Pay", "Purchase history", "Delete filter: Red",
+        "Size M filter, delete", "Address book", "Books", "Facebook", "Postal code",
+        "Resend", "PayPal", "Booking details", "Reserved seats", "Transferable",
+    ]
+
+    def judge(self, names, selectors=False):
+        script = ("const r = require(process.argv[1]); const sel = process.argv[3] === '1';"
+                  "process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map("
+                  "(n) => r.isCommitName(sel ? r.selectorWords(n) : n))));")
+        out = subprocess.run([NODE, "-e", script, str(ROUTER), json.dumps(names), "1" if selectors else "0"],
+                             capture_output=True, text=True, check=True).stdout
+        return dict(zip(names, json.loads(out)))
+
+    def test_commit_names_match(self):
+        self.assertEqual([n for n, hit in self.judge(self.COMMITS).items() if not hit], [])
+
+    def test_look_alikes_do_not_match(self):
+        self.assertEqual([n for n, hit in self.judge(self.NOT_COMMITS).items() if hit], [])
+
+    def test_selectors_are_read_as_words(self):
+        self.assertEqual(self.judge(["#placeOrderBtn", "[data-test=place-order]", "#buy_now",
+                                     ".add-to-cart", "#search"], selectors=True),
+                         {"#placeOrderBtn": True, "[data-test=place-order]": True, "#buy_now": True,
+                          ".add-to-cart": False, "#search": False})
 
 
 if __name__ == "__main__":

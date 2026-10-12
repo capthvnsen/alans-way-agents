@@ -66,7 +66,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                        "Put a whole checkout batch under one `commit`.",
                        "`declined`, `approval_timeout` and `approval_unavailable` mean it did not run",
                        "do not retry it or reach the same result another way",
-                       "refused with `commit_required`",
+                       "with `commit_required`; so are Enter, Space and clicks by position",
                        "Ask the user before any other financial, destructive or production change."):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)

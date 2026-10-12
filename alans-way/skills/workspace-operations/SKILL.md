@@ -31,9 +31,11 @@ recipient read off the page. The user gets an approval prompt in chat,
 and the action runs only on Approve. Put a whole checkout batch under one
 `commit`. `declined`, `approval_timeout` and `approval_unavailable` mean it did
 not run: do not retry it or reach the same result another way; tell the user,
-and in a scheduled job leave everything staged and ask them to finish. A click
-on a control named like Place order, Pay, Book now, Send, Post or Delete
-without `commit` is refused with `commit_required`. Ask the user before
+and in a scheduled job (where Hermes declines on its own) leave everything
+staged and ask them to finish. A click on a control or selector named like
+Place order, Pay, Book now, Send, Post or Delete without `commit` is refused
+with `commit_required`; so are Enter, Space and clicks by position on a page
+that shows such a control, since they can set it off. Ask the user before
 any other financial, destructive or production change. Ownership, control
 epoch, and human takeover gates remain.
 
