@@ -20,11 +20,22 @@ background; it never moves the human's cursor or touches their tabs.
 
 Ordinary actions in a bot-owned in-app browser tab are preauthorized and require
 no extra browser permission prompt: navigation, typing, forms, upload/download,
-research, and normal account work. Never ask merely to use the browser. Native
-Hermes approval remains mandatory for sending external messages/posts,
-purchases, bookings, deletions, financial actions, credential/permission
-changes, destructive actions, and production changes. Ownership, control epoch,
-and human takeover gates remain.
+research, and normal account work. Never ask merely to use the browser.
+
+Sending messages or posts, purchases, bookings, submissions, deletions, and
+account or permission changes need the user's Approve tap, and the connector
+enforces it. Pass `commit` on the `cua_alans_way_action` call that does it:
+`{kind: purchase|booking|send|post|submit|delete|account_change, summary,
+amount?, currency?, counterparty?}`, with the summary, total and merchant or
+recipient read off the page. The user gets an approval prompt in chat,
+and the action runs only on Approve. Put a whole checkout batch under one
+`commit`. `declined`, `approval_timeout` and `approval_unavailable` mean it did
+not run: do not retry it or reach the same result another way; tell the user,
+and in a scheduled job leave everything staged and ask them to finish. A click
+on a control named like Place order, Pay, Book now, Send, Post or Delete
+without `commit` is refused with `commit_required`. Ask the user before
+any other financial, destructive or production change. Ownership, control
+epoch, and human takeover gates remain.
 
 Reach for the browser when:
 

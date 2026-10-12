@@ -880,6 +880,63 @@ function rewriteTabDefaults(result) {
   }
 }
 
+// The commit gate. A cua_alans_way_action that buys, books, sends, posts,
+// submits, deletes or changes an account carries `commit`; the router asks the
+// user to approve it (MCP elicitation, which Hermes shows as chat buttons) and
+// forwards it only on Approve. A click on a control named like one of these
+// without `commit` is refused before it reaches the browser.
+const COMMIT_VERBS = {
+  purchase: 'buy',
+  booking: 'book',
+  send: 'send',
+  post: 'post',
+  submit: 'submit',
+  delete: 'delete',
+  account_change: 'change an account',
+};
+const COMMIT_NAME = /\b(?:place\s+(?:your\s+)?order|pay|buy\s+now|purchase|confirm\s+and\s+pay|complete\s+booking|book\s+now|reserve|send|post|publish|submit\s+application|delete)\b/i;
+const COMMIT_STEP_ACTIONS = new Set(['click', 'double_click', 'press']);
+
+function addCommitParam(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    const props = tool && tool.name === 'cua_alans_way_action' && tool.inputSchema && tool.inputSchema.properties;
+    if (!props || typeof props !== 'object') continue;
+    props.commit = {
+      type: 'object',
+      description: 'Required on the call that places an order, pays, books, sends, posts, publishes, submits, deletes or changes account settings. The user approves it in chat first; it runs only on Approve and is never retried.',
+      properties: {
+        kind: { type: 'string', enum: Object.keys(COMMIT_VERBS) },
+        summary: { type: 'string', maxLength: 200, description: 'What the user is approving, read off the page.' },
+        amount: { type: 'string', description: 'Total as shown, e.g. "40.00".' },
+        currency: { type: 'string' },
+        counterparty: { type: 'string', description: 'Merchant, recipient or venue.' },
+      },
+      required: ['kind', 'summary'],
+    };
+  }
+}
+
+// One line of plain text for the approval card, or '' when unusable.
+const cardText = (value, max) => (typeof value === 'string' || typeof value === 'number'
+  ? String(value).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max)
+  : '');
+
+function cleanCommit(commit) {
+  if (!commit || typeof commit !== 'object' || !Object.hasOwn(COMMIT_VERBS, commit.kind)) return null;
+  if (typeof commit.summary !== 'string' || commit.summary.length > 200) return null;
+  const summary = cardText(commit.summary, 200);
+  if (!summary) return null;
+  return {
+    kind: commit.kind,
+    summary,
+    amount: cardText(commit.amount, 40),
+    currency: cardText(commit.currency, 10),
+    counterparty: cardText(commit.counterparty, 100),
+  };
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
@@ -887,6 +944,7 @@ function annotateResult(msg, host, mac, notice, ms, tabIdChanged) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
+  addCommitParam(msg.result);
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
     msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
   }
@@ -1236,7 +1294,9 @@ async function main() {
     const reads = [];
     tabMerges.clear();
     for (const [id, req] of pendingRequests) {
-      if (req.via === 'vm') continue;
+      // A commit still awaiting approval was never sent; settleApproval
+      // refuses it once it sees the host changed.
+      if (req.via === 'vm' || req.awaitingApproval) continue;
       if (req.method !== 'tools/call') replay.push(req);
       else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
       else lost.push({ id, at: req.at });
@@ -1501,6 +1561,7 @@ async function main() {
     if (typeof id !== 'string') return;
     knownTabs.delete(id);
     vmTabs.delete(id);
+    tabPages.delete(id);
     if (currentTabId === id) currentTabId = '';
   }
 
@@ -1568,6 +1629,35 @@ async function main() {
   ]);
   const TAB_DEFAULTED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_snapshot']);
   const TAB_ID = /^[\w-]{1,100}$/;
+
+  // Per tab, the names behind the element refs replies have shown and the
+  // page's origin: what the commit gate matches a click against and shows the
+  // user. Refs are generation-scoped (s<base>-<n>), so names from earlier
+  // replies never relabel a newer element and merging is safe.
+  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin }
+  function learnTabPage(tabId, data) {
+    if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
+    let page = tabPages.get(tabId);
+    if (!page) {
+      page = { names: new Map(), origin: '' };
+      tabPages.set(tabId, page);
+    }
+    const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
+    try {
+      if (typeof url === 'string' && url) page.origin = new URL(url).origin;
+    } catch { /* keep the last origin a reply named */ }
+    const lists = [data.elements, ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (const el of list) {
+        if (el && typeof el.ref === 'string' && typeof el.name === 'string') page.names.set(el.ref, el.name);
+      }
+    }
+    for (const ref of page.names.keys()) {
+      if (page.names.size <= 2000) break;
+      page.names.delete(ref);
+    }
+  }
 
   function noteKnownTab(id, epoch, backend) {
     if (typeof id !== 'string' || !TAB_ID.test(id)) return;
@@ -1638,6 +1728,7 @@ async function main() {
     const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
     if (typeof used === 'string' && TAB_ID.test(used)) {
       noteKnownTab(used, undefined, backend);
+      learnTabPage(used, data);
       currentTabId = used;
     }
   }
@@ -1840,13 +1931,184 @@ async function main() {
     process.stderr.write('workspace-router: started the VM browser connector\n');
   }
 
+  // Hermes bounds the whole tool call (setup writes timeout: 120), and the
+  // approval wait is inside it, so the window closes early enough to leave
+  // the action its time. A tap after that changes nothing.
+  const APPROVAL_MS = num('HERMES_ROUTER_APPROVAL_MS', 60000);
+  const decisionLog = path.join(path.dirname(macStateFile), 'commit-decisions.jsonl');
+  const approvals = new Map(); // elicitation id -> { callId, line, child, record, timer }
+  let approvalSeq = 0;
+
+  function logDecision(record, decision) {
+    try {
+      fs.mkdirSync(path.dirname(decisionLog), { recursive: true });
+      fs.appendFileSync(decisionLog, `${JSON.stringify({ ts: new Date().toISOString(), bot: botId, ...record, decision })}\n`, { mode: 0o600 });
+    } catch (e) {
+      process.stderr.write(`workspace-router: could not log a commit decision: ${e.message}\n`);
+    }
+  }
+
+  // Form-mode elicitation: `elicitation: {}` (form implied) or one naming form.
+  function clientElicits() {
+    try {
+      const caps = JSON.parse(handshake.initialize).params.capabilities;
+      const e = caps && caps.elicitation;
+      return Boolean(e && typeof e === 'object' && (Object.keys(e).length === 0 || e.form));
+    } catch {
+      return false;
+    }
+  }
+
+  // Names of the commit-looking controls this call (or any batch step) clicks.
+  function commitTargets(args) {
+    const names = [];
+    const walk = (step, tabId) => {
+      if (!step || typeof step !== 'object') return;
+      const tab = typeof step.tabId === 'string' ? step.tabId : tabId;
+      if (step.action === 'batch') {
+        if (Array.isArray(step.steps)) for (const inner of step.steps) walk(inner, tab);
+        return;
+      }
+      if (!COMMIT_STEP_ACTIONS.has(step.action) || typeof step.ref !== 'string') return;
+      const page = tabPages.get(tab);
+      const name = page && page.names.get(step.ref);
+      if (name && COMMIT_NAME.test(name)) names.push(cardText(name, 80));
+    };
+    walk(args, args.tabId);
+    return names;
+  }
+
+  const APPROVAL_REFUSALS = {
+    declined: 'declined: the user did not approve this. It did not run. Do not retry it or reach the same result another way unless the user asks.',
+    approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
+    approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
+    host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
+  };
+
+  // Returns true when the call was refused or is now awaiting approval.
+  function gateCommit(msg, line) {
+    const args = msg.params.arguments;
+    const targets = commitTargets(args);
+    if (args.commit === undefined && !targets.length) return false;
+    unbuffer(line);
+    const page = tabPages.get(args.tabId);
+    const origin = page ? page.origin : '';
+    const refuse = (text) => {
+      pendingRequests.delete(msg.id);
+      emitToolError(msg.id, text);
+      return true;
+    };
+    if (args.commit === undefined) {
+      logDecision({ origin, target: targets[0] }, 'commit_required');
+      return refuse(`commit_required: "${targets[0]}" looks like it buys, books, sends, posts, submits or deletes. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
+    }
+    const commit = cleanCommit(args.commit);
+    if (!commit) {
+      return refuse(`commit_invalid: commit needs kind (${Object.keys(COMMIT_VERBS).join(', ')}) and a summary of 1-200 characters. It did not run.`);
+    }
+    const record = { origin, ...commit };
+    if (!clientElicits()) {
+      logDecision(record, 'approval_unavailable');
+      return refuse(APPROVAL_REFUSALS.approval_unavailable);
+    }
+    delete args.commit;
+    const forward = JSON.stringify(msg);
+    const req = pendingRequests.get(msg.id);
+    if (req) {
+      req.line = forward;
+      req.awaitingApproval = true;
+    }
+    const price = [commit.amount, commit.currency].filter(Boolean).join(' ');
+    const what = [commit.summary, price, commit.counterparty].filter(Boolean).join(' · ');
+    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}`;
+    const id = `wsr-commit-${++approvalSeq}`;
+    const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), APPROVAL_MS);
+    timer.unref();
+    approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer });
+    process.stdout.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method: 'elicitation/create',
+      params: {
+        message,
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            approve: {
+              type: 'boolean',
+              title: 'Approve',
+              description: targets.length ? `Approve clicking "${targets.join('", "')}"` : 'Approve this action',
+            },
+          },
+          required: ['approve'],
+        },
+      },
+    })}\n`);
+    return true;
+  }
+
+  // Exactly one outcome per approval: the user's answer, the window closing,
+  // or the client cancelling the call. An approved commit runs once, on the
+  // backend it was asked about; nothing here ever retries it.
+  function settleApproval(id, decision) {
+    const entry = approvals.get(id);
+    if (!entry) return;
+    approvals.delete(id);
+    clearTimeout(entry.timer);
+    if (decision === 'approved' && entry.child !== activeChild) decision = 'host_changed';
+    logDecision(entry.record, decision);
+    if (decision === 'approval_timeout' || decision === 'cancelled') {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: decision } })}\n`);
+    }
+    const req = pendingRequests.get(entry.callId);
+    if (decision === 'cancelled') {
+      pendingRequests.delete(entry.callId);
+      return;
+    }
+    if (decision !== 'approved') {
+      pendingRequests.delete(entry.callId);
+      emitToolError(entry.callId, APPROVAL_REFUSALS[decision]);
+      return;
+    }
+    if (req) {
+      delete req.awaitingApproval;
+      req.at = Date.now();
+    }
+    const out = routeToolCall(entry.line, true);
+    if (out !== null) writeToChild(out);
+  }
+
+  // The client's answer to an elicitation, consumed here even when it comes
+  // too late to count; false for any other line.
+  function answerApproval(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    if (!msg || msg.method !== undefined || typeof msg.id !== 'string' || !msg.id.startsWith('wsr-commit-')) return false;
+    const r = msg.result;
+    // Hermes accepts with empty content; only an explicit approve:false says no.
+    const approved = r && r.action === 'accept' && !(r.content && r.content.approve === false);
+    settleApproval(msg.id, msg.error || !r ? 'approval_unavailable' : approved ? 'approved' : 'declined');
+    return true;
+  }
+
+  function cancelApprovalFor(callId) {
+    for (const [id, entry] of approvals) {
+      if (entry.callId === callId) settleApproval(id, 'cancelled');
+    }
+  }
+
   // A tools/call the router answers or diverts itself. host:"computer" while
   // the session already runs on the VM is a clear error; host:"vm" and calls
   // aimed at a known VM tab go to the VM connector; a tabs call while it runs
   // merges both lists. Anything else falls through to the active backend.
   // Returns the line to forward (rewritten when defaults were injected) or
-  // null when the call was answered or sent on internally.
-  function routeToolCall(line) {
+  // null when the call was answered or sent on internally. `approved` is the
+  // commit gate's own second pass for a call the user just approved.
+  function routeToolCall(line, approved = false) {
     let msg;
     try {
       msg = JSON.parse(line);
@@ -1869,6 +2131,7 @@ async function main() {
       );
       return null;
     }
+    if (!approved && msg.params && msg.params.name === 'cua_alans_way_action' && gateCommit(msg, line)) return null;
     const args = (msg.params && msg.params.arguments) || {};
     const host = normalizeHost(args.host);
     if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
@@ -1988,9 +2251,13 @@ async function main() {
     .createInterface({ input: process.stdin, crlfDelay: Infinity })
     .on('line', (line) => {
       touchActivity();
+      if (line.includes('wsr-commit-') && answerApproval(line)) return;
       const method = noteClientRpc(line, pendingRequests);
       if (method === 'initialize') handshake.initialize = line;
       else if (method === 'notifications/initialized') handshake.initialized = line;
+      else if (method === 'notifications/cancelled' && approvals.size) {
+        try { cancelApprovalFor(JSON.parse(line).params.requestId); } catch { /* nothing to withdraw */ }
+      }
       if (!provedAlive) bufferedStdin.push(line);
       if (holdCalls && method === 'tools/call') {
         heldCalls.push(line);
@@ -2034,7 +2301,7 @@ async function main() {
       if (activeHost !== 'mac' || fellBack || shuttingDown) return;
       const now = Date.now();
       for (const [id, req] of pendingRequests) {
-        if (req.method !== 'tools/call') continue;
+        if (req.method !== 'tools/call' || req.awaitingApproval) continue;
         const age = now - req.at;
         const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
         if (req.via === 'vm') {
