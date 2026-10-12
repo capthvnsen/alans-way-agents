@@ -844,12 +844,18 @@ function workspaceMeta(host, mac, ms, tabIdChanged) {
 }
 
 // Older connectors still declare open's `host` as Ignored; the router routes
-// it now, so the advertised schema says what it does.
+// it now, so the advertised schema says what it does. open's description also
+// carries the search routing: the tool list is in every turn, the skill is not.
+const SEARCH_ROUTING = 'For a plain lookup, use web_search or web_extract when you have them instead of opening a search engine page. '
+  + 'When a search needs the real page, omit host so it runs on the user\'s computer: the VM browser meets far more CAPTCHAs. '
+  + 'Never solve a CAPTCHA: release the tab with reason captcha and ask the user.';
 function rewriteOpenHost(result) {
   const tools = result && result.tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
-    const props = tool && tool.name === 'cua_alans_way_open' && tool.inputSchema && tool.inputSchema.properties;
+    if (!tool || tool.name !== 'cua_alans_way_open') continue;
+    tool.description = tool.description ? `${tool.description} ${SEARCH_ROUTING}` : SEARCH_ROUTING;
+    const props = tool.inputSchema && tool.inputSchema.properties;
     if (props && typeof props === 'object') {
       props.host = { type: 'string', description: '"computer" or "vm"; omit for the default.' };
     }

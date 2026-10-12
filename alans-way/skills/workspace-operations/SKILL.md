@@ -7,7 +7,8 @@ description: Use whenever a task needs a real browser: sites or web apps with no
 
 ## Open a browser when the task needs one
 
-Treat the workspace browser as your default surface for anything web-shaped.
+Treat the workspace browser as your default surface for anything web-shaped
+that a plain lookup cannot answer (see "Search the web" below).
 If a task lives in a site or web app and no API or CLI covers it, or driving
 the page is simply the most reliable path, open a tab and do the work there.
 Do not ask whether you may use the browser or describe a plan first; open the
@@ -75,6 +76,22 @@ Reach for the browser when:
 - driving the page beats synthesizing requests: the site enforces its own
   auth, validation, and side effects, so the UI path is the honest path
 - a link or site comes up in chat; open it in your own tab and look
+
+## Search the web
+
+Take the first of these that answers the question:
+
+1. A plain lookup (a fact, a price, docs, news, an address): use Hermes' own
+   `web_search`, then `web_extract` on the best URLs. Do not open a search
+   engine page in a tab for this.
+2. When you need the real page (maps, shopping, signed-in results, or a page
+   you must click through), open a tab on the user's computer: omit `host`.
+   Their real connection and session meet far fewer challenges.
+3. Use a search engine in the VM browser only while the user's computer is
+   offline, and expect a CAPTCHA there. Never pass `host:"vm"` to a search
+   engine while the computer is online.
+
+If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.
 
 ## Choose the execution host
 
@@ -251,7 +268,8 @@ the tab stays yours to keep working.
    `wait` or `read` steps only when you need something `effect` does not
    show. For
    a multi-step browser run, write no chat text between tool calls and send
-   one short message when it is done. Put `wait` steps
+   one short message when it is done (the one exception is the CAPTCHA
+   message below). Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use
@@ -287,6 +305,51 @@ the tab stays yours to keep working.
    timed-out submission as uncertain and check its effects before resubmitting.
 5. To collaborate on another bot's tab, obtain the user's explicit grant through
    Workspace's tab access dialog. Keep normal work in your own tabs.
+
+## When a site shows a CAPTCHA
+
+You never solve a CAPTCHA. Do not click, type into, drag, or screenshot a
+challenge widget to solve it, do not reach it with `eval` or `cdp`, and never
+use a solver service. The user solves it; you wait. A challenge is never
+something to approve either: do not ask the user to approve a click on one.
+
+A challenge shows up as a `challenge` field (`kind` and `blocking`) in a
+snapshot or action reply, as a `challenge_present` refusal, or as the tab
+handed to the human with reason `captcha` (calls answer `awaiting_human`, and
+the tab's `handback.reason` is `captcha`). `blocking:false` means the widget
+is on the page but not in your way: keep working and leave it alone. On a
+blocking challenge:
+
+1. The app normally hands the tab to the user with reason `captcha` itself.
+   If the tab is still yours (a `challenge_present` refusal says so), release
+   it: `{action:"release", reason:"captcha", note:"Solve the CAPTCHA, then give the tab back."}`.
+2. Tell the user once, as one short text before your next tool call; Hermes
+   delivers it to Telegram mid-turn. Name the site and what you were doing.
+   For a tab on their computer, say it is waiting in Alan's Workspace. For a
+   VM tab, include the viewer link the reply gives; without one, say it is in
+   the VM viewer in Alan's Workspace, and ask them to say when they're
+   through. For example: "Google wants a CAPTCHA before I can search. Can you
+   tap through it in Alan's Workspace? I'll pick it back up."
+3. Wait. Check `cua_alans_way_tabs` at most once every 30 seconds (a
+   foreground `sleep 30` in the terminal between checks), for up to 30
+   minutes. Do not snapshot, act on, or claim the tab meanwhile. When the tab
+   is back with you (`controller` is `agent`, or its handback says
+   `human_returned`), read it for the fresh epoch and carry on without
+   another message. A VM tab can stay with the human after the challenge
+   clears, so there the user saying they're done also ends the wait.
+4. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
+   message already said you will pick it back up. When the user says it's
+   done, list your tabs; if the tab is still theirs, their reply is the
+   agreement to claim it, so claim it and continue.
+
+**Back off.** If the same site challenges you twice within 10 minutes (when
+you cannot tell the time, twice in this task counts), or a reply says to stop
+retrying it, stop using that site for this task, and do not retry it in a
+fresh tab. Switch to another source: `web_search`, another site with the same
+answer, or, when the challenges came on the VM, the user's computer once it
+is online. This is a change of source, not a browser failure: say in your
+reply which source you used. If no other source can answer, ask the user how
+to go on.
 
 ## Hand a task between computers
 
