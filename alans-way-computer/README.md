@@ -33,7 +33,7 @@ Hermes the plugin installs and logs that it did nothing.
 
 Hermes asks for approval before every `computer_use` action except `capture`, `list_apps`, `list_windows` and `wait`, once per action
 type. An unattended Telegram bot has nobody to answer, so grant them once. Either tap Always in Telegram when asked,
-or add these entries to `command_allowlist` in the profile's config.yaml, one each, and restart the gateway (`hermes gateway restart`; on a supervisord host `supervisorctl signal USR1 <program>` on the program running `hermes gateway run` — a plain `restart`/`stop` can SIGKILL it mid-drain and corrupt `state.db`):
+or add these entries to `command_allowlist` in the profile's config.yaml, one each, and restart the gateway (`hermes gateway restart`; on a supervisord host `supervisorctl signal USR1 <program>` on the program running `hermes gateway run`; a plain `restart`/`stop` can SIGKILL it mid-drain and corrupt `state.db`):
 
 ```yaml
 command_allowlist:
