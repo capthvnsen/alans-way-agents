@@ -12,7 +12,6 @@ background, focus_app only retargets, and the stock `type` (no field) has no equ
 from __future__ import annotations
 
 import collections
-import concurrent.futures
 import itertools
 import json
 import logging
@@ -43,9 +42,27 @@ _SAFE_ENV = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"
              "COMSPEC", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATHEXT", "PROGRAMDATA", "PROGRAMFILES",
              "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERNAME", "USERPROFILE", "WINDIR",
              "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"}
-_CODES = {"stale_ref", "unsupported_action", "off_limits", "in_front", "no_window", "not_found", "bad_request", "failed"}
+_CODES = {"stale_ref", "unsupported_action", "off_limits", "in_front", "no_window", "not_found", "bad_request", "failed",
+          "locked", "permission", "timeout", "unresponsive", "focus_unverified"}
+# The router passes the app's error text through without its code, so most codes are read back from the text.
 _INFER = (("off limits", "off_limits"), ("in front", "in_front"), ("no window", "no_window"), ("no control at that point", "not_found"),
-          ("not found", "not_found"), ("stale", "stale_ref"))
+          ("not found", "not_found"), ("stale", "stale_ref"), ("screen is locked", "locked"), ("accessibility is off", "permission"),
+          ("screen recording is off", "permission"), ("not responding", "unresponsive"), ("timed out", "timeout"),
+          ("did not appear within", "timeout"), ("which field has focus", "focus_unverified"))
+# What to do next, appended to every error with that code.
+_NEXT = {
+    "stale_ref": "That control changed since your element list: capture again for fresh element numbers.",
+    "locked": "Nothing can be read or driven until the user unlocks it; then capture again.",
+    "permission": "Ask the user to turn it on for alans-way-localapp in System Settings > Privacy & Security, then retry.",
+    "in_front": "The app in front is the user's and is never driven: ask the user to switch to another app, then retry.",
+    "no_window": "Its windows are closed, minimized or on another Space: ask the user to open one on this Space, then capture again.",
+    "off_limits": "It stays off limits: do not retry or work around it; tell the user.",
+    "not_found": "Call list_apps if the app may have quit, otherwise capture again and use an element number from that list.",
+    "unresponsive": "The app is hung: do not repeat the action; wait a moment, then capture to see whether it ran.",
+    "timeout": "It may still have run: capture to see the app's state before retrying.",
+    "focus_unverified": "Capture again, then retry once.",
+}
+CHANGES_SHOWN = 12
 _LOST = ("NOT retried", "connection dropped")
 _MANAGED = {"node", "npm", "npx", "uv", "uvx"}
 
@@ -339,24 +356,14 @@ class AlansWayComputerBackend(ComputerUseBackend):
             except _Dead as e:
                 if attempt:
                     raise RuntimeError(f"workspace router: {e}") from e
-            except (_ToolError, LookupError) as e:
+            except _ToolError as e:
+                code, message = _coded(str(e), e.code)
+                raise RuntimeError(f"{code}: {message}" if code != "failed" else message) from e
+            except LookupError as e:
                 raise RuntimeError(str(e)) from e
 
-    def _gather(self, jobs):
-        """Results of (tool, args) jobs, run concurrently over the one router; a failed job is its exception."""
-        def one(job):
-            try:
-                return _unpack(self._call(*job))
-            except (_ToolError, _Dead) as e:
-                return e
-        if len(jobs) == 1:
-            return [one(jobs[0])]
-        with concurrent.futures.ThreadPoolExecutor(len(jobs)) as pool:
-            return list(pool.map(one, jobs))
-
-    def _checked(self, out, before):
-        if isinstance(out, Exception):
-            raise out
+    def _read(self, tool, args, before):
+        out = _unpack(self._call(tool, args))
         if self._seen(out[2]):
             raise _HostChanged(f"The workspace switched from {before} to {out[2]}, so app ids and element numbers changed")
         return out
@@ -371,28 +378,24 @@ class AlansWayComputerBackend(ComputerUseBackend):
         else:
             raise LookupError("capture needs app= (a name from list_apps) or pid=; the focused app is off limits")
         since = self._tree["gen"] if self._tree and self._tree["pid"] == pid else None
-        jobs = []
+        before, notes, kept = self._host, [], [] if since is None else self._tree["notes"]
+        els, gen = (self._tree["els"], self._tree["gen"]) if mode == "vision" and since is not None else ([], None)
         if mode != "vision":
-            jobs.append(("workspace_computer_snapshot", {"pid": pid, **({"since": since} if since is not None else {})}))
-        if mode != "ax":
-            jobs.append(("workspace_computer_screenshot", {"pid": pid}))
-        before, outs = self._host, self._gather(jobs)
-        tree_out = self._checked(outs.pop(0), before) if mode != "vision" else None
-        notes = [t for t in (tree_out[1][1:] if tree_out else []) if t]
-        els, gen = (self._tree["els"], self._tree["gen"]) if mode == "vision" and self._tree and self._tree["pid"] == pid else ([], None)
-        if tree_out:
-            body = _json(tree_out[1][0] if tree_out[1] else "")
+            _, texts, _ = self._read("workspace_computer_snapshot", {"pid": pid, **({"since": since} if since is not None else {})}, before)
+            notes = [t for t in texts[1:] if t]
+            body = _json(texts[0] if texts else "")
             if body.get("unchanged") and since is not None:
                 els, gen = self._tree["els"], self._tree["gen"]
             else:
-                els, gen = body.get("elements") or [], body.get("generation")
-            if body.get("truncated"):
-                notes.append("The element list was cut at the app's cap; some controls are missing.")
+                els, gen, kept = body.get("elements") or [], body.get("generation"), _tree_notes(body)
+        # Named controls are enough to act on, and a screenshot costs ~1.2k tokens: som takes one only when the
+        # tree names nothing (empty, another Space, a canvas app).
+        tree_only = mode == "ax" or (mode == "som" and any(e and e.get("name") for e in els))
         png = mime = shot = None
         width = height = 0
-        if mode != "ax":
+        if not tree_only:
             try:
-                items, shot_texts, _ = self._checked(outs.pop(0), before)
+                items, shot_texts, _ = self._read("workspace_computer_screenshot", {"pid": pid}, before)
                 image = next(i for i in items if i.get("type") == "image")
                 geo = _json(shot_texts[0] if shot_texts else "")
                 win = geo["window"]
@@ -402,21 +405,26 @@ class AlansWayComputerBackend(ComputerUseBackend):
                     shot = {"wx": win["x"], "wy": win["y"], "ww": win["width"], "wh": win["height"], "iw": width, "ih": height}
             except (_ToolError, StopIteration, KeyError, TypeError, ValueError) as e:
                 if mode == "vision":
-                    raise RuntimeError(f"screenshot failed: {e}") from e
+                    raise RuntimeError(f"screenshot failed: {_coded(str(e), e.code)[1] if isinstance(e, _ToolError) else e}") from e
                 png = mime = None
                 width = height = 0
                 notes.append(f"Screenshot unavailable ({e}); use the element list.")
         self._target(pid, name)
-        self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els} if mode != "vision" else self._tree), shot
+        self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els, "notes": kept} if mode != "vision" else self._tree), shot
         if shot:
             notes.insert(0, "No numbered overlays are drawn: use the element numbers listed. Coordinates are screenshot pixels."
                          if mode != "vision" else "Coordinates are screenshot pixels.")
+        elif mode == "som" and tree_only:
+            notes.insert(0, "No screenshot was taken: the list names the controls, so act on element numbers. Bounds and coordinate= "
+                         "are screen pixels. capture(mode='vision') shows the window if you need to see it.")
         elif mode == "ax":
             notes.insert(0, "No screenshot: element bounds and coordinate= are screen pixels.")
+        if mode != "vision":
+            notes += kept
         elements = [] if mode == "vision" else [
             UIElement(index=i, role=e.get("role", ""), label=_label(e), bounds=self._bounds(e), app=name, pid=pid,
                       window_id=0, attributes={"value": e["value"]} if e.get("value") else {})
-            for i, e in enumerate(els, 1)]
+            for i, e in enumerate(els, 1) if e is not None]
         return CaptureResult(mode=mode, width=width, height=height, png_b64=png, elements=elements, app=name,
                              png_bytes_len=len(png) * 3 // 4 if png else 0, image_mime_type=mime, note=" ".join(notes))
 
@@ -436,7 +444,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
 
     def _element(self, index):
         els = self._tree["els"] if self._tree and self._tree["pid"] == self._pid else []
-        return els[index - 1] if isinstance(index, int) and 1 <= index <= len(els) else None
+        return els[index - 1] if isinstance(index, int) and 1 <= index <= len(els) else None  # a gone slot is None
 
     def _center(self, index):
         e = self._element(index)
@@ -464,22 +472,41 @@ class AlansWayComputerBackend(ComputerUseBackend):
         if any(marker in text for marker in _LOST):
             self._reset()
             return self._fail(action, "host_changed", f"{text} App ids and element numbers are gone: call list_apps and capture again.")
-        m = re.match(r"([a-z_]+): (.*)", text, re.S)
-        if code:
-            message = m.group(2) if m and m.group(1) == code else text
-        elif m and m.group(1) in _CODES:
-            code, message = m.group(1), m.group(2)
+        return self._fail(action, *_coded(text, code))
+
+    def _merge(self, body):
+        """Fold an action reply into the element list the model's numbers refer to; returns [(number, element)] that
+        are new or changed, and how many disappeared. A gone element leaves a None slot so no number ever shifts."""
+        tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
+        if tree is None or body.get("unchanged") or not isinstance(body.get("generation"), int):
+            return [], 0
+        els = tree["els"]
+        at = {e["ref"]: i for i, e in enumerate(els) if e is not None}
+        if isinstance(body.get("elements"), list):
+            now = {e["ref"]: e for e in body["elements"]}
+            gone = [ref for ref in at if ref not in now]
+            changed = [e for ref, e in now.items() if ref not in at or els[at[ref]] != e]
         else:
-            code, message = next((c for needle, c in _INFER if needle in text.lower()), "failed"), text
-        if code == "stale_ref":
-            message += " Capture again for fresh element numbers: the last action changed the app."
-        return self._fail(action, code, message)
+            gone = [ref for ref in body.get("removed") or [] if ref in at]
+            changed = body.get("changed") or []
+        for ref in gone:
+            els[at.pop(ref)] = None
+        out = []
+        for e in changed:
+            if e["ref"] in at:
+                els[at[e["ref"]]] = e
+            else:
+                els.append(e)
+                at[e["ref"]] = len(els) - 1
+            out.append((at[e["ref"]] + 1, e))
+        tree["gen"], tree["notes"] = body["generation"], _tree_notes(body)
+        return out, len(gone)
 
     def _run(self, action, step):
         if self._pid is None:
             return self._no_target(action)
-        if "ref" in step:
-            step["generation"] = self._tree["gen"]
+        if self._tree and self._tree["pid"] == self._pid and self._tree["gen"] is not None:
+            step["generation"] = self._tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
         before = self._host
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
@@ -495,11 +522,21 @@ class AlansWayComputerBackend(ComputerUseBackend):
                               "at an app that no longer exists there and may not have happened. App ids and element numbers are gone: "
                               "call list_apps and capture again.")
         body = _json(texts[0] if texts else "")
-        message = f"{action} sent to {self._app}."
-        if body.get("unchanged"):
-            message += " The app's element tree did not change."
-        message = " ".join([message, *[t for t in texts[1:] if t]])
-        return ActionResult(ok=True, action=action, message=message, meta={k: v for k, v in (("host", host), ("generation", body.get("generation"))) if v is not None})
+        held = self._tree["notes"] if self._tree and self._tree["pid"] == self._pid else []
+        changed, gone = self._merge(body)
+        parts = [f"{action} sent to {self._app}."]
+        if changed or gone:
+            shown = "; ".join(f"#{i} {e.get('role', '')} {_label(e)!r}" for i, e in changed[:CHANGES_SHOWN])
+            parts.append("The element list is updated, so no capture is needed to read the result.")
+            parts += [f"Changed: {shown}." if changed else "",
+                      f"{len(changed) - CHANGES_SHOWN} more changed; capture to list them." if len(changed) > CHANGES_SHOWN else "",
+                      f"{gone} element(s) disappeared; their numbers are gone." if gone else ""]
+        elif body.get("unchanged"):
+            parts.append("The app's element tree did not change. If the effect only shows in pixels, capture(mode='vision') to check before retrying.")
+        parts += [*(n for n in _tree_notes(body) if n not in held), *texts[1:]]
+        return ActionResult(ok=True, action=action, message=" ".join(p for p in parts if p),
+                            effect="confirmed" if changed or gone else None,
+                            meta={k: v for k, v in (("host", host), ("generation", body.get("generation"))) if v is not None})
 
     def _by_element_or_point(self, action, step, element, x, y):
         if self._pid is None:
@@ -507,7 +544,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
         if element is not None:
             e = self._element(element)
             if e is None:
-                return self._fail(action, "no_such_element", f"Element {element} is not in the last capture. Capture again.")
+                gone = isinstance(element, int) and self._tree and 1 <= element <= len(self._tree["els"])
+                return self._fail(action, "no_such_element", f"Element {element} " + (
+                    "disappeared after an earlier action. Use a number from the latest list, or capture again." if gone
+                    else "is not in the last capture. Capture again."))
             return self._run(action, {**step, "ref": e["ref"]})
         if x is not None and y is not None:
             return self._run(action, {**step, **self._point(x, y)})
@@ -571,6 +611,28 @@ class AlansWayComputerBackend(ComputerUseBackend):
         self._target(pid, name)
         return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Alan's Way never raises or focuses windows; "
                             "input is delivered in the background.")
+
+
+def _coded(text, code=None):
+    """(code, message with the next step) for an error text the router passed through."""
+    m = re.match(r"([a-z_]+): (.*)", text, re.S)
+    if code:
+        message = m.group(2) if m and m.group(1) == code else text
+    elif m and m.group(1) in _CODES:
+        code, message = m.group(1), m.group(2)
+    else:
+        code, message = next((c for needle, c in _INFER if needle in text.lower()), "failed"), text
+    return code, f"{message} {_NEXT[code]}" if code in _NEXT else message
+
+
+def _tree_notes(body):
+    """The app's own words about a tree: why it is empty, what is scrolled away, whether it was cut."""
+    notes = [body["note"]] if isinstance(body.get("note"), str) and body["note"] else []
+    if isinstance(body.get("hidden"), int) and body["hidden"] > 0:
+        notes.append(f"{body['hidden']} more controls are scrolled out of view; scroll to reach them.")
+    if body.get("truncated"):
+        notes.append("The element list was cut at the app's cap; some controls are missing.")
+    return notes
 
 
 def _label(e):

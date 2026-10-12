@@ -61,11 +61,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (c.die_on === name) process.exit(1);
   const s = state();
   if (c.host) { s.host = c.host; save(s); }
-  if (c.delay !== undefined) { s.delay = c.delay; save(s); }
+  if (c.bump) { s.generation += 1; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ apps: APPS });
+  else if (c.error) result = fail(c.error);
   else if (args.pid === 103) result = fail('That app is the one in front. Leave it there; the pointer stays where it is.');
-  else if (name === 'workspace_computer_snapshot') result = args.since === s.generation ? text({ unchanged: true, generation: s.generation }) : text(tree(s.generation));
+  else if (name === 'workspace_computer_snapshot') result = c.snap ? text({ ...tree(s.generation), ...c.snap })
+    : args.since === s.generation ? text({ unchanged: true, generation: s.generation }) : text(tree(s.generation));
   else if (name === 'workspace_computer_screenshot') result = { content: [{ type: 'image', data: Buffer.from('jpegbytes').toString('base64'), mimeType: 'image/jpeg' },
     { type: 'text', text: JSON.stringify({ imageWidth: 480, imageHeight: 300, window: { x: 100, y: 100, width: 960, height: 600 } }) }] };
   else if (name === 'workspace_computer_action') {
@@ -77,12 +79,14 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     else if (args.ref !== undefined && args.generation !== s.generation) result = fail('stale_ref: The app changed since your snapshot. Take a fresh snapshot.');
     else if (args.action === 'drag' && args.x2 === undefined) result = fail('bad_request: drag needs x2 and y2.');
     else if (args.action === 'type' && args.ref === undefined && !c.desktop) result = fail('bad_request: type needs a ref.');
-    else { s.generation += 1; save(s); result = text({ ok: true, generation: s.generation, elements: tree(s.generation).elements }); }
+    else {
+      if (!(c.reply && c.reply.unchanged)) { s.generation += 1; save(s); }
+      result = text({ ok: true, generation: s.generation, ...(c.reply || { elements: tree(s.generation).elements }) });
+    }
   } else result = fail('Unknown browser tool.');
   if (c.notice) result.content.push({ type: 'text', text: c.notice });
   result._meta = { workspace: { host: s.host || 'mac' } };
-  const reply = () => out({ jsonrpc: '2.0', id: msg.id, result });
-  if (s.delay && /snapshot|screenshot/.test(name)) setTimeout(reply, s.delay); else reply();
+  out({ jsonrpc: '2.0', id: msg.id, result });
 });
 """
 
@@ -141,7 +145,9 @@ R["ax"] = {"png": ax.png_b64, "bounds": [list(e.bounds) for e in ax.elements], "
 be.capture(mode="som", app="Notes")
 m = mark()
 R["click_el"] = plain(be.click(element=1)); R["click_el_call"] = action_calls(m)
-R["stale"] = plain(be.click(element=2))  # the click above changed the tree; the old generation must be refused
+m = mark(); R["after_click"] = plain(be.click(element=2)); R["after_click_call"] = action_calls(m)  # the reply's tree is held
+CTL.write_text(json.dumps({"bump": True}))  # the app changes behind the provider's back
+R["stale"] = plain(be.click(element=2))
 
 be.capture(mode="som", app="Notes")
 m = mark(); be.click(element=2, click_count=2); R["double"] = action_calls(m)
@@ -153,6 +159,7 @@ R["bad_index"] = plain(be.click(element=99))
 
 # --- coordinates: screenshot pixels in, screen pixels out
 be.capture(mode="som", app="Notes")
+be.capture(mode="vision", app="Notes")
 m = mark(); be.click(x=100, y=75); R["click_xy"] = action_calls(m)
 m = mark(); be.scroll(direction="down", amount=3, x=100, y=75); R["scroll_xy"] = action_calls(m)
 m = mark(); be.scroll(direction="up"); R["scroll_plain"] = action_calls(m)
@@ -163,6 +170,52 @@ m = mark(); be.set_value("hello", element=2); R["set_value"] = action_calls(m)
 m = mark(); be.key("cmd+s"); R["key_combo"] = action_calls(m)
 m = mark(); be.key("return"); R["key_plain"] = action_calls(m)
 m = mark(); R["type_text_mac"] = plain(be.type_text("hi")); R["type_text"] = action_calls(m)
+
+# --- som takes a screenshot only when the tree names nothing; the app's notes ride in the capture note
+def captured(cap, m):
+    return {"png": bool(cap.png_b64), "w": cap.width, "elements": [[e.index, e.label, list(e.bounds)] for e in cap.elements],
+            "note": cap.note, "calls": [c["name"] for c in calls(m)]}
+unnamed = [{"ref": "c1", "role": "AXGroup", "name": "", "x": 300, "y": 250, "width": 100, "height": 40}]
+CTL.write_text(json.dumps({"snap": {"generation": 90, "elements": unnamed, "hidden": 12}}))
+m = mark(); R["som_unnamed"] = captured(be.capture(mode="som", pid=101), m)
+CTL.write_text(json.dumps({"snap": {"generation": 91, "elements": [], "note": "No window of this app is readable: its windows are on another Space."}}))
+m = mark(); R["som_empty"] = captured(be.capture(mode="som", pid=101), m)
+
+# --- action replies: a delta folds into the element list, gone numbers stay gone, nothing shifts
+be.capture(mode="som", app="Notes")
+gen = be._tree["gen"]
+CTL.write_text(json.dumps({"reply": {"hidden": 4, "removed": ["c3"], "changed": [
+    {"ref": "c2", "role": "AXTextField", "name": "Title", "value": "bye", "x": 100, "y": 100, "width": 200, "height": 30},
+    {"ref": "c4", "role": "AXButton", "name": "Done", "x": 500, "y": 250, "width": 80, "height": 40}]}}))
+m = mark(); R["delta"] = plain(be.click(element=1)); R["delta_call"] = action_calls(m)
+R["delta_gone"] = plain(be.click(element=3))
+CTL.write_text(json.dumps({"reply": {"changed": [], "removed": [], "hidden": 4}}))
+m = mark(); be.click(element=4); R["delta_new_call"] = action_calls(m)
+m = mark(); R["delta_capture"] = captured(be.capture(mode="ax"), m)
+R["delta_gen"] = [gen, be._tree["gen"]]
+CTL.write_text(json.dumps({"reply": {"unchanged": True}}))
+R["unchanged"] = plain(be.click(element=1))
+CTL.write_text(json.dumps({"reply": {"elements": [
+    {"ref": "c1", "role": "AXButton", "name": "Saved", "x": 300, "y": 250, "width": 100, "height": 40},
+    {"ref": "c4", "role": "AXButton", "name": "Done", "x": 500, "y": 250, "width": 80, "height": 40}]}}))
+R["whole"] = plain(be.click(element=4))
+CTL.write_text(json.dumps({"reply": {"generation": None, "note": "unresponsive: the steps ran but the app stopped responding, so there is no tree."}}))
+R["no_tree"] = plain(be.key("return"))
+
+# --- error texts the router passes through become codes that say the next step
+errors = {"locked": "The screen is locked, so apps cannot be read or driven. Ask the user to unlock it, then retry.",
+          "permission": "Accessibility is off for this program. Turn it on in System Settings → Privacy & Security → Accessibility, then retry.",
+          "unresponsive": "That app is not responding.", "timeout": "Computer helper timed out.",
+          "no_window": "That app has no window to capture.", "stale": "stale_ref: c2 is gone or changed since your snapshot. Take a fresh snapshot."}
+be.capture(mode="som", app="Notes")
+for key, message in errors.items():
+    CTL.write_text(json.dumps({"error": message}))
+    R["err_" + key] = plain(be.key("return"))
+CTL.write_text(json.dumps({"error": errors["locked"]}))
+try:
+    be.capture(mode="som", pid=101); R["err_capture"] = None
+except Exception as e:
+    R["err_capture"] = str(e)
 
 # --- unsupported actions never reach the router
 m = mark()
@@ -250,17 +303,10 @@ for key in ("nowindow", "nocontrol", "coded"):
 CTL.write_text(json.dumps({"desktop": True}))
 R["type_text_desktop"] = plain(b.type_text("hi"))
 
-# --- vision is screenshot only; a cached pid skips apps; snapshot and screenshot run in parallel
+# --- vision is screenshot only; a cached pid skips apps
 m = mark()
 vis = b.capture(mode="vision", app="Notes")
 R["vision"] = [[c["name"] for c in calls(m)], len(vis.elements), bool(vis.png_b64)]
-CTL.write_text(json.dumps({"delay": 400}))
-b.capture(mode="ax", pid=101)  # consumes the control file
-m = mark(); t0 = time.time()
-b.capture(mode="som", pid=101)
-R["parallel"] = [time.time() - t0, [c["name"] for c in calls(m)]]
-CTL.write_text(json.dumps({"delay": 0}))
-b.capture(mode="ax", pid=101)
 b.stop()
 
 # --- doctor
@@ -361,6 +407,10 @@ print("RESULT:" + json.dumps({"registered": NewContext.registered is not None}))
 """
 
 
+def bare(actions):
+    return [{k: v for k, v in a.items() if k != "generation"} for a in actions]
+
+
 def last_result(proc):
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith("RESULT:"):
@@ -410,6 +460,70 @@ class StaticTests(unittest.TestCase):
         self.assertRegex(entry, r"(?m)^docs_url: https://github.com/capthvnsen/alans-way-agents/tree/(0{40}|[0-9a-f]{40})/alans-way-computer$")
         self.assertIn("known_issues:", entry)
         self.assertRegex(entry, r"(?m)^platforms: \[linux, macos\]$")
+
+
+class ReplyFoldingTests(unittest.TestCase):
+    """The pure parts of the provider, without Hermes: folding action replies and reading error texts."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("alans_way_computer_fold", PLUGIN / "__init__.py")
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+
+    def backend(self, refs):
+        be = self.mod.AlansWayComputerBackend()
+        be._pid = 101
+        be._tree = {"pid": 101, "gen": 1, "els": [{"ref": r, "role": "AXButton", "name": r.upper()} for r in refs], "notes": []}
+        return be
+
+    def test_a_delta_updates_in_place_appends_new_and_tombstones_gone(self):
+        be = self.backend(["a", "b", "c"])
+        changed, gone = be._merge({"generation": 2, "changed": [{"ref": "b", "role": "AXButton", "name": "B2"},
+                                                                {"ref": "d", "role": "AXButton", "name": "D"}], "removed": ["a"]})
+        self.assertEqual([(i, e["name"]) for i, e in changed], [(2, "B2"), (4, "D")])
+        self.assertEqual(gone, 1)
+        self.assertEqual([e and e["name"] for e in be._tree["els"]], [None, "B2", "C", "D"])
+        self.assertEqual(be._tree["gen"], 2)
+        self.assertIsNone(be._element(1))
+        self.assertEqual(be._element(4)["ref"], "d")
+
+    def test_a_whole_tree_keeps_each_ref_at_its_number(self):
+        be = self.backend(["a", "b", "c"])
+        changed, gone = be._merge({"generation": 2, "elements": [{"ref": "c", "role": "AXButton", "name": "C"},
+                                                                 {"ref": "a", "role": "AXButton", "name": "A!"},
+                                                                 {"ref": "e", "role": "AXButton", "name": "E"}]})
+        self.assertEqual([(i, e["name"]) for i, e in changed], [(1, "A!"), (4, "E")])
+        self.assertEqual(gone, 1)
+        self.assertEqual([e and e["name"] for e in be._tree["els"]], ["A!", None, "C", "E"])
+
+    def test_unchanged_a_missing_tree_or_another_app_leaves_the_list_alone(self):
+        for body in ({"unchanged": True, "generation": 1}, {"note": "unresponsive: no tree"}):
+            be = self.backend(["a"])
+            self.assertEqual(be._merge(body), ([], 0))
+            self.assertEqual((be._tree["gen"], len(be._tree["els"])), (1, 1))
+        be = self.backend(["a"])
+        be._pid = 202
+        self.assertEqual(be._merge({"generation": 2, "changed": [{"ref": "z", "name": "Z"}], "removed": []}), ([], 0))
+
+    def test_error_texts_map_to_codes_with_a_next_step(self):
+        coded = self.mod._coded
+        self.assertEqual(coded("The screen is locked, so apps cannot be read or driven.")[0], "locked")
+        self.assertEqual(coded("Screen Recording is off for this program.")[0], "permission")
+        self.assertEqual(coded("Could not verify which field has focus; retry or snapshot first.")[0], "focus_unverified")
+        code, message = coded("stale_ref: c2 is gone or changed since your snapshot.")
+        self.assertEqual(code, "stale_ref")
+        self.assertTrue(message.startswith("c2 is gone"))
+        self.assertIn("capture again", message)
+        self.assertEqual(coded("Refused.", "off_limits"), ("off_limits", "Refused. " + self.mod._NEXT["off_limits"]))
+        self.assertEqual(coded("Press failed."), ("failed", "Press failed."))
+
+    def test_tree_notes_carry_the_apps_note_hidden_count_and_truncation(self):
+        notes = self.mod._tree_notes({"note": "On another Space.", "hidden": 3, "truncated": True})
+        self.assertEqual(notes[0], "On another Space.")
+        self.assertIn("3 more controls are scrolled out of view", notes[1])
+        self.assertIn("cut", notes[2])
+        self.assertEqual(self.mod._tree_notes({"hidden": 0}), [])
 
 
 @NEEDS_HERMES
@@ -481,15 +595,71 @@ class ProviderTests(unittest.TestCase):
     def test_list_apps(self):
         self.assertEqual(self.r["apps"][0], {"name": "Notes", "bundle_id": "com.apple.Notes", "pid": 101, "frontmost": False})
 
-    def test_som_capture_maps_elements_and_converts_bounds_to_screenshot_pixels(self):
+    def test_som_capture_of_a_named_tree_skips_the_screenshot(self):
         som = self.r["som"]
-        self.assertEqual((som["mode"], som["w"], som["h"], som["mime"], som["png"], som["app"]), ("som", 480, 300, "image/jpeg", True, "Notes"))
-        # screen (300,250,100,40) in a window at (100,100) 960x600 shown at 480x300 is (100,75,50,20)
-        self.assertEqual(som["elements"][0], [1, "AXButton", "Save", [100, 75, 50, 20]])
-        self.assertEqual(som["elements"][1][3], [0, 0, 100, 15])
+        self.assertEqual((som["mode"], som["w"], som["h"], som["mime"], som["png"], som["app"]), ("som", 0, 0, None, False, "Notes"))
+        self.assertEqual(som["elements"][0], [1, "AXButton", "Save", [300, 250, 100, 40]])
         self.assertEqual(som["elements"][2][3], [0, 0, 0, 0])
-        self.assertEqual([name for name, _ in som["calls"]], ["workspace_computer_apps", "workspace_computer_snapshot", "workspace_computer_screenshot"])
+        self.assertEqual([name for name, _ in som["calls"]], ["workspace_computer_apps", "workspace_computer_snapshot"])
+        self.assertIn("capture(mode='vision')", som["note"])
+        self.assertIn("screen pixels", som["note"])
         self.assertEqual(self.r["target"], [{"pid": 101, "window_id": 0}, "Notes"])
+
+    def test_som_capture_of_an_unnamed_tree_adds_the_screenshot_and_converts_bounds(self):
+        som = self.r["som_unnamed"]
+        self.assertEqual((som["png"], som["w"]), (True, 480))
+        self.assertEqual(som["calls"], ["workspace_computer_snapshot", "workspace_computer_screenshot"])
+        # screen (300,250,100,40) in a window at (100,100) 960x600 shown at 480x300 is (100,75,50,20)
+        self.assertEqual(som["elements"], [[1, "", [100, 75, 50, 20]]])
+        self.assertIn("12 more controls are scrolled out of view", som["note"])
+
+    def test_an_empty_tree_says_why_and_gets_the_screenshot(self):
+        som = self.r["som_empty"]
+        self.assertTrue(som["png"])
+        self.assertEqual(som["elements"], [])
+        self.assertIn("another Space", som["note"])
+
+    def test_a_delta_reply_folds_into_the_element_list_without_shifting_numbers(self):
+        delta = self.r["delta"]
+        self.assertTrue(delta["ok"])
+        self.assertEqual(delta["effect"], "confirmed")
+        self.assertIn("#2 AXTextField 'Title = bye'", delta["message"])
+        self.assertIn("#4 AXButton 'Done'", delta["message"])
+        self.assertIn("1 element(s) disappeared", delta["message"])
+        self.assertIn("4 more controls are scrolled out of view", delta["message"])
+        self.assertIn("no capture is needed", delta["message"])
+        gen, held = self.r["delta_gen"]
+        self.assertEqual(self.r["delta_call"][0]["generation"], gen)
+        self.assertEqual(held, gen + 2)  # the delta click and the click on element 4
+        self.assertEqual(self.r["delta_gone"]["code"], "no_such_element")
+        self.assertIn("disappeared", self.r["delta_gone"]["message"])
+        self.assertEqual(self.r["delta_new_call"], [{"pid": 101, "action": "press", "ref": "c4", "generation": gen + 1}])
+
+    def test_a_capture_after_a_delta_keeps_the_numbers_it_handed_out(self):
+        cap = self.r["delta_capture"]
+        self.assertEqual([e[:2] for e in cap["elements"]], [[1, "Save"], [2, "Title = bye"], [4, "Done"]])
+        self.assertIn("4 more controls are scrolled out of view", cap["note"])
+
+    def test_unchanged_and_whole_tree_replies(self):
+        self.assertIn("did not change", self.r["unchanged"]["message"])
+        self.assertIsNone(self.r["unchanged"]["effect"])
+        whole = self.r["whole"]
+        self.assertIn("#1 AXButton 'Saved'", whole["message"])
+        self.assertNotIn("Done", whole["message"])  # c4 is the same, so it is not listed as changed
+        self.assertIn("1 element(s) disappeared", whole["message"])
+        self.assertIn("unresponsive", self.r["no_tree"]["message"])
+        self.assertIsNone(self.r["no_tree"]["effect"])
+
+    def test_each_error_code_says_the_next_step(self):
+        r = self.r
+        expected = {"locked": ("locked", "unlock"), "permission": ("permission", "alans-way-localapp"),
+                    "unresponsive": ("unresponsive", "do not repeat"), "timeout": ("timeout", "capture"),
+                    "no_window": ("no_window", "another Space"), "stale": ("stale_ref", "capture again")}
+        for key, (code, step) in expected.items():
+            with self.subTest(key):
+                self.assertEqual((r["err_" + key]["ok"], r["err_" + key]["code"]), (False, code))
+                self.assertIn(step, r["err_" + key]["message"])
+        self.assertTrue(r["err_capture"].startswith("locked: The screen is locked"), r["err_capture"])
 
     def test_ax_capture_skips_the_image_and_reuses_an_unchanged_tree(self):
         ax = self.r["ax"]
@@ -511,7 +681,9 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["right"][0]["action"], "right_click")
         self.assertEqual(self.r["right"][0]["ref"], "c2")
 
-    def test_stale_ref_is_mapped_and_the_action_tree_is_not_adopted(self):
+    def test_the_action_tree_is_held_and_a_stale_ref_is_mapped(self):
+        self.assertTrue(self.r["after_click"]["ok"])
+        self.assertEqual(self.r["after_click_call"][0]["generation"], 8)
         stale = self.r["stale"]
         self.assertFalse(stale["ok"])
         self.assertEqual(stale["code"], "stale_ref")
@@ -524,25 +696,30 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(bad["code"], "no_such_element")
 
     def test_coordinates_convert_from_screenshot_pixels_to_screen_pixels(self):
-        self.assertEqual(self.r["click_xy"], [{"pid": 101, "action": "click", "x": 300, "y": 250}])
+        self.assertEqual(bare(self.r["click_xy"]), [{"pid": 101, "action": "click", "x": 300, "y": 250}])
         scroll = self.r["scroll_xy"][0]
         self.assertEqual((scroll["x"], scroll["y"], scroll["direction"]), (300, 250, "down"))
-        self.assertEqual(self.r["drag_xy"], [{"pid": 101, "action": "drag", "x": 100, "y": 100, "x2": 300, "y2": 250}])
+        self.assertEqual(bare(self.r["drag_xy"]), [{"pid": 101, "action": "drag", "x": 100, "y": 100, "x2": 300, "y2": 250}])
 
     def test_scroll_ticks_become_pages(self):
         self.assertEqual(self.r["scroll_xy"][0]["amount"], 0.75)
-        self.assertEqual(self.r["scroll_plain"], [{"pid": 101, "action": "scroll", "direction": "up", "amount": 0.75}])
+        self.assertEqual(bare(self.r["scroll_plain"]), [{"pid": 101, "action": "scroll", "direction": "up", "amount": 0.75}])
 
     def test_drag_between_elements_uses_their_centres(self):
-        self.assertEqual(self.r["drag_el"], [{"pid": 101, "action": "drag", "x": 350, "y": 270, "x2": 200, "y2": 115}])
+        self.assertEqual(bare(self.r["drag_el"]), [{"pid": 101, "action": "drag", "x": 350, "y": 270, "x2": 200, "y2": 115}])
 
     def test_set_value_and_keys(self):
         generation = self.r["set_value"][0]["generation"]
         self.assertEqual(self.r["set_value"], [{"pid": 101, "action": "type", "ref": "c2", "text": "hello", "generation": generation}])
-        self.assertEqual(self.r["key_combo"], [{"pid": 101, "action": "hotkey", "keys": "cmd+s"}])
-        self.assertEqual(self.r["key_plain"], [{"pid": 101, "action": "key", "key": "return"}])
+        self.assertEqual(bare(self.r["key_combo"]), [{"pid": 101, "action": "hotkey", "keys": "cmd+s"}])
+        self.assertEqual(bare(self.r["key_plain"]), [{"pid": 101, "action": "key", "key": "return"}])
         # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
-        self.assertEqual(self.r["type_text"], [{"pid": 101, "action": "type", "text": "hi"}])
+        self.assertEqual(bare(self.r["type_text"]), [{"pid": 101, "action": "type", "text": "hi"}])
+
+    def test_every_action_carries_the_held_generation_so_replies_can_be_deltas(self):
+        for key in ("click_xy", "scroll_plain", "drag_xy", "key_combo", "type_text"):
+            with self.subTest(key):
+                self.assertIsInstance(self.r[key][0]["generation"], int)
         self.assertEqual(self.r["type_text_mac"]["code"], "bad_request")
         self.assertIn("set_value", self.r["type_text_mac"]["message"])
         self.assertTrue(self.r["type_text_desktop"]["ok"])
@@ -601,13 +778,10 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["code_nocontrol"]["code"], "not_found")
         self.assertEqual(self.r["code_coded"]["code"], "off_limits")
 
-    def test_vision_fetches_only_the_screenshot_and_reads_run_in_parallel(self):
+    def test_vision_fetches_only_the_screenshot(self):
         names, elements, png = self.r["vision"]
         self.assertEqual(names, ["workspace_computer_apps", "workspace_computer_screenshot"])
         self.assertEqual((elements, png), (0, True))
-        seconds, parallel = self.r["parallel"]
-        self.assertEqual(sorted(parallel), ["workspace_computer_screenshot", "workspace_computer_snapshot"])
-        self.assertLess(seconds, 0.7)
 
     def test_doctor_accepts_any_host_decision_and_flags_a_missing_one(self):
         r = self.r
@@ -630,7 +804,7 @@ class ProviderTests(unittest.TestCase):
     def test_tool_handler_end_to_end(self):
         r = self.r
         self.assertIn("Save", r["e2e_capture"])
-        self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101], ["workspace_computer_screenshot", 101]])
+        self.assertEqual(r["e2e_click_calls"], [["workspace_computer_action", 101], ["workspace_computer_snapshot", 101]])
         self.assertIn('"ok": true', r["e2e_click"].lower().replace('\\"', '"'))
         self.assertNotIn("unsupported_action", r["e2e_type"])
 

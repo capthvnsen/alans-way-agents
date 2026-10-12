@@ -376,6 +376,13 @@ class DesktopAppsSkillTests(unittest.TestCase):
         self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
         self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
+    def test_where_to_act_names_each_surface_and_when_to_ask(self):
+        self.assertIn("**Where to act.** A web page is `cua_alans_way_*` work", self.normalized)
+        self.assertIn("A native app is `computer_use` work", self.normalized)
+        self.assertIn("`vps` is the VM desktop", self.normalized)
+        self.assertIn("ask the user instead of working around it", self.normalized)
+        self.assertIn("so do not capture again just to read the result", self.normalized)
+
     def test_a_permission_error_names_the_app_and_both_switches(self):
         self.assertIn("Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp)", self.normalized)
         self.assertIn("System Settings", self.normalized)

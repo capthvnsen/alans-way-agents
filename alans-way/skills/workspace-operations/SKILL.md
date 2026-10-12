@@ -86,6 +86,13 @@ with the `computer_use` tool, which asks the user for approval on each
 action. Press a ref from the accessibility
 tree, leave the focused window alone, and do not move the pointer.
 
+**Where to act.** A web page is `cua_alans_way_*` work: the user's computer
+by default, the VM with `host:"vm"` or while the computer is offline. A
+native app is `computer_use` work; `workspace_computer_apps` says which
+machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
+`vps` is the VM desktop). If the app is in front, on another Space, or the
+screen is locked, the error says so: ask the user instead of working around it.
+
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
 for that boundary. Do not use an external computer-use driver.
@@ -276,10 +283,12 @@ Desktop apps, on the Mac and on the Linux machine, are driven by the
 `computer_use` tool. Hermes asks the user for approval before each action;
 that approval gate is the only desktop-input path, so never look for a way
 around it. `computer_use` `list_apps` names the running apps; `capture` with
-`app` returns one app's numbered element list plus a small window screenshot;
+`app` returns one app's numbered element list, with a small window
+screenshot only when the list names nothing (`mode="vision"` asks for one);
 `click`, `double_click`, `right_click`, `drag`, `scroll`, `key`,
-`set_value` and `focus_app` act on element numbers or capture-pixel
-coordinates. `set_value` replaces a field's text; free typing with no target
+`set_value` and `focus_app` act on element numbers or coordinates. Each
+action's reply lists the element numbers that changed, so do not capture
+again just to read the result. `set_value` replaces a field's text; free typing with no target
 element is not available because nothing takes focus. A stale element
 number comes back `stale_ref`, and a switch between the computer and the VM
 comes back `host_changed`: `list_apps` and `capture` again. To look without
