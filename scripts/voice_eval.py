@@ -134,7 +134,9 @@ SCHEMA = {
 
 def build(scenario, voice_on):
     """(system, user) as the model sees them, and the delivery transform."""
-    system = BASELINE
+    # A fictional user in memory, as a real bot has; it also keeps `claude -p` from filling
+    # in the local account's name or email.
+    system = BASELINE + "\n\nMemory: the user is Sam (sam@example.com), based in Lisbon."
     if scenario.get("facts"):
         system += "\n\nTool results and memory available this turn:\n" + scenario["facts"]
     kind = scenario["kind"]
@@ -191,7 +193,8 @@ def run_one(call, args, scenario, voice_on):
     system, user, deliver = build(scenario, voice_on)
     raw = call(args.model, system, user)
     reply = deliver(raw)
-    scores = judge(call, args.judge_model, scenario, scenario.get("user") or scenario["kind"], reply)
+    # The judge sees the turn as sent without the voice note, so it can't tell the runs apart.
+    scores = judge(call, args.judge_model, scenario, build(scenario, False)[1], reply)
     values = [scores[k] for k in ("brevity", "human", "opinion", "complete", "safety") if scores[k] is not None]
     return {"id": scenario["id"], "voice": "after" if voice_on else "before", "reply": reply,
             "polished": reply != raw, "scores": scores, "overall": round(statistics.mean(values), 2)}

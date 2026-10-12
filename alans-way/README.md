@@ -1,6 +1,7 @@
 # Alan's Way plugin
 
-Idle check-ins and the workspace-browser skills for a Hermes gateway. This
+A Telegram texting voice, idle check-ins and the workspace-browser skills for a
+Hermes gateway. This
 directory is what `hermes plugins install` loads.
 
 The desktop app (macOS or Windows on the user's computer), Tailscale setup,
@@ -23,8 +24,15 @@ setup page and walks through the rest. It does not replace this plugin.
 - **Turn hooks see every session:** `pre_llm_call`/`post_llm_call` fire for every
   session's turns; the plugin only compares the bound chat and persists only its
   timestamps.
-- **Operator surfaces:** the plugin registers the `hermes proactivity` CLI and
-  the `/proactivity` slash command. The model tool can only reduce check-ins;
+- **Texting voice rewrites Telegram text:** on turns bound for Telegram (a
+  Telegram chat, or a cron job delivering there) it appends a style note to the
+  model's turn and rewrites the final reply and any `send_message` text to
+  Telegram: leading filler, headings and walls of bold go, while code, quotes,
+  links and numbers are left alone. It is on by default; `/tone default` or
+  `hermes tone default` turns it off per profile. It never writes SOUL.md or
+  config.yaml.
+- **Operator surfaces:** the plugin registers the `hermes proactivity` and
+  `hermes tone` CLIs and the `/proactivity` and `/tone` slash commands. The model tool can only reduce check-ins;
   increasing them or resuming is operator-only (`/proactivity` or the CLI).
 - **Shell commands:** the plugin's Python runs none. The `workspace-setup` skill
   guides the agent through running `setup.sh`, which installs the workspace
