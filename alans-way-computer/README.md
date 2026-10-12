@@ -27,10 +27,10 @@ Hermes the plugin installs and logs that it did nothing.
 - `capture` (`mode="som"`) returns the element list alone when its named controls cover most of the window; when
   they don't (a canvas, a game, a web area) it attaches the window screenshot and says why. `mode="vision"` is the
   screenshot alone.
-- On a Mac, each action's reply says which element numbers changed or disappeared and updates the list in place, so
-  a number keeps meaning the same control and no capture is needed to read the result. Windows and the VM desktop
-  number controls by position, so there the reply describes the change and asks for a capture before acting by
-  number again.
+- On a Mac or Windows computer, each action's reply says which element numbers changed or disappeared and updates
+  the list in place, so a number keeps meaning the same control and no capture is needed to read the result. Linux
+  (the VM desktop, or a Linux computer) numbers controls by position, so there the reply describes the change and
+  asks for a capture before acting by number again.
 - Errors carry a code and, where there is one, the next step: `locked`, `in_front` and `no_window` mean asking the
   user; `stale_ref` means capture again. A capture of an app whose windows are on another Space says so in its note.
 - After a switch between the computer and the VM, app ids and element numbers no longer mean anything. The

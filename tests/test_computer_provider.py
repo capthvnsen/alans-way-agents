@@ -230,8 +230,8 @@ try:
 except Exception as e:
     R["err_capture"] = str(e)
 
-# --- Windows and the VM desktop number refs by position: a reply is described, the old generation is kept
-CTL.write_text(json.dumps({"os": "windows"})); be.list_apps()
+# --- the VM desktop numbers refs by position: a reply is described, the old generation is kept
+CTL.write_text(json.dumps({"os": "vps"})); be.list_apps()
 rows = [{"ref": f"c{i}", "role": "AXRow", "name": n, "x": 100, "y": 100 + 30 * i, "width": 300, "height": 30}
         for i, n in enumerate(["a.txt", "b.txt", "c.txt", "d.txt"], 1)]
 CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
@@ -242,6 +242,18 @@ R["win_delete"] = plain(be.click(element=2))  # deletes b.txt: c.txt is now c2, 
 R["win_third"] = plain(be.click(element=3))  # the model's #3 was c.txt; c3 is now d.txt
 R["win_calls"] = action_calls(m)
 R["win_gen"] = [win_gen, be._tree["gen"], [e["name"] for e in be._tree["els"]]]
+
+# --- Windows keeps refs on their own controls: the same delete folds in and #3 still means c.txt
+CTL.write_text(json.dumps({"os": "windows"})); be.list_apps()
+CTL.write_text(json.dumps({"snap": {"elements": rows}})); be.capture(mode="ax", pid=101)
+fold_gen = be._tree["gen"]
+CTL.write_text(json.dumps({"reply": {"changed": [], "removed": ["c2"]}}))
+m = mark()
+R["fold_delete"] = plain(be.click(element=2))
+CTL.write_text(json.dumps({"reply": {"changed": [], "removed": []}}))
+R["fold_third"] = plain(be.click(element=3))
+R["fold_calls"] = action_calls(m)
+R["fold_gen"] = [fold_gen, be._tree["gen"], [e and e["name"] for e in be._tree["els"]]]
 CTL.write_text(json.dumps({"os": "mac"})); be.list_apps()
 
 # --- unsupported actions never reach the router
@@ -712,6 +724,16 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Gone: #2 AXTextField 'Title = tick'.", whole["message"])
         self.assertIn("unresponsive", self.r["no_tree"]["message"])
         self.assertIsNone(self.r["no_tree"]["effect"])
+
+    def test_windows_refs_are_stable_so_a_delete_folds_in_without_shifting_numbers(self):
+        r = self.r
+        self.assertIn("Gone: #2 AXRow 'b.txt'.", r["fold_delete"]["message"])
+        self.assertEqual(r["fold_delete"]["effect"], "confirmed")  # the pressed row itself went
+        gen, held, names = r["fold_gen"]
+        self.assertEqual(held, gen + 2)
+        self.assertEqual(names, ["a.txt", None, "c.txt", "d.txt"])
+        self.assertEqual(r["fold_calls"][1], {"pid": 101, "action": "press", "ref": "c3", "generation": gen + 1})
+        self.assertTrue(r["fold_third"]["ok"])
 
     def test_positional_refs_keep_the_old_generation_so_a_shifted_number_is_refused(self):
         r = self.r

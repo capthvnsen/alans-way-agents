@@ -63,9 +63,10 @@ _NEXT = {
     "focus_unverified": "Capture again, then retry once.",
 }
 CHANGES_SHOWN = 12
-# Only the mac helper keeps a ref on its own control across generations; Windows and the VPS number refs by
-# position and guard them with a whole-tree generation check, so there a reply is described, never folded in.
-_STABLE_REFS = {"mac"}
+# The mac and Windows helpers keep a ref on its own control across generations and check each ref's identity; the
+# Linux helper (the VM desktop, or a Linux computer) numbers refs by position and guards them with a whole-tree
+# generation check, so there a reply is described, never folded in.
+_STABLE_REFS = {"mac", "windows"}
 # ponytail: one share and one reach for every app, tune them if real apps misjudge. Measured coverage: the bench
 # fixture 0.41, Calculator 0.52, Messages 0.61, Finder 0.88, and Preview showing a PDF (pixels) 0.31.
 MIN_COVERAGE = 0.35  # share of the window named controls must cover for som to leave the screenshot out
