@@ -771,6 +771,36 @@ class BriefTests(unittest.TestCase):
         self.assertIsNone(p.tick())          # the next check-in counts from the brief
         self.assertEqual(len(ctx.sent), 1)
 
+    def test_the_brief_moves_the_check_in_anchor_before_its_turn_runs(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-06T20:00"), morning_brief=True)
+        clock.now = at("2026-10-07T08:17")
+        self.assertTrue(p.tick())
+        clock.now = at("2026-10-07T08:18")   # the brief's turn hasn't started yet
+        self.assertIsNone(p.tick())
+        self.assertEqual(len(ctx.sent), 1)
+        self.assertEqual(p.load()["nudges"], 0)
+        self.assertNotIn("last_nudge_ts", p.load())
+
+    def test_a_full_day_west_inside_the_brief_window_still_gets_no_second_brief(self):
+        # 08:20 on the 8th in Kiritimati is 08:20 on the 7th in Honolulu.
+        p, clock = runtime(FakeCtx(), at("2026-10-07T20:00", "Pacific/Kiritimati"),
+                           timezone="Pacific/Kiritimati", morning_brief=True)
+        self.assertEqual(len(self.run_ticks(p, clock, at("2026-10-08T08:00", "Pacific/Kiritimati"),
+                                            at("2026-10-08T08:20", "Pacific/Kiritimati"))), 1)
+        p.update({"timezone": "Pacific/Honolulu"})
+        self.assertEqual(self.run_ticks(p, clock, clock.now, at("2026-10-07T12:00", "Pacific/Honolulu")), [])
+
+    def test_a_brief_date_from_a_clock_jump_is_ignored(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-06T20:00"), morning_brief=True)
+        state = p.load()
+        state["last_brief_date"] = "2027-01-01"
+        p.save(state)
+        clock.now = at("2026-10-07T06:00")
+        self.assertEqual(p.status()["next_brief"], "2026-10-07T08:17+00:00")
+        self.assertEqual(self.run_ticks(p, clock, clock.now, at("2026-10-07T09:00")),
+                         [at("2026-10-07T08:17")])
+
     def test_dst_keeps_the_brief_at_8am_local_once_a_day(self):
         tz = "America/Chicago"
         for first, last in (("2026-10-31", "2026-11-02"),    # clocks go back Nov 1
@@ -867,7 +897,8 @@ class PromptTests(unittest.TestCase):
                              "No headings, bullet lists or tables", "numbered list only for decisions",
                              "emoji only if they use them",
                              "Never mention timers, schedules, check-ins or being prompted",
-                             "Open differently from your recent messages"):
+                             "Open differently from your recent messages",
+                             "end with a short question or offer"):
                     self.assertIn(rule, text)
 
     def test_check_ins_are_short_and_name_one_open_thread(self):

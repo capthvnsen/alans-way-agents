@@ -162,7 +162,8 @@ VOICE = (" Write like a sharp person texting them on Telegram: lead with the con
          " greeting or preamble. No headings, bullet lists or tables; a numbered list only for"
          " decisions you need from them. Plain text or light formatting Telegram renders; emoji only"
          " if they use them. Never mention timers, schedules, check-ins or being prompted. Open"
-         " differently from your recent messages to them.")
+         " differently from your recent messages to them. When something needs their call, end"
+         " with a short question or offer, such as 'Want me to ...?'")
 
 
 def caller_session_key():
@@ -304,6 +305,15 @@ class Proactivity:
                  state.get("bound_ts") or 0)
         return datetime.fromtimestamp(ts, timezone.utc)
 
+    @staticmethod
+    def _last_brief(state, today):
+        """The last briefed local date. ISO dates sort as strings, and callers use "<"
+        rather than "!=" so flying west, which moves the local date back a day,
+        can't earn a second brief. A date further ahead than that came from a clock
+        jump and is ignored, so it can't stop briefs."""
+        last = state.get("last_brief_date", "")
+        return "" if last > (today + timedelta(days=1)).isoformat() else last
+
     def _busy(self, now):
         # ponytail: post_llm_call never fires for a crashed or stopped turn, so a
         # turn older than BUSY_CAP is treated as over.
@@ -319,21 +329,21 @@ class Proactivity:
                 return None
             anchor, nudges = self._anchor(state), state.get("nudges", 0)
             day = now.astimezone(zone(s)).date()
-            # ISO dates sort as strings; "<" rather than "!=" so flying west, which
-            # moves the local date back, can't earn a second brief.
-            brief = (s.morning_brief and state.get("last_brief_date", "") < day.isoformat()
+            brief = (s.morning_brief and self._last_brief(state, day) < day.isoformat()
                      and in_window(s, now) and day_start(s, day) <= now < brief_at(s, day) + BRIEF_LATE)
             if brief and now < brief_at(s, day):
                 return None   # the window-start check-in waits for the brief
             if brief:
                 # ponytail: the date is spent before injecting, so a refused brief
-                # isn't retried; the held check-in goes out on the next tick instead.
+                # isn't retried; the next check-in counts from it either way.
                 state["last_brief_date"] = day.isoformat()
                 if now.timestamp() - (state.get("last_user_ts") or 0) < BRIEF_QUIET.total_seconds():
                     state["last_result"] = "brief skipped: user active"
                     self.save(state)
                     return None
-                state["last_result"] = "pending"
+                # The brief's own turn may not start before the next tick, so move the
+                # check-in anchor now; nudges and last_nudge_ts stay untouched.
+                state.update(last_activity_ts=now.timestamp(), last_result="pending")
                 text = self.brief_prompt(s, now)
             elif now < due_at(s, anchor, nudges) or not in_window(s, now):
                 return None
@@ -419,7 +429,7 @@ class Proactivity:
                 if s.morning_brief:
                     today = now.astimezone(zone(s)).date()
                     days = (today + timedelta(days=i) for i in range(3))
-                    day = next((d for d in days if d.isoformat() > state.get("last_brief_date", "")
+                    day = next((d for d in days if d.isoformat() > self._last_brief(state, today)
                                 and brief_at(s, d) + BRIEF_LATE > now), None)
                     if day:
                         out["next_brief"] = brief_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
