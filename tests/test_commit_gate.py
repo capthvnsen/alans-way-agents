@@ -24,18 +24,18 @@ const fs = require('fs');
 const mode = process.env.MAC_MODE || 'ok';
 const pages = {
   'mac-tab-1': { url: 'https://shop.example/checkout?step=2', elements: [
-    { ref: 's1-1', role: 'button', name: 'Place order' },
-    { ref: 's1-2', role: 'button', name: 'Add to cart' },
-    { ref: 's1-3', role: 'link', name: 'Delete' },
-    { ref: 's1-4', role: 'input', name: 'Card number' },
-    { ref: 's1-5', role: 'button' },
+    { ref: 'e1', role: 'button', name: 'Place order' },
+    { ref: 'e2', role: 'button', name: 'Add to cart' },
+    { ref: 'e3', role: 'link', name: 'Delete' },
+    { ref: 'e4', role: 'input', name: 'Card number' },
+    { ref: 'e5', role: 'button' },
   ] },
   'mac-tab-2': { url: 'https://shop.example/search', elements: [
-    { ref: 's2-1', role: 'input', name: 'Search' },
-  ] },
+    { ref: 'e1', role: 'input', name: 'Search' },
+  ], overlays: [{ name: 'Join our newsletter', close: 'e5', closeName: 'No thanks' }] },
   // A long page whose snapshot was cut at maxElements.
   'mac-tab-3': { url: 'https://shop.example/catalog', truncated: { text: false, elements: true }, elements: [
-    { ref: 's4-1', role: 'input', name: 'Filter' },
+    { ref: 'e1', role: 'input', name: 'Filter' },
   ] },
 };
 const tabFor = (url) => (/search/.test(url) ? 'mac-tab-2' : /catalog/.test(url) ? 'mac-tab-3' : 'mac-tab-1');
@@ -64,14 +64,19 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
     return reply(m.id, JSON.stringify({ generation: 1, ...pages[a.tabId], tab: { id: a.tabId, epoch: 1 },
       ...(a.maxChars === 200000 ? { text: 'x'.repeat(150000) } : {}) }));
   if (m.params.name === 'cua_alans_way_action') {
-    if (mode === 'die-on-commit' && line.includes('s1-1')) process.exit(1);
+    if (mode === 'die-on-commit' && line.includes('"ref":"e1"')) process.exit(1);
     if (a.action === 'navigate') {
       // An action reply lists at most 40 controls; a long page fills all 40.
       const n = /long/.test(a.url) ? 40 : /bare/.test(a.url) ? 0 : 1;
-      const elements = Array.from({ length: n }, (_, i) => ({ ref: 's3-' + (i + 1), role: 'input', name: 'Field ' + (i + 1) }));
+      const elements = Array.from({ length: n }, (_, i) => ({ ref: 'e' + (21 + i), role: 'input', name: 'Field ' + (i + 1) }));
       return reply(m.id, JSON.stringify({ effect: { navigated: true, url: a.url }, generation: 3,
         ...(n ? { elements } : {}), tab: { id: a.tabId, epoch: 1 } }));
     }
+    // With generation the app answers with what changed: here, a control
+    // named after the typed text appears.
+    if (a.generation !== undefined)
+      return reply(m.id, JSON.stringify({ changed: [{ ref: 'e7', role: 'button', name: a.text || 'Clear' }], removed: [],
+        generation: a.generation + 1, effect: { url: (pages[a.tabId] || {}).url }, tab: { id: a.tabId, epoch: 1 } }));
     return reply(m.id, JSON.stringify({ ok: true, tab: { id: a.tabId, epoch: 1 } }));
   }
   reply(m.id, 'mac');
@@ -199,7 +204,7 @@ class CommitGateTests(unittest.TestCase):
 
     def test_an_approved_commit_runs_once_without_the_commit_object(self):
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         self.assertEqual(ask["method"], "elicitation/create")
         self.assertEqual(ask["params"]["message"],
@@ -216,7 +221,7 @@ class CommitGateTests(unittest.TestCase):
         sent = self.actions()
         self.assertEqual(len(sent), 1)
         self.assertNotIn("commit", sent[0])
-        self.assertEqual((sent[0]["ref"], sent[0]["tabId"], sent[0]["epoch"]), ("s1-1", "mac-tab-1", 1))
+        self.assertEqual((sent[0]["ref"], sent[0]["tabId"], sent[0]["epoch"]), ("e1", "mac-tab-1", 1))
         [entry] = self.decisions()
         self.assertEqual({k: entry[k] for k in ("bot", "origin", "kind", "summary", "amount", "decision")},
                          {"bot": "bot1", "origin": "https://shop.example", "kind": "purchase",
@@ -227,7 +232,7 @@ class CommitGateTests(unittest.TestCase):
         self.open_checkout()
         for action in ("decline", "cancel"):
             with self.subTest(action=action):
-                call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+                call = self.act(action="click", ref="e1", commit=PURCHASE)
                 self.answer(self.recv(), action)
                 self.refused(call, "declined")
         self.answer_with_unchecked_box()
@@ -235,7 +240,7 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual([d["decision"] for d in self.decisions()], ["declined"] * 3)
 
     def answer_with_unchecked_box(self):
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         self.answer(self.recv(), "accept", {"approve": False})
         self.refused(call, "declined")
 
@@ -243,7 +248,7 @@ class CommitGateTests(unittest.TestCase):
         # Hermes advertises elicitation to every MCP server and, with no user
         # to ask (cron, -q), declines on its own.
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         self.answer(self.recv(), "decline")
         msg = self.refused(call, "declined")
         self.assertIn("Leave everything staged", self.text(msg))
@@ -252,7 +257,7 @@ class CommitGateTests(unittest.TestCase):
 
     def test_without_elicitation_support_nothing_runs(self):
         self.open_checkout(elicitation=False)
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         msg = self.refused(call, "approval_unavailable")
         self.assertNotIn("method", msg)
         self.assertEqual(self.actions(), [])
@@ -260,7 +265,7 @@ class CommitGateTests(unittest.TestCase):
 
     def test_an_elicitation_error_fails_closed(self):
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         self.write({"jsonrpc": "2.0", "id": ask["id"], "error": {"code": -32601, "message": "no"}})
         self.refused(call, "approval_unavailable")
@@ -268,14 +273,14 @@ class CommitGateTests(unittest.TestCase):
 
     def test_a_commit_button_without_commit_is_refused(self):
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1")
+        call = self.act(action="click", ref="e1")
         self.refused(call, "commit_required")
         self.assertEqual(self.actions(), [])
-        ok = self.act(action="click", ref="s1-2")
+        ok = self.act(action="click", ref="e2")
         done = self.recv()
         self.assertEqual(done["id"], ok)
         self.assertFalse(done["result"].get("isError"))
-        self.assertEqual([a["ref"] for a in self.actions()], ["s1-2"])
+        self.assertEqual([a["ref"] for a in self.actions()], ["e2"])
         self.assertEqual(self.decisions()[-1]["decision"], "commit_required")
 
     def open_search(self):
@@ -291,17 +296,17 @@ class CommitGateTests(unittest.TestCase):
 
     def test_enter_or_space_on_a_page_with_a_commit_control_needs_commit(self):
         self.open_checkout()
-        for args in ({"action": "press", "ref": "s1-4", "key": "Enter"},
+        for args in ({"action": "press", "ref": "e4", "key": "Enter"},
                      {"action": "press", "key": "Return"},
                      {"action": "press", "key": " "},
-                     {"action": "batch", "steps": [{"action": "type", "ref": "s1-4", "text": "4242"},
+                     {"action": "batch", "steps": [{"action": "type", "ref": "e4", "text": "4242"},
                                                    {"action": "press", "key": "Enter"}]}):
             with self.subTest(args=args):
                 msg = self.refused(self.act(**args), "commit_required")
                 self.assertIn("Place order", self.text(msg))
         self.assertEqual(self.actions(), [])
-        self.ran(self.act(action="press", ref="s1-4", key="Tab"))
-        call = self.act(action="press", ref="s1-4", key="Enter", commit=PURCHASE)
+        self.ran(self.act(action="press", ref="e4", key="Tab"))
+        call = self.act(action="press", ref="e4", key="Enter", commit=PURCHASE)
         ask = self.recv()
         self.assertIn('presses Enter; presses a key on "Card number"', ask["params"]["message"])
         self.answer(ask, "accept", {})
@@ -312,10 +317,10 @@ class CommitGateTests(unittest.TestCase):
         self.open_checkout()
         # The same tab, once it leaves the checkout page, no longer counts it.
         self.ran(self.act(action="navigate", url="https://shop.example/thanks"))
-        self.ran(self.act(action="press", ref="s3-1", key="Enter"))
-        self.ran(self.act(action="press", ref="s3-1", key="Enter", modifiers=["control"]))
+        self.ran(self.act(action="press", ref="e21", key="Enter"))
+        self.ran(self.act(action="press", ref="e21", key="Enter", modifiers=["control"]))
         self.open_search()
-        self.ran(self.act(tabId="mac-tab-2", action="press", ref="s2-1", key="Enter"))
+        self.ran(self.act(tabId="mac-tab-2", action="press", ref="e1", key="Enter"))
         self.ran(self.act(tabId="mac-tab-2", action="click", x=10, y=20))
 
     def test_any_key_that_can_act_needs_commit_on_a_commit_page(self):
@@ -323,14 +328,14 @@ class CommitGateTests(unittest.TestCase):
         for key, modifiers in (("\r", None), ("\n", None), ("Delete", None), ("Backspace", None),
                                ("F5", None), ("a", ["meta"])):
             with self.subTest(key=key, modifiers=modifiers):
-                args = {"action": "press", "ref": "s1-4", "key": key}
+                args = {"action": "press", "ref": "e4", "key": key}
                 if modifiers:
                     args["modifiers"] = modifiers
                 self.refused(self.act(**args), "commit_required")
         self.assertEqual(self.actions(), [])
         for key in ("Tab", "ArrowDown", "Escape", "a", "7", "A"):
             with self.subTest(key=key):
-                self.ran(self.act(action="press", ref="s1-4", key=key))
+                self.ran(self.act(action="press", ref="e4", key=key))
 
     def test_batch_steps_are_judged_on_the_batch_tab(self):
         self.open_checkout()
@@ -405,11 +410,11 @@ class CommitGateTests(unittest.TestCase):
 
     def test_an_icon_only_button_counts_as_a_blind_click(self):
         self.open_checkout()
-        msg = self.refused(self.act(action="click", ref="s1-5"), "commit_required")
+        msg = self.refused(self.act(action="click", ref="e5"), "commit_required")
         self.assertIn("unnamed control", self.text(msg))
-        self.refused(self.act(action="batch", steps=[{"action": "double_click", "ref": "s1-5"}]), "commit_required")
+        self.refused(self.act(action="batch", steps=[{"action": "double_click", "ref": "e5"}]), "commit_required")
         self.assertEqual(self.actions(), [])
-        call = self.act(action="click", ref="s1-5", commit=PURCHASE)
+        call = self.act(action="click", ref="e5", commit=PURCHASE)
         ask = self.recv()
         self.assertIn("clicks an unnamed control", ask["params"]["message"])
         self.answer(ask, "accept", {})
@@ -444,15 +449,124 @@ class CommitGateTests(unittest.TestCase):
 
     def test_drags_and_selects_are_judged_like_clicks(self):
         self.open_checkout()
-        for args in ({"action": "drag", "ref": "s1-2", "toRef": "s1-1"},
+        for args in ({"action": "drag", "ref": "e2", "toRef": "e1"},
                      {"action": "drag", "x": 640, "y": 410, "toX": 640, "toY": 410},
-                     {"action": "drag", "ref": "s1-2", "toSelector": ".cart"},
+                     {"action": "drag", "ref": "e2", "toSelector": ".cart"},
                      {"action": "select", "selector": "#shipping", "value": "express"}):
             with self.subTest(args=args):
                 self.refused(self.act(**args), "commit_required")
         self.assertEqual(self.actions(), [])
-        self.ran(self.act(action="drag", ref="s1-2", toRef="s1-4"))
-        self.ran(self.act(action="select", ref="s1-4", value="visa"))
+        self.ran(self.act(action="drag", ref="e2", toRef="e4"))
+        self.ran(self.act(action="select", ref="e4", value="visa"))
+
+    def test_a_control_targeted_by_name_is_judged_by_that_name(self):
+        self.open_checkout()
+        for args in ({"action": "click", "name": "Place order"},
+                     {"action": "double_click", "name": "Place order", "role": "button"},
+                     {"action": "select", "name": "Delete"},
+                     {"action": "batch", "steps": [{"action": "click", "name": "Place order"}]},
+                     # On a page with a commit control a harmless name is still refused.
+                     {"action": "click", "name": "Add to cart"}):
+            with self.subTest(args=args):
+                self.refused(self.act(**args), "commit_required")
+        self.assertEqual(self.actions(), [])
+        call = self.act(action="click", name="Place order", commit=PURCHASE)
+        ask = self.recv()
+        self.assertIn('(clicks "Place order")', ask["params"]["message"])
+        self.answer(ask, "accept", {})
+        self.ran(call)
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="click", name="Search"))
+        self.refused(self.act(tabId="mac-tab-2", action="click", name="Send"), "commit_required")
+
+    def test_a_ref_not_seen_on_the_current_page_is_refused(self):
+        self.open_checkout()
+        for args in ({"action": "click", "ref": "e99"},
+                     {"action": "drag", "ref": "e2", "toRef": "e98"},
+                     {"action": "press", "ref": "e97", "key": "Tab"},
+                     {"action": "click", "ref": "e96", "commit": PURCHASE}):
+            with self.subTest(args=args):
+                self.refused(self.act(**args), "snapshot_required")
+        # A ref from the page before a navigation names nothing on the new one.
+        self.ran(self.act(action="navigate", url="https://shop.example/thanks"))
+        self.refused(self.act(action="click", ref="e2"), "snapshot_required")
+        self.ran(self.act(action="click", ref="e21"))
+        self.assertEqual([a["action"] for a in self.actions()], ["navigate", "click"])
+
+    def test_controls_that_appear_in_a_delta_reply_are_learned(self):
+        self.open_checkout()
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="press", key="Enter"))
+        # A Send button appears after typing; the reply says only what changed.
+        self.ran(self.act(tabId="mac-tab-2", action="type", ref="e1", text="Send", generation=1))
+        for args in ({"action": "click", "ref": "e7"}, {"action": "press", "key": "Enter"},
+                     {"action": "eval", "code": "document.forms[0].submit()"}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(tabId="mac-tab-2", **args), "commit_required")
+                self.assertIn("Send", self.text(msg))
+
+    def test_a_delta_reply_leaves_the_page_partly_seen(self):
+        self.open_checkout()
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="type", ref="e1", text="Clear", generation=1))
+        self.ran(self.act(tabId="mac-tab-2", action="click", ref="e7"))
+        self.refused(self.act(tabId="mac-tab-2", action="press", key="Enter"), "snapshot_required")
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-2"})
+        self.recv()
+        self.ran(self.act(tabId="mac-tab-2", action="press", key="Enter"))
+
+    def test_an_overlay_close_ref_is_learned(self):
+        self.open_checkout()
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="click", ref="e5"))
+
+    def test_a_reload_on_a_commit_page_needs_commit(self):
+        self.open_checkout()
+        self.refused(self.act(action="reload"), "commit_required")
+        self.refused(self.act(action="cdp", method="Page.reload"), "commit_required")
+        self.assertEqual(self.actions(), [])
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="reload"))
+
+    def test_an_address_that_reads_like_an_action_needs_commit(self):
+        self.open_checkout()
+        for args in ({"action": "navigate", "url": "https://shop.example/checkout/complete"},
+                     {"action": "navigate", "url": "shop.example/orders/7/delete"},
+                     {"action": "navigate", "url": "https://shop.example/cart?step=confirm"},
+                     {"action": "navigate", "url": "https://shop.example/api/placeOrder"},
+                     {"action": "cdp", "method": "Page.navigate", "params": {"url": "https://shop.example/pay"}},
+                     {"action": "batch", "steps": [{"action": "navigate", "url": "https://shop.example/submit"}]}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(**args), "commit_required")
+                self.assertIn("looks like an address", self.text(msg))
+        self.assertEqual(self.actions(), [])
+        for url in ("https://shop.example/maps/place/x", "https://shop.example/payments-help",
+                    "https://other.example/delete"):
+            with self.subTest(url=url):
+                self.ran(self.act(action="navigate", url=url))
+
+    def test_accepting_a_page_dialog_counts_as_blind_input(self):
+        self.open_checkout()
+        self.refused(self.act(action="click", ref="e2", dialog={"accept": True}), "commit_required")
+        self.refused(self.act(action="batch", dialog={"accept": True}, steps=[{"action": "click", "ref": "e2"}]),
+                     "commit_required")
+        self.assertEqual(self.actions(), [])
+        self.ran(self.act(action="click", ref="e2", dialog={"accept": False}))
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="click", ref="e1", dialog={"accept": True}))
+
+    def test_blind_steps_after_one_that_may_change_the_page_need_their_own_call(self):
+        self.open_checkout()
+        self.open_search()
+        for steps in ([{"action": "click", "ref": "e1"}, {"action": "press", "key": "Enter"}],
+                      [{"action": "navigate", "url": "https://shop.example/cart"}, {"action": "click", "x": 5, "y": 5}],
+                      [{"action": "back"}, {"action": "eval", "code": "1"}]):
+            with self.subTest(steps=steps):
+                msg = self.refused(self.act(tabId="mac-tab-2", action="batch", steps=steps), "snapshot_required")
+                self.assertIn("earlier step in this batch", self.text(msg))
+        self.ran(self.act(tabId="mac-tab-2", action="batch", steps=[
+            {"action": "type", "ref": "e1", "text": "lamp"}, {"action": "press", "key": "Tab"},
+            {"action": "press", "key": "Enter"}]))
 
     def test_a_blind_press_on_a_tab_never_read_needs_a_snapshot(self):
         self.start()
@@ -468,16 +582,16 @@ class CommitGateTests(unittest.TestCase):
         self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/"})
         self.recv()
         # A respawned router has no names for refs the agent still holds.
-        call = self.act(action="click", ref="s1-1")
+        call = self.act(action="click", ref="e1")
         self.refused(call, "snapshot_required")
         self.assertEqual(self.actions(), [])
         self.send("tools/call", name="cua_alans_way_snapshot", arguments={})
         self.recv()
-        self.refused(self.act(action="click", ref="s1-1"), "commit_required")
+        self.refused(self.act(action="click", ref="e1"), "commit_required")
 
     def test_a_duplicate_accept_runs_the_action_once(self):
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         self.answer(ask, "accept", {})
         self.answer(ask, "accept", {})
@@ -487,14 +601,14 @@ class CommitGateTests(unittest.TestCase):
 
     def test_a_batch_with_a_commit_step_is_refused_without_commit(self):
         self.open_checkout()
-        call = self.act(action="batch", steps=[{"action": "click", "ref": "s1-2"},
-                                               {"action": "press", "ref": "s1-3", "key": "Enter"}])
+        call = self.act(action="batch", steps=[{"action": "click", "ref": "e2"},
+                                               {"action": "press", "ref": "e3", "key": "Enter"}])
         self.refused(call, "commit_required")
         self.assertEqual(self.actions(), [])
 
     def test_a_batch_is_gated_once_before_it_runs(self):
         self.open_checkout()
-        steps = [{"action": "click", "ref": "s1-2"}, {"action": "click", "ref": "s1-1"},
+        steps = [{"action": "click", "ref": "e2"}, {"action": "click", "ref": "e1"},
                  {"action": "wait", "text": "Thanks"}]
         call = self.act(action="batch", steps=steps, commit=PURCHASE)
         self.answer(self.recv(), "accept", {"approve": True})
@@ -509,13 +623,13 @@ class CommitGateTests(unittest.TestCase):
         for commit in ({"kind": "gift", "summary": "x"}, {"kind": "purchase"},
                        {"kind": "purchase", "summary": "x" * 201}):
             with self.subTest(commit=commit):
-                self.refused(self.act(action="click", ref="s1-1", commit=commit), "commit_invalid")
+                self.refused(self.act(action="click", ref="e1", commit=commit), "commit_invalid")
         self.assertEqual(self.actions(), [])
 
     def test_an_unanswered_approval_times_out_and_a_late_tap_does_nothing(self):
         self.env = {"HERMES_ROUTER_APPROVAL_MS": "500"}
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         withdrawn = self.recv()
         self.assertEqual((withdrawn["method"], withdrawn["params"]["requestId"]),
@@ -529,7 +643,7 @@ class CommitGateTests(unittest.TestCase):
     def test_a_slow_approval_does_not_trip_the_call_deadlines(self):
         self.env = {"HERMES_ROUTER_CALL_DEADLINE_MS": "300", "HERMES_ROUTER_CALL_HARD_MS": "600"}
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         time.sleep(2)  # the user reads the card; the host is fine
         self.answer(ask, "accept", {})
@@ -541,7 +655,7 @@ class CommitGateTests(unittest.TestCase):
 
     def test_a_cancelled_call_never_runs_on_a_late_approval(self):
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         self.send("notifications/cancelled", requestId=call, reason="user stopped the turn")
         withdrawn = self.recv()
@@ -553,7 +667,7 @@ class CommitGateTests(unittest.TestCase):
     def test_an_approved_commit_lost_in_failover_is_not_replayed(self):
         self.env = {"MAC_MODE": "die-on-commit"}
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         self.answer(self.recv(), "accept", {})
         msg = self.refused(call, "NOT retried")
         self.assertEqual(len(self.actions()), 1)
@@ -565,7 +679,7 @@ class CommitGateTests(unittest.TestCase):
         self.open_checkout()
         self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://vm.example/", "host": "vm"})
         self.recv()
-        call = self.act(tabId="vm-tab-1", action="click", ref="buy", commit=PURCHASE)
+        call = self.act(tabId="vm-tab-1", action="click", name="Buy now", commit=PURCHASE)
         self.answer(self.recv(), "accept", {})
         msg = self.refused(call, "NOT retried")
         self.assertNotIn("Retry", self.text(msg))
@@ -583,7 +697,7 @@ class CommitGateTests(unittest.TestCase):
         self.open_checkout()
         status = self.send("tools/call", name="cua_alans_way_status", arguments={})
         time.sleep(0.5)  # the host is gone; calls now wait for the VPS restore
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         self.send("notifications/cancelled", requestId=call, reason="user stopped the turn")
         self.assertEqual(self.recv()["id"], status)
         self.assertIsNone(self.recv(timeout=2, required=False))
@@ -592,7 +706,7 @@ class CommitGateTests(unittest.TestCase):
     def test_a_failover_while_awaiting_approval_never_runs_the_commit(self):
         self.env = {"MAC_MODE": "die-on-status"}
         self.open_checkout()
-        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
         status = self.send("tools/call", name="cua_alans_way_status", arguments={})
         replayed = self.recv()

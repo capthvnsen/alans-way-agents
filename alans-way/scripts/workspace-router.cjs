@@ -939,8 +939,32 @@ const TARGET_STEPS = {
   press: ['presses a key on', 'a key press'],
 };
 // DevTools calls that only read or set up the view. Any other (Input.*,
-// Runtime.evaluate, a DOM edit) can act on the page, as eval can.
+// Runtime.evaluate, a DOM edit) can act on the page, as eval can. A reload or
+// a navigation is judged on its own.
 const READ_ONLY_CDP = /^(?:\w+\.(?:get|describe|query|search|capture|enable|disable)|Emulation\.|Page\.(?:navigate|reload|stopLoading)$)/;
+// Steps that leave the page where it is. After any other step a batch may be
+// on a page the router has not seen.
+const PAGE_STAYS = new Set(['type', 'wait', 'read', 'scroll', 'move', 'viewport']);
+// An address whose path or query reads like an action (/orders/7/delete,
+// ?step=confirm, /checkout/complete) can commit just by loading. "place"
+// counts only beside "order", since /maps/place/ is an ordinary page.
+const ACTION_URL = new RegExp(`(?<![\\p{L}\\p{N}])(?:confirm|place${SEP}order|order${SEP}place|placeorder|checkout${SEP}complete|pay|submit|delete)(?![\\p{L}\\p{N}])`, 'iu');
+// Whether a navigation on a page of `origin` lands on such an address, read
+// the way the app reads it (no scheme means https).
+function isActionUrl(url, origin) {
+  let parsed;
+  try {
+    parsed = new URL(/^[a-z][\w+.-]*:\/\//i.test(url) ? url : `https://${url}`);
+  } catch {
+    return false;
+  }
+  if (origin && parsed.origin !== origin) return false;
+  let words = `${parsed.pathname} ${parsed.search}`;
+  try {
+    words = decodeURIComponent(words);
+  } catch { /* judge it encoded */ }
+  return ACTION_URL.test(selectorWords(words));
+}
 const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
 function addCommitParam(result) {
@@ -1678,14 +1702,16 @@ async function main() {
 
   // Per tab, the names behind the element refs replies have shown, the
   // page's origin, and the commit-looking controls the current page shows:
-  // what the commit gate matches a click against and shows the user. Refs are
-  // generation-scoped (s<base>-<n>), so names from earlier replies never
-  // relabel a newer element and merging is safe. `live` and `full` reset when
-  // the page URL changes: a key or a click by position on a page that shows
-  // a commit control may set it off, and one whose controls the router has
-  // not seen in full may hide one.
+  // what the commit gate matches a click against and shows the user. A ref
+  // (e12) names one control for its document's life and keeps it when the
+  // control is renamed, so a later name replaces an earlier one. Everything
+  // resets when the page URL changes: a ref the router has not seen on this
+  // page is refused, a key or a click by position on a page that shows a
+  // commit control may set it off, and one whose controls the router has not
+  // seen in full may hide one.
   const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name), full }
-  // Action replies carry only the first 40 controls (the app's own cap); a
+  // Action replies carry only the first 40 controls (the app's own cap, with
+  // unlisted counting the rest), or with generation only what changed; a
   // snapshot says whether its list was cut.
   const ACTION_ELEMENT_CAP = 40;
   function learnTabPage(tabId, data) {
@@ -1703,6 +1729,7 @@ async function main() {
         parsed.hash = '';
         if (parsed.href !== page.url) {
           page.url = parsed.href;
+          page.names = new Map();
           page.live = new Set();
           page.full = false;
         }
@@ -1712,8 +1739,13 @@ async function main() {
       page.full = data.truncated && typeof data.truncated === 'object'
         ? !data.truncated.elements
         : data.elements.length < ACTION_ELEMENT_CAP;
+    } else if (Array.isArray(data.changed) || Array.isArray(data.removed)) {
+      page.full = false;
     }
-    const lists = [data.elements, ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
+    const overlays = Array.isArray(data.overlays)
+      ? data.overlays.map((o) => o && { ref: o.close, name: o.closeName }) : [];
+    const lists = [data.elements, data.changed, overlays,
+      ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
     for (const list of lists) {
       if (!Array.isArray(list)) continue;
       for (const el of list) {
@@ -2039,36 +2071,68 @@ async function main() {
 
   // What this call (or any batch step) does, read four ways: `acts`
   // describes each step for the approval card, `commits` says why one looks
-  // like a commit, `unseen` names a ref the router never saw a name for (a
-  // respawned router), and `unread` says the page's controls are not known in
-  // full. A control is judged by its ref name or selector words. Input that
-  // cannot be judged that way (a key other than a plain move or character, a
-  // click by position, on an unnamed control or on a selector that names no
-  // commit, page script, a DevTools call that can act) counts as a commit on
-  // a page that shows a commit control and is refused on one the router has
-  // not seen in full. Every step runs on the batch's own tab, whatever tabId
-  // a step names, so that is the page each is judged against.
-  const APP_REF = /^s\d+-\d+$/;
+  // like a commit, `unseen` names a ref the router has not seen on this page,
+  // and `unread` says why the router cannot judge a step and what to do. A
+  // control is judged by its name (its ref's, the name it is targeted by, or
+  // its selector's words). Input that cannot be judged that way (a key other
+  // than a plain move or character, a click by position, on an unnamed
+  // control or on a selector that names no commit, page script, a DevTools
+  // call that can act, accepting a page dialog) counts as a commit on a page
+  // that shows a commit control, and is refused on one the router has not
+  // seen in full or that an earlier batch step may have left. Every step runs
+  // on the batch's own tab, whatever tabId a step names, so that is the page
+  // each is judged against. A reload on a commit page may resubmit it, and a
+  // same-site address that reads like an action may commit by loading.
   const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
   function clickTargets(args) {
     const found = { acts: [], commits: [], unseen: null, unread: null };
     const page = tabPages.get(args.tabId);
+    const live = page && page.live.size ? [...page.live][0] : '';
     const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
+    let moved = false;
+    const blind = (what) => {
+      if (live) {
+        found.commits.push(`${what} here could set off "${live}"`);
+      } else if (moved) {
+        found.unread = found.unread || `an earlier step in this batch can change the page, so this connector cannot tell what ${what} would do. Send the steps from there as a separate call once you have seen the page`;
+      } else if (!page || !page.full) {
+        found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${what} would do. Take a snapshot (raise maxElements if it is cut off) and try again`;
+      }
+    };
+    const accepts = (step) => step.dialog && typeof step.dialog === 'object' && step.dialog.accept === true;
+    if (args.action === 'batch' && accepts(args)) {
+      found.acts.push('accepts page dialogs');
+      blind('accepting a page dialog');
+    }
     for (const step of steps) {
       if (!step || typeof step !== 'object') continue;
-      const blind = [];
-      if (step.action === 'press' && typeof step.key === 'string' && !isSafeKey(step)) {
+      if (accepts(step)) {
+        found.acts.push('accepts a page dialog');
+        blind('accepting a page dialog');
+      }
+      const safeKey = step.action === 'press' && isSafeKey(step);
+      if (step.action === 'press' && typeof step.key === 'string' && !safeKey) {
         const key = keyLabel(step.key);
         found.acts.push(`presses ${key}`);
-        blind.push(`pressing ${key}`);
+        blind(`pressing ${key}`);
+      }
+      const cdpUrl = step.action === 'cdp' && step.method === 'Page.navigate' && step.params && step.params.url;
+      const url = step.action === 'navigate' ? step.url : cdpUrl;
+      if (typeof url === 'string' && isActionUrl(url, page && page.origin)) {
+        found.acts.push(`opens ${cardText(url, 80)}`);
+        found.commits.push(`${cardText(url, 80)} looks like an address that confirms, orders, pays, submits or deletes`);
+      }
+      if (step.action === 'reload' || (step.action === 'cdp' && step.method === 'Page.reload')) {
+        found.acts.push('reloads the page');
+        if (live) found.commits.push(`reloading here could resubmit "${live}"`);
       }
       if (step.action === 'eval') {
         found.acts.push('runs a page script');
-        blind.push('a page script');
+        blind('a page script');
       } else if (step.action === 'cdp' && !READ_ONLY_CDP.test(String(step.method))) {
         const method = cardText(String(step.method), 60);
         found.acts.push(`sends ${method}`);
-        blind.push(`the DevTools call ${method}`);
+        blind(`the DevTools call ${method}`);
       }
       const target = TARGET_STEPS[step.action];
       const ends = !target ? [] : step.action === 'drag'
@@ -2078,30 +2142,32 @@ async function main() {
         if (typeof end.ref === 'string') {
           const name = page ? page.names.get(end.ref) : undefined;
           if (name === undefined) {
-            if (!found.unseen && APP_REF.test(end.ref)) found.unseen = `ref ${end.ref} is not from a page state this connector has seen`;
+            found.unseen = found.unseen || `ref ${cardText(end.ref, 20)} is not from this page as this connector has seen it`;
           } else if (!name) {
             found.acts.push(`${act} an unnamed control`);
-            if (step.action !== 'press') blind.push(`${noun} on an unnamed control`);
+            if (step.action !== 'press') blind(`${noun} on an unnamed control`);
           } else {
             found.acts.push(`${act} "${cardText(name, 80)}"`);
             if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
           }
+        } else if (typeof end.name === 'string' && end.name) {
+          // The app acts only on a control with exactly this name.
+          const name = cardText(end.name, 80);
+          found.acts.push(`${act} "${name}"`);
+          if (isCommitName(end.name)) found.commits.push(`"${name}" looks like it buys, books, sends, posts, submits or deletes`);
+          else if (step.action !== 'press' && live) found.commits.push(`${noun} on "${name}" here could set off "${live}"`);
         } else if (typeof end.selector === 'string' && end.selector) {
           const selector = cardText(end.selector, 80);
           found.acts.push(`${act} ${selector}`);
           if (isCommitName(selectorWords(end.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
-          else if (step.action !== 'press') blind.push(`${noun} on ${selector}`);
+          else if (step.action !== 'press') blind(`${noun} on ${selector}`);
         } else if (step.action !== 'press' && (typeof end.x === 'number' || typeof end.y === 'number')) {
           found.acts.push(`${act} at ${end.x},${end.y}`);
-          blind.push(`${noun} by position`);
+          blind(`${noun} by position`);
         }
       }
-      if (!blind.length) continue;
-      if (page && page.live.size) {
-        found.commits.push(`${blind[0]} here could set off "${[...page.live][0]}"`);
-      } else if (!page || !page.full) {
-        found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${blind[0]} would do`;
-      }
+      const readOnly = step.action === 'cdp' && READ_ONLY_CDP.test(String(step.method)) && !url && step.method !== 'Page.reload';
+      if (!PAGE_STAYS.has(step.action) && !safeKey && !readOnly) moved = true;
     }
     return found;
   }
@@ -2127,10 +2193,10 @@ async function main() {
       return true;
     };
     if (targets.unseen) {
-      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs.`);
+      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
     }
     if (args.commit === undefined && !targets.commits.length) {
-      return refuse(`snapshot_required: ${targets.unread}. It did not run. Take a snapshot (raise maxElements if it is cut off) and try again, or pass commit so the user can approve it.`);
+      return refuse(`snapshot_required: ${targets.unread}, or pass commit so the user can approve it. It did not run.`);
     }
     if (args.commit === undefined) {
       logDecision({ origin, target: targets.commits[0] }, 'commit_required');
