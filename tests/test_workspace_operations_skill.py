@@ -66,7 +66,8 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                        "Put a whole checkout batch under one `commit`.",
                        "`declined`, `approval_timeout` and `approval_unavailable` mean it did not run",
                        "do not retry it or reach the same result another way",
-                       "So is any key other than Tab, an arrow, Escape or a plain character, and any click by position",
+                       "any key other than Tab, an arrow, Escape or a plain character; any click, drag or select by position, on an unnamed control or by a selector that names no commit; and any `eval` or `cdp` call that can act",
+                       "`eval` cannot commit: finish a purchase, booking, send, post, submit or delete with a click that carries `commit`",
                        "refused with `snapshot_required`, so snapshot first",
                        "Ask the user before any other financial, destructive or production change."):
             with self.subTest(phrase=phrase):

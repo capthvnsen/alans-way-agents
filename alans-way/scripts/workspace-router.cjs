@@ -904,18 +904,19 @@ const COMMIT_PHRASES = [
   'complete booking', 'book now', 'book', 'reserve', 'request to book', 'confirm order',
   'confirm booking', 'complete order', 'submit order', 'order now', 'send', 'post', 'publish',
   'submit application', 'easy apply', 'delete', 'subscribe', 'donate', 'transfer', 'buy', 'submit',
-  'zahlungspflichtig bestellen', 'kaufen', 'bezahlen', 'commander', 'payer', 'valider la commande',
+  'bestellen', 'kauf abschlie(?:ß|ss)en', 'kaufen', 'bezahlen', 'commander', 'payer', 'valider la commande',
   'confirmer la commande', 'réserver', 'comprar', 'pagar', 'realizar pedido', 'confirmar pedido',
 ].map(phrase);
 const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PHRASES.join('|')})(?![\\p{L}\\p{N}])|注文を確定する|購入する|支払う|予約する`, 'iu');
 // Look-alikes that do not commit, removed before matching: a login or 2FA
-// code, a payment-method picker, an order history link, a filter chip's
-// delete, a saved-address picker.
+// code, a payment-method picker (the whole name, so "Pay with Google Pay
+// now" still pays), an order history link, a filter chip's delete, a
+// saved-address picker.
 const NOT_COMMIT = new RegExp([
   `send(?:${SEP}(?:me|a|new|verification|security|login|sign${SEP}in|one${SEP}time|sms|text))*${SEP}(?:code|otp|passcode)`,
-  `pay${SEP}with${SEP}[\\p{L}\\p{N}]+(?:${SEP}pay(?![\\p{L}\\p{N}]))?`,
+  `^\\s*pay${SEP}with${SEP}[\\p{L}\\p{N}]+(?:${SEP}pay)?\\s*$`,
   `purchase${SEP}history`,
-  `delete(?=.*filter)|(?<=filter.*)delete`,
+  `delete${SEP}filter|filter[\\s,:_-]*delete\\s*$`,
   `address${SEP}book`,
 ].join('|'), 'giu');
 const isCommitName = (name) => COMMIT_NAME.test(String(name).replace(NOT_COMMIT, ' '));
@@ -928,7 +929,18 @@ const selectorWords = (selector) => selector.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $
 const SAFE_KEYS = /^(?:tab|escape|esc|arrow(?:up|down|left|right)|up|down|left|right|home|end|pageup|pagedown|[\p{L}\p{N}])$/iu;
 const isSafeKey = (step) => typeof step.key === 'string' && SAFE_KEYS.test(step.key)
   && (!Array.isArray(step.modifiers) || step.modifiers.every((m) => m === 'shift'));
-const COMMIT_STEP_ACTIONS = new Set(['click', 'double_click', 'press']);
+// Steps aimed at a control, judged by its name. A drag presses on one end
+// and releases on the other, so both ends count; a select fires change.
+const TARGET_STEPS = {
+  click: ['clicks', 'a click'],
+  double_click: ['double-clicks', 'a double-click'],
+  drag: ['drags', 'a drag'],
+  select: ['sets', 'setting a value'],
+  press: ['presses a key on', 'a key press'],
+};
+// DevTools calls that only read or set up the view. Any other (Input.*,
+// Runtime.evaluate, a DOM edit) can act on the page, as eval can.
+const READ_ONLY_CDP = /^(?:\w+\.(?:get|describe|query|search|capture|enable|disable)|Emulation\.|Page\.(?:navigate|reload|stopLoading)$)/;
 const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
 function addCommitParam(result) {
@@ -2025,15 +2037,17 @@ async function main() {
     }
   }
 
-  // What this call (or any batch step) clicks or presses, read four ways:
-  // `acts` describes each for the approval card, `commits` says why one
-  // looks like a commit, `unseen` names a ref the router never saw a name for
-  // (a respawned router), and `unread` says the page's controls are not known
-  // in full. A ref or selector is judged by its words; a key other than a
-  // plain move or character, or a click by position, cannot be, so it counts
-  // as a commit on a page that shows a commit control and is refused on one
-  // the router has not seen in full. Every step runs on the batch's own tab,
-  // whatever tabId a step names, so that is the page each is judged against.
+  // What this call (or any batch step) does, read four ways: `acts`
+  // describes each step for the approval card, `commits` says why one looks
+  // like a commit, `unseen` names a ref the router never saw a name for (a
+  // respawned router), and `unread` says the page's controls are not known in
+  // full. A control is judged by its ref name or selector words. Input that
+  // cannot be judged that way (a key other than a plain move or character, a
+  // click by position, on an unnamed control or on a selector that names no
+  // commit, page script, a DevTools call that can act) counts as a commit on
+  // a page that shows a commit control and is refused on one the router has
+  // not seen in full. Every step runs on the batch's own tab, whatever tabId
+  // a step names, so that is the page each is judged against.
   const APP_REF = /^s\d+-\d+$/;
   const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
   function clickTargets(args) {
@@ -2041,28 +2055,46 @@ async function main() {
     const page = tabPages.get(args.tabId);
     const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
     for (const step of steps) {
-      if (!step || typeof step !== 'object' || !COMMIT_STEP_ACTIONS.has(step.action)) continue;
+      if (!step || typeof step !== 'object') continue;
       const blind = [];
       if (step.action === 'press' && typeof step.key === 'string' && !isSafeKey(step)) {
         const key = keyLabel(step.key);
         found.acts.push(`presses ${key}`);
         blind.push(`pressing ${key}`);
       }
-      if (typeof step.ref === 'string') {
-        const name = page ? page.names.get(step.ref) : undefined;
-        if (name === undefined) {
-          if (!found.unseen && APP_REF.test(step.ref)) found.unseen = `ref ${step.ref} is not from a page state this connector has seen`;
-        } else if (name) {
-          found.acts.push(`clicks "${cardText(name, 80)}"`);
-          if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
+      if (step.action === 'eval') {
+        found.acts.push('runs a page script');
+        blind.push('a page script');
+      } else if (step.action === 'cdp' && !READ_ONLY_CDP.test(String(step.method))) {
+        const method = cardText(String(step.method), 60);
+        found.acts.push(`sends ${method}`);
+        blind.push(`the DevTools call ${method}`);
+      }
+      const target = TARGET_STEPS[step.action];
+      const ends = !target ? [] : step.action === 'drag'
+        ? [step, { ref: step.toRef, selector: step.toSelector, x: step.toX, y: step.toY }] : [step];
+      for (const end of ends) {
+        const [act, noun] = end === step ? target : ['drops on', 'a drop'];
+        if (typeof end.ref === 'string') {
+          const name = page ? page.names.get(end.ref) : undefined;
+          if (name === undefined) {
+            if (!found.unseen && APP_REF.test(end.ref)) found.unseen = `ref ${end.ref} is not from a page state this connector has seen`;
+          } else if (!name) {
+            found.acts.push(`${act} an unnamed control`);
+            if (step.action !== 'press') blind.push(`${noun} on an unnamed control`);
+          } else {
+            found.acts.push(`${act} "${cardText(name, 80)}"`);
+            if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
+          }
+        } else if (typeof end.selector === 'string' && end.selector) {
+          const selector = cardText(end.selector, 80);
+          found.acts.push(`${act} ${selector}`);
+          if (isCommitName(selectorWords(end.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
+          else if (step.action !== 'press') blind.push(`${noun} on ${selector}`);
+        } else if (step.action !== 'press' && (typeof end.x === 'number' || typeof end.y === 'number')) {
+          found.acts.push(`${act} at ${end.x},${end.y}`);
+          blind.push(`${noun} by position`);
         }
-      } else if (typeof step.selector === 'string' && step.selector) {
-        const selector = cardText(step.selector, 80);
-        found.acts.push(`clicks ${selector}`);
-        if (isCommitName(selectorWords(step.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
-      } else if (step.action !== 'press' && (typeof step.x === 'number' || typeof step.y === 'number')) {
-        found.acts.push(`clicks at ${step.x},${step.y}`);
-        blind.push('clicking by position');
       }
       if (!blind.length) continue;
       if (page && page.live.size) {

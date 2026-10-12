@@ -34,10 +34,13 @@ not run: do not retry it or reach the same result another way; tell the user,
 and in a scheduled job (where Hermes declines on its own) leave everything
 staged and ask them to finish. A click on a control or selector named like
 Place order, Pay, Book now, Send, Post or Delete without `commit` is refused
-with `commit_required`. So is any key other than Tab, an arrow, Escape or a
-plain character, and any click by position, on a page that shows such a
-control, since it can set one off; on a page whose controls the connector has
-not seen in full it is refused with `snapshot_required`, so snapshot first. Ask the user before
+with `commit_required`. So is any input the connector cannot judge by name, on
+a page that shows such a control, since it can set one off: any key other than
+Tab, an arrow, Escape or a plain character; any click, drag or select by
+position, on an unnamed control or by a selector that names no commit; and
+any `eval` or `cdp` call that can act (`Input.*`, `Runtime.evaluate`, a DOM
+edit). On a page whose controls the connector has not seen in full it is
+refused with `snapshot_required`, so snapshot first. Ask the user before
 any other financial, destructive or production change. Ownership, control
 epoch, and human takeover gates remain.
 
@@ -228,8 +231,10 @@ the tab stays yours to keep working.
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use
-   `action=eval` with `code` to run JS in the page: read DOM state, extract
-   data, or complete a whole interaction in one call. `eval` awaits Promises,
+   `action=eval` with `code` to run JS in the page to read DOM state or
+   extract data. `eval` cannot commit: finish a purchase, booking, send,
+   post, submit or delete with a click that carries `commit`, and read a
+   page that shows such a control with snapshot or `read`. `eval` awaits Promises,
    so `await new Promise(r => setTimeout(r, 500))` and polling loops work
    inside it; state you store on `window` (for example `window.__h = {}`)
    persists between eval calls on that tab. Keep the return value small;

@@ -18,7 +18,7 @@ NODE = shutil.which("node")
 SH = shutil.which("sh")
 
 # The user's computer: a checkout page (one commit button, a card field, two
-# ordinary controls) and, in a second tab, a search page with no commit control.
+# ordinary controls, an icon-only button) and, in a second tab, a search page with no commit control.
 MAC_STUB = r"""
 const fs = require('fs');
 const mode = process.env.MAC_MODE || 'ok';
@@ -28,6 +28,7 @@ const pages = {
     { ref: 's1-2', role: 'button', name: 'Add to cart' },
     { ref: 's1-3', role: 'link', name: 'Delete' },
     { ref: 's1-4', role: 'input', name: 'Card number' },
+    { ref: 's1-5', role: 'button' },
   ] },
   'mac-tab-2': { url: 'https://shop.example/search', elements: [
     { ref: 's2-1', role: 'input', name: 'Search' },
@@ -302,7 +303,7 @@ class CommitGateTests(unittest.TestCase):
         self.ran(self.act(action="press", ref="s1-4", key="Tab"))
         call = self.act(action="press", ref="s1-4", key="Enter", commit=PURCHASE)
         ask = self.recv()
-        self.assertIn('presses Enter; clicks "Card number"', ask["params"]["message"])
+        self.assertIn('presses Enter; presses a key on "Card number"', ask["params"]["message"])
         self.answer(ask, "accept", {})
         self.ran(call)
         self.assertEqual([a["key"] for a in self.actions()], ["Tab", "Enter"])
@@ -390,11 +391,68 @@ class CommitGateTests(unittest.TestCase):
                      {"action": "click", "selector": "[data-test=buy-now]"},
                      {"action": "click", "selector": "button[type=submit]"},
                      {"action": "click", "x": 640, "y": 410},
-                     {"action": "batch", "steps": [{"action": "click", "selector": "form .submit-order"}]}):
+                     {"action": "batch", "steps": [{"action": "click", "selector": "form .submit-order"}]},
+                     # A selector that names no commit can still point at one.
+                     {"action": "click", "selector": "form > button:last-child"},
+                     {"action": "click", "selector": ".btn-primary"},
+                     {"action": "batch", "steps": [{"action": "click", "selector": ".add-to-cart"}]}):
             with self.subTest(args=args):
                 self.refused(self.act(**args), "commit_required")
         self.assertEqual(self.actions(), [])
-        self.ran(self.act(action="click", selector=".add-to-cart"))
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="click", selector=".btn-primary"))
+        self.refused(self.act(tabId="mac-tab-3", action="click", selector=".btn-primary"), "snapshot_required")
+
+    def test_an_icon_only_button_counts_as_a_blind_click(self):
+        self.open_checkout()
+        msg = self.refused(self.act(action="click", ref="s1-5"), "commit_required")
+        self.assertIn("unnamed control", self.text(msg))
+        self.refused(self.act(action="batch", steps=[{"action": "double_click", "ref": "s1-5"}]), "commit_required")
+        self.assertEqual(self.actions(), [])
+        call = self.act(action="click", ref="s1-5", commit=PURCHASE)
+        ask = self.recv()
+        self.assertIn("clicks an unnamed control", ask["params"]["message"])
+        self.answer(ask, "accept", {})
+        self.ran(call)
+
+    def test_page_script_and_devtools_input_need_commit_on_a_commit_page(self):
+        self.open_checkout()
+        for args in ({"action": "eval", "code": "document.querySelector('button').click()"},
+                     {"action": "cdp", "method": "Input.dispatchKeyEvent",
+                      "params": {"type": "keyDown", "key": "Enter"}},
+                     {"action": "cdp", "method": "Runtime.evaluate",
+                      "params": {"expression": "document.forms[0].submit()"}},
+                     {"action": "cdp", "method": "DOM.setOuterHTML", "params": {"nodeId": 1, "outerHTML": "x"}},
+                     {"action": "batch", "steps": [{"action": "eval", "code": "document.forms[0].requestSubmit()"}]},
+                     {"action": "batch", "steps": [{"action": "cdp", "method": "Input.dispatchMouseEvent"}]}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(**args), "commit_required")
+                self.assertIn("Place order", self.text(msg))
+        self.assertEqual(self.actions(), [])
+        for method in ("Accessibility.getFullAXTree", "DOM.getDocument", "Page.captureScreenshot",
+                       "Network.enable", "Emulation.setDeviceMetricsOverride"):
+            with self.subTest(method=method):
+                self.ran(self.act(action="cdp", method=method))
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="eval", code="document.title"))
+        self.refused(self.act(tabId="mac-tab-3", action="eval", code="document.title"), "snapshot_required")
+        call = self.act(action="eval", code="document.forms[0].requestSubmit()", commit=PURCHASE)
+        ask = self.recv()
+        self.assertIn("runs a page script", ask["params"]["message"])
+        self.answer(ask, "accept", {})
+        self.ran(call)
+
+    def test_drags_and_selects_are_judged_like_clicks(self):
+        self.open_checkout()
+        for args in ({"action": "drag", "ref": "s1-2", "toRef": "s1-1"},
+                     {"action": "drag", "x": 640, "y": 410, "toX": 640, "toY": 410},
+                     {"action": "drag", "ref": "s1-2", "toSelector": ".cart"},
+                     {"action": "select", "selector": "#shipping", "value": "express"}):
+            with self.subTest(args=args):
+                self.refused(self.act(**args), "commit_required")
+        self.assertEqual(self.actions(), [])
+        self.ran(self.act(action="drag", ref="s1-2", toRef="s1-4"))
+        self.ran(self.act(action="select", ref="s1-4", value="visa"))
 
     def test_a_blind_press_on_a_tab_never_read_needs_a_snapshot(self):
         self.start()
@@ -554,7 +612,9 @@ class CommitNameTests(unittest.TestCase):
         "Confirm order", "Confirm booking", "Complete order", "Submit order", "Order now",
         "Send", "Send message", "Post", "Publish", "Submit application", "Easy Apply",
         "Delete", "Delete account", "Subscribe", "Donate", "Transfer",
-        "Zahlungspflichtig bestellen", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
+        "Zahlungspflichtig bestellen", "Bestellen", "Kostenpflichtig bestellen",
+        "Jetzt kostenpflichtig bestellen", "Kauf abschließen", "Kauf abschliessen",
+        "Pay with Google Pay now", "Confirm and pay with PayPal", "Remove filter, delete account", "Delete account filter", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
         "注文を確定する", "ご注文を確定する", "Réserver", "RÉSERVER UNE TABLE",
         "Buy", "Submit", "Payer", "Valider la commande", "Confirmer la commande",
         "Realizar pedido", "Confirmar pedido", "Kaufen", "Bezahlen", "Jetzt bezahlen",
@@ -566,6 +626,7 @@ class CommitNameTests(unittest.TestCase):
         "Size M filter, delete", "Address book", "Books", "Facebook", "Postal code",
         "Resend", "PayPal", "Booking details", "Reserved seats", "Transferable",
         "Buying guide", "Submitted", "Einkaufswagen", "Pay with Google Pay",
+        "Meine Bestellungen", "Pay with Amazon Pay",
     ]
 
     def judge(self, names, selectors=False):
