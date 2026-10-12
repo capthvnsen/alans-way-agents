@@ -33,7 +33,8 @@ permissions, touches production, or deletes anything without asking.
 To check in more, start again, widen the hours or turn on the morning brief, send
 `/proactivity more`, `/proactivity resume`, `/proactivity hours 9-21` or
 `/proactivity brief on` yourself: the bot's tool can only make check-ins
-quieter, because anything the model reads can be prompt-injected. Only the bound chat can change these.
+quieter, because anything the model reads can be prompt-injected. Only the
+bound chat can change these.
 
 Want a check-in right now, say to see what the bot could take on? Send
 `/proactivity now` from the bound chat. It runs one check-in immediately, even
@@ -102,8 +103,8 @@ cron remove <id>` turns it off.
 
 The plugin's `pre_llm_call` and `post_llm_call` hooks note when the bound chat
 was last active and whether the bot is mid-turn. A 60-second timer, started
-only when the gateway connects Telegram, checks whether a check-in or brief is due. When
-one is, it injects one internal prompt into that chat, and the bot decides what
+only when the gateway connects Telegram, checks whether a check-in or brief is
+due. When one is, it injects one internal prompt into that chat, and the bot decides what
 to do with its own memory and tools. A `[SILENT]` reply is never delivered.
 State lives in Hermes' plugin state (`ctx.state`).
 
