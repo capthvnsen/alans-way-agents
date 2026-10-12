@@ -28,8 +28,8 @@ Hermes the plugin installs and logs that it did nothing.
   when the list names nothing. `mode="vision"` is the screenshot alone.
 - Each action's reply says which element numbers changed or disappeared and updates the list in place, so a number
   keeps meaning the same control and no capture is needed to read the result.
-- Every error carries a code and the next step: `locked`, `in_front` and `no_window` (another Space) mean asking
-  the user; `stale_ref` means capture again.
+- Errors carry a code and, where there is one, the next step: `locked`, `in_front` and `no_window` mean asking the
+  user; `stale_ref` means capture again. A capture of an app whose windows are on another Space says so in its note.
 - After a switch between the computer and the VM, app ids and element numbers no longer mean anything. The
   next action returns `host_changed`: call `list_apps` and `capture` again.
 - Typing needs a field: use `set_value` with an element number. `type` with no target, middle and triple clicks and

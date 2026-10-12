@@ -91,7 +91,8 @@ by default, the VM with `host:"vm"` or while the computer is offline. A
 native app is `computer_use` work; `workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
 `vps` is the VM desktop). If the app is in front, on another Space, or the
-screen is locked, the error says so: ask the user instead of working around it.
+screen is locked, the error or capture note says so: ask the user instead of
+working around it.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)

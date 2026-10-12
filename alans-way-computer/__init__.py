@@ -48,7 +48,7 @@ _CODES = {"stale_ref", "unsupported_action", "off_limits", "in_front", "no_windo
 _INFER = (("off limits", "off_limits"), ("in front", "in_front"), ("no window", "no_window"), ("no control at that point", "not_found"),
           ("not found", "not_found"), ("stale", "stale_ref"), ("screen is locked", "locked"), ("accessibility is off", "permission"),
           ("screen recording is off", "permission"), ("not responding", "unresponsive"), ("timed out", "timeout"),
-          ("did not appear within", "timeout"), ("which field has focus", "focus_unverified"))
+          ("which field has focus", "focus_unverified"))
 # What to do next, appended to every error with that code.
 _NEXT = {
     "stale_ref": "That control changed since your element list: capture again for fresh element numbers.",
@@ -404,16 +404,17 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 if win["width"] > 0 and win["height"] > 0 and width > 0 and height > 0:
                     shot = {"wx": win["x"], "wy": win["y"], "ww": win["width"], "wh": win["height"], "iw": width, "ih": height}
             except (_ToolError, StopIteration, KeyError, TypeError, ValueError) as e:
+                why = _coded(str(e), e.code)[1] if isinstance(e, _ToolError) else str(e)
                 if mode == "vision":
-                    raise RuntimeError(f"screenshot failed: {_coded(str(e), e.code)[1] if isinstance(e, _ToolError) else e}") from e
+                    raise RuntimeError(f"screenshot failed: {why}") from e
                 png = mime = None
                 width = height = 0
-                notes.append(f"Screenshot unavailable ({e}); use the element list.")
+                notes.append(f"Screenshot unavailable: {why}" + (" Use the element list." if els else ""))
         self._target(pid, name)
         self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els, "notes": kept} if mode != "vision" else self._tree), shot
         if shot:
             notes.insert(0, "No numbered overlays are drawn: use the element numbers listed. Coordinates are screenshot pixels."
-                         if mode != "vision" else "Coordinates are screenshot pixels.")
+                         if mode != "vision" else "Coordinates are screenshot pixels; bounds in earlier element lists were screen pixels.")
         elif mode == "som" and tree_only:
             notes.insert(0, "No screenshot was taken: the list names the controls, so act on element numbers. Bounds and coordinate= "
                          "are screen pixels. capture(mode='vision') shows the window if you need to see it.")
@@ -526,7 +527,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         changed, gone = self._merge(body)
         parts = [f"{action} sent to {self._app}."]
         if changed or gone:
-            shown = "; ".join(f"#{i} {e.get('role', '')} {_label(e)!r}" for i, e in changed[:CHANGES_SHOWN])
+            shown = "; ".join(f"#{i} {e.get('role', '')} {_label(e)[:80]!r}" for i, e in changed[:CHANGES_SHOWN])
             parts.append("The element list is updated, so no capture is needed to read the result.")
             parts += [f"Changed: {shown}." if changed else "",
                       f"{len(changed) - CHANGES_SHOWN} more changed; capture to list them." if len(changed) > CHANGES_SHOWN else "",

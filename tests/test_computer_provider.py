@@ -62,12 +62,14 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const s = state();
   if (c.host) { s.host = c.host; save(s); }
   if (c.bump) { s.generation += 1; save(s); }
+  if (c.noshot !== undefined) { s.noshot = c.noshot; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ apps: APPS });
   else if (c.error) result = fail(c.error);
   else if (args.pid === 103) result = fail('That app is the one in front. Leave it there; the pointer stays where it is.');
   else if (name === 'workspace_computer_snapshot') result = c.snap ? text({ ...tree(s.generation), ...c.snap })
     : args.since === s.generation ? text({ unchanged: true, generation: s.generation }) : text(tree(s.generation));
+  else if (name === 'workspace_computer_screenshot' && s.noshot) result = fail('That app has no window to capture.');
   else if (name === 'workspace_computer_screenshot') result = { content: [{ type: 'image', data: Buffer.from('jpegbytes').toString('base64'), mimeType: 'image/jpeg' },
     { type: 'text', text: JSON.stringify({ imageWidth: 480, imageHeight: 300, window: { x: 100, y: 100, width: 960, height: 600 } }) }] };
   else if (name === 'workspace_computer_action') {
@@ -180,6 +182,10 @@ CTL.write_text(json.dumps({"snap": {"generation": 90, "elements": unnamed, "hidd
 m = mark(); R["som_unnamed"] = captured(be.capture(mode="som", pid=101), m)
 CTL.write_text(json.dumps({"snap": {"generation": 91, "elements": [], "note": "No window of this app is readable: its windows are on another Space."}}))
 m = mark(); R["som_empty"] = captured(be.capture(mode="som", pid=101), m)
+CTL.write_text(json.dumps({"noshot": True, "snap": {"generation": 92, "elements": [], "note": "On another Space."}}))
+R["som_noshot"] = captured(be.capture(mode="som", pid=101), mark())
+CTL.write_text(json.dumps({"noshot": False, "snap": {"generation": 93}}))
+be.capture(mode="ax", pid=101)
 
 # --- action replies: a delta folds into the element list, gone numbers stay gone, nothing shifts
 be.capture(mode="som", app="Notes")
@@ -618,6 +624,11 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(som["png"])
         self.assertEqual(som["elements"], [])
         self.assertIn("another Space", som["note"])
+        noshot = self.r["som_noshot"]
+        self.assertFalse(noshot["png"])
+        self.assertIn("Screenshot unavailable: That app has no window to capture.", noshot["note"])
+        self.assertIn("ask the user", noshot["note"])
+        self.assertNotIn("Use the element list", noshot["note"])
 
     def test_a_delta_reply_folds_into_the_element_list_without_shifting_numbers(self):
         delta = self.r["delta"]
@@ -715,14 +726,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(bare(self.r["key_plain"]), [{"pid": 101, "action": "key", "key": "return"}])
         # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
         self.assertEqual(bare(self.r["type_text"]), [{"pid": 101, "action": "type", "text": "hi"}])
+        self.assertEqual(self.r["type_text_mac"]["code"], "bad_request")
+        self.assertIn("set_value", self.r["type_text_mac"]["message"])
+        self.assertTrue(self.r["type_text_desktop"]["ok"])
 
     def test_every_action_carries_the_held_generation_so_replies_can_be_deltas(self):
         for key in ("click_xy", "scroll_plain", "drag_xy", "key_combo", "type_text"):
             with self.subTest(key):
                 self.assertIsInstance(self.r[key][0]["generation"], int)
-        self.assertEqual(self.r["type_text_mac"]["code"], "bad_request")
-        self.assertIn("set_value", self.r["type_text_mac"]["message"])
-        self.assertTrue(self.r["type_text_desktop"]["ok"])
 
     def test_unsupported_actions_are_refused_without_reaching_the_router(self):
         for name, result in self.r["unsupported"].items():
