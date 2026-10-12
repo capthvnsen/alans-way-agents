@@ -34,8 +34,10 @@ not run: do not retry it or reach the same result another way; tell the user,
 and in a scheduled job (where Hermes declines on its own) leave everything
 staged and ask them to finish. A click on a control or selector named like
 Place order, Pay, Book now, Send, Post or Delete without `commit` is refused
-with `commit_required`; so are Enter, Space and clicks by position on a page
-that shows such a control, since they can set it off. Ask the user before
+with `commit_required`. So is any key other than Tab, an arrow, Escape or a
+plain character, and any click by position, on a page that shows such a
+control, since it can set one off; on a page whose controls the connector has
+not seen in full it is refused with `snapshot_required`, so snapshot first. Ask the user before
 any other financial, destructive or production change. Ownership, control
 epoch, and human takeover gates remain.
 

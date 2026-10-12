@@ -903,16 +903,17 @@ const COMMIT_PHRASES = [
   'place order', 'place your order', 'pay', 'buy now', 'purchase', 'confirm and pay',
   'complete booking', 'book now', 'book', 'reserve', 'request to book', 'confirm order',
   'confirm booking', 'complete order', 'submit order', 'order now', 'send', 'post', 'publish',
-  'submit application', 'easy apply', 'delete', 'subscribe', 'donate', 'transfer',
-  'zahlungspflichtig bestellen', 'jetzt kaufen', 'commander', 'comprar', 'pagar', 'réserver',
+  'submit application', 'easy apply', 'delete', 'subscribe', 'donate', 'transfer', 'buy', 'submit',
+  'zahlungspflichtig bestellen', 'kaufen', 'bezahlen', 'commander', 'payer', 'valider la commande',
+  'confirmer la commande', 'réserver', 'comprar', 'pagar', 'realizar pedido', 'confirmar pedido',
 ].map(phrase);
-const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PHRASES.join('|')})(?![\\p{L}\\p{N}])|注文を確定する`, 'iu');
+const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PHRASES.join('|')})(?![\\p{L}\\p{N}])|注文を確定する|購入する|支払う|予約する`, 'iu');
 // Look-alikes that do not commit, removed before matching: a login or 2FA
 // code, a payment-method picker, an order history link, a filter chip's
 // delete, a saved-address picker.
 const NOT_COMMIT = new RegExp([
   `send(?:${SEP}(?:me|a|new|verification|security|login|sign${SEP}in|one${SEP}time|sms|text))*${SEP}(?:code|otp|passcode)`,
-  `pay${SEP}with(?![\\p{L}\\p{N}]).*`,
+  `pay${SEP}with${SEP}[\\p{L}\\p{N}]+(?:${SEP}pay(?![\\p{L}\\p{N}]))?`,
   `purchase${SEP}history`,
   `delete(?=.*filter)|(?<=filter.*)delete`,
   `address${SEP}book`,
@@ -921,8 +922,12 @@ const isCommitName = (name) => COMMIT_NAME.test(String(name).replace(NOT_COMMIT,
 // A selector read as words: #placeOrderBtn and [data-test=place-order] both
 // say "place order".
 const selectorWords = (selector) => selector.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').replace(/[^\p{L}\p{N}]+/gu, ' ');
-const SUBMIT_SELECTOR = /type\s*=\s*["']?submit|:submit\b/i;
-const BLIND_KEYS = /^(?:enter|return|space| )$/i;
+// Keys that only move focus, scroll or type a character. Any other key (Enter
+// in any spelling including a raw "\r", Space, Delete, Backspace, a shortcut)
+// may act on the focused control, so it is judged against the page.
+const SAFE_KEYS = /^(?:tab|escape|esc|arrow(?:up|down|left|right)|up|down|left|right|home|end|pageup|pagedown|[\p{L}\p{N}])$/iu;
+const isSafeKey = (step) => typeof step.key === 'string' && SAFE_KEYS.test(step.key)
+  && (!Array.isArray(step.modifiers) || step.modifiers.every((m) => m === 'shift'));
 const COMMIT_STEP_ACTIONS = new Set(['click', 'double_click', 'press']);
 const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
@@ -1663,15 +1668,19 @@ async function main() {
   // page's origin, and the commit-looking controls the current page shows:
   // what the commit gate matches a click against and shows the user. Refs are
   // generation-scoped (s<base>-<n>), so names from earlier replies never
-  // relabel a newer element and merging is safe. `live` resets when the page
-  // URL changes; Enter, Space or a click by position on a page that still
-  // shows a commit control may set it off.
-  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name) }
+  // relabel a newer element and merging is safe. `live` and `full` reset when
+  // the page URL changes: a key or a click by position on a page that shows
+  // a commit control may set it off, and one whose controls the router has
+  // not seen in full may hide one.
+  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name), full }
+  // Action replies carry only the first 40 controls (the app's own cap); a
+  // snapshot says whether its list was cut.
+  const ACTION_ELEMENT_CAP = 40;
   function learnTabPage(tabId, data) {
     if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
     let page = tabPages.get(tabId);
     if (!page) {
-      page = { names: new Map(), origin: '', url: '', live: new Set() };
+      page = { names: new Map(), origin: '', url: '', live: new Set(), full: false };
       tabPages.set(tabId, page);
     }
     const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
@@ -1683,9 +1692,15 @@ async function main() {
         if (parsed.href !== page.url) {
           page.url = parsed.href;
           page.live = new Set();
+          page.full = false;
         }
       }
     } catch { /* keep the last page a reply named */ }
+    if (Array.isArray(data.elements)) {
+      page.full = data.truncated && typeof data.truncated === 'object'
+        ? !data.truncated.elements
+        : data.elements.length < ACTION_ELEMENT_CAP;
+    }
     const lists = [data.elements, ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
     for (const list of lists) {
       if (!Array.isArray(list)) continue;
@@ -1753,7 +1768,13 @@ async function main() {
   // reply's own id wins, then a retargeted continued tab, then the id the
   // call named. A successful close forgets its tab entirely.
   function learnTabUse(line, req, backend) {
-    if (line.length > BIG_LINE || !req || req.method !== 'tools/call') return;
+    if (!req || req.method !== 'tools/call') return;
+    if (line.length > BIG_LINE) {
+      // Too big to read: whatever page it shows, the gate has not seen it.
+      const page = TAB_DEFAULTED_TOOLS.has(req.name) && tabPages.get(argsTabId(req));
+      if (page) page.full = false;
+      return;
+    }
     let data;
     try {
       const msg = JSON.parse(line);
@@ -2004,28 +2025,26 @@ async function main() {
     }
   }
 
-  // What this call (or any batch step) clicks or presses, read three ways:
+  // What this call (or any batch step) clicks or presses, read four ways:
   // `acts` describes each for the approval card, `commits` says why one
-  // looks like a commit, and `unseen` why the router cannot tell (a ref it
-  // never saw a name for after a respawn, or a blind input on a tab it never
-  // read). A ref or selector is judged by its words; Enter, Space, a click by
-  // position, or a selector for "the submit button" cannot be, so they count
-  // as commits on a page that shows a commit control.
+  // looks like a commit, `unseen` names a ref the router never saw a name for
+  // (a respawned router), and `unread` says the page's controls are not known
+  // in full. A ref or selector is judged by its words; a key other than a
+  // plain move or character, or a click by position, cannot be, so it counts
+  // as a commit on a page that shows a commit control and is refused on one
+  // the router has not seen in full. Every step runs on the batch's own tab,
+  // whatever tabId a step names, so that is the page each is judged against.
   const APP_REF = /^s\d+-\d+$/;
+  const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
   function clickTargets(args) {
-    const found = { acts: [], commits: [], unseen: null };
-    const walk = (step, tabId) => {
-      if (!step || typeof step !== 'object') return;
-      const tab = typeof step.tabId === 'string' ? step.tabId : tabId;
-      if (step.action === 'batch') {
-        if (Array.isArray(step.steps)) for (const inner of step.steps) walk(inner, tab);
-        return;
-      }
-      if (!COMMIT_STEP_ACTIONS.has(step.action)) return;
-      const page = tabPages.get(tab);
+    const found = { acts: [], commits: [], unseen: null, unread: null };
+    const page = tabPages.get(args.tabId);
+    const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
+    for (const step of steps) {
+      if (!step || typeof step !== 'object' || !COMMIT_STEP_ACTIONS.has(step.action)) continue;
       const blind = [];
-      if (step.action === 'press' && typeof step.key === 'string' && BLIND_KEYS.test(step.key)) {
-        const key = step.key === ' ' ? 'Space' : cardText(step.key, 10);
+      if (step.action === 'press' && typeof step.key === 'string' && !isSafeKey(step)) {
+        const key = keyLabel(step.key);
         found.acts.push(`presses ${key}`);
         blind.push(`pressing ${key}`);
       }
@@ -2041,19 +2060,17 @@ async function main() {
         const selector = cardText(step.selector, 80);
         found.acts.push(`clicks ${selector}`);
         if (isCommitName(selectorWords(step.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
-        else if (SUBMIT_SELECTOR.test(step.selector)) blind.push(`clicking ${selector}`);
       } else if (step.action !== 'press' && (typeof step.x === 'number' || typeof step.y === 'number')) {
         found.acts.push(`clicks at ${step.x},${step.y}`);
         blind.push('clicking by position');
       }
-      if (!blind.length) return;
-      if (!page || !page.url) {
-        if (!found.unseen) found.unseen = `this connector has not read tab ${tab} yet, so it cannot tell what ${blind[0]} would do`;
-      } else if (page.live.size) {
+      if (!blind.length) continue;
+      if (page && page.live.size) {
         found.commits.push(`${blind[0]} here could set off "${[...page.live][0]}"`);
+      } else if (!page || !page.full) {
+        found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${blind[0]} would do`;
       }
-    };
-    walk(args, args.tabId);
+    }
     return found;
   }
 
@@ -2068,7 +2085,7 @@ async function main() {
   function gateCommit(msg, line) {
     const args = msg.params.arguments;
     const targets = clickTargets(args);
-    if (args.commit === undefined && !targets.commits.length && !targets.unseen) return false;
+    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread) return false;
     unbuffer(line);
     const page = tabPages.get(args.tabId);
     const origin = page ? page.origin : '';
@@ -2079,6 +2096,9 @@ async function main() {
     };
     if (targets.unseen) {
       return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs.`);
+    }
+    if (args.commit === undefined && !targets.commits.length) {
+      return refuse(`snapshot_required: ${targets.unread}. It did not run. Take a snapshot (raise maxElements if it is cut off) and try again, or pass commit so the user can approve it.`);
     }
     if (args.commit === undefined) {
       logDecision({ origin, target: targets.commits[0] }, 'commit_required');
