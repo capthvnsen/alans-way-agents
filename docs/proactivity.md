@@ -2,7 +2,9 @@
 
 Your primary Telegram bot reaches out on its own when you've gone quiet, like a
 proactive employee: it does something useful and tells you, suggests something it
-could do, or asks a good question. If nothing is worth saying it stays silent.
+could do, or asks a good question. It writes like a person texting you: one to
+three short sentences about one specific open thread, with no headings and no
+talk of timers or check-ins. If nothing is worth saying it stays silent.
 
 ## When it checks in
 
@@ -26,17 +28,37 @@ permissions, touches production, or deletes anything without asking.
 | "I'm in Tokyo this week" | Use Asia/Tokyo for check-in hours |
 | "Not before 9am" | Start the day at 9:00 |
 | "When will you check in next?" | Shows the next check-in time |
+| "Stop the morning brief" | Turns the morning brief off |
 
-To check in more, start again or widen the hours, send `/proactivity more`,
-`/proactivity resume` or `/proactivity hours 9-21` yourself: the bot's tool can
-only make check-ins quieter, because anything the model reads can be
-prompt-injected. Only the bound chat can change these.
+To check in more, start again, widen the hours or turn on the morning brief, send
+`/proactivity more`, `/proactivity resume`, `/proactivity hours 9-21` or
+`/proactivity brief on` yourself: the bot's tool can only make check-ins
+quieter, because anything the model reads can be prompt-injected. Only the
+bound chat can change these.
 
 Want a check-in right now, say to see what the bot could take on? Send
 `/proactivity now` from the bound chat. It runs one check-in immediately, even
 when paused or outside your hours, and tells the bot not to stay silent. It
-doesn't change your settings or the doubling wait, and only you can send it: the
-bot's tool can't.
+doesn't change your settings; the next automatic check-in is measured from this
+reply. Only you can send it: the bot's tool can't.
+
+## Morning brief
+
+Off unless you turn it on with `/proactivity brief on` (or `hermes proactivity
+set --settings '{"morning_brief": true}'`). Once a day, a few minutes after your
+active hours start (8:00 to 8:20 by default, your timezone), the bot sends a
+short brief: what it did or learned since you last talked, anything
+time-sensitive today (from your calendar or email, read-only, if it has those
+tools), anything that failed, and up to three decisions it needs from you as
+numbered questions. If there's nothing, it stays silent.
+
+It skips the day if you were chatting in the two hours before. If the bot is
+busy, paused or offline at brief time, it still sends once that clears, up to two
+hours late, then gives up for the day. It doesn't count as a check-in, so it
+doesn't lengthen the doubling wait, but the next check-in is measured from the
+brief. So once unanswered check-ins have stretched the wait past a day, the brief
+is the one message you get each morning. `/proactivity status` shows when the
+next one is due and `/proactivity brief off` stops it.
 
 ## Setup
 
@@ -81,8 +103,8 @@ cron remove <id>` turns it off.
 
 The plugin's `pre_llm_call` and `post_llm_call` hooks note when the bound chat
 was last active and whether the bot is mid-turn. A 60-second timer, started
-only when the gateway connects Telegram, checks whether a check-in is due. When
-one is, it injects one internal prompt into that chat, and the bot decides what
+only when the gateway connects Telegram, checks whether a check-in or brief is
+due. When one is, it injects one internal prompt into that chat, and the bot decides what
 to do with its own memory and tools. A `[SILENT]` reply is never delivered.
 State lives in Hermes' plugin state (`ctx.state`).
 
