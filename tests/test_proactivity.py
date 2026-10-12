@@ -614,6 +614,40 @@ class CommandTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertIn("/proactivity", self.command(p, args))
 
+    def test_now_checks_in_without_touching_the_backoff_or_settings(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T08:30"))
+        turn(p, clock, at("2026-10-07T09:00"))
+        clock.now = at("2026-10-07T11:00")
+        p.tick()
+        p.update({"paused_until": "off"})
+        before = p.load()
+        clock.now = at("2026-10-07T23:30")   # paused and outside the window
+        self.assertEqual(self.command(p, "now"), "Checking in now.")
+        self.assertEqual(p.load(), before)
+        text, key = ctx.sent[-1]
+        self.assertEqual(key, KEY)
+        self.assertTrue(text.startswith(P.MARKER))
+        self.assertIn("asked you to check in now", text)
+        self.assertNotIn("reply with exactly [SILENT]", text)
+        self.assertIn("without asking first", text)
+
+    def test_now_is_bound_chat_only_and_waits_out_a_busy_turn(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-07T09:00"))
+        self.assertIn("bound chat", self.command(p, "now", key=self.OTHER))
+        self.assertEqual(self.command(p, "now extra"), P.USAGE)
+        turn(p, clock, at("2026-10-07T10:00"), finish=False)
+        self.assertIn("mid-reply", self.command(p, "now"))
+        self.assertEqual(ctx.sent, [])
+
+    def test_now_reports_a_refused_or_failing_injection(self):
+        for accept in (False, RuntimeError("boom")):
+            with self.subTest(accept=accept):
+                p, _ = runtime(FakeCtx(accept=accept), at("2026-10-07T09:00"))
+                self.assertIn("Couldn't start a check-in", self.command(p, "now"))
+                self.assertEqual(p.load()["nudges"], 0)
+
     def test_pause_with_trailing_tokens_is_a_usage_line(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
         out = self.command(p, "pause 2026-10-08T09:00:00+00:00 plus stuff")

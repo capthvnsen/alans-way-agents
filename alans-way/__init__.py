@@ -48,8 +48,8 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", runtime.on_turn_start)
     ctx.register_hook("post_llm_call", runtime.on_turn_end)
     ctx.register_command("proactivity", runtime.command,
-                         description="Check-in settings: status, less, normal, more, pause [until], resume, hours 9-21, tz Area/City",
-                         args_hint="[status|less|normal|more|pause|resume|hours|tz]")
+                         description="Check-ins: status, now, less, normal, more, pause [until], resume, hours 9-21, tz Area/City",
+                         args_hint="[status|now|less|normal|more|pause|resume|hours|tz]")
     if background:
         ctx.register_platform_handler("telegram", runtime.on_telegram_connect)
     if hasattr(ctx, "register_cli_command"):
