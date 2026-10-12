@@ -458,6 +458,27 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn('proactivity set --settings {"paused_until": "off"}', calls)
             self.assertNotIn("proactivity probe", calls)
 
+    def test_tone_default_opts_out_and_no_flag_leaves_the_voice_alone(self):
+        for flag, expected in ((("--tone", "default"), True), ((), False)):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / "hermes_home"
+                home.mkdir()
+                log = Path(directory) / "log"
+                bin_dir = logging_hermes_bin(Path(directory), log)
+                env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+                result = run(*flag, "--non-interactive", "--skip-browser", "--skip-services",
+                             "--hermes-home", str(home), env=env, check=False)
+                calls = log.read_text(encoding="utf-8")
+                self.assertEqual("tone default" in calls, expected)
+                self.assertEqual("Telegram voice: default" in result.stdout, expected)
+                self.assertNotIn("system_prompt", calls)
+                self.assertNotIn("personality", calls)
+
+    def test_tone_must_be_texting_or_default(self):
+        result = run("--tone", "loud", "--verify", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--tone", result.stderr)
+
     def test_proactive_must_be_yes_or_no(self):
         result = run("--proactive", "maybe", "--verify", check=False)
         self.assertEqual(result.returncode, 2)

@@ -37,7 +37,9 @@ The Mac app requires an Apple Silicon Mac; the Windows app requires Windows
 10/11 x64. This plugin is already installed, so do not run a `setup.sh` line
 from that page that omits `--skip-plugin`. Use this command instead.
 `--non-interactive` means you do not wait for `setup.sh` prompts; ask the
-proactivity question yourself first. Add `--profile <name>` unless the profile
+proactivity question yourself first. The bots text on Telegram in the plugin's
+texting voice by default; pass `--tone default` only when the user asked for
+Hermes' own voice (they can also send `/tone default` any time). Add `--profile <name>` unless the profile
 is `default`. Give `--mac-ssh` the computer's Tailscale name or IP; `setup.sh`
 refuses anything else.
 
@@ -66,7 +68,7 @@ git -C ~/alans-way-agents checkout "$PIN"
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
-    --bind --proactive <yes|no> [--profile <name>] --restart
+    --bind --proactive <yes|no> [--tone default] [--profile <name>] --restart
 ```
 
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to

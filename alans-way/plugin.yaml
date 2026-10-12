@@ -1,15 +1,18 @@
 name: alans-way
 version: "0.21.0"
-description: "Idle check-ins from your primary Hermes bot, plus the workspace browser skills. The desktop app, Alan's Workspace, is a separate repo; the workspace-setup skill walks the agent through it."
+description: "A texting voice for everything your Hermes bots send on Telegram, idle check-ins from your primary bot, plus the workspace browser skills. The desktop app, Alan's Workspace, is a separate repo; the workspace-setup skill walks the agent through it."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"
 requires_hermes: ">=0.21.5"
 tags:
   - proactivity
+  - telegram
   - workspace
 provides_tools:
   - proactivity
 provides_hooks:
   - pre_llm_call
   - post_llm_call
+  - transform_llm_output
+  - pre_tool_call
