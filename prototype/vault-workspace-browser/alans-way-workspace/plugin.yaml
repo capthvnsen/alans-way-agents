@@ -1,0 +1,7 @@
+name: alans-way-workspace
+version: 0.0.0
+description: "PROTOTYPE (N6 spike, do not merge). Hermes browser tools and the credential vault on a scoped view of the Alan's Workspace VPS Chromium."
+author: alans-way
+kind: backend
+provides_browser_providers:
+  - alans-way-workspace
