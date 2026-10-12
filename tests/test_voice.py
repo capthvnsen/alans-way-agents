@@ -36,7 +36,7 @@ class PolishTests(unittest.TestCase):
         self.assertEqual(V.polish("## Plan\nShip it.\n### Risks ###\nNone."), "Plan\nShip it.\nRisks\nNone.")
 
     def test_collapses_bold_walls_but_keeps_one_emphasis(self):
-        wall = "**Status:** **green**. **Tests:** **passing**. **Next:** **deploy**."
+        wall = "**Status:** **green**. **Tests:** **passing**. **Next:** **deploy**."  # six spans
         self.assertEqual(V.polish(wall), "Status: green. Tests: passing. Next: deploy.")
         self.assertEqual(V.polish("**Everything here is bold because the model got excited about it.**"),
                          "Everything here is bold because the model got excited about it.")
@@ -52,6 +52,12 @@ class PolishTests(unittest.TestCase):
             'He wrote "**Certainly!** ## Done" and left.',
             "Total: $1,249.99 for 3 seats, 12.5% off, ref #4417.",
             "~~~\n**bold** in a tilde fence\n~~~",
+            "# 4417 is the ticket",
+            "    ## indented code\n    x = **a** **b** **c** **d** **e**",
+            "````md\n```\n## inside a nested fence\n```\n````",
+            "a**2 + b**2 = c**2 and d**2 + e**2 = f**2 + g**2",
+            "**Do not** pay it. **Only** I approve. **Never** share the code.",
+            "bad\x009\x00 input **x**",
         ]
         for text in cases:
             with self.subTest(text=text[:30]):
@@ -78,6 +84,8 @@ class PolishTests(unittest.TestCase):
     def test_never_empties_a_reply(self):
         self.assertEqual(V.polish("Certainly!"), "Certainly!")
         self.assertEqual(V.polish(""), "")
+        self.assertEqual(V.polish("## "), "## ")
+        self.assertEqual(V.polish("## SILENT"), "## SILENT")
 
 
 def voice(mode=None):
@@ -154,9 +162,9 @@ class OutputTests(unittest.TestCase):
             self.assertIsNone(voice().on_output(response_text=marker, platform="telegram"))
 
     def test_send_message_to_telegram_is_polished(self):
-        args = {"action": "send", "target": "telegram:42", "message": "Certainly! **Heads up:** **CAPTCHA** **waiting**"}
+        args = {"action": "send", "target": "telegram:42", "message": "Certainly! Google wants a CAPTCHA. Can you tap through it?"}
         self.assertEqual(voice().on_tool_call(tool_name="send_message", args=args),
-                         {"action": "modify", "args": {"message": "Heads up: CAPTCHA waiting"}})
+                         {"action": "modify", "args": {"message": "Google wants a CAPTCHA. Can you tap through it?"}})
         for other in ({**args, "target": "discord:1"}, {**args, "action": "react"}):
             self.assertIsNone(voice().on_tool_call(tool_name="send_message", args=other))
         self.assertIsNone(voice().on_tool_call(tool_name="terminal", args={"command": "echo Certainly!"}))

@@ -30,12 +30,13 @@ NOTE = (
     " multi-step task, say in one short line what you're doing first. " + NEXT + " " + SAFE)
 
 
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_INDENTED = re.compile(r"^(?: {4}|\t)")
 _QUOTE = re.compile(r"^\s*>")
 # Inline code, URLs and quoted text are masked before any rewrite and restored after.
 _MASK = re.compile(r"`[^`\n]*`|\bhttps?://\S+|\"[^\"\n]*\"|“[^”\n]*”")
-_HEADING = re.compile(r"^(\s*)#{1,6}\s+(.*?)(?:\s+#+)?\s*$")
-_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
+_HEADING = re.compile(r"^( {0,3})#{1,6}[ \t]+(?=[^\d\s])(.*?)(?:[ \t]+#+)?[ \t]*$")
+_BOLD = re.compile(r"(?<!\w)\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\w)")
 _TIC = re.compile(
     r"^\s*(?:(?:certainly|absolutely|of course|sure thing|great question|what a great question"
     r"|good question)\s*[!.]"
@@ -56,8 +57,8 @@ def _unbold_wall(paragraph):
     spans = _BOLD.findall(paragraph)
     bolded = sum(len(s) for s in spans)
     visible = len(_BOLD.sub(r"\1", paragraph).strip())
-    # ponytail: three spans, or one span over 80% of a 40+ char paragraph, is a wall; tune here.
-    if len(spans) >= 3 or (spans and visible >= 40 and bolded >= 0.8 * visible):
+    # ponytail: five spans, or one span over 80% of a 40+ char paragraph, is a wall; tune here.
+    if len(spans) >= 5 or (spans and visible >= 40 and bolded >= 0.8 * visible):
         return _BOLD.sub(r"\1", paragraph)
     return paragraph
 
@@ -65,14 +66,25 @@ def _unbold_wall(paragraph):
 def polish(text):
     """The send-time safety net: drop leading assistant tics, turn markdown headings into
     plain lines and unbold walls of bold. Code, quotes, URLs and quoted text are untouched."""
-    if not isinstance(text, str) or not text.strip() or text.strip() in SILENT:
+    if not isinstance(text, str) or not text.strip() or text.strip() in SILENT or "\x00" in text:
         return text
-    lines, masks, fenced = text.split("\n"), [], False
+    try:
+        out = _polish(text)
+    except Exception:   # a safety net must never block or drop a message
+        return text
+    return out if out.strip() and out.strip() not in SILENT else text
+
+
+def _polish(text):
+    lines, masks, fence = text.split("\n"), [], None
     prose = []  # indexes of lines that may be rewritten
     for i, line in enumerate(lines):
-        if _FENCE.match(line):
-            fenced = not fenced
-        elif not fenced and not _QUOTE.match(line):
+        m = _FENCE.match(line)
+        if fence is None and m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+        elif fence and m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+            fence = None
+        elif fence is None and not _QUOTE.match(line) and not _INDENTED.match(line):
             prose.append(i)
 
     def mask(m):
