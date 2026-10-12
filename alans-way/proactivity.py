@@ -326,6 +326,8 @@ class Proactivity:
             if brief and now < brief_at(s, day):
                 return None   # the window-start check-in waits for the brief
             if brief:
+                # ponytail: the date is spent before injecting, so a refused brief
+                # isn't retried; the held check-in goes out on the next tick instead.
                 state["last_brief_date"] = day.isoformat()
                 if now.timestamp() - (state.get("last_user_ts") or 0) < BRIEF_QUIET.total_seconds():
                     state["last_result"] = "brief skipped: user active"
@@ -415,11 +417,12 @@ class Proactivity:
                 due = due_at(s, self._anchor(state), out["nudges_since_reply"])
                 out["next_check_in"] = due.astimezone(zone(s)).isoformat(timespec="minutes")
                 if s.morning_brief:
-                    day = now.astimezone(zone(s)).date()
-                    while (day.isoformat() <= state.get("last_brief_date", "")
-                           or brief_at(s, day) + BRIEF_LATE <= now):
-                        day += timedelta(days=1)
-                    out["next_brief"] = brief_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
+                    today = now.astimezone(zone(s)).date()
+                    days = (today + timedelta(days=i) for i in range(3))
+                    day = next((d for d in days if d.isoformat() > state.get("last_brief_date", "")
+                                and brief_at(s, d) + BRIEF_LATE > now), None)
+                    if day:
+                        out["next_brief"] = brief_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
             return out
 
     def tool(self, args, **kwargs):

@@ -51,10 +51,13 @@ time-sensitive today (from your calendar or email, read-only, if it has those
 tools), anything that failed, and up to three decisions it needs from you as
 numbered questions. If there's nothing, it stays silent.
 
-It skips the day if you were chatting in the two hours before, or if it's paused
-or offline until more than two hours after its time. It doesn't count as a check-in, so it doesn't lengthen the
-doubling wait. `/proactivity status` shows when the next one is due and
-`/proactivity brief off` stops it.
+It skips the day if you were chatting in the two hours before. If the bot is
+busy, paused or offline at brief time, it still sends once that clears, up to two
+hours late, then gives up for the day. It doesn't count as a check-in, so it
+doesn't lengthen the doubling wait, but the next check-in is measured from the
+brief. So once unanswered check-ins have stretched the wait past a day, the brief
+is the one message you get each morning. `/proactivity status` shows when the
+next one is due and `/proactivity brief off` stops it.
 
 ## Setup
 
