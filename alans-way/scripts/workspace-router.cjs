@@ -896,6 +896,7 @@ const COMMIT_VERBS = {
 };
 const COMMIT_NAME = /\b(?:place\s+(?:your\s+)?order|pay|buy\s+now|purchase|confirm\s+and\s+pay|complete\s+booking|book\s+now|reserve|send|post|publish|submit\s+application|delete)\b/i;
 const COMMIT_STEP_ACTIONS = new Set(['click', 'double_click', 'press']);
+const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
 function addCommitParam(result) {
   const tools = result && result.tools;
@@ -924,7 +925,7 @@ const cardText = (value, max) => (typeof value === 'string' || typeof value === 
   : '');
 
 function cleanCommit(commit) {
-  if (!commit || typeof commit !== 'object' || !Object.hasOwn(COMMIT_VERBS, commit.kind)) return null;
+  if (!commit || typeof commit !== 'object' || typeof commit.kind !== 'string' || !Object.hasOwn(COMMIT_VERBS, commit.kind)) return null;
   if (typeof commit.summary !== 'string' || commit.summary.length > 200) return null;
   const summary = cardText(commit.summary, 200);
   if (!summary) return null;
@@ -1650,7 +1651,7 @@ async function main() {
     for (const list of lists) {
       if (!Array.isArray(list)) continue;
       for (const el of list) {
-        if (el && typeof el.ref === 'string' && typeof el.name === 'string') page.names.set(el.ref, el.name);
+        if (el && typeof el.ref === 'string') page.names.set(el.ref, typeof el.name === 'string' ? el.name : '');
       }
     }
     for (const ref of page.names.keys()) {
@@ -1922,7 +1923,9 @@ async function main() {
         if (req.via !== 'vm') continue;
         pendingRequests.delete(id);
         noteDead(id);
-        emitToolError(id, 'The VM browser connector stopped. Retry the call.');
+        emitToolError(id, req.committed
+          ? `The VM browser connector stopped. ${COMMIT_LOST}`
+          : 'The VM browser connector stopped. Retry the call.');
       }
     };
     c.on('error', drop);
@@ -1959,9 +1962,13 @@ async function main() {
     }
   }
 
-  // Names of the commit-looking controls this call (or any batch step) clicks.
-  function commitTargets(args) {
-    const names = [];
+  // What this call (or any batch step) clicks by ref: the names of every
+  // control, the commit-looking ones, and the first page ref whose name this
+  // router never saw (a respawned router, or a ref from a reply it skipped).
+  // An unseen ref cannot be checked, so it is refused rather than let through.
+  const APP_REF = /^s\d+-\d+$/;
+  function clickTargets(args) {
+    const found = { names: [], commits: [], unseen: null };
     const walk = (step, tabId) => {
       if (!step || typeof step !== 'object') return;
       const tab = typeof step.tabId === 'string' ? step.tabId : tabId;
@@ -1971,15 +1978,21 @@ async function main() {
       }
       if (!COMMIT_STEP_ACTIONS.has(step.action) || typeof step.ref !== 'string') return;
       const page = tabPages.get(tab);
-      const name = page && page.names.get(step.ref);
-      if (name && COMMIT_NAME.test(name)) names.push(cardText(name, 80));
+      const name = page ? page.names.get(step.ref) : undefined;
+      if (name === undefined) {
+        if (!found.unseen && APP_REF.test(step.ref)) found.unseen = step.ref;
+        return;
+      }
+      if (!name) return;
+      found.names.push(cardText(name, 80));
+      if (COMMIT_NAME.test(name)) found.commits.push(cardText(name, 80));
     };
     walk(args, args.tabId);
-    return names;
+    return found;
   }
 
   const APPROVAL_REFUSALS = {
-    declined: 'declined: the user did not approve this. It did not run. Do not retry it or reach the same result another way unless the user asks.',
+    declined: 'declined: the user did not approve this (or no one could be asked). It did not run. Do not retry it or reach the same result another way unless the user asks.',
     approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
     approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
     host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
@@ -1988,8 +2001,8 @@ async function main() {
   // Returns true when the call was refused or is now awaiting approval.
   function gateCommit(msg, line) {
     const args = msg.params.arguments;
-    const targets = commitTargets(args);
-    if (args.commit === undefined && !targets.length) return false;
+    const targets = clickTargets(args);
+    if (args.commit === undefined && !targets.commits.length && !targets.unseen) return false;
     unbuffer(line);
     const page = tabPages.get(args.tabId);
     const origin = page ? page.origin : '';
@@ -1998,12 +2011,16 @@ async function main() {
       emitToolError(msg.id, text);
       return true;
     };
+    if (targets.unseen) {
+      return refuse(`snapshot_required: ref ${targets.unseen} is not from a page state this connector has seen. It did not run. Take a snapshot and use its refs.`);
+    }
     if (args.commit === undefined) {
-      logDecision({ origin, target: targets[0] }, 'commit_required');
-      return refuse(`commit_required: "${targets[0]}" looks like it buys, books, sends, posts, submits or deletes. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
+      logDecision({ origin, target: targets.commits[0] }, 'commit_required');
+      return refuse(`commit_required: "${targets.commits[0]}" looks like it buys, books, sends, posts, submits or deletes. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
     }
     const commit = cleanCommit(args.commit);
     if (!commit) {
+      logDecision({ origin }, 'commit_invalid');
       return refuse(`commit_invalid: commit needs kind (${Object.keys(COMMIT_VERBS).join(', ')}) and a summary of 1-200 characters. It did not run.`);
     }
     const record = { origin, ...commit };
@@ -2011,18 +2028,28 @@ async function main() {
       logDecision(record, 'approval_unavailable');
       return refuse(APPROVAL_REFUSALS.approval_unavailable);
     }
+    const req = pendingRequests.get(msg.id);
+    // The window runs from when the call arrived, so time it spent held
+    // during a failover comes out of the user's share, not the action's.
+    const windowMs = APPROVAL_MS - (req ? Date.now() - req.at : 0);
+    if (windowMs <= 0) {
+      logDecision(record, 'approval_timeout');
+      return refuse(APPROVAL_REFUSALS.approval_timeout);
+    }
     delete args.commit;
     const forward = JSON.stringify(msg);
-    const req = pendingRequests.get(msg.id);
     if (req) {
       req.line = forward;
       req.awaitingApproval = true;
     }
     const price = [commit.amount, commit.currency].filter(Boolean).join(' ');
     const what = [commit.summary, price, commit.counterparty].filter(Boolean).join(' · ');
-    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}`;
+    // The origin and the clicked controls are the router's own reading of
+    // the page; everything before them is the agent's description.
+    const clicks = targets.names.length ? ` (clicks "${targets.names.join('", "')}")` : '';
+    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${clicks}`;
     const id = `wsr-commit-${++approvalSeq}`;
-    const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), APPROVAL_MS);
+    const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), windowMs);
     timer.unref();
     approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer });
     process.stdout.write(`${JSON.stringify({
@@ -2037,7 +2064,7 @@ async function main() {
             approve: {
               type: 'boolean',
               title: 'Approve',
-              description: targets.length ? `Approve clicking "${targets.join('", "')}"` : 'Approve this action',
+              description: targets.names.length ? `Approve clicking "${targets.names.join('", "')}"` : 'Approve this action',
             },
           },
           required: ['approve'],
@@ -2070,10 +2097,10 @@ async function main() {
       emitToolError(entry.callId, APPROVAL_REFUSALS[decision]);
       return;
     }
-    if (req) {
-      delete req.awaitingApproval;
-      req.at = Date.now();
-    }
+    if (!req) return;
+    delete req.awaitingApproval;
+    req.committed = true;
+    req.at = Date.now();
     const out = routeToolCall(entry.line, true);
     if (out !== null) writeToChild(out);
   }
@@ -2095,9 +2122,17 @@ async function main() {
     return true;
   }
 
-  function cancelApprovalFor(callId) {
+  // A cancelled call never runs: withdraw its approval, or drop it from the
+  // calls held during a failover before it ever reaches the gate.
+  function cancelCall(callId) {
     for (const [id, entry] of approvals) {
       if (entry.callId === callId) settleApproval(id, 'cancelled');
+    }
+    const req = pendingRequests.get(callId);
+    const held = req ? heldCalls.indexOf(req.line) : -1;
+    if (held >= 0) {
+      heldCalls.splice(held, 1);
+      pendingRequests.delete(callId);
     }
   }
 
@@ -2131,7 +2166,6 @@ async function main() {
       );
       return null;
     }
-    if (!approved && msg.params && msg.params.name === 'cua_alans_way_action' && gateCommit(msg, line)) return null;
     const args = (msg.params && msg.params.arguments) || {};
     const host = normalizeHost(args.host);
     if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
@@ -2140,13 +2174,15 @@ async function main() {
       emitToolError(msg.id, 'Use host "computer" or "vm", or omit it.');
       return null;
     }
-    if (host === 'computer') {
-      if (activeHost !== 'vps') return out;
+    if (host === 'computer' && activeHost === 'vps') {
       pendingRequests.delete(msg.id);
       unbuffer(line);
       emitToolError(msg.id, 'Your computer is offline. Omit host to use the VM browser, or pass host: "vm".');
       return null;
     }
+    // After the host checks, so a call that would fail anyway never asks.
+    if (!approved && msg.params && msg.params.name === 'cua_alans_way_action' && gateCommit(msg, line)) return null;
+    if (host === 'computer') return out;
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
       || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
@@ -2255,8 +2291,8 @@ async function main() {
       const method = noteClientRpc(line, pendingRequests);
       if (method === 'initialize') handshake.initialize = line;
       else if (method === 'notifications/initialized') handshake.initialized = line;
-      else if (method === 'notifications/cancelled' && approvals.size) {
-        try { cancelApprovalFor(JSON.parse(line).params.requestId); } catch { /* nothing to withdraw */ }
+      else if (method === 'notifications/cancelled') {
+        try { cancelCall(JSON.parse(line).params.requestId); } catch { /* nothing to withdraw */ }
       }
       if (!provedAlive) bufferedStdin.push(line);
       if (holdCalls && method === 'tools/call') {
@@ -2310,7 +2346,9 @@ async function main() {
           if (age > hard) {
             pendingRequests.delete(id);
             noteDead(id);
-            emitToolError(id, 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
+            emitToolError(id, req.committed
+              ? `The VM browser did not answer the call in time. ${COMMIT_LOST}`
+              : 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
           }
           continue;
         }

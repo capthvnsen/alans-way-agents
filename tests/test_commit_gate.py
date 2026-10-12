@@ -4,6 +4,7 @@ import json
 import os
 import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -179,7 +180,8 @@ class CommitGateTests(unittest.TestCase):
         ask = self.recv()
         self.assertEqual(ask["method"], "elicitation/create")
         self.assertEqual(ask["params"]["message"],
-                         "Alan wants to buy: One brass desk lamp · 40.00 EUR · Lamp Shop on https://shop.example")
+                         "Alan wants to buy: One brass desk lamp · 40.00 EUR · Lamp Shop on https://shop.example"
+                         ' (clicks "Place order")')
         schema = ask["params"]["requestedSchema"]
         self.assertEqual(schema["properties"]["approve"]["type"], "boolean")
         self.assertIn("Place order", schema["properties"]["approve"]["description"])
@@ -241,6 +243,29 @@ class CommitGateTests(unittest.TestCase):
         self.assertFalse(done["result"].get("isError"))
         self.assertEqual([a["ref"] for a in self.actions()], ["s1-2"])
         self.assertEqual(self.decisions()[-1]["decision"], "commit_required")
+
+    def test_a_ref_this_router_never_saw_is_refused_until_a_snapshot(self):
+        self.start()
+        self.handshake()
+        self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/"})
+        self.recv()
+        # A respawned router has no names for refs the agent still holds.
+        call = self.act(action="click", ref="s1-1")
+        self.refused(call, "snapshot_required")
+        self.assertEqual(self.actions(), [])
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={})
+        self.recv()
+        self.refused(self.act(action="click", ref="s1-1"), "commit_required")
+
+    def test_a_duplicate_accept_runs_the_action_once(self):
+        self.open_checkout()
+        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        ask = self.recv()
+        self.answer(ask, "accept", {})
+        self.answer(ask, "accept", {})
+        self.assertEqual(self.recv()["id"], call)
+        self.assertIsNone(self.recv(timeout=1, required=False))
+        self.assertEqual(len(self.actions()), 1)
 
     def test_a_batch_with_a_commit_step_is_refused_without_commit(self):
         self.open_checkout()
@@ -316,6 +341,35 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(len(self.actions()), 1)
         self.assertEqual(self.actions("vm.log"), [])
         self.assertIsNone(self.recv(timeout=1, required=False), msg)
+
+    def test_an_approved_vm_commit_that_times_out_is_not_called_retryable(self):
+        self.env = {"VM_MODE": "slow", "VM_DELAY_MS": "3000", "HERMES_ROUTER_CALL_HARD_MS": "1000"}
+        self.open_checkout()
+        self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        call = self.act(tabId="vm-tab-1", action="click", ref="buy", commit=PURCHASE)
+        self.answer(self.recv(), "accept", {})
+        msg = self.refused(call, "NOT retried")
+        self.assertNotIn("Retry", self.text(msg))
+
+    def test_a_cancelled_call_held_during_a_failover_never_prompts_or_runs(self):
+        self.env = {"MAC_MODE": "die-on-status", "HERMES_ROUTER_RESTORE_MS": "3000"}
+        # A VPS browser host that accepts and never answers keeps the restore,
+        # and so the hold on new calls, open for its full timeout.
+        silent = socket.socket()
+        self.addCleanup(silent.close)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        (self.dir / "conn.json").write_text(json.dumps(
+            {"url": "http://127.0.0.1:%d" % silent.getsockname()[1], "token": "tok"}))
+        self.open_checkout()
+        status = self.send("tools/call", name="cua_alans_way_status", arguments={})
+        time.sleep(0.5)  # the host is gone; calls now wait for the VPS restore
+        call = self.act(action="click", ref="s1-1", commit=PURCHASE)
+        self.send("notifications/cancelled", requestId=call, reason="user stopped the turn")
+        self.assertEqual(self.recv()["id"], status)
+        self.assertIsNone(self.recv(timeout=2, required=False))
+        self.assertEqual(self.actions("vm.log"), [])
 
     def test_a_failover_while_awaiting_approval_never_runs_the_commit(self):
         self.env = {"MAC_MODE": "die-on-status"}
