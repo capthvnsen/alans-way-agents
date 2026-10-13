@@ -433,7 +433,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         ]
         for text, is_error in replies:
             with self.subTest(text=text[:40]):
-                call = self.call("cua_alans_way_action", {"action": "click", "ref": "s1-2",
+                call = self.call("cua_alans_way_action", {"action": "click", "name": "Next",
                                                           "echo": text, "isError": is_error})
                 msg = self.assert_intact(call, text, is_error)
                 self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "mac")
