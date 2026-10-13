@@ -66,6 +66,35 @@ class PolishTests(unittest.TestCase):
             with self.subTest(text=text[:30]):
                 self.assertEqual(V.polish(text), text)
 
+    def test_protects_every_code_and_quote_form(self):
+        """Each case has something polish would otherwise rewrite inside the protected span."""
+        cases = [
+            "Use ``a ** b ** c ** d ** e ** f`` here.",
+            "Try ``**kwargs`` and ``## not``.",
+            "Run `cat <<EOF\n## header line\nEOF` and done.",
+            "He said 'Certainly! **this** **is** **a** **real** **quote**' twice.",
+            "Elle a dit «## Titre **gras** **gras** **gras** **gras** **gras**».",
+            "Sie sagte „**eins** **zwei** **drei** **vier** **fünf**“ laut.",
+            "She said ‘## heading’ and ‹**a** **b** **c** **d** **e**›.",
+            "「**一** **二** **三** **四** **五**」と言った。",
+            "Mail ops**team**@example.com or see <https://example.com/**a**> and [x](#**y**).",
+            "Unclosed `code with ## heading\n## still code",
+            'An opening " that never closes\n## so this stays',
+            "<pre>## kept</pre>",
+            "| **a** | **b** | **c** | **d** | **e** |\n|---|---|---|---|---|",
+        ]
+        for text in cases:
+            with self.subTest(text=text[:40]):
+                self.assertEqual(V.polish(text), text)
+
+    def test_rewrites_prose_around_protected_spans(self):
+        self.assertEqual(V.polish("Certainly! ## Fix\nRun ``a ** b`` then 'quote ## x'."),
+                         "Fix\nRun ``a ** b`` then 'quote ## x'.")
+        self.assertEqual(V.polish("Use ``**a** **b**`` here. **x** **y** **z** **w** **v**"),
+                         "Use ``**a** **b**`` here. x y z w v")
+        self.assertEqual(V.polish("It's Sam's **one** **two** **three** **four** **five** pick, don't worry."),
+                         "It's Sam's one two three four five pick, don't worry.")
+
     def test_mixed_reply_only_changes_prose(self):
         raw = ("Certainly! Here's the fix.\n\n## Steps\n\n```sh\n## keep me\ngit push\n```\n\n"
                "Docs: https://example.com/**x**")
@@ -88,7 +117,8 @@ class PolishTests(unittest.TestCase):
         self.assertEqual(V.polish("Certainly!"), "Certainly!")
         self.assertEqual(V.polish(""), "")
         self.assertEqual(V.polish("## "), "## ")
-        self.assertEqual(V.polish("## SILENT"), "## SILENT")
+        for text in ("## SILENT", "Certainly! NO_REPLY", "# 静默", "Certainly! The silent auction is at 6."):
+            self.assertEqual(V.polish(text), text)
 
 
 def voice(mode=None):
@@ -105,8 +135,8 @@ def env(**values):
 
 
 class NoteTests(unittest.TestCase):
-    def turn(self, v, platform, chat_type="dm", deliver="", text="hey can you check my calendar tomorrow"):
-        with env(HERMES_SESSION_CHAT_TYPE=chat_type, HERMES_CRON_AUTO_DELIVER_PLATFORM=deliver):
+    def turn(self, v, platform, chat_type="dm", targets=(), text="hey can you check my calendar tomorrow"):
+        with env(HERMES_SESSION_CHAT_TYPE=chat_type), patch.object(V, "cron_platforms", return_value=list(targets)):
             return v.on_turn_start(user_message=text, platform=platform, session_id="s", sender_id="42")
 
     def test_on_by_default_for_every_telegram_chat(self):
@@ -121,10 +151,22 @@ class NoteTests(unittest.TestCase):
             self.assertIsNone(self.turn(voice(), platform))
         self.assertIsNone(self.turn(voice("default"), "telegram"))
 
-    def test_cron_only_when_it_delivers_to_telegram(self):
-        self.assertIn("sent to them as a Telegram message", self.turn(voice(), "cron", "", "telegram")["context"])
-        self.assertIsNone(self.turn(voice(), "cron", "", "discord"))
-        self.assertIsNone(self.turn(voice(), "cron", "", ""))
+    def test_cron_only_when_every_destination_is_telegram(self):
+        self.assertIn("sent to them as a Telegram message", self.turn(voice(), "cron", "", ["telegram"])["context"])
+        self.assertIsNotNone(self.turn(voice(), "cron", "", ["telegram", "telegram"]))
+        for targets in (["telegram", "discord"], ["discord", "telegram"], ["email"], []):
+            with self.subTest(targets):
+                self.assertIsNone(self.turn(voice(), "cron", "", targets))
+
+    def test_cron_targets_come_from_the_job(self):
+        self.assertEqual(V.cron_platforms("agent:main:telegram:dm:42"), [])
+        self.assertEqual(V.cron_platforms(None), [])
+        with patch.dict(sys.modules, {"cron": SimpleNamespace(), "cron.jobs": SimpleNamespace(
+                get_job=lambda job_id: {"id": job_id} if job_id == "daily_health" else None),
+                "cron.scheduler_delivery": SimpleNamespace(_resolve_delivery_targets=lambda job: [
+                    {"platform": "telegram", "chat_id": "1"}, {"platform": "discord", "chat_id": "2"}])}):
+            self.assertEqual(V.cron_platforms("cron_daily_health_20261013_081000"), ["telegram", "discord"])
+            self.assertEqual(V.cron_platforms("cron_gone_20261013_081000"), [])
 
     def test_check_ins_and_the_brief_keep_their_own_prompt(self):
         for text in (P.MARKER + " It has been 3 hours", P.BRIEF_MARKER + " The user's day is starting"):
@@ -154,31 +196,25 @@ class OutputTests(unittest.TestCase):
         self.assertIsNone(voice("default").on_output(response_text=self.TIC, platform="telegram"))
         self.assertIsNone(voice().on_output(response_text="All good.", platform="telegram"))
 
-    def test_cron_reports_to_telegram_are_polished(self):
-        with env(HERMES_CRON_AUTO_DELIVER_PLATFORM="telegram"):
-            self.assertEqual(voice().on_output(response_text=self.TIC, platform="cron"), "Plan\nShip it.")
-        with env(HERMES_CRON_AUTO_DELIVER_PLATFORM="email"):
-            self.assertIsNone(voice().on_output(response_text=self.TIC, platform="cron"))
+    def test_cron_results_are_polished_only_when_every_destination_is_telegram(self):
+        for targets, polished in ((["telegram"], True), (["telegram", "discord"], False),
+                                  (["discord", "telegram"], False), (["email"], False)):
+            with self.subTest(targets), patch.object(V, "cron_platforms", return_value=targets):
+                out = voice().on_output(response_text=self.TIC, platform="cron", session_id="cron_j_20261013_081000")
+                self.assertEqual(out, "Plan\nShip it." if polished else None)
 
     def test_silence_markers_pass_through(self):
-        for marker in V.SILENT:
+        for marker in ("[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[静默]", "沉默"):
             self.assertIsNone(voice().on_output(response_text=marker, platform="telegram"))
-
-    def test_send_message_to_telegram_is_polished(self):
-        args = {"action": "send", "target": "telegram:42", "message": "Certainly! Google wants a CAPTCHA. Can you tap through it?"}
-        self.assertEqual(voice().on_tool_call(tool_name="send_message", args=args),
-                         {"action": "modify", "args": {"message": "Google wants a CAPTCHA. Can you tap through it?"}})
-        for other in ({**args, "target": "discord:1"}, {**args, "action": "react"}):
-            self.assertIsNone(voice().on_tool_call(tool_name="send_message", args=other))
-        self.assertIsNone(voice().on_tool_call(tool_name="terminal", args={"command": "echo Certainly!"}))
-        self.assertIsNone(voice("default").on_tool_call(tool_name="send_message", args=args))
 
 
 class SwitchTests(unittest.TestCase):
     def test_tone_command(self):
         v = voice()
         self.assertIn("on", v.command(""))
-        self.assertIn("default voice", v.command("default"))
+        off = v.command("default")
+        self.assertIn("default voice", off)
+        self.assertIn("Check-ins and the morning brief keep their own short style", off)
         self.assertEqual(v.mode(), "default")
         self.assertIn("is on", v.command("TEXTING"))
         self.assertIn("usage", v.command("loud"))
@@ -201,7 +237,6 @@ class SwitchTests(unittest.TestCase):
             with patch.dict("os.environ", {"HERMES_HOME": home}), env(HERMES_SESSION_CHAT_TYPE="dm"):
                 result = v.on_turn_start(user_message="hi", platform="telegram")
                 v.on_output(response_text="Certainly! Hi.", platform="telegram")
-                v.on_tool_call(tool_name="send_message", args={"target": "telegram", "message": "## Hi"})
                 v.command("default")
                 v.command("texting")
             self.assertEqual({p: p.read_bytes() for p in (soul, config)}, before)
@@ -227,16 +262,17 @@ class RegisterTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d:
                 sys.modules["alans_way_idle_test"].register(ctx, legacy_home=d)
             with self.subTest(profile):
-                for hook in ("pre_llm_call", "transform_llm_output", "pre_tool_call"):
+                for hook in ("pre_llm_call", "transform_llm_output"):
                     self.assertIn(("hook", hook, "Voice"), calls)
+                self.assertNotIn(("hook", "pre_tool_call", "Voice"), calls)
                 self.assertIn(("command", "tone"), calls)
                 self.assertIn(("cli", "tone"), calls)
                 self.assertEqual(("tool", "proactivity") in calls, primary)
 
     def test_manifest_declares_the_voice_hooks(self):
         text = (Path(V.__file__).parent / "plugin.yaml").read_text(encoding="utf-8")
-        for name in ("transform_llm_output", "pre_tool_call"):
-            self.assertIn(f"- {name}", text)
+        self.assertIn("- transform_llm_output", text)
+        self.assertNotIn("- pre_tool_call", text)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 # Texting voice
 
-Everything your bots send on Telegram should read like a text from a sharp,
-warm friend who happens to be very capable: short by default, plain words, an
+Your bot's replies on Telegram should read like a text from a sharp, warm
+friend who happens to be very capable: short by default, plain words, an
 opinion when you ask for one, and complete when the job needs detail. The
 plugin does this for every profile it is enabled in, which with `setup.sh` is
-every profile that has a Telegram bot.
+every profile that has a Telegram bot. It covers the bot's own model-written
+replies; fixed Hermes messages are out of reach (see
+[Not covered](#not-covered)).
 
 ## Turn it off or on
 
@@ -22,6 +24,11 @@ yours wins.
 Add `-p <profile>` to the `hermes` commands for a named profile. Without
 `--tone`, setup leaves each profile's switch as it is. The switch lives in the
 plugin's own state (`plugin-data/alans-way/state.json`), not in `config.yaml`.
+
+Check-ins and the morning brief keep their own short texting style when the
+voice is off: that style is part of their prompts (`/proactivity` controls
+them), not this switch. With `/tone default` only the send-time polish stops for
+them.
 
 Hermes already has `/voice` (voice mode) and `/personality`. The texting voice
 uses neither. A Hermes personality replaces `agent.system_prompt` while it is
@@ -48,20 +55,28 @@ affected.
 
    In groups it also keeps replies shorter and talks to whoever asked. In cron
    runs it treats the result as a Telegram message.
-2. **A send-time polish** (`transform_llm_output` on the final reply, and
-   `pre_tool_call` on `send_message` text addressed to Telegram). It is
+2. **A send-time polish** (`transform_llm_output` on the final reply). It is
    deterministic, with no model call. It:
    - drops leading filler such as "Certainly!", "Great question", "I'd be happy to
      help" and "As an AI,";
    - turns markdown headings into plain lines;
    - unbolds a paragraph that is mostly bold.
 
-   It never touches code blocks, inline code, URLs, quoted text, blockquotes or
-   numbers. It passes Hermes' silence markers (`[SILENT]`, `NO_REPLY`) through as
-   they are, and never empties a reply.
+   Before any rewrite it sets aside, byte for byte:
+   - fenced code (an unclosed fence protects the rest), indented code, tables
+     and blockquotes;
+   - code spans of any backtick count, including ones that cross lines;
+   - URLs, link targets, HTML tags and email addresses;
+   - every quotation form: "…", “…”, „…“, ‚…‘, ‘…’, '…', «…», ‹…›, »…«, 「…」, 『…』.
+
+   An opening backtick or quote with no close protects everything after it. A
+   reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) or
+   holds `<pre>`/`<code>` is left exactly as written, and it never empties a
+   reply. When in doubt, it changes nothing.
 3. **Check-ins and the morning brief** already carry the same rules
    (`alans-way/voice.py` holds the shared wording `proactivity.py` uses), so the
-   note is not added on top of them; the polish still applies.
+   note is not added on top of them; the polish still applies while the voice
+   is on.
 
 It never changes:
 - SOUL.md, `agent.system_prompt`, `display.personality` or anything else in `config.yaml`;
@@ -74,16 +89,27 @@ It never changes:
 
 Checked against the Hermes source this release targets.
 
-| Path | Covered by |
+| Path | What applies |
 |---|---|
-| Replies in a DM, group, forum topic or channel, including groups with several bots | note + polish |
+| The bot's reply in a DM, group, forum topic or channel, including groups with several bots | note + polish |
 | Check-ins and the morning brief (injected turns) | their own prompt (same rules) + polish |
-| Cron jobs delivering to Telegram | note + polish, when Telegram is the job's first delivery target |
-| `send_message` to Telegram mid-turn, such as a CAPTCHA or handback ping | the turn's note + polish of the message |
 | Agent-notify / async-completion turns | note + polish |
-| Interim lines sent alongside tool calls | the note shapes them; the polish can't reach them |
-| Streaming (off by default) | live edits show raw text; the final edit shows the polished reply |
-| Approval cards, gateway errors, tool-progress lines, cron failure notices | not changed: fixed Hermes text from its locale catalog |
+| Cron jobs whose every destination is Telegram | note + polish |
+| Cron jobs that also deliver elsewhere (Discord, email, local) | nothing: Hermes sends one shared result to every destination, so styling it for Telegram would style the others too |
+| Interim lines the model writes alongside tool calls (how a CAPTCHA or handback ping usually goes out mid-task) | the turn's note shapes them; the polish can't reach them |
+| Streaming (off by default) | early chunks show raw text; the final edit shows the polished reply |
+
+### Not covered
+
+No supported Hermes hook reaches these, so the plugin does not touch them:
+- approval cards and their buttons, and MCP elicitation prompts such as the
+  commit gate's (fixed Hermes text; deliberately never altered);
+- gateway error and failure messages, status and tool-progress lines, and cron
+  failure notices (fixed Hermes text from its locale catalog);
+- `hermes send` and other direct sends. Current Hermes has no model-callable
+  `send_message` tool, and these paths run no plugin hook;
+- a cron run after Hermes compacts it mid-run: the session id changes and the
+  job can no longer be identified, so that run keeps the default voice.
 
 Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the
@@ -95,14 +121,17 @@ the voice.
 
 ## Upstream gaps (Hermes)
 
-- No hook can reach fixed outbound text per platform: approval cards, gateway
-  errors, tool progress and cron failure notices. `register_locale` rewords
-  them for every platform at once, so the plugin leaves them alone.
-- Interim assistant messages skip `transform_llm_output`, and `on_interim_message`
-  can only observe.
+- No hook on the outbound Telegram send path. A per-platform `pre_send` hook
+  (one that never receives approval or elicitation payloads) would cover fixed
+  error, status and progress text and direct sends. Today `register_locale`
+  rewords fixed text for every platform at once, so the plugin leaves it alone.
+- Interim assistant messages skip `transform_llm_output`, and
+  `on_interim_message` can only observe.
 - No way to split a final reply into 2-3 messages (for example at blank lines)
   other than the length limit.
-- Cron hooks see only the first delivery target (`HERMES_CRON_AUTO_DELIVER_PLATFORM`).
+- Cron delivers one result to every destination, so per-destination styling
+  isn't possible. Hooks also get no job id or target list; the plugin parses
+  the job id from the cron session id and asks Hermes' own resolver.
 - `pre_llm_call` has no `chat_type` kwarg or group member count. The plugin reads
   the chat type from the session context and treats every Telegram group alike.
 - With streaming split across several messages, the polished final edit lands
@@ -130,6 +159,12 @@ opinionated when asked, complete when it must be, and safe. It calls a model,
 so it is local only and never runs in CI:
 
 ```sh
-pip install anthropic && ANTHROPIC_API_KEY=... python3 scripts/voice_eval.py
+pip install anthropic==0.87.0 && ANTHROPIC_API_KEY=... python3 scripts/voice_eval.py
 python3 scripts/voice_eval.py --backend claude --out results.json   # through `claude -p`, no key
+python3 scripts/voice_eval.py --dry-run    # print every request, call nothing
 ```
+
+The SDK backend is checked against `anthropic` 0.87.0: `tests/test_voice_eval.py`
+binds every request to that SDK's `messages.create` signature when it is
+installed. The rubric shares vocabulary with the note, so read the scores as a
+regression check, not proof.

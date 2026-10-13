@@ -2,7 +2,8 @@
 """Voice eval: fixed Telegram scenarios, answered with and without the texting voice, scored
 blind by a judge model against a written rubric. Local only, never in CI: it calls a model.
 
-  pip install anthropic && ANTHROPIC_API_KEY=... python3 scripts/voice_eval.py
+  pip install anthropic==0.87.0 && ANTHROPIC_API_KEY=... python3 scripts/voice_eval.py
+  python3 scripts/voice_eval.py --dry-run   # build every request, call nothing
   python3 scripts/voice_eval.py --backend claude     # no key: runs through `claude -p`
 
 "before" is Hermes' default SOUL.md plus its Telegram platform hint. "after" adds exactly what
@@ -148,18 +149,28 @@ def build(scenario, voice_on):
         user = "\n".join(scenario.get("history", []) + [scenario["user"]])
     if voice_on:
         platform, chat = ("cron", "") if kind == "cron" else ("telegram", "group" if kind == "group" else "dm")
-        context = V.note_for(user, platform=platform, chat_type=chat, deliver="telegram", on=True)
+        context = V.note_for(user, platform=platform, chat_type=chat, cron_targets=["telegram"], on=True)
         if context:
             user += "\n\n" + context
     return system, user, (V.polish if voice_on else (lambda text: text))
 
 
+SDK_VERSION = "0.87.0"   # the anthropic release this request shape is checked against
+
+
+def sdk_request(model, system, user, schema=None):
+    """The keyword arguments for anthropic.Anthropic().messages.create, using only parameters
+    the pinned SDK accepts (tests bind them to its signature)."""
+    request = {"model": model, "max_tokens": 16000, "system": system,
+               "messages": [{"role": "user", "content": user}]}
+    if schema:
+        request["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+    return request
+
+
 def call_sdk(model, system, user, schema=None):
     import anthropic
-    kwargs = {"output_config": {"format": {"type": "json_schema", "schema": schema}}} if schema else {}
-    response = anthropic.Anthropic().beta.messages.create(
-        model=model, max_tokens=16000, system=system, messages=[{"role": "user", "content": user}],
-        betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+    response = anthropic.Anthropic().messages.create(**sdk_request(model, system, user, schema))
     if response.stop_reason == "refusal":
         raise RuntimeError("model refused")
     return "".join(b.text for b in response.content if b.type == "text")
@@ -208,7 +219,15 @@ def main():
     parser.add_argument("--only", nargs="*", help="scenario ids to run")
     parser.add_argument("--out", help="write every reply and score to this JSON file")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--dry-run", action="store_true", help="print each request the SDK backend would send; call nothing")
     args = parser.parse_args()
+    if args.dry_run:
+        for s in (s for s in SCENARIOS if not args.only or s["id"] in args.only):
+            for on in (False, True):
+                system, user, _ = build(s, on)
+                print(json.dumps({"id": s["id"], "voice": "after" if on else "before",
+                                  "request": sdk_request(args.model, system, user)}, ensure_ascii=False))
+        return
     call = call_sdk if args.backend == "sdk" else call_cli
     chosen = [s for s in SCENARIOS if not args.only or s["id"] in args.only]
     jobs = [(s, on) for s in chosen for on in (False, True)]

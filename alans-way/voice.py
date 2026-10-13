@@ -1,5 +1,6 @@
-"""The texting voice for everything the bot sends to Telegram: one set of tone rules shared with
-check-ins and the brief, a per-turn note for the model, and a deterministic polish at send time.
+"""The texting voice for the bot's own replies on Telegram: one set of tone rules shared with
+check-ins and the brief, a per-turn note for the model, and a deterministic polish of the final
+reply. Fixed Hermes messages (approvals, errors, progress) have no hook and are never touched.
 On by default; `/tone default` turns it off for this profile. It layers on top of SOUL.md and
 agent.system_prompt and never writes either."""
 import re
@@ -7,7 +8,6 @@ import re
 STATE_KEY = "voice"
 MODES = ("texting", "default")
 NOTE_MARKER = "[Texting voice]"
-SILENT = ("[SILENT]", "SILENT", "NO_REPLY", "NO REPLY")   # Hermes' suppression markers, passed through
 
 # Shared by proactivity.py's check-ins and the reply note, so both sound like one person.
 TEXTING = "Write like a sharp, warm friend texting them on Telegram"
@@ -31,11 +31,25 @@ NOTE = (
     " multi-step task, say in one short line what you're doing first. " + NEXT + " " + SAFE)
 
 
+# Hermes suppresses a reply that is (or starts/ends with) one of these; any reply mentioning
+# one is left exactly as written.
+_SILENCE = re.compile(r"silent|no[ _]?reply|静默|沉默", re.IGNORECASE)
+_PH_OPEN, _PH_CLOSE = "", ""   # placeholder brackets (Unicode private use)
+_PLACEHOLDER = re.compile(_PH_OPEN + r"(\d+)" + _PH_CLOSE)
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_INDENTED = re.compile(r"^(?: {4}|\t)")
-_QUOTE = re.compile(r"^\s*>")
-# Inline code, URLs and quoted text are masked before any rewrite and restored after.
-_MASK = re.compile(r"`[^`\n]*`|\bhttps?://\S+|\"[^\"\n]*\"|“[^”\n]*”")
+# Indented code, blockquotes and table rows are never rewritten.
+_PROTECTED_LINE = re.compile(r"^(?: {4}|\t| {0,3}>|\s*\|)")
+# Masked across the whole text, earliest match first, before any rewrite.
+_SPAN = re.compile(
+    r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)"            # code spans of any backtick count, any lines
+    r"|\b(?:https?|ftp)://\S+|\bwww\.\S+"               # URLs
+    r"|\]\([^)\n]*\)|<[^<>\n]+>"                        # link targets, autolinks, HTML tags
+    r"|[\w.+-]+@[\w-]+\.[\w.-]+"                        # emails
+    r"|\"[^\"]*\"|“[^”]*”|„[^“”]*[“”]|‚[^‘’]*[‘’]|‘[^’]*’"
+    r"|«[^»]*»|‹[^›]*›|»[^«]*«|「[^」]*」|『[^』]*』"       # every quotation form
+    r"|(?<![\w'])'[^'\n]+'(?![\w'])")                   # 'single quotes', not apostrophes
+# Left over after masking, any of these opens something unclosed: the rest stays as written.
+_UNCLOSED = re.compile(r"[`\"“„‚‘«‹「『]")
 _HEADING = re.compile(r"^( {0,3})#{1,6}[ \t]+(?=[^\d\s])(.*?)(?:[ \t]+#+)?[ \t]*$")
 _BOLD = re.compile(r"(?<!\w)\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\w)")
 _TIC = re.compile(
@@ -67,51 +81,48 @@ def _unbold_wall(paragraph):
 
 def polish(text):
     """The send-time safety net: drop leading assistant tics, turn markdown headings into
-    plain lines and unbold walls of bold. Code, quotes, URLs and quoted text are untouched."""
-    if not isinstance(text, str) or not text.strip() or text.strip() in SILENT or "\x00" in text:
+    plain lines and unbold walls of bold. Everything that could be code, a link or a quotation
+    is masked first and comes back byte for byte; when in doubt the text is left alone."""
+    if (not isinstance(text, str) or not text.strip() or _SILENCE.search(text)
+            or _PH_OPEN in text or _PH_CLOSE in text or re.search(r"<(?:pre|code)\b", text, re.I)):
         return text
     try:
         out = _polish(text)
     except Exception:   # a safety net must never block or drop a message
         return text
-    return out if out.strip() and out.strip() not in SILENT else text
+    return out if out.strip() and not _SILENCE.search(out) else text
 
 
 def _polish(text):
-    lines, masks, fence = text.split("\n"), [], None
-    prose = []  # indexes of lines that may be rewritten
+    masks = []
+
+    def mask(value):
+        masks.append(value)
+        return f"{_PH_OPEN}{len(masks) - 1}{_PH_CLOSE}"
+
+    lines, fence = text.split("\n"), None
     for i, line in enumerate(lines):
         m = _FENCE.match(line)
         if fence is None and m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = m.group(1)
+            fence = m.group(1)   # an unclosed fence protects everything after it
         elif fence and m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
             fence = None
-        elif fence is None and not _QUOTE.match(line) and not _INDENTED.match(line):
-            prose.append(i)
-
-    def mask(m):
-        masks.append(m.group())
-        return f"\x00{len(masks) - 1}\x00"
-
-    for i in prose:
-        lines[i] = _MASK.sub(mask, lines[i])
-    if prose and prose[0] == next(i for i, line in enumerate(lines) if line.strip()):
-        lines[prose[0]] = _strip_tics(lines[prose[0]])
-    for i in prose:
-        lines[i] = _HEADING.sub(r"\1\2", lines[i])
-    # Paragraphs: runs of consecutive non-blank prose lines.
-    run = []
-    for i in prose + [None]:
-        if i is not None and lines[i].strip() and (not run or run[-1] == i - 1):
-            run.append(i)
+        elif fence is None and not _PROTECTED_LINE.match(line):
             continue
-        if run:
-            block = _unbold_wall("\n".join(lines[j] for j in run)).split("\n")
-            for j, new in zip(run, block):
-                lines[j] = new
-        run = [i] if i is not None and lines[i].strip() else []
-    out = "\n".join(lines)
-    return re.sub(r"\x00(\d+)\x00", lambda m: masks[int(m.group(1))], out)
+        lines[i] = mask(line)
+    masked = _SPAN.sub(lambda m: mask(m.group()), "\n".join(lines))
+    if leftover := _UNCLOSED.search(masked):
+        masked = masked[:leftover.start()] + mask(masked[leftover.start():])
+
+    lines = masked.split("\n")
+    first = next(i for i, line in enumerate(lines) if line.strip())
+    lines[first] = _strip_tics(lines[first])
+    lines = [_HEADING.sub(r"\1\2", line) for line in lines]
+    paragraphs = re.split(r"(\n[ \t]*\n)", "\n".join(lines))
+    out = "".join(_unbold_wall(part) for part in paragraphs)
+    while _PLACEHOLDER.search(out):   # a mask can hold earlier masks
+        out = _PLACEHOLDER.sub(lambda m: masks[int(m.group(1))], out)
+    return out
 
 
 GROUP = (" This is a group chat, maybe with other bots: answer whoever addressed you, keep it"
@@ -127,18 +138,33 @@ def session_env(name):
         return ""
 
 
-def to_telegram(platform):
-    """A gateway turn in a Telegram chat, or a cron run whose output is delivered to Telegram.
-    ponytail: cron publishes only its first delivery target; a job whose first target is
-    elsewhere stays in the default voice (upstream: expose every target to hooks)."""
-    return platform == "telegram" or (
-        platform == "cron" and session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM").lower() == "telegram")
+_CRON_SESSION = re.compile(r"cron_(.+)_\d{8}_\d{6}")
 
 
-def note_for(user_message, *, platform, chat_type="", deliver="", on=True):
+def cron_platforms(session_id):
+    """Every platform a cron run's result goes to, from Hermes' own resolver; [] when unknown."""
+    m = _CRON_SESSION.fullmatch(str(session_id or ""))
+    if not m:
+        return []
+    try:
+        from cron.jobs import get_job
+        from cron.scheduler_delivery import _resolve_delivery_targets
+        job = get_job(m.group(1))
+        return [str(t.get("platform") or "").lower() for t in _resolve_delivery_targets(job)] if job else []
+    except Exception:
+        return []
+
+
+def all_telegram(platforms):
+    # Hermes delivers one shared cron result to every target, so a job that also goes to
+    # Discord or email keeps the default voice everywhere.
+    return bool(platforms) and all(p == "telegram" for p in platforms)
+
+
+def note_for(user_message, *, platform, chat_type="", cron_targets=(), on=True):
     """The context a texting turn gets, or None. Pure, so the eval runs exactly this."""
     from .proactivity import BRIEF_MARKER, MARKER
-    telegram = platform == "telegram" or (platform == "cron" and deliver.lower() == "telegram")
+    telegram = platform == "telegram" or (platform == "cron" and all_telegram(cron_targets))
     # Check-ins and the brief carry the same rules in their own prompts, with their own length.
     if not on or not telegram or str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
         return None
@@ -159,31 +185,22 @@ class Voice:
     def on(self):
         return self.mode() == "texting"
 
-    def on_turn_start(self, user_message="", platform="", **kwargs):
+    def on_turn_start(self, user_message="", platform="", session_id="", **kwargs):
         """pre_llm_call: the texting note for a Telegram-bound turn. Reads plugin state only."""
-        note = note_for(user_message, platform=platform, on=self.on(),
-                        chat_type=session_env("HERMES_SESSION_CHAT_TYPE"),
-                        deliver=session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM"))
+        if not self.on():
+            return None
+        note = note_for(user_message, platform=platform, chat_type=session_env("HERMES_SESSION_CHAT_TYPE"),
+                        cron_targets=cron_platforms(session_id) if platform == "cron" else ())
         return {"context": note} if note else None
 
-    def on_output(self, response_text="", platform="", **kwargs):
+    def on_output(self, response_text="", platform="", session_id="", **kwargs):
         """transform_llm_output: the polished final reply, or None to leave it as is."""
-        if not to_telegram(platform) or not self.on():
+        if not self.on():
+            return None
+        if platform != "telegram" and not (platform == "cron" and all_telegram(cron_platforms(session_id))):
             return None
         out = polish(response_text)
         return out if out != response_text else None
-
-    def on_tool_call(self, tool_name="", args=None, **kwargs):
-        """pre_tool_call: polish a send_message the model addresses to Telegram (CAPTCHA and
-        handback pings go out this way mid-turn)."""
-        if tool_name != "send_message" or not isinstance(args, dict) or not self.on():
-            return None
-        if args.get("action", "send") != "send" or not isinstance(args.get("message"), str):
-            return None
-        if str(args.get("target") or "").split(":", 1)[0].strip().lower() != "telegram":
-            return None
-        out = polish(args["message"])
-        return {"action": "modify", "args": {"message": out}} if out != args["message"] else None
 
     def set(self, mode):
         if mode not in MODES:
@@ -193,7 +210,9 @@ class Voice:
     def status_text(self):
         if self.on():
             return "Texting voice is on for Telegram. Send /tone default to switch it off."
-        return "Telegram uses Hermes' default voice. Send /tone texting to switch the texting voice back on."
+        return ("Telegram uses Hermes' default voice. Check-ins and the morning brief keep their own"
+                " short style (/proactivity controls them). Send /tone texting to switch the texting"
+                " voice back on.")
 
     def command(self, raw_args=""):
         """`/tone [texting|default|status]`. Plain text, never raises."""

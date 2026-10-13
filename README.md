@@ -48,10 +48,11 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
-- **Telegram messages read like texts.** In every profile the plugin is enabled
-  in, the bot's Telegram replies, check-ins, cron reports and `send_message`
-  pings use a short, warm texting voice, with a send-time polish that drops
-  "Certainly!"-style openers, headings and walls of bold. It layers on top of
+- **Telegram replies read like texts.** In every profile the plugin is enabled
+  in, the bot's Telegram replies and Telegram-only cron reports use a short,
+  warm texting voice, with a send-time polish that drops "Certainly!"-style
+  openers, headings and walls of bold. Fixed Hermes messages (approval cards,
+  errors, progress) are not changed. It layers on top of
   your SOUL.md and `agent.system_prompt` and never edits them. `/tone default`
   turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
 - **No bundled account connections.** Email, calendar, Notion and similar
@@ -242,10 +243,10 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | `proactivity` tool + `/proactivity` + `hermes proactivity` CLI | bind the chat, tune the wait, level, timezone and pause — bound to one designated chat |
 | Idle-nudge loop | a 60-second daemon started when Telegram connects; injects one internal prompt when a check-in is due |
 | Turn hooks | `pre_llm_call`/`post_llm_call` note when the bound chat was last active and whether the bot is mid-turn |
-| Texting voice + `/tone` + `hermes tone` CLI | on Telegram-bound turns, `pre_llm_call` adds the voice note, `transform_llm_output` polishes the final reply and `pre_tool_call` polishes `send_message` text to Telegram; every profile, on by default |
 | `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
+| Texting voice + `/tone` + `hermes tone` CLI | on turns bound for Telegram (a Telegram chat, or a cron job whose every destination is Telegram), `pre_llm_call` adds the voice note and `transform_llm_output` polishes the final reply; every profile, on by default. Fixed Hermes messages (approvals, errors, progress) are not changed; see [docs/voice.md](docs/voice.md) |
 
 ## Orgo / fresh Linux hosts
 

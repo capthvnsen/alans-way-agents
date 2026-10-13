@@ -46,7 +46,6 @@ def register(ctx, *, legacy_home=None, background=True):
     voice = voice_mod.Voice(ctx)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
     ctx.register_hook("transform_llm_output", voice.on_output)
-    ctx.register_hook("pre_tool_call", voice.on_tool_call)
     ctx.register_command("tone", voice.command,
                          description="Telegram voice: texting (default) or Hermes' default voice",
                          args_hint="[texting|default|status]")
