@@ -54,9 +54,13 @@ booking or payment widget), a key aimed at no control or a click by position
 cannot be judged and a snapshot cannot help: act by ref or name, or pass
 `commit`. `cdp Page.addScriptToEvaluateOnNewDocument` is never allowed. A ref
 the connector has not seen on the current page is refused with
-`snapshot_required` too. A tab the human holds, or a stale epoch, is refused
-with the browser's own reason (`awaiting_human`, `human_has_control`,
-`stale_control_epoch`) before anyone is asked. Never send `approval` yourself:
+`snapshot_required` too. Awaiting-human, CAPTCHA and recording holds, the
+Take-back cooldown, and stale control epochs are refused with the browser's
+own reason (`awaiting_human`, `stale_control_epoch`, or the hold reason)
+before anyone is asked. Ordinary human control can yield to
+automatic takeover as described below; with automatic takeover off,
+`human_has_control` means wait or ask the user to hand the tab back.
+Never send `approval` yourself:
 the connector drops it and adds its own only to the call the user approved.
 The gate protects against agent mistakes and against clicks steered by
 prompt injection or a malicious website. It does not stop a deliberately
@@ -65,8 +69,15 @@ the same OS user as the router and the browser services. Full isolation (a
 separate OS account plus router-signed approvals) is planned for v0.21.6.
 Never work around the gate with any tool: a refused commit goes to the user.
 Ask the user before
-any other financial, destructive or production change. Ownership, control
-epoch, and human takeover gates remain.
+any other financial, destructive or production change. Ownership and control
+epoch gates remain. With automatic takeover enabled, a bot acting on a tab
+the human holds on the user's computer can take it back after the grace
+period: act or claim. Awaiting-human, CAPTCHA and recording holds and the
+Take-back cooldown still keep the bot out. A commit still needs fresh user
+approval; the app honors that accepted approval across the automatic
+takeover exactly once. Refused actions leave the human's focus, tab owner
+and control epoch untouched. With automatic takeover off, follow
+`human_has_control`: wait or ask the user to hand the tab back.
 
 Reach for the browser when:
 

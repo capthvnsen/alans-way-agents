@@ -77,11 +77,17 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)
 
-    def test_ownership_control_epoch_and_human_takeover_gates_remain(self):
-        self.assertIn(
-            "Ownership, control epoch, and human takeover gates remain.",
-            self.normalized,
-        )
+    def test_automatic_takeover_preserves_holds_and_approval(self):
+        for phrase in ("Ownership and control epoch gates remain.",
+                       "after the grace period: act or claim",
+                       "Awaiting-human, CAPTCHA and recording holds",
+                       "Take-back cooldown still keep the bot out",
+                       "A commit still needs fresh user approval",
+                       "across the automatic takeover exactly once",
+                       "Refused actions leave the human's focus, tab owner and control epoch untouched",
+                       "With automatic takeover off, follow `human_has_control`"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.normalized)
 
     def test_supervisord_restart_uses_the_usr1_drain(self):
         """Issue #65: the post-update restart note must route a supervised
