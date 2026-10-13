@@ -458,6 +458,27 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn('proactivity set --settings {"paused_until": "off"}', calls)
             self.assertNotIn("proactivity probe", calls)
 
+    def test_tone_default_opts_out_and_no_flag_leaves_the_voice_alone(self):
+        for flag, expected in ((("--tone", "default"), True), ((), False)):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / "hermes_home"
+                home.mkdir()
+                log = Path(directory) / "log"
+                bin_dir = logging_hermes_bin(Path(directory), log)
+                env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+                result = run(*flag, "--non-interactive", "--skip-browser", "--skip-services",
+                             "--hermes-home", str(home), env=env, check=False)
+                calls = log.read_text(encoding="utf-8")
+                self.assertEqual("tone default" in calls, expected)
+                self.assertEqual("Telegram voice: default" in result.stdout, expected)
+                self.assertNotIn("system_prompt", calls)
+                self.assertNotIn("personality", calls)
+
+    def test_tone_must_be_texting_or_default(self):
+        result = run("--tone", "loud", "--verify", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--tone", result.stderr)
+
     def test_proactive_must_be_yes_or_no(self):
         result = run("--proactive", "maybe", "--verify", check=False)
         self.assertEqual(result.returncode, 2)
@@ -3405,6 +3426,50 @@ class LiveGatewayRefusalTests(unittest.TestCase):
         retry = calls.rindex("plugins install --force file://")
         self.assertLess(calls.index("-p default gateway stop"), retry)
         self.assertLess(retry, calls.index("-p default gateway start"))
+
+    def test_tone_default_is_applied_after_a_deferred_install_and_before_restart(self):
+        """--tone default on an upgrade whose install the running gateway refused:
+        the old plugin has no `tone` command, so the tone must ride the retry,
+        after the reinstall and before each profile's gateway starts again. A
+        second bot profile's first install is deferred the same way."""
+        (self.home / "profiles" / "beta").mkdir(parents=True)
+        (self.home / "profiles" / "beta" / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=333:AAFakeSecretTokenForTests\n", encoding="utf-8")
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%(log)s"\n'
+             'prof=default; [ "$1" = -p ] && { prof="$2"; shift 2; }\n'
+             'st="%(root)s/gw-$prof"\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "$st"\n'
+             '    [ "$2" = start ] && echo running > "$st";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) [ "$prof" = beta ] || echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        if [ "$(cat "$st" 2>/dev/null || echo running)" = running ]; then\n'
+             '          echo "%(refusal)s" >&2; exit 1\n'
+             '        fi\n'
+             '        touch "%(root)s/installed-$prof";;\n'
+             '    esac;;\n'
+             '  tone) [ -e "%(root)s/installed-$prof" ] || { echo "unknown command: tone" >&2; exit 2; };;\n'
+             'esac\nexit 0\n' % {"log": self.log, "root": self.root, "refusal": self.REFUSAL})
+        result = run("--tone", "default", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home),
+                     env=env_for(self.root, self.bin_dir, self.home, ALANS_WAY_MISSING="systemctl supervisorctl"),
+                     check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        for prof in ("default", "beta"):
+            with self.subTest(prof):
+                install = calls.rindex("-p %s plugins install" % prof)
+                tone = calls.index("-p %s tone default" % prof)
+                self.assertLess(calls.index("-p %s gateway stop" % prof), install)
+                self.assertLess(install, tone)
+                self.assertLess(tone, calls.index("-p %s gateway start" % prof))
+                self.assertEqual(calls.count("-p %s tone default" % prof), 1, calls)
+        self.assertIn("queued behind the plugin install", result.stdout)
+        self.assertNotIn("could not set the Telegram voice", result.stdout)
+        self.assertNotIn("still failed", result.stdout)
 
     def test_a_failed_systemctl_stop_falls_back_to_hermes_gateway_stop(self):
         """On a systemd host whose unit stop fails (a unit that is not really

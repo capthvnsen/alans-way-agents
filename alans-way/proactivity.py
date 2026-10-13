@@ -10,6 +10,8 @@ import sqlite3
 import threading
 import zlib
 
+from .voice import FORMAT, PLAIN, TEXTING
+
 LEVELS = {"less": 240, "normal": 120, "more": 60}
 MAX_WAIT = timedelta(days=7)
 BUSY_CAP = timedelta(hours=3)
@@ -158,12 +160,10 @@ USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|
          "hours <start>-<end>|tz <IANA zone>|brief on|off]")
 SAFETY = (" This is not new authorization: never send external messages, spend money, change"
           " credentials or permissions, touch production, or delete anything without asking first.")
-VOICE = (" Write like a sharp person texting them on Telegram: lead with the concrete thing, no"
-         " greeting or preamble. No headings, bullet lists or tables; a numbered list only for"
-         " decisions you need from them. Plain text or light formatting Telegram renders; emoji only"
-         " if they use them. Never mention timers, schedules, check-ins or being prompted. Open"
-         " differently from your recent messages to them. When something needs their call, end"
-         " with a short question or offer, such as 'Want me to ...?'")
+VOICE = (f" {TEXTING}: lead with the concrete thing. {PLAIN} No bullet lists; a numbered list"
+         f" only for decisions you need from them. {FORMAT} Never mention timers, schedules,"
+         " check-ins or being prompted. Open differently from your recent messages to them. When"
+         " something needs their call, end with a short question or offer, such as 'Want me to ...?'")
 
 
 def caller_session_key():

@@ -14,7 +14,7 @@
 #        (re-running without --mac-ssh keeps the configured computer;
 #         --mac-ssh none removes it)
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
-#        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --timezone IANA
+#        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --tone texting|default --timezone IANA
 #        --restart --non-interactive --verify
 set -eu
 
@@ -22,7 +22,7 @@ REPO_URL="https://github.com/capthvnsen/alans-way-agents"
 DESKTOP_REPO_URL="https://github.com/capthvnsen/alans-way"
 PLUGIN_NAME="alans-way"
 
-BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE=""
+BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PROACTIVE="" TONE=""
 MAC_SSH_SET=0 HOST_OS_SET=0
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
@@ -54,6 +54,7 @@ while [ $# -gt 0 ]; do
     --dev-plugin-install) DEV_PLUGIN=1; shift;;
     --bind) DO_BIND=1; shift;;
     --proactive) PROACTIVE="$2"; shift 2;;
+    --tone) TONE="$2"; shift 2;;
     --timezone) TIMEZONE="$2"; shift 2;;
     --restart) DO_RESTART=1; shift;;
     --non-interactive) NON_INTERACTIVE=1; shift;;
@@ -73,6 +74,8 @@ setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
   --proactive yes|no  keep proactivity on (default) or pause it after binding
+  --tone texting|default  the bot's voice on Telegram: texting (the default)
+                   or Hermes' own; applies to every profile setup configures
   --timezone IANA  your local zone for check-in hours, e.g. Europe/Berlin
   --restart        restart the gateway last, detached, once setup has finished
   --verify         check an existing install without changing anything
@@ -104,6 +107,7 @@ EOF
 done
 
 case "$PROACTIVE" in ""|yes|no) ;; *) echo "setup: --proactive must be yes or no" >&2; exit 2;; esac
+case "$TONE" in ""|texting|default) ;; *) echo "setup: --tone must be texting or default" >&2; exit 2;; esac
 for _port in "$CDP_PORT_FLAG" "${ALANS_WAY_CDP_PORT:-}"; do
   [ -z "$_port" ] && continue
   case "$_port" in *[!0-9]*|'') _port=bad;; esac
@@ -1767,6 +1771,37 @@ enable_proactivity_toolsets() {
 }
 enable_proactivity_toolsets
 
+# ------------------------------------------------- texting voice
+# The plugin's texting voice is on by default in every profile it is enabled in;
+# --tone default opts this profile out (--tone texting opts back in).
+# A plugin install this profile's running gateway refused is queued, so the
+# `tone` command may not exist yet: queue the tone behind it, and the retry
+# applies it after the install and before that gateway starts again.
+plugin_op_queued() {
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "set -- $_line"
+    [ "$1" = "${PROFILE:-default}" ] || continue
+    _last=""; for _last do :; done
+    case "$_last" in "$PLUGIN_NAME"|*"#$PLUGIN_NAME") return 0;; esac
+  done <<EOF
+$REFUSED_OPS
+EOF
+  return 1
+}
+apply_tone() {
+  [ -n "$TONE" ] || return 0
+  if plugin_op_queued; then
+    queue_plugin_op tone "$TONE"
+    say "  Telegram voice ${TONE}${PROFILE:+ for profile $PROFILE}: queued behind the plugin install"
+    return 0
+  fi
+  hermes_p tone "$TONE" >/dev/null 2>&1 \
+    && ok "Telegram voice${PROFILE:+ for profile $PROFILE}: $TONE" \
+    || warn "could not set the Telegram voice: send /tone $TONE to the bot${PROFILE:+ of profile $PROFILE}"
+}
+apply_tone
+
 # ------------------------------------------------- computer-use provider (optional)
 # Offered only when this Hermes has the pluggable computer-use API; feature-probed
 # with Hermes' own interpreter, never by version.
@@ -2795,19 +2830,22 @@ else
 fi
 
 # Every other profile with a Telegram bot of its own gets the plugin (for the
-# workspace skills; proactivity is the primary's alone) and the same workspace
+# texting voice and the workspace skills; proactivity is the primary's alone) and the same workspace
 # setup under that bot's id.
 install_plugin_for_bot_profile() {
   if plugin_listed "$PLUGIN_NAME" || plugin_is_catalog_installed; then
     ok "plugin already installed in profile $PROFILE; leaving it as it is"
     say "  to move it forward: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins update $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
+    apply_tone
   elif [ "$SKIP_PLUGIN" = 1 ]; then
     warn "no $PLUGIN_NAME plugin in profile $PROFILE (--skip-plugin): install it from the Hermes catalog: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install $PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   elif plugins_op plugins install --force "$REPO_FILE_URL#$PLUGIN_NAME"; then
     hermes_p plugins enable "$PLUGIN_NAME" >/dev/null 2>&1 || true
     ok "plugin installed in profile $PROFILE"
+    apply_tone
   elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
     queue_plugin_op plugins enable "$PLUGIN_NAME"
+    apply_tone
   else
     warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   fi
