@@ -8,7 +8,10 @@ every profile that has a Telegram bot.
 
 ## Turn it off or on
 
-It is on by default. Each profile (each bot) has its own switch.
+It is on by default, including for existing installs once they update the
+plugin. Each profile (each bot) has its own switch. Where your SOUL.md or
+`agent.system_prompt` asks for a different style, the note tells the model
+yours wins.
 
 | Where | Off | On | Check |
 |---|---|---|---|

@@ -24,11 +24,14 @@ class PolishTests(unittest.TestCase):
             ("Sure thing! Great question. I'd be happy to help with that. It's at 3pm.", "It's at 3pm."),
             ("As an AI, I can't feel the rain, but it's 12°C there.", "I can't feel the rain, but it's 12°C there."),
             ("Absolutely! Done.", "Done."),
+            ("Certainly! iPhone 17 ships Friday.", "iPhone 17 ships Friday."),
+            ("Great question. `git push` first.", "`git push` first."),
         ):
             self.assertEqual(V.polish(raw), want)
 
     def test_keeps_tic_words_that_carry_meaning(self):
         for text in ("Sure, but only if the card is yours.", "I'd be happy to book it once you approve.",
+                     "Absolutely. Delete it.", "Of course. It's safe.",
                      "Certainly not: that would delete prod.", "Great question for Sam, not me."):
             self.assertEqual(V.polish(text), text)
 
@@ -133,7 +136,7 @@ class NoteTests(unittest.TestCase):
                      "never at their expense and never with bad news", "pick one and say why",
                      "stay complete: lead with a one-line answer", "real next step",
                      "approvals, CAPTCHA handbacks and safety checks work exactly as before",
-                     "say plainly when something failed"):
+                     "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
 
     def test_check_ins_share_the_same_rules(self):

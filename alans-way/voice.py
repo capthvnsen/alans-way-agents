@@ -18,7 +18,8 @@ FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code),
 NEXT = ("End with a short question or offer only when there's a real next step; otherwise just"
         " stop.")
 SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks work exactly as"
-        " before, and say plainly when something failed.")
+        " before, and say plainly when something failed. Where their own persona or instructions"
+        " ask for a different style, theirs wins.")
 
 NOTE = (
     f"{NOTE_MARKER} {TEXTING}. Default to 1-4 sentences and match their energy and length. {PLAIN}"
@@ -38,8 +39,9 @@ _MASK = re.compile(r"`[^`\n]*`|\bhttps?://\S+|\"[^\"\n]*\"|“[^”\n]*”")
 _HEADING = re.compile(r"^( {0,3})#{1,6}[ \t]+(?=[^\d\s])(.*?)(?:[ \t]+#+)?[ \t]*$")
 _BOLD = re.compile(r"(?<!\w)\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\w)")
 _TIC = re.compile(
-    r"^\s*(?:(?:certainly|absolutely|of course|sure thing|great question|what a great question"
-    r"|good question)\s*[!.]"
+    # "Absolutely." can be the answer to a yes/no question, so the bare words go only with "!".
+    r"^\s*(?:(?:certainly|absolutely|of course|sure thing)\s*!"
+    r"|(?:great question|what a great question|good question)\s*[!.]"
     r"|i'?d be (?:happy|glad) to help(?: you)?(?: with (?:that|this))?\s*[!.]"
     r"|as an ai(?: language model| assistant)?,)\s*", re.IGNORECASE)
 
@@ -48,8 +50,8 @@ def _strip_tics(line):
     out = line
     while (m := _TIC.match(out)) and out[m.end():].strip():
         out = out[m.end():]
-    if out is line:
-        return line
+    if out is line or not re.match(r"[a-z][a-z' ]", out):   # leave iPhone, `git`, 3pm as written
+        return out
     return out[:1].upper() + out[1:]
 
 
