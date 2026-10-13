@@ -2931,17 +2931,52 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn('DISPLAY=":98"', self.conf())
 
     def test_a_live_display_stack_prints_the_viewer_url(self):
-        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 6080 localhost:5999";;\n'
-             '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
              'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
-        result = self.run_setup()
-        self.assertIn("6080", result.stdout)
-        self.assertIn("vnc.html", result.stdout)
-        self.assertIn(ip, result.stdout)
-        self.assertNotIn("apt-get install xvfb", result.stdout)
+        for listener in ("6080", ".".join(["0"] * 4) + ":6080"):
+            with self.subTest(listener=listener):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc %s localhost:5999";;\n'
+                     '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n' % listener)
+                result = self.run_setup()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html" % ip,
+                              result.stdout)
+                self.assertNotIn("not reachable over the tailnet", result.stdout)
+                self.assertNotIn("apt-get install xvfb", result.stdout)
+
+    def test_setup_recognizes_websockify_bound_to_this_hosts_tailnet_ip(self):
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n' % ip)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        result = self.run_setup("--skip-services")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html" % ip,
+                      result.stdout)
+        self.assertNotIn("not reachable over the tailnet", result.stdout)
+
+    def test_setup_warns_for_websockify_binds_without_a_matching_tailnet_ip(self):
+        ip = tailnet_ip(64, 0, 2)
+        private_ip = ".".join(str(part) for part in (192, 168, 1, 2))
+        for host, observed in (("127.0.0.1", ip), ("localhost", ip),
+                               (private_ip, ip), (tailnet_ip(64, 0, 9), ip), (ip, "")):
+            with self.subTest(host=host, observed=observed):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+                     '  *) exit 1;;\nesac\n' % host)
+                fake(self.bin_dir, "tailscale",
+                     'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (observed, TAILSCALE_UP))
+                result = self.run_setup("--skip-services")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html "
+                              "(bound to %s, so not reachable over the tailnet)" % (host, host),
+                              result.stdout)
+                if host != ip:
+                    self.assertNotIn("http://%s:6080/vnc.html" % ip, result.stdout)
 
     def test_a_running_vnc_display_beats_a_lower_numbered_socket(self):
         import socket as socket_mod
@@ -4118,16 +4153,32 @@ class VerifyHostStateTests(unittest.TestCase):
 
     def test_verify_prints_the_websockify_viewer_url(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 6080 localhost:5999";;\n'
-             '  *) exit 1;;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
              'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        for listener in ("6080", ".".join(["0"] * 4) + ":6080"):
+            with self.subTest(listener=listener):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc %s localhost:5999";;\n'
+                     '  *) exit 1;;\nesac\n' % listener)
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html" % ip,
+                              result.stdout)
+                self.assertNotIn("not reachable over the tailnet", result.stdout)
+
+    def test_verify_recognizes_websockify_bound_to_this_hosts_tailnet_ip(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n' % ip)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
         result = self.verify()
-        self.assertIn("6080", result.stdout)
-        self.assertIn("vnc.html", result.stdout)
-        self.assertIn(ip, result.stdout)
+        self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html" % ip,
+                      result.stdout)
+        self.assertNotIn("not reachable over the tailnet", result.stdout)
 
     def test_verify_skips_websockify_option_values_for_the_listen_port(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
@@ -4153,20 +4204,25 @@ class VerifyHostStateTests(unittest.TestCase):
         self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
         self.assertNotIn("on port 5900", result.stdout)
 
-    def test_verify_does_not_offer_a_tailnet_url_for_a_loopback_websockify(self):
+    def test_verify_warns_for_websockify_binds_without_a_matching_tailnet_ip(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/websockify 127.0.0.1:6080 localhost:5900";;\n'
-             '  *) exit 1;;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
-        fake(self.bin_dir, "tailscale",
-             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
-        empty_x11 = self.root / "no-x11"
-        empty_x11.mkdir()
-        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
-        self.assertIn("http://127.0.0.1:6080/vnc.html", result.stdout)
-        self.assertIn("not reachable over the tailnet", result.stdout)
-        self.assertNotIn(ip, result.stdout)
+        private_ip = ".".join(str(part) for part in (192, 168, 1, 2))
+        for host, observed in (("127.0.0.1", ip), ("localhost", ip),
+                               (private_ip, ip), (tailnet_ip(64, 0, 9), ip), (ip, "")):
+            with self.subTest(host=host, observed=observed):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+                     '  *) exit 1;;\nesac\n' % host)
+                fake(self.bin_dir, "tailscale",
+                     'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (observed, TAILSCALE_UP))
+                result = self.verify(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html "
+                              "(bound to %s, so not reachable over the tailnet)" % (host, host),
+                              result.stdout)
+                if host != ip:
+                    self.assertNotIn("http://%s:6080/vnc.html" % ip, result.stdout)
 
     def test_verify_reports_a_websockify_only_desktop(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
