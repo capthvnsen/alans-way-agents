@@ -396,6 +396,101 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
                 self.assertIn(forbidden, self.normalized)
 
 
+class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.normalized = _normalized(SKILL_PATH.read_text(encoding="utf-8"))
+        search = re.search(r"## Search the web(.*?)## ", SKILL_PATH.read_text(encoding="utf-8"), re.S)
+        cls.search = _normalized(search.group(1)) if search else ""
+        captcha = re.search(r"## When a site shows a CAPTCHA(.*?)## ", SKILL_PATH.read_text(encoding="utf-8"), re.S)
+        cls.captcha = _normalized(captcha.group(1)) if captcha else ""
+
+    def test_search_goes_hermes_tools_then_the_users_computer_then_the_vm(self):
+        self.assertTrue(self.search, "the Search the web section is gone")
+        hermes = self.search.index("use Hermes' own `web_search`, then `web_extract`")
+        computer = self.search.index("open a tab on the user's computer: omit `host`")
+        vm = self.search.index("search engine in the VM browser only while the user's computer is offline")
+        self.assertLess(hermes, computer)
+        self.assertLess(computer, vm)
+        self.assertIn("Do not open a search engine page in a tab for this.", self.search)
+        self.assertIn("maps, shopping, signed-in results", self.search)
+        self.assertIn("expect a CAPTCHA there", self.search)
+        self.assertIn('Never pass `host:"vm"` to a search engine while the computer is online.', self.search)
+        self.assertIn("If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.", self.search)
+        # The browser is the default only for what a plain lookup cannot answer.
+        self.assertIn("default surface for anything web-shaped that a plain lookup cannot answer", self.normalized)
+
+    def test_the_bot_never_solves_a_captcha(self):
+        self.assertTrue(self.captcha, "the CAPTCHA section is gone")
+        self.assertIn("You never solve a CAPTCHA.", self.captcha)
+        self.assertIn("Do not click, type into, drag, or screenshot a challenge widget to solve it", self.captcha)
+        self.assertIn("do not reach it with `eval` or `cdp`", self.captcha)
+        self.assertIn("never use a solver service", self.captcha)
+        self.assertIn("do not ask the user to approve a click on one", self.captcha)
+
+    def test_every_challenge_signal_uses_the_apps_field_names(self):
+        # Field names as capthvnsen/alans-way#138 sends them.
+        for signal in ["`challenge: {kind, blocking}`", "`challenge_present`", "`awaiting_human`",
+                       '`state:"awaiting_human"`', '`reason:"captcha"`', '`controller:"human"`',
+                       "the `viewerUrl` to solve it in", "`human_returned`",
+                       "`backOff:true`", "its `advice` says the site has challenged twice in 10 minutes"]:
+            with self.subTest(signal=signal):
+                self.assertIn(signal, self.captcha)
+        for kind in ["recaptcha", "hcaptcha", "turnstile", "cloudflare", "google_sorry", "arkose"]:
+            with self.subTest(kind=kind):
+                self.assertIn(f"`{kind}`", self.captcha)
+        self.assertIn("`blocking:false` is a widget inside a page that stays yours", self.captcha)
+        self.assertIn("is handed to the user by the app itself", self.captcha)
+        self.assertIn('{action:"release", reason:"captcha", note:', self.captcha)
+        for assumed in ["awaitingHuman", "handback.reason` is"]:
+            with self.subTest(assumed=assumed):
+                self.assertNotIn(assumed, self.captcha)
+
+    def test_one_short_telegram_message_with_where_to_solve_it(self):
+        self.assertIn("Tell the user once, as one short text before your next tool call", self.captcha)
+        self.assertIn("Hermes delivers it to Telegram mid-turn", self.captcha)
+        self.assertIn("say it is waiting in Alan's Workspace", self.captcha)
+        self.assertIn("For a VM tab, include the handback's `viewerUrl`", self.captcha)
+        self.assertIn("Google wants a CAPTCHA before I can search.", self.captcha)
+        self.assertIn("I'll pick it back up.", self.captcha)
+        # The no-chat-between-calls rule makes room for this one message.
+        self.assertIn("(the one exception is the CAPTCHA message below)", self.normalized)
+
+    def test_a_viewer_link_with_a_secret_is_never_pasted(self):
+        self.assertIn("Never paste a viewer link that has a password, token or key in it", self.captcha)
+        for part in ["`password=`", "`token=`", "`key=`", "`user:pass@`", "anything after `#`"]:
+            with self.subTest(part=part):
+                self.assertIn(part, self.captcha)
+        self.assertIn("leave the link out and point them to the viewer in Alan's Workspace instead", self.captcha)
+
+    def test_waiting_is_slow_and_bounded(self):
+        self.assertIn("Check `cua_alans_way_tabs` at most once every 30 seconds", self.captcha)
+        self.assertIn("for up to 30 minutes", self.captcha)
+        self.assertIn("Do not snapshot, act on, or claim the tab meanwhile.", self.captcha)
+        self.assertIn("The app hands the tab back on its own once the challenge clears.", self.captcha)
+        # A handback that merely expired leaves the tab with the human.
+        self.assertNotIn("handback is gone", self.captcha)
+        self.assertIn("(`controller` is `agent` and its handback says `human_returned`)", self.captcha)
+        self.assertIn("carry on without another message", self.captcha)
+        self.assertIn("the tab list you just read gave you the fresh one", self.captcha)
+        self.assertIn("After 30 minutes, or if you cannot keep waiting in this turn, stop.", self.captcha)
+        # A bot's own release on the VM is not held or watched the same way:
+        # the user's "done" ends the wait and is the claim agreement.
+        self.assertIn("the user saying they're done also ends the wait", self.captcha)
+        self.assertIn("their reply is the agreement to claim it", self.captcha)
+        self.assertIn("ask them to say when they're through", self.captcha)
+
+    def test_a_site_that_challenges_twice_is_dropped(self):
+        self.assertIn("stop using that site for this task", self.captcha)
+        self.assertIn("the same site challenges you twice within 10 minutes across tabs", self.captcha)
+        self.assertIn("twice in this task counts", self.captcha)
+        self.assertIn("Do not wait on that tab or retry the site in a fresh tab.", self.captcha)
+        self.assertIn("Tell the user in one line that you moved on, so they can ignore that CAPTCHA.", self.captcha)
+        self.assertIn("If no other source can answer, ask the user how to go on.", self.captcha)
+        # Switching source must not read as the "do not silently substitute another browser" failure case.
+        self.assertIn("This is a change of source, not a browser failure", self.captcha)
+
+
 class DesktopAppsSkillTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
