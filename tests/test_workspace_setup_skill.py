@@ -1,6 +1,11 @@
 """workspace-setup skill regression tests: agents must drive setup.sh, not improvise."""
 from pathlib import Path
+import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +124,115 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("signal USR1", self.normalized)
         self.assertIn("stopwaitsecs", self.normalized)
         self.assertIn("state.db", self.normalized)
+
+    def test_long_chats_step_precedes_restart_and_requires_consent(self):
+        self.assertLess(self.text.index("**Long chats"), self.text.index("## Order of work"))
+        for requirement in ("explicit user consent", "each Alan's Way profile",
+                            "customized values", "micro_compact", "effective compression threshold",
+                            "auxiliary.compression", "never switch it automatically"):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, self.normalized)
+        self.assertIn("references/long-chats.md", self.text)
+
+
+class LongChatsSetupProcedureTests(unittest.TestCase):
+    """Execute the documented opt-in block with an isolated Hermes CLI double."""
+
+    def setUp(self):
+        reference = SKILL_PATH.parent / "references" / "long-chats.md"
+        self.text = reference.read_text(encoding="utf-8")
+        self.block = re.search(r"<!-- pruning-commands -->\s*```sh\n(.*?)```", self.text, re.S).group(1)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.config = self.directory / "config.json"
+        self.calls = self.directory / "calls.jsonl"
+        self.config.write_text(json.dumps({
+            "proactive_prune_tokens": 0,
+            "proactive_prune_min_result_chars": 8000,
+            "proactive_prune_min_reclaim_tokens": 4096,
+        }))
+        cli = self.directory / "hermes"
+        cli.write_text(f"#!{sys.executable}\n" + '''import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ["TEST_CALLS"], "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+assert args[:3] == ["-p", "test-profile", "config"], args
+path = pathlib.Path(os.environ["TEST_CONFIG"])
+config = json.loads(path.read_text())
+key = args[4].removeprefix("compression.")
+if args[3] == "get":
+    if key == os.environ.get("TEST_FAIL_KEY"):
+        sys.exit(1)
+    print(json.dumps(config[key]))
+elif args[3] == "set":
+    config[key] = int(args[5])
+    path.write_text(json.dumps(config))
+else:
+    sys.exit(2)
+''')
+        cli.chmod(0o755)
+        self.env = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
+                        profile="test-profile", TEST_CONFIG=str(self.config), TEST_CALLS=str(self.calls))
+        self.env.pop("PRUNING_CONSENT", None)
+
+    def run_procedure(self, consent=None):
+        if consent is not None:
+            self.env["PRUNING_CONSENT"] = consent
+        result = subprocess.run(["sh", "-c", self.block], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+        return json.loads(self.config.read_text()), [call for call in calls if call[3] == "set"]
+
+    def test_no_consent_makes_no_writes(self):
+        for consent in (None, "no"):
+            with self.subTest(consent=consent):
+                config, writes = self.run_procedure(consent)
+                self.assertEqual(writes, [])
+                self.assertEqual(config, {"proactive_prune_tokens": 0,
+                                          "proactive_prune_min_result_chars": 8000,
+                                          "proactive_prune_min_reclaim_tokens": 4096})
+
+    def test_consent_sets_stock_values_and_is_idempotent(self):
+        config, writes = self.run_procedure("yes")
+        self.assertEqual(config, {"proactive_prune_tokens": 48000,
+                                  "proactive_prune_min_result_chars": 8000,
+                                  "proactive_prune_min_reclaim_tokens": 4096})
+        self.assertEqual(len(writes), 1)
+        _, repeated_writes = self.run_procedure("yes")
+        self.assertEqual(repeated_writes, writes)
+
+    def test_every_custom_threshold_is_preserved(self):
+        custom = {"proactive_prune_tokens": 64000, "proactive_prune_min_result_chars": 12000,
+                  "proactive_prune_min_reclaim_tokens": 2048}
+        self.config.write_text(json.dumps(custom))
+        config, writes = self.run_procedure("yes")
+        self.assertEqual(config, custom)
+        self.assertEqual(writes, [])
+
+    def test_custom_eligibility_does_not_prevent_approved_trigger_opt_in(self):
+        config = json.loads(self.config.read_text())
+        config["proactive_prune_min_result_chars"] = 12000
+        self.config.write_text(json.dumps(config))
+        config, writes = self.run_procedure("yes")
+        self.assertEqual(config["proactive_prune_tokens"], 48000)
+        self.assertEqual(config["proactive_prune_min_result_chars"], 12000)
+        self.assertEqual(len(writes), 1)
+
+    def test_unreadable_trigger_is_not_treated_as_a_default(self):
+        self.env["TEST_FAIL_KEY"] = "proactive_prune_tokens"
+        config, writes = self.run_procedure("yes")
+        self.assertEqual(config["proactive_prune_tokens"], 0)
+        self.assertEqual(writes, [])
+
+    def test_sanity_check_and_undo_are_documented(self):
+        for key in ("compression", "model", "auxiliary.compression.provider",
+                    "auxiliary.compression.model", "auxiliary.compression.base_url"):
+            self.assertIn(key, self.text)
+        for requirement in ("model_thresholds", "threshold_tokens", "75%", "512,000",
+                            "output reservation", "runtime", "unknown", "config unset",
+                            "config set compression.proactive_prune_tokens 0"):
+            self.assertIn(requirement, self.text)
 
 
 if __name__ == "__main__":

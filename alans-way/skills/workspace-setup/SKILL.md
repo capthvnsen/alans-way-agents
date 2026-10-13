@@ -75,6 +75,8 @@ seconds after it prints its summary. If it asks which Telegram route is the prim
 the conversation you're in unless the user said otherwise: do not bind a
 different bot's route silently.
 
+**Long chats (before the gateway restart).** Hermes can prune old tool output early to reduce context buildup without another summarizer. For each Alan's Way profile, follow [the long-chat setup procedure](references/long-chats.md): report the effective compression threshold and `auxiliary.compression` route, then obtain explicit user consent before enabling pruning at 48,000 tokens with 8,000-character eligibility and 4,096-token minimum reclaim. Preserve customized values, leave `micro_compact` unchanged, and use the supported profile-scoped Hermes config CLI. Only suggest a dedicated summary model; never switch it automatically.
+
 ## Order of work
 
 1. **Tailscale first when the two machines can't see each other.** If the VPS
