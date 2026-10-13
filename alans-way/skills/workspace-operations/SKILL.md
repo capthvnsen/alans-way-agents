@@ -191,7 +191,7 @@ as an error. It may have happened, so snapshot the VPS tab and check before
 repeating it.
 
 You do not have to wait for an error to learn a tab moved. After the move,
-every VPS result's `_meta.workspace.tabIdChanged` lists one
+the first VPS result's `_meta.workspace.tabIdChanged` lists one
 `[workspace] tab id changed: <old> -> <new>, reason: <handoff or host unreachable>`
 line per tab. Swap any Mac tab id you saved (in a plan, a note, or a
 sub-agent prompt) for its new id before you use it.

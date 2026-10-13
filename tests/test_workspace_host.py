@@ -405,6 +405,79 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertIn("vm-tab-1", self.text(msg))
         self.assertEqual(len(self.vm_spawns()), 1)
 
+    def fake_browser_host(self):
+        """A local browser host: no mirror to restore, and it opens the
+        continued page as vps-tab-1."""
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def reply(self, status, body):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.reply(200, b'{"tabs":[]}')
+
+            def do_POST(self):
+                if self.path == "/v1/restore":
+                    self.reply(404, b"{}")
+                else:
+                    self.reply(200, b'{"id":"vps-tab-1","url":"https://mac.example/"}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        (self.dir / "conn.json").write_text(
+            json.dumps({"url": "http://127.0.0.1:%d" % server.server_address[1], "token": "tok"}))
+
+    def test_a_forced_handoff_reports_the_tab_id_change_once(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The snapshot is the call the Mac dies under: a read, so it is
+        # replayed and its VPS answer is the first result after the move.
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertEqual(
+            workspace["tabIdChanged"],
+            ["[workspace] tab id changed: mac-tab-1 -> vps-tab-1, reason: handoff"])
+        self.assertIn("moved to the VPS browser", self.text(moved))
+        # The change was reported once; the next VPS result does not repeat it.
+        again = self.call("cua_alans_way_tabs")
+        repeated = self.recv()
+        self.assertEqual(repeated["id"], again)
+        self.assertNotIn("tabIdChanged", repeated["result"]["_meta"]["workspace"])
+
+    def test_a_handoff_does_not_pair_the_change_with_a_vm_tab(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The tab used last belongs to the VM backend: it is not a Mac tab the
+        # continued page stands in for, so no id pair is reported for it.
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertNotIn("tabIdChanged", workspace)
+        self.assertIn("moved to the VPS browser", self.text(moved))
+
     def test_a_vm_page_is_not_recorded_as_the_computers_resume_page(self):
         self.start()
         self.handshake()

@@ -2911,7 +2911,7 @@ class SupervisordServiceTests(unittest.TestCase):
 
     def test_a_live_display_stack_prints_the_viewer_url(self):
         fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
+             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 6080 localhost:5999";;\n'
              '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
@@ -4006,6 +4006,17 @@ class VerifyHostStateTests(unittest.TestCase):
                              ALANS_WAY_SYS_CLASS_NET=str(sysnet))
         self.assertIn("tunnels through 'tailscale nc'", result.stdout)
 
+    def test_verify_reads_key_equals_value_ssh_config(self):
+        # ssh_config also writes 'Key=value'; '=' must not hide the directive.
+        sysnet = self.userspace_tailscale()
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "config").write_text(
+            "Host=mac.tail1234.ts.net\n  ProxyCommand=tailscale nc %h %p\n", encoding="utf-8")
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("tunnels through 'tailscale nc'", result.stdout)
+
     def test_verify_accepts_a_wildcard_host_block_proxycommand(self):
         # The bootstrap writes 'Host 100.*': a 100.x --mac-ssh is covered by it.
         sysnet = self.userspace_tailscale()
@@ -4043,7 +4054,7 @@ class VerifyHostStateTests(unittest.TestCase):
     def test_verify_prints_the_websockify_viewer_url(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
         fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
+             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 6080 localhost:5999";;\n'
              '  *) exit 1;;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
@@ -4052,6 +4063,45 @@ class VerifyHostStateTests(unittest.TestCase):
         self.assertIn("6080", result.stdout)
         self.assertIn("vnc.html", result.stdout)
         self.assertIn(ip, result.stdout)
+
+    def test_verify_skips_websockify_option_values_for_the_listen_port(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify --heartbeat 30 --web /usr/share/novnc 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+        self.assertNotIn("on port 30\n", result.stdout)
+
+    def test_verify_treats_ssl_target_as_a_flag_not_a_port(self):
+        # Upstream websockify makes --ssl-target a store_true flag: the port
+        # after it is the listener, not an option value.
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify --ssl-target 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+        self.assertNotIn("on port 5900", result.stdout)
+
+    def test_verify_does_not_offer_a_tailnet_url_for_a_loopback_websockify(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify 127.0.0.1:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("http://127.0.0.1:6080/vnc.html", result.stdout)
+        self.assertIn("not reachable over the tailnet", result.stdout)
+        self.assertNotIn(ip, result.stdout)
 
     def test_verify_reports_a_websockify_only_desktop(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
