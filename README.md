@@ -176,6 +176,9 @@ rather not be asked. The proactivity toolset is enabled for Telegram. Once a
 route is bound, check-ins are on by default; `--proactive no` binds them
 paused, and the bot tunes them from the bound chat.
 
+For automatic compaction and the setup skill's optional early tool-output
+pruning, see [Long chats](docs/long-chats.md).
+
 ### Or let your agent do it
 
 Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/setup-prompt.md)

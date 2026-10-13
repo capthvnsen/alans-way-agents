@@ -310,6 +310,10 @@ If a call fails with a permission error, ask the user to turn on Accessibility a
 
 ## Preserve vanilla Hermes
 
+Save durable user facts, decisions and preferences to memory as they come up during work,
+so nothing important lives only in chat history. Transient tab state, element refs and handback state
+must never go into durable memory; reacquire live workspace state from the tools when needed.
+
 Keep integration in supported profile configuration, optional plugins, hooks
 and skills. Use Hermes' native conversation, model, approval and delegation
 interfaces. Discover currently available profiles before delegating; retire

@@ -17,6 +17,14 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
         cls.normalized = _normalized(cls.text)
 
+    def test_durable_memory_is_saved_during_work_without_transient_browser_state(self):
+        for requirement in ("Save durable user facts, decisions and preferences to memory",
+                            "as they come up during work", "only in chat history",
+                            "Transient tab state, element refs and handback state",
+                            "never go into durable memory"):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, self.normalized)
+
     def test_ordinary_actions_are_preauthorized(self):
         self.assertIn(
             "Ordinary actions in a bot-owned in-app browser tab are preauthorized and "
