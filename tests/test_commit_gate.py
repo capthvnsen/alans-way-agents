@@ -1012,7 +1012,8 @@ class CommitNameTests(unittest.TestCase):
         "Reservar", "Jetzt buchen", "Buchen", "Reservieren", "Bestellung abschicken", "Passer la commande",
         "Acheter", "Valider votre commande", "Confirmer", "réservation", "Finalizar compra", "Confirmar reserva",
         "今すぐ買う", "注文する", "Senden", "Envoyer", "Enviar", "送信", "Löschen", "Supprimer", "Eliminar", "削除",
-        "Pay with credit card and place order", "Pay with Visa ending 4242 now", "Remove from cart and delete account", "Remove filter, delete account", "Delete account filter", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
+        "Pay with credit card and place order", "Pay with Visa ending 4242 now", "Remove from cart and delete account", "Buy it now", "Buy it again and place order", "Book a demo and pay",
+        "Subscribe & Save and place order", "Subscribe and Save and place order", "Remove filter, delete account", "Delete account filter", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
         "注文を確定する", "ご注文を確定する", "Réserver", "RÉSERVER UNE TABLE",
         "Buy", "Submit", "Payer", "Valider la commande", "Confirmer la commande",
         "Realizar pedido", "Confirmar pedido", "Kaufen", "Bezahlen", "Jetzt bezahlen",
@@ -1029,6 +1030,7 @@ class CommitNameTests(unittest.TestCase):
         "Comments", "Bids", "Reservations",
         "Continue to payment", "Proceed to payment", "Pay with credit card", "Pay with Visa ending 4242",
         "Confirm new password", "Post code", "Remove from cart", "Use this payment method",
+        "Buy it again", "Book a demo", "Subscribe & Save", "subscribe-&-save", "Subscribe and Save", "subscribe-and-save",
     ]
 
     def judge(self, names, selectors=False):
