@@ -408,6 +408,25 @@ websockify_listen() {
   return 1
 }
 
+# Use the listener's address family, and compare IPv6 spellings by address.
+websockify_tailnet_host() {
+  _listen_addr="$1"
+  case "$_listen_addr" in \[*\]) _family=-6;; *) _family=-4;; esac
+  _local_ip="$(have "$TAILSCALE" && "$TAILSCALE" ip "$_family" 2>/dev/null | head -1 || true)"
+  if [ -z "$_listen_addr" ]; then
+    echo "${_local_ip:-<this-host>}"; return 0
+  fi
+  python3 - "$_listen_addr" "$_local_ip" <<'PY'
+import ipaddress, sys
+try:
+    if ipaddress.ip_address(sys.argv[1].strip('[]')) != ipaddress.ip_address(sys.argv[2]):
+        sys.exit(1)
+except ValueError:
+    sys.exit(1)
+print(sys.argv[1])
+PY
+}
+
 # supervisord that is actually answering, not just installed. `status` cannot
 # prove that: it exits nonzero whenever any program is not RUNNING (an EXITED
 # or FATAL entry makes a healthy daemon look dead). `pid` prints the daemon's
@@ -958,12 +977,10 @@ check_display_stack() {
     return 0
   fi
   if [ -n "$_wsport" ]; then
-    _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
-    # An explicit bind is reachable only when it matches this host's observed IP.
-    if [ -n "$_wsaddr" ] && [ "$_wsaddr" != "$_tsip" ]; then
-      say "  the remote desktop viewer is at http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
+    if _viewer_addr="$(websockify_tailnet_host "$_wsaddr")"; then
+      say "  the remote desktop viewer is at http://$_viewer_addr:$_wsport/vnc.html"
     else
-      say "  the remote desktop viewer is at http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+      say "  the remote desktop viewer is at http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
     fi
   fi
 }
@@ -2669,12 +2686,10 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     _ws="$(websockify_listen || true)"
     _wsport="${_ws##*:}"; _wsaddr="${_ws%:*}"
     if [ -n "$_wsport" ]; then
-      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
-      # An explicit bind is reachable only when it matches this host's observed IP.
-      if [ -n "$_wsaddr" ] && [ "$_wsaddr" != "$_tsip" ]; then
-        say "  remote desktop is already serving: http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
+      if _viewer_addr="$(websockify_tailnet_host "$_wsaddr")"; then
+        say "  remote desktop is already serving: http://$_viewer_addr:$_wsport/vnc.html"
       else
-        say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+        say "  remote desktop is already serving: http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
       fi
     fi
   else
