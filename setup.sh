@@ -958,10 +958,11 @@ check_display_stack() {
     return 0
   fi
   if [ -n "$_wsport" ]; then
-    if [ -n "$_wsaddr" ]; then
+    _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+    # An explicit bind is reachable only when it matches this host's observed IP.
+    if [ -n "$_wsaddr" ] && [ "$_wsaddr" != "$_tsip" ]; then
       say "  the remote desktop viewer is at http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
     else
-      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
       say "  the remote desktop viewer is at http://${_tsip:-<this-host>}:$_wsport/vnc.html"
     fi
   fi
@@ -2668,10 +2669,11 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     _ws="$(websockify_listen || true)"
     _wsport="${_ws##*:}"; _wsaddr="${_ws%:*}"
     if [ -n "$_wsport" ]; then
-      if [ -n "$_wsaddr" ]; then
+      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+      # An explicit bind is reachable only when it matches this host's observed IP.
+      if [ -n "$_wsaddr" ] && [ "$_wsaddr" != "$_tsip" ]; then
         say "  remote desktop is already serving: http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
       else
-        _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
         say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
       fi
     fi
