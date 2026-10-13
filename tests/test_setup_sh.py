@@ -4075,6 +4075,19 @@ class VerifyHostStateTests(unittest.TestCase):
         self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
         self.assertNotIn("on port 30\n", result.stdout)
 
+    def test_verify_treats_ssl_target_as_a_flag_not_a_port(self):
+        # Upstream websockify makes --ssl-target a store_true flag: the port
+        # after it is the listener, not an option value.
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify --ssl-target 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+        self.assertNotIn("on port 5900", result.stdout)
+
     def test_verify_does_not_offer_a_tailnet_url_for_a_loopback_websockify(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
         fake(self.bin_dir, "pgrep", 'case "$*" in\n'

@@ -379,10 +379,11 @@ websockify_listen() {
   for _tok in ${_line#* }; do
     if [ "$_optarg" = 1 ]; then _optarg=0; continue; fi
     case "$_tok" in
-      --auth-plugin|--auth-source|--auth-pam-service|--auth-pam-user|--cert|\
-      --heartbeat|--idle-timeout|--key|--key-password|--log-file|--record|\
-      --ssl-target|--timeout|--token-plugin|--token-source|--unix-target|\
-      --web|--wrap-mode) _optarg=1; continue;;
+      --auth-plugin|--auth-source|--auth-pam-service|--auth-pam-user|--cafile|\
+      --cert|--heartbeat|--idle-timeout|--key|--key-password|--log-file|\
+      --record|--ssl-ciphers|--ssl-version|--syslog|--target-config|--timeout|\
+      --token-plugin|--token-source|--unix-listen|--unix-listen-mode|\
+      --unix-target|--web|--wrap-mode) _optarg=1; continue;;
       --inetd) return 1;; # inetd mode has no listener at all
       -*) continue;;
       *:*) _a="${_tok%:*}"; _p="${_tok##*:}"
