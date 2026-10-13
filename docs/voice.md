@@ -167,4 +167,6 @@ python3 scripts/voice_eval.py --dry-run    # print every request, call nothing
 The SDK backend is checked against `anthropic` 0.87.0: `tests/test_voice_eval.py`
 binds every request to that SDK's `messages.create` signature when it is
 installed. The rubric shares vocabulary with the note, so read the scores as a
-regression check, not proof.
+regression check, not proof. The `claude` backend runs inside Claude Code, which
+can still slip the local account's name or email into a reply even with the
+eval's fictional user in memory; use the SDK backend for runs you publish.
