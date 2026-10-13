@@ -938,9 +938,9 @@ const PAGE_STAYS = new Set(['type', 'wait', 'read', 'scroll', 'move', 'viewport'
 // ?step=confirm, /checkout/complete, /buy) can commit just by loading.
 // "place" counts only beside "order", since /maps/place/ is an ordinary page.
 const ACTION_URL = new RegExp(`(?<![\\p{L}\\p{N}])(?:confirm|place${SEP}order|order${SEP}place|placeorder|(?:checkout|order)${SEP}complete|pay|buy|submit|delete)(?![\\p{L}\\p{N}])`, 'iu');
-// Whether a navigation on a page of `origin` lands on such an address, read
-// the way the app reads it (trimmed, and no scheme means https).
-function isActionUrl(url, origin) {
+// Whether an address reads like that, on any site, read the way the app
+// reads it (trimmed, and no scheme means https).
+function isActionUrl(url) {
   let parsed;
   const address = url.trim();
   try {
@@ -948,7 +948,6 @@ function isActionUrl(url, origin) {
   } catch {
     return false;
   }
-  if (origin && parsed.origin !== origin) return false;
   let words = `${parsed.pathname} ${parsed.search}`;
   try {
     words = decodeURIComponent(words);
@@ -1714,7 +1713,7 @@ async function main() {
     if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
     let page = tabPages.get(tabId);
     if (!page) {
-      page = { names: new Map(), origin: '', url: '', live: new Set(), full: false };
+      page = { names: new Map(), hrefs: new Map(), origin: '', url: '', live: new Set(), full: false };
       tabPages.set(tabId, page);
     }
     const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
@@ -1726,10 +1725,11 @@ async function main() {
         if (parsed.href !== page.url) {
           page.url = parsed.href;
           page.names = new Map();
+          page.hrefs = new Map();
           page.live = new Set();
           page.full = false;
           page.frame = undefined;
-          if (isActionUrl(page.url, '')) page.visited = page.url;
+          if (isActionUrl(page.url)) page.visited = page.url;
         }
       }
     } catch { /* keep the last page a reply named */ }
@@ -1762,6 +1762,8 @@ async function main() {
         if (!el || typeof el.ref !== 'string') continue;
         const name = typeof el.name === 'string' ? el.name : '';
         page.names.set(el.ref, name);
+        if (typeof el.href === 'string' && el.href) page.hrefs.set(el.ref, el.href);
+        else page.hrefs.delete(el.ref);
         if (name && isCommitName(name)) page.live.add(cardText(name, 80));
       }
     }
@@ -1770,19 +1772,37 @@ async function main() {
     // its old name is dropped and the next use needs a fresh one.
     if (Array.isArray(data.elements)) {
       const listed = new Set(data.elements.map((el) => el && el.ref));
-      for (const ref of acted) if (!listed.has(ref)) page.names.delete(ref);
+      for (const ref of acted) {
+        if (listed.has(ref)) continue;
+        page.names.delete(ref);
+        page.hrefs.delete(ref);
+      }
     }
     for (const ref of page.names.keys()) {
       if (page.names.size <= 2000) break;
       page.names.delete(ref);
+      page.hrefs.delete(ref);
     }
   }
 
-  function noteKnownTab(id, epoch, backend) {
+  // A full tab description (it names its controller) also says who controls
+  // the tab and whether it waits for the human (handback); a reply that only
+  // names the tab keeps what the last description said. A new control epoch
+  // means someone else had the tab, so what the gate knew of its page is
+  // dropped.
+  function noteKnownTab(id, epoch, backend, info) {
     if (typeof id !== 'string' || !TAB_ID.test(id)) return;
     if (backend === 'vm') vmTabs.add(id);
-    const prev = knownTabs.get(id);
-    knownTabs.set(id, { backend, epoch: Number.isInteger(epoch) ? epoch : prev && prev.epoch });
+    const prev = knownTabs.get(id) || {};
+    const described = info && typeof info === 'object' && typeof info.controller === 'string';
+    const next = Number.isInteger(epoch) ? epoch : prev.epoch;
+    if (Number.isInteger(prev.epoch) && next !== prev.epoch) tabPages.delete(id);
+    knownTabs.set(id, {
+      backend,
+      epoch: next,
+      controller: described ? info.controller : prev.controller,
+      handback: described ? info.handback || null : prev.handback,
+    });
   }
 
   // Every reply shape that names a tab: open and claim answers carry it at
@@ -1792,13 +1812,13 @@ async function main() {
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.tabs)) {
       for (const tab of data.tabs) {
-        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend);
+        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend, tab);
       }
     }
     if (data.tab && typeof data.tab === 'object') {
-      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend);
+      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend, data.tab);
     }
-    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend);
+    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend, data);
     if (typeof data.continuedTab === 'string') noteKnownTab(data.continuedTab, data.continuedEpoch, 'vm');
     forgetClosedTabs(data);
   }
@@ -2122,16 +2142,24 @@ async function main() {
     const live = page && page.live.size ? [...page.live][0] : '';
     const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
     let moved = false;
-    const blind = (what) => {
+    let typed = false;
+    // Untargeted input (a key with no control named, a point) may land in a
+    // frame from another site; input aimed at a control lands on that control.
+    const blind = (what, untargeted = false) => {
       if (live) {
         found.commits.push(`${what} here could set off "${live}"`);
       } else if (moved) {
         found.unread = found.unread || `an earlier step in this batch can change the page, so this connector cannot tell what ${what} would do. Send the steps from there as a separate call once you have seen the page`;
-      } else if (page && page.frame) {
+      } else if (untargeted && page && page.frame) {
         found.unread = found.unread || `this page embeds ${page.frame} in a frame this connector cannot read, so it cannot tell what ${what} would do. Act on the page's own controls by ref or name instead`;
-      } else if (!page || !page.full || page.frame === undefined) {
+      } else if (!page || !page.full || (untargeted && page.frame === undefined)) {
         found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${what} would do. Take a snapshot (raise maxElements if it is cut off) and try again`;
       }
+    };
+    // A link whose address reads like an action commits when followed.
+    const actionHref = (ref) => {
+      const href = page.hrefs.get(ref);
+      if (href && isActionUrl(href)) found.commits.push(`the link goes to ${cardText(href, 80)}, an address that confirms, orders, pays, submits or deletes`);
     };
     const accepts = (step) => step.dialog && typeof step.dialog === 'object' && step.dialog.accept === true;
     if (args.action === 'batch' && accepts(args)) {
@@ -2148,11 +2176,16 @@ async function main() {
       if (step.action === 'press' && typeof step.key === 'string' && !safeKey) {
         const key = keyLabel(step.key);
         found.acts.push(`presses ${key}`);
-        blind(`pressing ${key}`);
+        // Typing then Enter in one call sends what was typed (a chat message)
+        // before the page can be read; on its own the key is judged by the page.
+        if (typed && key !== 'Space') found.commits.push(`pressing ${key} right after typing in the same batch could send what was typed. Press it as its own call, or pass commit`);
+        const aimed = [step.ref, step.name, step.selector].some((t) => typeof t === 'string' && t);
+        blind(`pressing ${key}`, !aimed);
       }
+      if (step.action === 'type') typed = true;
       const cdpUrl = step.action === 'cdp' && step.method === 'Page.navigate' && step.params && step.params.url;
       const url = step.action === 'navigate' ? step.url : cdpUrl;
-      if (typeof url === 'string' && isActionUrl(url, page && page.origin)) {
+      if (typeof url === 'string' && isActionUrl(url)) {
         found.acts.push(`opens ${cardText(url, 80)}`);
         found.commits.push(`${cardText(url, 80)} looks like an address that confirms, orders, pays, submits or deletes`);
       }
@@ -2173,8 +2206,10 @@ async function main() {
       } else if (step.action === 'cdp' && !READ_ONLY_CDP.test(String(step.method))) {
         const method = cardText(String(step.method), 60);
         found.acts.push(`sends ${method}`);
-        blind(`the DevTools call ${method}`);
+        blind(`the DevTools call ${method}`, /^Input\./.test(method));
       }
+      // A click, or a key that acts, follows a link.
+      const follows = step.action === 'click' || step.action === 'double_click' || (step.action === 'press' && !safeKey);
       const target = TARGET_STEPS[step.action];
       const ends = !target ? [] : step.action === 'drag'
         ? [step, { ref: step.toRef, selector: step.toSelector, x: step.toX, y: step.toY }] : [step];
@@ -2190,13 +2225,17 @@ async function main() {
           } else {
             found.acts.push(`${act} "${cardText(name, 80)}"`);
             if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
+            else if (follows) actionHref(end.ref);
           }
         } else if (typeof end.name === 'string' && end.name) {
           // The app acts only on a control with exactly this name.
           const name = cardText(end.name, 80);
           found.acts.push(`${act} "${name}"`);
           if (isCommitName(end.name)) found.commits.push(`"${name}" looks like it buys, books, sends, posts, submits or deletes`);
-          else if (step.action !== 'press' && live) found.commits.push(`${noun} on "${name}" here could set off "${live}"`);
+          else if (page && follows) {
+            const wanted = end.name.trim().toLowerCase();
+            for (const [ref, known] of page.names) if (known.trim().toLowerCase() === wanted) actionHref(ref);
+          }
         } else if (typeof end.selector === 'string' && end.selector) {
           const selector = cardText(end.selector, 80);
           found.acts.push(`${act} ${selector}`);
@@ -2204,7 +2243,7 @@ async function main() {
           else if (step.action !== 'press') blind(`${noun} on ${selector}`);
         } else if (step.action !== 'press' && (typeof end.x === 'number' || typeof end.y === 'number')) {
           found.acts.push(`${act} at ${end.x},${end.y}`);
-          blind(`${noun} by position`);
+          blind(`${noun} by position`, true);
         }
       }
       const readOnly = step.action === 'cdp' && READ_ONLY_CDP.test(String(step.method)) && !url && step.method !== 'Page.reload';
@@ -2218,6 +2257,7 @@ async function main() {
     approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
     approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
     host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
+    page_changed: 'page_changed: the tab left the approved page, or someone else took control of it, while the approval was pending. It did not run. Check the page, then ask again.',
   };
 
   // Returns true when the call was refused or is now awaiting approval.
@@ -2236,6 +2276,22 @@ async function main() {
       emitToolError(msg.id, text);
       return true;
     };
+    // The browser would refuse a tab the human holds or a stale epoch anyway;
+    // say so in its words instead of asking the user to approve a call that
+    // cannot run, or hiding the handback behind commit_required.
+    const known = msg.params.name === 'cua_alans_way_action' ? knownTabs.get(args.tabId) : undefined;
+    if (known) {
+      const h = known.handback;
+      if (h && h.state === 'awaiting_human') {
+        return refuse(`awaiting_human: this tab was handed to the human (${cardText(h.reason, 20) || 'other'}). It did not run. Wait until they give it back; read the tab state later.`);
+      }
+      if (known.controller && known.controller !== 'agent') return refuse('human_has_control: the human has this tab. It did not run.');
+      if (Number.isInteger(args.epoch) && Number.isInteger(known.epoch) && args.epoch !== known.epoch) {
+        return refuse(h && h.state === 'human_returned'
+          ? 'human_returned: the human finished and gave this tab back. It did not run. Read the tab state for its fresh epoch and current page.'
+          : 'stale_control_epoch: it did not run. Read the tab state and retry after a fresh snapshot.');
+      }
+    }
     if (targets.banned) {
       return refuse(`not_allowed: ${targets.banned}. It did not run, and agents cannot run it.`);
     }
@@ -2282,7 +2338,10 @@ async function main() {
     const id = `wsr-commit-${++approvalSeq}`;
     const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), windowMs);
     timer.unref();
-    approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer });
+    // The page and control epoch the user approved; the receipt the app
+    // checks is bound to the same tab and epoch.
+    const bound = msg.params.name === 'cua_alans_way_action' ? { tabId: args.tabId, epoch: args.epoch, origin } : null;
+    approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer, bound, commit });
     process.stdout.write(`${JSON.stringify({
       jsonrpc: '2.0',
       id,
@@ -2314,6 +2373,12 @@ async function main() {
     approvals.delete(id);
     clearTimeout(entry.timer);
     if (decision === 'approved' && entry.child !== activeChild) decision = 'host_changed';
+    if (decision === 'approved' && entry.bound) {
+      const known = knownTabs.get(entry.bound.tabId);
+      const page = tabPages.get(entry.bound.tabId);
+      if ((known && Number.isInteger(known.epoch) && known.epoch !== entry.bound.epoch)
+        || (page && page.origin && entry.bound.origin && page.origin !== entry.bound.origin)) decision = 'page_changed';
+    }
     logDecision(entry.record, decision);
     if (decision === 'approval_timeout' || decision === 'cancelled') {
       process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: decision } })}\n`);
@@ -2332,7 +2397,22 @@ async function main() {
     delete req.awaitingApproval;
     req.committed = true;
     req.at = Date.now();
-    const out = routeToolCall(entry.line, true);
+    let line = entry.line;
+    if (entry.bound) {
+      // The app runs a commit only with this receipt: one nonce, for this
+      // forward alone, bound to the approved tab and epoch.
+      const msg = JSON.parse(line);
+      msg.params.arguments.approval = {
+        nonce: crypto.randomUUID(),
+        kind: entry.commit.kind,
+        summary: entry.commit.summary,
+        issuedAt: Date.now(),
+        tabId: entry.bound.tabId,
+        epoch: entry.bound.epoch,
+      };
+      line = JSON.stringify(msg);
+    }
+    const out = routeToolCall(line, true);
     if (out !== null) writeToChild(out);
   }
 
@@ -2374,6 +2454,28 @@ async function main() {
   // Returns the line to forward (rewritten when defaults were injected) or
   // null when the call was answered or sent on internally. `approved` is the
   // commit gate's own second pass for a call the user just approved.
+  // Only the router's own approved forward may carry an approval receipt,
+  // so one the agent sends is dropped, top level and in every step, before
+  // the call is buffered, held or routed (a failover replays buffered lines).
+  function withoutApproval(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    const args = msg && msg.params && msg.params.arguments;
+    if (!args || typeof args !== 'object') return line;
+    let found = false;
+    for (const target of [args, ...(Array.isArray(args.steps) ? args.steps : [])]) {
+      if (target && typeof target === 'object' && 'approval' in target) {
+        delete target.approval;
+        found = true;
+      }
+    }
+    return found ? JSON.stringify(msg) : line;
+  }
+
   function routeToolCall(line, approved = false) {
     let msg;
     try {
@@ -2516,9 +2618,10 @@ async function main() {
 
   readline
     .createInterface({ input: process.stdin, crlfDelay: Infinity })
-    .on('line', (line) => {
+    .on('line', (raw) => {
       touchActivity();
-      if (line.includes('wsr-commit-') && answerApproval(line)) return;
+      if (raw.includes('wsr-commit-') && answerApproval(raw)) return;
+      const line = withoutApproval(raw);
       const method = noteClientRpc(line, pendingRequests);
       if (method === 'initialize') handshake.initialize = line;
       else if (method === 'notifications/initialized') handshake.initialized = line;
