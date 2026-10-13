@@ -136,7 +136,7 @@ def build(scenario, voice_on):
     """(system, user) as the model sees them, and the delivery transform."""
     # A fictional user in memory, as a real bot has; it also keeps `claude -p` from filling
     # in the local account's name or email.
-    system = BASELINE + "\n\nMemory: the user is Sam (sam@example.com), based in Lisbon."
+    system = BASELINE + "\n\nMemory: the user is Sam (sam@example.com)."
     if scenario.get("facts"):
         system += "\n\nTool results and memory available this turn:\n" + scenario["facts"]
     kind = scenario["kind"]
