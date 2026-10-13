@@ -26,7 +26,8 @@ class PolishTests(unittest.TestCase):
             ("Certainly! The deploy is green.", "The deploy is green."),
             ("Great question! Obsidian, because your notes stay local.",
              "Obsidian, because your notes stay local."),
-            ("Absolutely!\n\nDone.", "Done."),
+            ("Absolutely!\nDone.", "Done."),
+            ("Of course!   Done.", "Done."),
             ("Certainly! ## Plan\n**Ship** it.", "## Plan\n**Ship** it."),   # no flattening
             ("Sure thing! Great question. Done.", "Great question. Done."),  # only the first one
         ):
@@ -38,6 +39,7 @@ class PolishTests(unittest.TestCase):
                      "As an AI, I can't feel the rain.", "Done. Certainly! More later.",
                      "I'd be happy to help with that. Standup is at 9:30.",   # the apostrophe blocks it
                      " Certainly! Leading space.", "Certainly!", "## Plan\n**a** **b** **c** **d** **e**",
+                     "Absolutely!\n\nDone.", "Certainly!\tDone.", "Certainly! \nDone.\n ",
                      "# 4417 is the ticket", "Total: $1,249.99 for 3 seats, ref #4417.", ""):
             self.assertEqual(V.polish(text), text)
 
@@ -47,6 +49,17 @@ class PolishTests(unittest.TestCase):
             with self.subTest(rest):
                 text = "Certainly!\n" + rest
                 self.assertEqual(V.polish(text), text)
+
+    def test_any_other_line_break_blocks_the_opener(self):
+        for sep in ("\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            for text in (f"Certainly!{sep}    def f():{sep}        return 1",   # the reviewer's case
+                         f"Certainly!{sep}Done.", f"Certainly! Done.{sep}"):
+                with self.subTest(sep=repr(sep), text=text[:20]):
+                    self.assertEqual(V.polish(text), text)
+
+    def test_the_line_break_set_matches_splitlines(self):
+        breaks = {chr(c) for c in range(0x3000) if len(("a" + chr(c) + "b").splitlines()) > 1}
+        self.assertEqual(breaks - {"\n"}, set(V._OTHER_LINE_BREAKS))
 
     def test_reviewer_cases(self):
         for text in (
@@ -82,6 +95,8 @@ class PolishTests(unittest.TestCase):
             lambda: "```\n" + inner() + "\n```",
             lambda: "    " + inner().replace("\n", "\n    "),
             lambda: "\t" + inner().replace("\n", " "),
+            *[lambda sep=sep: inner() + sep + "    " + inner() for sep in
+              ("\r", "\r\n", "\v", "\f", "\x85", "\u2028", "\u2029")],
             lambda: "[t](" + inner().replace(")", "").replace("\n", "") + ")",
             lambda: "[t](https://e.io/" + inner().replace(" ", "").replace("\n", "") + ")",
             lambda: "\n[ref]: ./" + inner().replace(" ", "").replace("\n", "") + "\n",
@@ -100,14 +115,17 @@ class PolishTests(unittest.TestCase):
             if not body.strip() or V._SILENCE.search(text) or V._OPENER.match(body):
                 continue
             out = V.polish(text)
-            risky = ("`" in text or any(line[:1] in (" ", "\t") for line in text.split("\n"))
+            risky = ("`" in text or any(ch in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029" for ch in text)
+                     or any(line[:1].isspace() for line in text.splitlines())
                      or any(V._is_quote(ch) for ch in text))
             with self.subTest(n=n, text=text[:60]):
                 for piece in pieces:
                     self.assertIn(piece.strip(), out)
                 self.assertTrue(text.endswith(out))   # only ever a prefix is removed
                 m = V._OPENER.match(text)
-                self.assertEqual(out, text if risky or not m else text[m.end():])
+                rest = text[m.end():] if m else ""
+                stripped = not risky and rest.strip() and not rest[:1].isspace()
+                self.assertEqual(out, rest if stripped else text)
             checked += 1
         self.assertGreaterEqual(checked, 200)
 

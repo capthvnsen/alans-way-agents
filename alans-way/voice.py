@@ -40,9 +40,10 @@ _SILENCE = re.compile(r"silent|no[ _]?reply|静默|沉默", re.IGNORECASE)
 # help") can never pass the quote check below, so they are left to the voice note.
 _OPENER = re.compile(
     r"(?:(?:certainly|absolutely|of course|sure thing)!"
-    r"|(?:great question|good question|what a great question)[!.])\s*", re.IGNORECASE)
-_INDENTED_LINE = re.compile(r"^[ \t]", re.MULTILINE)
+    r"|(?:great question|good question|what a great question)[!.]) *\n?", re.IGNORECASE)
 _CORNER_QUOTES = "「」『』﹁﹂﹃﹄"
+# Every line break str.splitlines() honours except "\n": CR, VT, FF, FS, GS, RS, NEL, LS, PS.
+_OTHER_LINE_BREAKS = "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 
 def _is_quote(ch):
@@ -54,21 +55,28 @@ def _is_quote(ch):
 
 def polish(text):
     """The send-time safety net, minimal by design: drop a known assistant opener ("Certainly!",
-    "Great question.") at the very start of the message, and only when
-    the whole message has no indented line, no backtick and no quotation mark. Everything else,
-    including any message with code or quotes, comes back byte-identical. Headings and bold are
-    left to the voice note."""
+    "Great question.") at the very start of the message, and only when the whole message has no
+    line break other than "\n", no indented line, no backtick and no quotation mark. Everything
+    else, including any message with code or quotes, comes back byte-identical. Headings and
+    bold are left to the voice note."""
     if (not isinstance(text, str) or _SILENCE.search(text) or "`" in text
-            or _INDENTED_LINE.search(text) or any(_is_quote(ch) for ch in text)):
+            or any(ch in _OTHER_LINE_BREAKS for ch in text)
+            or any(line[:1].isspace() for line in text.splitlines())
+            or any(_is_quote(ch) for ch in text)):
         return text
     m = _OPENER.match(text)
-    if not m or not text[m.end():].strip():
+    rest = text[m.end():] if m else ""
+    # The opener takes only spaces on its own line and at most one "\n"; anything else
+    # after it (a blank line, a tab) means the message is left alone.
+    if not rest.strip() or rest[:1].isspace():
         return text
-    return text[m.end():]
+    return rest
 
 
 GROUP = (" This is a group chat, maybe with other bots: answer whoever addressed you, keep it"
          " shorter still, and don't repeat what others already said.")
+
+
 def session_env(name):
     try:
         from gateway.session_context import get_session_env

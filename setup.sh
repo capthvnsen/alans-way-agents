@@ -1748,8 +1748,28 @@ enable_proactivity_toolsets
 # ------------------------------------------------- texting voice
 # The plugin's texting voice is on by default in every profile it is enabled in;
 # --tone default opts this profile out (--tone texting opts back in).
+# A plugin install this profile's running gateway refused is queued, so the
+# `tone` command may not exist yet: queue the tone behind it, and the retry
+# applies it after the install and before that gateway starts again.
+plugin_op_queued() {
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "set -- $_line"
+    [ "$1" = "${PROFILE:-default}" ] || continue
+    _last=""; for _last do :; done
+    case "$_last" in "$PLUGIN_NAME"|*"#$PLUGIN_NAME") return 0;; esac
+  done <<EOF
+$REFUSED_OPS
+EOF
+  return 1
+}
 apply_tone() {
   [ -n "$TONE" ] || return 0
+  if plugin_op_queued; then
+    queue_plugin_op tone "$TONE"
+    say "  Telegram voice ${TONE}${PROFILE:+ for profile $PROFILE}: queued behind the plugin install"
+    return 0
+  fi
   hermes_p tone "$TONE" >/dev/null 2>&1 \
     && ok "Telegram voice${PROFILE:+ for profile $PROFILE}: $TONE" \
     || warn "could not set the Telegram voice: send /tone $TONE to the bot${PROFILE:+ of profile $PROFILE}"
@@ -2794,6 +2814,7 @@ install_plugin_for_bot_profile() {
     apply_tone
   elif [ "$PLUGINS_OP_REFUSED" = 1 ]; then
     queue_plugin_op plugins enable "$PLUGIN_NAME"
+    apply_tone
   else
     warn "could not install the plugin in profile $PROFILE: run: hermes -p $PROFILE gateway stop && hermes -p $PROFILE plugins install --force $REPO_FILE_URL#$PLUGIN_NAME && hermes -p $PROFILE gateway start (supervisord: $GW_SUP_STOP)"
   fi

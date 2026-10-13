@@ -57,21 +57,25 @@ affected.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
    deterministic, with no model call, and does exactly one thing: it drops a
    known assistant opener ("Certainly!", "Absolutely!", "Of course!", "Sure
-   thing!", "Great question.") from the very start of the message. It does this
-   only when the whole message has no line starting with a space or tab, no
-   backtick, and no quotation mark: ASCII `'` and `"`, Unicode initial and final
+   thing!", "Great question.") from the very start of the message, taking with
+   it only spaces on the same line and at most one newline. It does this only
+   when the whole message has no line break other than `\n` (no CR, VT, FF,
+   NEL, U+2028 or U+2029), no line starting with whitespace, no backtick, and
+   no quotation mark: ASCII `'` and `"`, Unicode initial and final
    quotes (`“` `”` `‘` `’` `«` `»` `‹` `›` `⸂` `⸃` …), and any other character
    named a quotation mark or apostrophe (`„` `〝` `〟` `＂` …), plus corner
    brackets (`「」『』`).
 
-   Otherwise the reply comes back byte-identical. Headings and bold are never
-   rewritten; the note asks the model not to use them. A contraction counts as
-   a quote, so openers like "I'd be happy to help" are left to the note too. A
-   reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is
-   never changed, and the polish never empties a reply. A seeded property test
-   generates 300 messages mixing code, links and every quote form. For the ones
-   it checks, it requires the output to be an exact suffix of the input: the
-   whole input whenever code or a quote is present.
+   If the opener is followed by a blank line or other whitespace, or the reply
+   is only the opener, it is left alone too. Otherwise the reply comes back
+   byte-identical. Headings and bold are never rewritten; the note asks the
+   model not to use them. A contraction counts as a quote, so openers like "I'd
+   be happy to help" are left to the note too. A reply that mentions a silence
+   word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is never changed, and the polish
+   never empties a reply. A seeded property test generates 300 messages mixing
+   code, links, every quote form and every line break. For the ones it checks,
+   it requires the output to be an exact suffix of the input: the whole input
+   whenever code, a quote, indentation or a non-`\n` line break is present.
 3. **Check-ins and the morning brief** already carry the same rules
    (`alans-way/voice.py` holds the shared wording `proactivity.py` uses), so the
    note is not added on top of them; the polish still applies while the voice
