@@ -149,7 +149,7 @@ def build(scenario, voice_on):
         user = "\n".join(scenario.get("history", []) + [scenario["user"]])
     if voice_on:
         platform, chat = ("cron", "") if kind == "cron" else ("telegram", "group" if kind == "group" else "dm")
-        context = V.note_for(user, platform=platform, chat_type=chat, cron_targets=["telegram"], on=True)
+        context = V.note_for(user, platform=platform, chat_type=chat, on=True)
         if context:
             user += "\n\n" + context
     return system, user, (V.polish if voice_on else (lambda text: text))

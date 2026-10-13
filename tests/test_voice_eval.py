@@ -48,7 +48,7 @@ class DryRunTests(unittest.TestCase):
                          [("thanks", "before"), ("thanks", "after"), ("cron_health", "before"), ("cron_health", "after")])
         after = {r["id"]: r["request"]["messages"][0]["content"] for r in rows if r["voice"] == "after"}
         self.assertIn("[Texting voice]", after["thanks"])
-        self.assertIn("sent to them as a Telegram message", after["cron_health"])
+        self.assertNotIn("[Texting voice]", after["cron_health"])   # cron keeps the default voice
 
 
 if __name__ == "__main__":

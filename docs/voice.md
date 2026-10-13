@@ -53,26 +53,24 @@ affected.
    - a one-line heads-up before a long multi-step task;
    - a closing question only when there's a real next step.
 
-   In groups it also keeps replies shorter and talks to whoever asked. In cron
-   runs it treats the result as a Telegram message.
+   In groups it also keeps replies shorter and talks to whoever asked.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
-   deterministic, with no model call. It:
-   - drops leading filler such as "Certainly!", "Great question", "I'd be happy to
-     help" and "As an AI,";
-   - turns markdown headings into plain lines;
-   - unbolds a paragraph that is mostly bold.
+   deterministic, with no model call, and minimal by design:
+   - it drops a known assistant opener ("Certainly!", "Great question", "I'd be
+     happy to help", "As an AI, I'd be happy to help") only when it is the
+     message's very first sentence;
+   - only when the message contains no backtick, no `](` link, no `[label]:`
+     reference, no quote character (`'` `"` `«` `»` `‹` `›` `“` `”` `‘` `’` and
+     similar), no URL, email or HTML tag, and no indented code, blockquote, table
+     or `~~~` fence, it also turns markdown headings into plain lines and unbolds
+     a paragraph that is mostly bold.
 
-   Before any rewrite it sets aside, byte for byte:
-   - fenced code (an unclosed fence protects the rest), indented code, tables
-     and blockquotes;
-   - code spans of any backtick count, including ones that cross lines;
-   - URLs, link targets, HTML tags and email addresses;
-   - every quotation form: "…", “…”, „…“, ‚…‘, ‘…’, '…', «…», ‹…›, »…«, 「…」, 『…』.
-
-   An opening backtick or quote with no close protects everything after it. A
-   reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) or
-   holds `<pre>`/`<code>` is left exactly as written, and it never empties a
-   reply. When in doubt, it changes nothing.
+   Anything else stays exactly as written. A contraction like "don't" counts as
+   a quote character, so most conversational replies only ever lose an opener.
+   A reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is
+   never changed, and the polish never empties a reply. A seeded property test
+   checks 290 random messages mixing code, links and quotes and requires the
+   output to match the input byte for byte, apart from a leading opener.
 3. **Check-ins and the morning brief** already carry the same rules
    (`alans-way/voice.py` holds the shared wording `proactivity.py` uses), so the
    note is not added on top of them; the polish still applies while the voice
@@ -94,8 +92,7 @@ Checked against the Hermes source this release targets.
 | The bot's reply in a DM, group, forum topic or channel, including groups with several bots | note + polish |
 | Check-ins and the morning brief (injected turns) | their own prompt (same rules) + polish |
 | Agent-notify / async-completion turns | note + polish |
-| Cron jobs whose every destination is Telegram | note + polish |
-| Cron jobs that also deliver elsewhere (Discord, email, local) | nothing: Hermes sends one shared result to every destination, so styling it for Telegram would style the others too |
+| Cron jobs, including ones that deliver only to Telegram | nothing for now (see below) |
 | Interim lines the model writes alongside tool calls (how a CAPTCHA or handback ping usually goes out mid-task) | the turn's note shapes them; the polish can't reach them |
 | Streaming (off by default) | early chunks show raw text; the final edit shows the polished reply |
 
@@ -108,8 +105,10 @@ No supported Hermes hook reaches these, so the plugin does not touch them:
   failure notices (fixed Hermes text from its locale catalog);
 - `hermes send` and other direct sends. Current Hermes has no model-callable
   `send_message` tool, and these paths run no plugin hook;
-- a cron run after Hermes compacts it mid-run: the session id changes and the
-  job can no longer be identified, so that run keeps the default voice.
+- cron results. Hermes sends one shared result to every destination of a job,
+  and gives hooks no public way to see those destinations (the target list is
+  only reachable through a private Hermes function, which this repo doesn't
+  import). Cron runs keep the default voice until Hermes exposes it.
 
 Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the
@@ -129,9 +128,10 @@ the voice.
   `on_interim_message` can only observe.
 - No way to split a final reply into 2-3 messages (for example at blank lines)
   other than the length limit.
-- Cron delivers one result to every destination, so per-destination styling
-  isn't possible. Hooks also get no job id or target list; the plugin parses
-  the job id from the cron session id and asks Hermes' own resolver.
+- Cron gives hooks no public view of a job's destinations, and delivers one
+  result to all of them. Exposing the job id and its full target list in hook
+  kwargs (or per-destination results) would let cron reports that go only to
+  Telegram use the voice.
 - `pre_llm_call` has no `chat_type` kwarg or group member count. The plugin reads
   the chat type from the session context and treats every Telegram group alike.
 - With streaming split across several messages, the polished final edit lands
@@ -149,7 +149,7 @@ The scenarios include:
 - a technical deep dive;
 - a purchase approval;
 - a CAPTCHA ping;
-- a cron report;
+- a cron report (a control: cron keeps the default voice for now);
 - a multi-bot group;
 - an error;
 - a check-in and the brief.

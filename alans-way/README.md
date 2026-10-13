@@ -24,11 +24,11 @@ setup page and walks through the rest. It does not replace this plugin.
 - **Turn hooks see every session:** `pre_llm_call`/`post_llm_call` fire for every
   session's turns; the plugin only compares the bound chat and persists only its
   timestamps.
-- **Texting voice rewrites Telegram replies:** on turns bound for Telegram (a
-  Telegram chat, or a cron job whose every destination is Telegram) it appends
-  a style note to the model's turn and rewrites the final reply: leading
-  filler, headings and walls of bold go, while code, quotes, links and numbers
-  are left alone. Fixed Hermes messages (approvals, errors, progress) are never
+- **Texting voice rewrites Telegram replies:** on Telegram turns it appends a
+  style note to the model's turn and may rewrite the final reply: a leading
+  "Certainly!"-style opener goes, and only in a message with no code, link or
+  quotation character, headings and walls of bold are flattened. Cron runs keep
+  the default voice. Fixed Hermes messages (approvals, errors, progress) are never
   touched. It is on by default; `/tone default` or
   `hermes tone default` turns it off per profile. It never writes SOUL.md or
   config.yaml.

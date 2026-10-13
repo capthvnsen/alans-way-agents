@@ -5,6 +5,7 @@ from unittest.mock import patch
 import importlib
 import json
 import os
+import random
 import sys
 import tempfile
 import unittest
@@ -16,90 +17,110 @@ V = importlib.import_module("alans_way_idle_test.voice")
 
 
 class PolishTests(unittest.TestCase):
-    def test_strips_leading_tics(self):
+    def test_drops_a_known_opener_only_as_the_first_sentence(self):
         for raw, want in (
             ("Certainly! The deploy is green.", "The deploy is green."),
             ("Great question! Obsidian, because your notes stay local.",
              "Obsidian, because your notes stay local."),
-            ("Sure thing! Great question. I'd be happy to help with that. It's at 3pm.", "It's at 3pm."),
-            ("As an AI, I can't feel the rain, but it's 12°C there.", "I can't feel the rain, but it's 12°C there."),
-            ("Absolutely! Done.", "Done."),
+            ("I'd be happy to help with that. It's at 3pm.", "It's at 3pm."),
+            ("As an AI, I'd be happy to help! It's at 3pm.", "It's at 3pm."),
+            ("Absolutely!\n\nDone.", "Done."),
             ("Certainly! iPhone 17 ships Friday.", "iPhone 17 ships Friday."),
             ("Great question. `git push` first.", "`git push` first."),
+            # Only the first sentence: a second opener stays.
+            ("Sure thing! Great question. Done.", "Great question. Done."),
         ):
             self.assertEqual(V.polish(raw), want)
 
-    def test_keeps_tic_words_that_carry_meaning(self):
+    def test_keeps_openers_anywhere_else_or_with_meaning(self):
         for text in ("Sure, but only if the card is yours.", "I'd be happy to book it once you approve.",
                      "Absolutely. Delete it.", "Of course. It's safe.",
-                     "Certainly not: that would delete prod.", "Great question for Sam, not me."):
+                     "Certainly not: that would delete prod.", "Great question for Sam, not me.",
+                     "As an AI, I can't feel the rain, but it's 12°C there.",
+                     "Done. Certainly! More later.", "'Certainly!' is what they said.",
+                     "Certainly!"):
             self.assertEqual(V.polish(text), text)
 
-    def test_headings_become_plain_lines(self):
+    def test_flattens_headings_and_bold_walls_in_plain_prose(self):
         self.assertEqual(V.polish("## Plan\nShip it.\n### Risks ###\nNone."), "Plan\nShip it.\nRisks\nNone.")
-
-    def test_collapses_bold_walls_but_keeps_one_emphasis(self):
-        wall = "**Status:** **green**. **Tests:** **passing**. **Next:** **deploy**."  # six spans
-        self.assertEqual(V.polish(wall), "Status: green. Tests: passing. Next: deploy.")
+        self.assertEqual(V.polish("**Status:** **green**. **Tests:** **passing**. **Next:** **deploy**."),
+                         "Status: green. Tests: passing. Next: deploy.")
         self.assertEqual(V.polish("**Everything here is bold because the model got excited about it.**"),
                          "Everything here is bold because the model got excited about it.")
-        one = "The deploy failed at **step 3**, the migration. Want me to roll back?"
-        self.assertEqual(V.polish(one), one)
+        for kept in ("The deploy failed at **step 3**, the migration. Want me to roll back?",
+                     "# 4417 is the ticket", "a**2 + b**2 = c**2 and d**2 + e**2 = f**2 + g**2"):
+            self.assertEqual(V.polish(kept), kept)
 
-    def test_never_touches_code_links_numbers_or_quotes(self):
-        cases = [
-            "```python\n# Certainly! a comment\n## not a heading\nx = **kwargs\n```",
-            "Run `**/*.py` then `## keep`.",
-            "See https://example.com/a**b**c#Certainly and [the docs](https://example.com/#heading).",
-            "> **Great question!** said nobody\n> ## quoted heading",
-            'He wrote "**Certainly!** ## Done" and left.',
-            "Total: $1,249.99 for 3 seats, 12.5% off, ref #4417.",
-            "~~~\n**bold** in a tilde fence\n~~~",
-            "# 4417 is the ticket",
-            "    ## indented code\n    x = **a** **b** **c** **d** **e**",
-            "````md\n```\n## inside a nested fence\n```\n````",
-            "a**2 + b**2 = c**2 and d**2 + e**2 = f**2 + g**2",
-            "**Do not** pay it. **Only** I approve. **Never** share the code.",
-            "bad\x009\x00 input **x**",
-        ]
-        for text in cases:
-            with self.subTest(text=text[:30]):
+    def test_any_code_link_or_quote_character_turns_flattening_off(self):
+        wall = "## Head\n**a** **b** **c** **d** **e**"
+        for marker in ("`x`", "[t](u)", "[r]: u", "it's", '"q"', "«q»", "»q«", "‹q›", "“q”", "‘q’",
+                       "https://e.io", "www.e.io", "<b>", "a@b.io", "    code", "> quote", "| t |", "~~~"):
+            with self.subTest(marker):
+                text = f"{wall}\n\n{marker}"
                 self.assertEqual(V.polish(text), text)
 
-    def test_protects_every_code_and_quote_form(self):
-        """Each case has something polish would otherwise rewrite inside the protected span."""
-        cases = [
+    def test_reviewer_cases(self):
+        for text in (
+            "'Certainly!\n## Keep this heading'",
+            "[docs](relative(path)/**one**/**two**/**three**/**four**/**five**)",
+            "See [the docs][d].\n\n[d]: ./guide/**one**/**two**/**three**/**four**/**five**",
+            "## Title\n[d]: <./a/**b**>",
+            "'## unclosed **a** **b** **c** **d** **e**\n## still kept",
+            "»## reverse **a** **b** **c** **d** **e**«",
             "Use ``a ** b ** c ** d ** e ** f`` here.",
-            "Try ``**kwargs`` and ``## not``.",
             "Run `cat <<EOF\n## header line\nEOF` and done.",
-            "He said 'Certainly! **this** **is** **a** **real** **quote**' twice.",
             "Elle a dit «## Titre **gras** **gras** **gras** **gras** **gras**».",
-            "Sie sagte „**eins** **zwei** **drei** **vier** **fünf**“ laut.",
-            "She said ‘## heading’ and ‹**a** **b** **c** **d** **e**›.",
             "「**一** **二** **三** **四** **五**」と言った。",
-            "Mail ops**team**@example.com or see <https://example.com/**a**> and [x](#**y**).",
-            "Unclosed `code with ## heading\n## still code",
-            'An opening " that never closes\n## so this stays',
-            "<pre>## kept</pre>",
-            "| **a** | **b** | **c** | **d** | **e** |\n|---|---|---|---|---|",
-        ]
-        for text in cases:
+            "```md\n## inside a fence\n```",
+            "~~~\n**bold** in a tilde fence\n~~~",
+            "    ## indented code\n    x = **a** **b** **c** **d** **e**",
+        ):
             with self.subTest(text=text[:40]):
                 self.assertEqual(V.polish(text), text)
 
-    def test_rewrites_prose_around_protected_spans(self):
-        self.assertEqual(V.polish("Certainly! ## Fix\nRun ``a ** b`` then 'quote ## x'."),
-                         "Fix\nRun ``a ** b`` then 'quote ## x'.")
-        self.assertEqual(V.polish("Use ``**a** **b**`` here. **x** **y** **z** **w** **v**"),
-                         "Use ``**a** **b**`` here. x y z w v")
-        self.assertEqual(V.polish("It's Sam's **one** **two** **three** **four** **five** pick, don't worry."),
-                         "It's Sam's one two three four five pick, don't worry.")
+    def test_removing_an_opener_never_unlocks_flattening(self):
+        for rest in ("[ref]: ./a\n\n# Heading **a** **b** **c** **d** **e**", "> quoted\n## Heading"):
+            self.assertEqual(V.polish("Certainly! " + rest), rest)
 
-    def test_mixed_reply_only_changes_prose(self):
-        raw = ("Certainly! Here's the fix.\n\n## Steps\n\n```sh\n## keep me\ngit push\n```\n\n"
-               "Docs: https://example.com/**x**")
-        self.assertEqual(V.polish(raw), "Here's the fix.\n\nSteps\n\n```sh\n## keep me\ngit push\n```\n\n"
-                                        "Docs: https://example.com/**x**")
+    def test_property_code_links_and_quotes_come_back_byte_identical(self):
+        rng = random.Random(93)
+        nasty = ["## h", "**a** **b** **c** **d** **e**", "Certainly!", "# x", "**", "~~", "\n## n\n"]
+
+        def bit():
+            return rng.choice(nasty + ["x", "y z", "42", "(p)", "/a/", "#1"])
+
+        def inner():
+            return "".join(bit() + rng.choice(["", " ", "\n"]) for _ in range(rng.randint(1, 4))).strip() or "x"
+
+        protected = [
+            lambda: "`" + inner().replace("`", "") + "`",
+            lambda: "``" + inner().replace("`", "") + " ` " + "``",
+            lambda: "```\n" + inner() + "\n```",
+            lambda: "[t](" + inner().replace(")", "").replace("\n", "") + ")",
+            lambda: "[t](https://e.io/" + inner().replace(" ", "").replace("\n", "") + ")",
+            lambda: "\n[ref]: ./" + inner().replace(" ", "").replace("\n", "") + "\n",
+            *[lambda o=o, c=c: o + inner() + c for o, c in
+              (("'", "'"), ('"', '"'), ("«", "»"), ("»", "«"), ("‹", "›"), ("“", "”"), ("‘", "’"),
+               ("„", "“"), ("「", "」"), ("'", ""), ('"', ""))],
+        ]
+        checked = 0
+        for n in range(300):
+            pieces = [rng.choice(protected)() for _ in range(rng.randint(1, 3))]
+            prose = [inner() for _ in range(rng.randint(0, 3))]
+            parts = pieces + prose
+            rng.shuffle(parts)
+            body = "\n".join(parts).lstrip()
+            opener = rng.choice(["", "Certainly! ", "Great question.\n", "I'd be happy to help! "])
+            text = opener + body
+            if not body.strip() or V._SILENCE.search(text) or V._OPENER.match(body):
+                continue
+            out = V.polish(text)
+            with self.subTest(n=n, text=text[:60]):
+                for piece in pieces:
+                    self.assertIn(piece.strip(), out)
+                self.assertIn(out, (text, body))
+            checked += 1
+        self.assertGreaterEqual(checked, 200)
 
     def test_approval_and_handback_texts_pass_unchanged(self):
         for text in (
@@ -113,8 +134,7 @@ class PolishTests(unittest.TestCase):
         ):
             self.assertEqual(V.polish(text), text)
 
-    def test_never_empties_a_reply(self):
-        self.assertEqual(V.polish("Certainly!"), "Certainly!")
+    def test_never_empties_or_silences_a_reply(self):
         self.assertEqual(V.polish(""), "")
         self.assertEqual(V.polish("## "), "## ")
         for text in ("## SILENT", "Certainly! NO_REPLY", "# 静默", "Certainly! The silent auction is at 6."):
@@ -135,8 +155,8 @@ def env(**values):
 
 
 class NoteTests(unittest.TestCase):
-    def turn(self, v, platform, chat_type="dm", targets=(), text="hey can you check my calendar tomorrow"):
-        with env(HERMES_SESSION_CHAT_TYPE=chat_type), patch.object(V, "cron_platforms", return_value=list(targets)):
+    def turn(self, v, platform, chat_type="dm", text="hey can you check my calendar tomorrow"):
+        with env(HERMES_SESSION_CHAT_TYPE=chat_type):
             return v.on_turn_start(user_message=text, platform=platform, session_id="s", sender_id="42")
 
     def test_on_by_default_for_every_telegram_chat(self):
@@ -151,22 +171,8 @@ class NoteTests(unittest.TestCase):
             self.assertIsNone(self.turn(voice(), platform))
         self.assertIsNone(self.turn(voice("default"), "telegram"))
 
-    def test_cron_only_when_every_destination_is_telegram(self):
-        self.assertIn("sent to them as a Telegram message", self.turn(voice(), "cron", "", ["telegram"])["context"])
-        self.assertIsNotNone(self.turn(voice(), "cron", "", ["telegram", "telegram"]))
-        for targets in (["telegram", "discord"], ["discord", "telegram"], ["email"], []):
-            with self.subTest(targets):
-                self.assertIsNone(self.turn(voice(), "cron", "", targets))
-
-    def test_cron_targets_come_from_the_job(self):
-        self.assertEqual(V.cron_platforms("agent:main:telegram:dm:42"), [])
-        self.assertEqual(V.cron_platforms(None), [])
-        with patch.dict(sys.modules, {"cron": SimpleNamespace(), "cron.jobs": SimpleNamespace(
-                get_job=lambda job_id: {"id": job_id} if job_id == "daily_health" else None),
-                "cron.scheduler_delivery": SimpleNamespace(_resolve_delivery_targets=lambda job: [
-                    {"platform": "telegram", "chat_id": "1"}, {"platform": "discord", "chat_id": "2"}])}):
-            self.assertEqual(V.cron_platforms("cron_daily_health_20261013_081000"), ["telegram", "discord"])
-            self.assertEqual(V.cron_platforms("cron_gone_20261013_081000"), [])
+    def test_cron_keeps_the_default_voice(self):
+        self.assertIsNone(self.turn(voice(), "cron", ""))
 
     def test_check_ins_and_the_brief_keep_their_own_prompt(self):
         for text in (P.MARKER + " It has been 3 hours", P.BRIEF_MARKER + " The user's day is starting"):
@@ -196,12 +202,8 @@ class OutputTests(unittest.TestCase):
         self.assertIsNone(voice("default").on_output(response_text=self.TIC, platform="telegram"))
         self.assertIsNone(voice().on_output(response_text="All good.", platform="telegram"))
 
-    def test_cron_results_are_polished_only_when_every_destination_is_telegram(self):
-        for targets, polished in ((["telegram"], True), (["telegram", "discord"], False),
-                                  (["discord", "telegram"], False), (["email"], False)):
-            with self.subTest(targets), patch.object(V, "cron_platforms", return_value=targets):
-                out = voice().on_output(response_text=self.TIC, platform="cron", session_id="cron_j_20261013_081000")
-                self.assertEqual(out, "Plan\nShip it." if polished else None)
+    def test_cron_results_are_not_polished(self):
+        self.assertIsNone(voice().on_output(response_text=self.TIC, platform="cron", session_id="cron_j_20261013_081000"))
 
     def test_silence_markers_pass_through(self):
         for marker in ("[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[静默]", "沉默"):
