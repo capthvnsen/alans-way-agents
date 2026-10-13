@@ -18,8 +18,9 @@ holds what your agents need to think and act:
   `scripts/workspace-router.cjs`, which probes your computer first and falls
   back to the VPS browser when it is asleep. Pass `--host-os windows` or `--host-os linux`
   when the user's computer is not a Mac (default `mac`).
-- **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
-  inside the plugin so agents know how to use the tools correctly.
+- **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations` and
+  `web-errands` skills ship inside the plugin so agents know how to use the
+  tools correctly.
 - **`alans-way-computer/`**: a second plugin (v0.21.0): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
@@ -48,6 +49,16 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
+- **Web errands stop at your Approve tap.** The `web-errands` skill drives
+  the research → stage → commit → verify → report loop for shopping, cart
+  comparison, booking and travel, job applications, form and civic-portal
+  filing, cancellations, refunds and document-driven claims — in your real
+  browser session on your computer, or on the VPS browser while it's
+  asleep. Every purchase, booking, send, submission and deletion waits for
+  the commit gate's Approve prompt; a CAPTCHA, sign-in or card-entry wall
+  hands the tab back to you with a reason instead of working past it, and
+  after each commit the bot reads the confirmation, captures the reference
+  number and sends a Telegram receipt.
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.

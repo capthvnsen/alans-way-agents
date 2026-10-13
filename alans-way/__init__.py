@@ -40,6 +40,7 @@ def register(ctx, *, legacy_home=None, background=True):
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
+    ctx.register_skill("web-errands", skills / "web-errands" / "SKILL.md")
     if not _primary_profile(ctx):
         return None
     runtime = Proactivity(ctx, legacy_home=legacy_home or _owning_home())
