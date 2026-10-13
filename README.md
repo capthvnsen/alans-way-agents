@@ -50,12 +50,11 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   Details in [docs/proactivity.md](docs/proactivity.md).
 - **Telegram replies read like texts.** In every profile the plugin is enabled
   in, the bot's Telegram replies use a short, warm texting voice. A minimal
-  send-time polish drops a leading "Certainly!"-style opener and, only in a
-  message with no code, link or quotation character, flattens headings and
-  walls of bold. Fixed Hermes messages (approval cards, errors, progress) and
-  cron reports are not changed. It layers on top of your SOUL.md and
-  `agent.system_prompt` and never edits them. `/tone default` turns it off for
-  that bot. Details in [docs/voice.md](docs/voice.md).
+  send-time polish only drops a leading "Certainly!"-style opener, and only
+  from a message with no indented line, backtick or quotation mark. Fixed
+  Hermes messages (approval cards, errors, progress) and cron reports are not
+  changed. It layers on top of your SOUL.md and `agent.system_prompt` and never
+  edits them. `/tone default` turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.

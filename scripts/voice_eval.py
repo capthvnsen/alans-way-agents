@@ -152,7 +152,9 @@ def build(scenario, voice_on):
         context = V.note_for(user, platform=platform, chat_type=chat, on=True)
         if context:
             user += "\n\n" + context
-    return system, user, (V.polish if voice_on else (lambda text: text))
+    # Production leaves cron results alone (no note, no polish), so the eval does too.
+    polished = voice_on and kind != "cron"
+    return system, user, (V.polish if polished else (lambda text: text))
 
 
 SDK_VERSION = "0.87.0"   # the anthropic release this request shape is checked against

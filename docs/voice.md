@@ -55,22 +55,23 @@ affected.
 
    In groups it also keeps replies shorter and talks to whoever asked.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
-   deterministic, with no model call, and minimal by design:
-   - it drops a known assistant opener ("Certainly!", "Great question", "I'd be
-     happy to help", "As an AI, I'd be happy to help") only when it is the
-     message's very first sentence;
-   - only when the message contains no backtick, no `](` link, no `[label]:`
-     reference, no quote character (`'` `"` `«` `»` `‹` `›` `“` `”` `‘` `’` and
-     similar), no URL, email or HTML tag, and no indented code, blockquote, table
-     or `~~~` fence, it also turns markdown headings into plain lines and unbolds
-     a paragraph that is mostly bold.
+   deterministic, with no model call, and does exactly one thing: it drops a
+   known assistant opener ("Certainly!", "Absolutely!", "Of course!", "Sure
+   thing!", "Great question.") from the very start of the message. It does this
+   only when the whole message has no line starting with a space or tab, no
+   backtick, and no quotation mark: ASCII `'` and `"`, Unicode initial and final
+   quotes (`“` `”` `‘` `’` `«` `»` `‹` `›` `⸂` `⸃` …), and any other character
+   named a quotation mark or apostrophe (`„` `〝` `〟` `＂` …), plus corner
+   brackets (`「」『』`).
 
-   Anything else stays exactly as written. A contraction like "don't" counts as
-   a quote character, so most conversational replies only ever lose an opener.
-   A reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is
+   Otherwise the reply comes back byte-identical. Headings and bold are never
+   rewritten; the note asks the model not to use them. A contraction counts as
+   a quote, so openers like "I'd be happy to help" are left to the note too. A
+   reply that mentions a silence word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is
    never changed, and the polish never empties a reply. A seeded property test
-   checks 290 random messages mixing code, links and quotes and requires the
-   output to match the input byte for byte, apart from a leading opener.
+   generates 300 messages mixing code, links and every quote form. For the ones
+   it checks, it requires the output to be an exact suffix of the input: the
+   whole input whenever code or a quote is present.
 3. **Check-ins and the morning brief** already carry the same rules
    (`alans-way/voice.py` holds the shared wording `proactivity.py` uses), so the
    note is not added on top of them; the polish still applies while the voice

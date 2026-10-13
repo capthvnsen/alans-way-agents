@@ -50,6 +50,13 @@ class DryRunTests(unittest.TestCase):
         self.assertIn("[Texting voice]", after["thanks"])
         self.assertNotIn("[Texting voice]", after["cron_health"])   # cron keeps the default voice
 
+    def test_cron_after_uses_the_identity_transform_like_production(self):
+        cron = next(s for s in E.SCENARIOS if s["kind"] == "cron")
+        _, _, deliver = E.build(cron, True)
+        self.assertEqual(deliver("Certainly! Disk is at 91%."), "Certainly! Disk is at 91%.")
+        chat = next(s for s in E.SCENARIOS if s["id"] == "thanks")
+        self.assertEqual(E.build(chat, True)[2]("Certainly! Anytime."), "Anytime.")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,10 @@
 """The texting voice for the bot's own replies on Telegram: one set of tone rules shared with
-check-ins and the brief, a per-turn note for the model, and a deterministic polish of the final
-reply. Fixed Hermes messages (approvals, errors, progress) have no hook and are never touched.
-On by default; `/tone default` turns it off for this profile. It layers on top of SOUL.md and
-agent.system_prompt and never writes either."""
+check-ins and the brief, a per-turn note for the model, and a minimal send-time polish that only
+drops a leading assistant opener. Fixed Hermes messages (approvals, errors, progress) have no
+hook and are never touched. On by default; `/tone default` turns it off for this profile. It
+layers on top of SOUL.md and agent.system_prompt and never writes either."""
 import re
+import unicodedata
 
 STATE_KEY = "voice"
 MODES = ("texting", "default")
@@ -34,50 +35,36 @@ NOTE = (
 # Hermes suppresses a reply that is (or starts/ends with) one of these; any reply mentioning
 # one is left exactly as written.
 _SILENCE = re.compile(r"silent|no[ _]?reply|静默|沉默", re.IGNORECASE)
-# A known assistant opener, only as the message's very first sentence. "Absolutely." can answer
-# a yes/no question, so the bare words count only with "!".
+# A known assistant opener at the very start of the message. "Absolutely." can answer a yes/no
+# question, so the bare words count only with "!". Openers with an apostrophe ("I'd be happy to
+# help") can never pass the quote check below, so they are left to the voice note.
 _OPENER = re.compile(
-    r"\s*(?:(?:certainly|absolutely|of course|sure thing)!"
-    r"|(?:great question|good question|what a great question)[!.]"
-    r"|(?:as an ai(?: language model| assistant)?, )?i'?d be (?:happy|glad) to help"
-    r"(?: you)?(?: with (?:that|this))?[!.])\s*", re.IGNORECASE)
-# Anything that could be code, a link or a quotation turns off all flattening for the message.
-_UNSAFE = re.compile(
-    r"[`'\"«»‹›“”‘’„‚「」『』]|\]\(|\[[^\]\n]+\]:|[a-z][a-z0-9+.-]*://|\bwww\.|<[a-z/!]|\S@\S"
-    r"|^(?: {4}|\t| {0,3}>|[ \t]*\||[ \t]*~~~)", re.IGNORECASE | re.MULTILINE)
-_HEADING = re.compile(r"^( {0,3})#{1,6}[ \t]+(?=[^\d\s])(.*?)(?:[ \t]+#+)?[ \t]*$", re.MULTILINE)
-_BOLD = re.compile(r"(?<!\w)\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\w)")
+    r"(?:(?:certainly|absolutely|of course|sure thing)!"
+    r"|(?:great question|good question|what a great question)[!.])\s*", re.IGNORECASE)
+_INDENTED_LINE = re.compile(r"^[ \t]", re.MULTILINE)
+_CORNER_QUOTES = "「」『』﹁﹂﹃﹄"
 
 
-def _unbold_wall(paragraph):
-    spans = _BOLD.findall(paragraph)
-    bolded = sum(len(s) for s in spans)
-    visible = len(_BOLD.sub(r"\1", paragraph).strip())
-    # ponytail: five spans, or one span over 80% of a 40+ char paragraph, is a wall; tune here.
-    if len(spans) >= 5 or (spans and visible >= 40 and bolded >= 0.8 * visible):
-        return _BOLD.sub(r"\1", paragraph)
-    return paragraph
+def _is_quote(ch):
+    if ch in "'\"" or ch in _CORNER_QUOTES or unicodedata.category(ch) in ("Pi", "Pf"):
+        return True
+    name = unicodedata.name(ch, "")
+    return "QUOTATION" in name or "APOSTROPHE" in name
 
 
 def polish(text):
-    """The send-time safety net, minimal by design:
-    1. drop a known assistant opener when it is the message's very first sentence;
-    2. only in a message with no code, link or quotation character at all, turn markdown
-       headings into plain lines and unbold walls of bold.
-    Anything else is returned exactly as written."""
-    if not isinstance(text, str) or not text.strip() or _SILENCE.search(text):
+    """The send-time safety net, minimal by design: drop a known assistant opener ("Certainly!",
+    "Great question.") at the very start of the message, and only when
+    the whole message has no indented line, no backtick and no quotation mark. Everything else,
+    including any message with code or quotes, comes back byte-identical. Headings and bold are
+    left to the voice note."""
+    if (not isinstance(text, str) or _SILENCE.search(text) or "`" in text
+            or _INDENTED_LINE.search(text) or any(_is_quote(ch) for ch in text)):
         return text
-    try:
-        out = text
-        m = _OPENER.match(out)
-        if m and out[m.end():].strip():
-            out = out[m.end():]
-        if not _UNSAFE.search(text) and not _UNSAFE.search(out):
-            out = _HEADING.sub(r"\1\2", out)
-            out = "".join(_unbold_wall(part) for part in re.split(r"(\n[ \t]*\n)", out))
-    except Exception:   # a safety net must never block or drop a message
+    m = _OPENER.match(text)
+    if not m or not text[m.end():].strip():
         return text
-    return out if out.strip() and not _SILENCE.search(out) else text
+    return text[m.end():]
 
 
 GROUP = (" This is a group chat, maybe with other bots: answer whoever addressed you, keep it"

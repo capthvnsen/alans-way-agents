@@ -25,12 +25,11 @@ setup page and walks through the rest. It does not replace this plugin.
   session's turns; the plugin only compares the bound chat and persists only its
   timestamps.
 - **Texting voice rewrites Telegram replies:** on Telegram turns it appends a
-  style note to the model's turn and may rewrite the final reply: a leading
-  "Certainly!"-style opener goes, and only in a message with no code, link or
-  quotation character, headings and walls of bold are flattened. Cron runs keep
-  the default voice. Fixed Hermes messages (approvals, errors, progress) are never
-  touched. It is on by default; `/tone default` or
-  `hermes tone default` turns it off per profile. It never writes SOUL.md or
+  style note to the model's turn and may remove one leading "Certainly!"-style
+  opener from the final reply, only when the reply has no indented line,
+  backtick or quotation mark. Nothing else in a reply is ever rewritten. It is
+  on by default; `/tone default` or `hermes tone default` turns it off per
+  profile. Cron runs keep the default voice. It never writes SOUL.md or
   config.yaml.
 - **Operator surfaces:** the plugin registers the `hermes proactivity` and
   `hermes tone` CLIs and the `/proactivity` and `/tone` slash commands. The model tool can only reduce check-ins;
