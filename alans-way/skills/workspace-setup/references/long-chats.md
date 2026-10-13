@@ -54,8 +54,11 @@ Show the current three values and proposed changes for this profile. Record
 them outside the repository for undo. Values differing from Hermes' stock
 defaults (`0`, `8000`, `4096`) are customized and must stay untouched, including
 a trigger already set to `48000`. If the user deliberately chose a stock value,
-preserve that too and skip the option for this profile. Ask for explicit consent
-to the remaining changes; approval of general installation, `--non-interactive`
+preserve that too and skip the option for this profile. `config get` returns
+the merged value, so a trigger that reads `0` cannot be told apart from one the
+user deliberately set to `0`: ask whether pruning was turned off on purpose
+before proposing to enable it. Ask for explicit consent to the remaining
+changes; approval of general installation, `--non-interactive`
 or proactivity does not count. Without consent, finish the read-only report.
 
 After consent, set `PRUNING_CONSENT=yes` for this block and keep `profile` set

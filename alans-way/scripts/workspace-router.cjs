@@ -925,8 +925,9 @@ function appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged) {
 // result, since either may be the agent's only signal that host changed.
 // ctx.botId scopes the resume file; ctx.takeMoveNotice() yields the one-shot
 // failover notice; ctx.restoredNote says which tabs the VPS browser restored;
-// ctx.tabIdChanged rides every VPS result's _meta so an agent holding an old
-// host tab id learns of the change before it acts on that id.
+// ctx.takeTabIdChanged() yields the one-shot id map so the first VPS result
+// after a change names it in _meta — an agent holding an old host tab id
+// learns of the change before it acts on that id.
 function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) {
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile, ctx.botId);
@@ -966,8 +967,11 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
       }
     }
     if (notice && ms !== undefined) notice += ` (took ${ms}ms)`;
-    if (shape) return appendResultMeta(line, shape, host, mac, notice, ms, ctx.tabIdChanged);
-    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, ctx.tabIdChanged));
+    // One change is reported once: only the VPS annotator drains it, since
+    // _meta drops the list for any other host.
+    const tabIdChanged = host === 'vps' && ctx.takeTabIdChanged ? ctx.takeTabIdChanged() : ctx.tabIdChanged;
+    if (shape) return appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged);
+    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, tabIdChanged));
   };
 }
 
@@ -1108,6 +1112,11 @@ async function main() {
     failedOver: false,
     restoredNote: null,
     tabIdChanged: null,
+    takeTabIdChanged() {
+      const changed = this.tabIdChanged;
+      this.tabIdChanged = null;
+      return changed;
+    },
     moveNotice: null,
     takeMoveNotice() {
       const notice = this.moveNotice;
@@ -1375,7 +1384,11 @@ async function main() {
         replayHandshake(spawnVps(continuation.args), pending);
       }
       annotCtx.restoredNote = continuationDetail(continuation, hostName);
-      annotCtx.tabIdChanged = tabIdChanges(continuation, currentTabId, annotCtx.failedOver ? 'handoff' : 'host unreachable');
+      annotCtx.tabIdChanged = tabIdChanges(
+        continuation,
+        (knownTabs.get(currentTabId) || {}).backend === 'computer' ? currentTabId : '',
+        annotCtx.failedOver ? 'handoff' : 'host unreachable',
+      );
       if (annotCtx.failedOver) {
         const notice = continuationNotice(continuation, hostName);
         if (lostSent || !lost.length) annotCtx.moveNotice = notice;

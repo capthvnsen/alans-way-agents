@@ -367,20 +367,38 @@ display_stack_present() {
   have Xvfb || have x11vnc || have Xtigervnc || have x0vncserver || have Xvnc || have websockify
 }
 
-# The noVNC listen port of a running websockify, else nothing. websockify argv
-# is "websockify [opts] [listen_addr:]port target" — the first bare port or
-# addr:port token is the listener.
-websockify_port() {
+# The noVNC listener of a running websockify as "addr:port" (addr empty when it
+# binds every interface), else nothing. websockify argv is
+# "websockify [opts] [listen_addr:]port target" — the first bare port or
+# addr:port token is the listener, but options that carry a value are stepped
+# over first ("--heartbeat 30 6080 ..." would otherwise read 30 as the port).
+websockify_listen() {
   _line="$(pgrep -af websockify 2>/dev/null | head -1)"
   [ -n "$_line" ] || return 1
+  _optarg=0
   for _tok in ${_line#* }; do
+    if [ "$_optarg" = 1 ]; then _optarg=0; continue; fi
     case "$_tok" in
-      *:*) case "${_tok%%:*}" in ''|*[!0-9.]*) continue;; esac; _p="${_tok##*:}";;
-      *) _p="$_tok";;
+      --auth-plugin|--auth-source|--auth-pam-service|--auth-pam-user|--cert|\
+      --heartbeat|--idle-timeout|--key|--key-password|--log-file|--record|\
+      --ssl-target|--timeout|--token-plugin|--token-source|--unix-target|\
+      --web|--wrap-mode) _optarg=1; continue;;
+      --inetd) return 1;; # inetd mode has no listener at all
+      -*) continue;;
+      *:*) _a="${_tok%:*}"; _p="${_tok##*:}"
+           case "$_a" in
+             \[*\]) ;;                                    # bracketed IPv6
+             localhost|ip6-localhost) ;;
+             ''|*[!0-9.:a-fA-F]*) continue;;              # not an IP literal
+           esac;;
+      *) _a=""; _p="$_tok";;
     esac
     case "$_p" in ''|*[!0-9]*) continue;; esac
     [ "$_p" -gt 0 ] 2>/dev/null && [ "$_p" -le 65535 ] 2>/dev/null || continue
-    echo "$_p"; return 0
+    # A listener addr of only zeros, dots and colons binds every interface.
+    [ -n "$(printf %s "$_a" | tr -d '[]0.[:')" ] || _a=""
+    case "$_a" in \[*) ;; *:*) _a="[$_a]";; esac
+    echo "$_a:$_p"; return 0
   done
   return 1
 }
@@ -921,7 +939,8 @@ check_browser_cdp() {
 check_display_stack() {
   [ "$GUEST_OS" = Linux ] || return 0
   [ "$SKIP_BROWSER" = 0 ] || { skip "display stack (--skip-browser)"; return 0; }
-  _wsport="$(websockify_port || true)"
+  _ws="$(websockify_listen || true)"
+  _wsport="${_ws##*:}"; _wsaddr="${_ws%:*}"
   if display_live; then
     ok "a desktop display is live (DISPLAY=$(detect_display))"
   elif [ -n "$_wsport" ]; then
@@ -934,8 +953,12 @@ check_display_stack() {
     return 0
   fi
   if [ -n "$_wsport" ]; then
-    _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
-    say "  the remote desktop viewer is at http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+    if [ -n "$_wsaddr" ]; then
+      say "  the remote desktop viewer is at http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
+    else
+      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+      say "  the remote desktop viewer is at http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+    fi
   fi
 }
 
@@ -960,7 +983,9 @@ for line in lines:
     words = line.split("#", 1)[0].split()
     if not words:
         continue
-    key, args = words[0].lower(), [w.lower() for w in words[1:]]
+    head, _, eq_arg = words[0].partition("=")
+    key = head.lower()
+    args = ([eq_arg.lower()] if eq_arg else []) + [w.lower() for w in words[1:]]
     if key == "host":
         active = (any(not p.startswith("!") and fnmatch.fnmatchcase(host, p) for p in args)
                   and not any(p.startswith("!") and fnmatch.fnmatchcase(host, p[1:]) for p in args))
@@ -2604,10 +2629,15 @@ if [ "$SKIP_BROWSER" = 0 ]; then
     say "  automatic sign-in (run netplwiz) so a reboot brings everything back."
   elif display_stack_present; then
     ok "a display stack is present (DISPLAY=${BROWSER_DISPLAY:-:99})"
-    _wsport="$(websockify_port || true)"
+    _ws="$(websockify_listen || true)"
+    _wsport="${_ws##*:}"; _wsaddr="${_ws%:*}"
     if [ -n "$_wsport" ]; then
-      _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
-      say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+      if [ -n "$_wsaddr" ]; then
+        say "  remote desktop is already serving: http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
+      else
+        _tsip="$(have "$TAILSCALE" && "$TAILSCALE" ip -4 2>/dev/null | head -1 || true)"
+        say "  remote desktop is already serving: http://${_tsip:-<this-host>}:$_wsport/vnc.html"
+      fi
     fi
   else
     say "  no display stack detected (Xvfb, x11vnc, TigerVNC, or websockify): for the VPS"

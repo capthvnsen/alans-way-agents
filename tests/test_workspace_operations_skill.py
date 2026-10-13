@@ -199,7 +199,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("If an action still fails, the error names the VPS tab. Use that tab.", self.normalized)
         self.assertIn("If that error lists controls, use one of those refs.", self.normalized)
         self.assertIn("The connector opens the last page there when the Mac drops.", self.normalized)
-        self.assertIn("every VPS result's `_meta.workspace.tabIdChanged` lists one", self.normalized)
+        self.assertIn("the first VPS result's `_meta.workspace.tabIdChanged` lists one", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
         self.assertIn("A closed laptop is not this handoff.", self.normalized)

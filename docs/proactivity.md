@@ -94,9 +94,10 @@ hermes cron create '0 18 * * 0' --name weekly-time-saved --deliver telegram \
   "Write my weekly time-saved report. Use session_search and memory to find what you actually did for me in the last 7 days: tasks finished, messages drafted, research done, problems fixed. Skip chatter and anything you only offered or planned. List each item on one line with your estimate of the minutes it saved me compared with doing it by hand, then a total in hours. Keep estimates conservative and say they are estimates. Under 15 lines. If you did nothing useful this week, reply exactly [SILENT]."
 ```
 
-It runs Sundays at 18:00 in the gateway's timezone and goes to your Telegram
-home channel. The minutes are the bot's estimates, not measurements. `hermes
-cron list` shows the job's ID; `hermes cron run <id>` sends one now and `hermes
+It runs Sundays at 18:00 in the configured Hermes timezone (or the server's
+local time), and goes to your Telegram home channel. The minutes are the
+bot's estimates, not measurements. `hermes cron list` shows the job's ID;
+`hermes cron run <id>` queues one for the next tick and `hermes
 cron remove <id>` turns it off.
 
 ## How it works
