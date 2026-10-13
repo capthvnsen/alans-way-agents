@@ -880,6 +880,124 @@ function rewriteTabDefaults(result) {
   }
 }
 
+// The commit gate. A cua_alans_way_action that buys, books, sends, posts,
+// submits, deletes or changes an account carries `commit`; the router asks the
+// user to approve it (MCP elicitation, which Hermes shows as chat buttons) and
+// forwards it only on Approve. A click on a control named like one of these
+// without `commit` is refused before it reaches the browser.
+const COMMIT_VERBS = {
+  purchase: 'buy',
+  booking: 'book',
+  send: 'send',
+  post: 'post',
+  submit: 'submit',
+  delete: 'delete',
+  account_change: 'change an account',
+};
+// Control names that commit, and look-alikes that do not (a login or 2FA
+// code, a payment-method picker, an order history link, a filter chip's
+// delete, a saved-address picker, a sign-up form's confirm fields). The list
+// lives in commit-patterns.json so the app's own dispatch check can use the
+// same one; that file says how to read it.
+const COMMIT_PATTERNS = require(path.join(__dirname, 'commit-patterns.json'));
+const SEP = '[\\s_-]+';
+const phrase = (text) => text.split(' ').join(SEP);
+const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PATTERNS.names.map(phrase).join('|')})(?![\\p{L}\\p{N}])|${COMMIT_PATTERNS.namesAnywhere.join('|')}`, 'iu');
+const NOT_COMMIT = new RegExp(COMMIT_PATTERNS.notCommit.map(phrase).join('|'), 'giu');
+const isCommitName = (name) => COMMIT_NAME.test(String(name).replace(NOT_COMMIT, ' '));
+// A selector read as words: #placeOrderBtn and [data-test=place-order] both
+// say "place order".
+const selectorWords = (selector) => selector.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').replace(/[^\p{L}\p{N}]+/gu, ' ');
+// Keys that only move focus, scroll or type a character. Any other key (Enter
+// in any spelling including a raw "\r", Space, Delete, Backspace, a shortcut)
+// may act on the focused control, so it is judged against the page.
+const SAFE_KEYS = /^(?:tab|escape|esc|arrow(?:up|down|left|right)|up|down|left|right|home|end|pageup|pagedown|[\p{L}\p{N}])$/iu;
+const isSafeKey = (step) => typeof step.key === 'string' && SAFE_KEYS.test(step.key)
+  && (!Array.isArray(step.modifiers) || step.modifiers.every((m) => m === 'shift'));
+// Steps aimed at a control, judged by its name. A drag presses on one end
+// and releases on the other, so both ends count; a select fires change.
+const TARGET_STEPS = {
+  click: ['clicks', 'a click'],
+  right_click: ['right-clicks', 'a right-click'],
+  double_click: ['double-clicks', 'a double-click'],
+  drag: ['drags', 'a drag'],
+  select: ['sets', 'setting a value'],
+  press: ['presses a key on', 'a key press'],
+};
+// DevTools calls that only read or set up the view. Any other (Input.*,
+// Runtime.evaluate, a DOM edit) can act on the page, as eval can. A reload or
+// a navigation is judged on its own.
+const READ_ONLY_CDP = /^(?:\w+\.(?:get|describe|query|search|capture|enable|disable)|Emulation\.|Page\.(?:navigate|reload|stopLoading)$)/;
+// A script planted for every later page in the tab outlives the gate's view
+// of the page it was approved on, so agents never get one.
+const BANNED_CDP = /^Page\.addScriptToEvaluateOn(?:NewDocument|Load)$/;
+// Steps that leave the page where it is. After any other step a batch may be
+// on a page the router has not seen.
+const PAGE_STAYS = new Set(['type', 'wait', 'read', 'scroll', 'move', 'viewport']);
+// An address whose path or query reads like an action (/orders/7/delete,
+// ?step=confirm, /checkout/complete, /buy) can commit just by loading.
+// "place" counts only beside "order", since /maps/place/ is an ordinary page.
+const ACTION_URL = new RegExp(`(?<![\\p{L}\\p{N}])(?:confirm|place${SEP}order|order${SEP}place|placeorder|(?:checkout|order)${SEP}complete|pay|buy|submit|delete)(?![\\p{L}\\p{N}])`, 'iu');
+// Whether an address reads like that, on any site, read the way the app
+// reads it (trimmed, and no scheme means https).
+function isActionUrl(url) {
+  let parsed;
+  const address = url.trim();
+  try {
+    parsed = new URL(/^[a-z][\w+.-]*:\/\//i.test(address) ? address : `https://${address}`);
+  } catch {
+    return false;
+  }
+  let words = `${parsed.pathname} ${parsed.search}`;
+  try {
+    words = decodeURIComponent(words);
+  } catch { /* judge it encoded */ }
+  return ACTION_URL.test(selectorWords(words));
+}
+// Tools the gate judges: actions, and opening a tab at an address.
+const GATED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_open']);
+const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
+
+function addCommitParam(result) {
+  const tools = result && result.tools;
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    const props = tool && GATED_TOOLS.has(tool.name) && tool.inputSchema && tool.inputSchema.properties;
+    if (!props || typeof props !== 'object') continue;
+    props.commit = {
+      type: 'object',
+      description: 'Required on the call that places an order, pays, books, sends, posts, publishes, submits, deletes or changes account settings. The user approves it in chat first; it runs only on Approve and is never retried.',
+      properties: {
+        kind: { type: 'string', enum: Object.keys(COMMIT_VERBS) },
+        summary: { type: 'string', maxLength: 200, description: 'What the user is approving, read off the page.' },
+        amount: { type: 'string', description: 'Total as shown, e.g. "40.00".' },
+        currency: { type: 'string' },
+        counterparty: { type: 'string', description: 'Merchant, recipient or venue.' },
+      },
+      required: ['kind', 'summary'],
+    };
+  }
+}
+
+// One line of plain text for the approval card, or '' when unusable.
+const cardText = (value, max) => (typeof value === 'string' || typeof value === 'number'
+  ? String(value).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max)
+  : '');
+
+function cleanCommit(commit) {
+  if (!commit || typeof commit !== 'object' || typeof commit.kind !== 'string' || !Object.hasOwn(COMMIT_VERBS, commit.kind)) return null;
+  if (typeof commit.summary !== 'string' || commit.summary.length > 200) return null;
+  const summary = cardText(commit.summary, 200);
+  if (!summary) return null;
+  return {
+    kind: commit.kind,
+    summary,
+    amount: cardText(commit.amount, 40),
+    currency: cardText(commit.currency, 10),
+    counterparty: cardText(commit.counterparty, 100),
+  };
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
@@ -887,6 +1005,7 @@ function annotateResult(msg, host, mac, notice, ms, tabIdChanged) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
+  addCommitParam(msg.result);
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
     msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
   }
@@ -1236,7 +1355,9 @@ async function main() {
     const reads = [];
     tabMerges.clear();
     for (const [id, req] of pendingRequests) {
-      if (req.via === 'vm') continue;
+      // A commit still awaiting approval was never sent; settleApproval
+      // refuses it once it sees the host changed.
+      if (req.via === 'vm' || req.awaitingApproval) continue;
       if (req.method !== 'tools/call') replay.push(req);
       else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
       else lost.push({ id, at: req.at });
@@ -1501,6 +1622,7 @@ async function main() {
     if (typeof id !== 'string') return;
     knownTabs.delete(id);
     vmTabs.delete(id);
+    tabPages.delete(id);
     if (currentTabId === id) currentTabId = '';
   }
 
@@ -1569,11 +1691,118 @@ async function main() {
   const TAB_DEFAULTED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_snapshot']);
   const TAB_ID = /^[\w-]{1,100}$/;
 
-  function noteKnownTab(id, epoch, backend) {
+  // Per tab, the names behind the element refs replies have shown, the
+  // page's origin, and the commit-looking controls the current page shows:
+  // what the commit gate matches a click against and shows the user. A ref
+  // (e12) names one control for its document's life and keeps it when the
+  // control is renamed, so a later name replaces an earlier one. Everything
+  // resets when the page URL changes: a ref the router has not seen on this
+  // page is refused, a key or a click by position on a page that shows a
+  // commit control may set it off, and one whose controls the router has not
+  // seen in full may hide one.
+  // A snapshot lists the page's frames: one from another site is unreadable,
+  // so input that may land in it cannot be judged (`frame`, unknown until a
+  // snapshot). `visited` is the last address the tab loaded that reads like an
+  // action, which back or forward may load again.
+  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name), full, frame, visited }
+  // Action replies carry only the first 40 controls (the app's own cap, with
+  // unlisted counting the rest), or with generation only what changed; a
+  // snapshot says whether its list was cut.
+  const ACTION_ELEMENT_CAP = 40;
+  function learnTabPage(tabId, data, acted = []) {
+    if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
+    let page = tabPages.get(tabId);
+    if (!page) {
+      page = { names: new Map(), hrefs: new Map(), origin: '', url: '', live: new Set(), full: false };
+      tabPages.set(tabId, page);
+    }
+    const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
+    try {
+      if (typeof url === 'string' && url) {
+        const parsed = new URL(url);
+        page.origin = parsed.origin;
+        parsed.hash = '';
+        if (parsed.href !== page.url) {
+          page.url = parsed.href;
+          page.names = new Map();
+          page.hrefs = new Map();
+          page.live = new Set();
+          page.full = false;
+          page.frame = undefined;
+          if (isActionUrl(page.url)) page.visited = page.url;
+        }
+      }
+    } catch { /* keep the last page a reply named */ }
+    if (Array.isArray(data.elements)) {
+      page.full = data.truncated && typeof data.truncated === 'object'
+        ? !data.truncated.elements
+        : data.elements.length < ACTION_ELEMENT_CAP;
+    } else if (Array.isArray(data.changed) || Array.isArray(data.removed)) {
+      page.full = false;
+    }
+    if (data.truncated && typeof data.truncated === 'object') {
+      const frames = Array.isArray(data.iframes) ? data.iframes : [];
+      const foreign = frames.map((f) => {
+        try {
+          return new URL(f.src).origin;
+        } catch {
+          return 'an unknown site';
+        }
+      }).find((origin) => origin !== page.origin);
+      // The app lists at most 8 frames.
+      page.frame = foreign || (frames.length >= 8 ? 'more frames than it lists' : '');
+    }
+    const overlays = Array.isArray(data.overlays)
+      ? data.overlays.map((o) => o && { ref: o.close, name: o.closeName }) : [];
+    const lists = [data.elements, data.changed, overlays,
+      ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (const el of list) {
+        if (!el || typeof el.ref !== 'string') continue;
+        const name = typeof el.name === 'string' ? el.name : '';
+        page.names.set(el.ref, name);
+        if (typeof el.href === 'string' && el.href) page.hrefs.set(el.ref, el.href);
+        else page.hrefs.delete(el.ref);
+        if (name && isCommitName(name)) page.live.add(cardText(name, 80));
+      }
+    }
+    // A control the call acted on may have been renamed by it. A delta or an
+    // unchanged reply would say so; a list that leaves it out does not, so
+    // its old name is dropped and the next use needs a fresh one.
+    if (Array.isArray(data.elements)) {
+      const listed = new Set(data.elements.map((el) => el && el.ref));
+      for (const ref of acted) {
+        if (listed.has(ref)) continue;
+        page.names.delete(ref);
+        page.hrefs.delete(ref);
+      }
+    }
+    for (const ref of page.names.keys()) {
+      if (page.names.size <= 2000) break;
+      page.names.delete(ref);
+      page.hrefs.delete(ref);
+    }
+  }
+
+  // A full tab description (it names its controller) also says who controls
+  // the tab and whether it waits for the human (handback); a reply that only
+  // names the tab keeps what the last description said. A new control epoch
+  // means someone else had the tab, so what the gate knew of its page is
+  // dropped.
+  function noteKnownTab(id, epoch, backend, info) {
     if (typeof id !== 'string' || !TAB_ID.test(id)) return;
     if (backend === 'vm') vmTabs.add(id);
-    const prev = knownTabs.get(id);
-    knownTabs.set(id, { backend, epoch: Number.isInteger(epoch) ? epoch : prev && prev.epoch });
+    const prev = knownTabs.get(id) || {};
+    const described = info && typeof info === 'object' && typeof info.controller === 'string';
+    const next = Number.isInteger(epoch) ? epoch : prev.epoch;
+    if (Number.isInteger(prev.epoch) && next !== prev.epoch) tabPages.delete(id);
+    knownTabs.set(id, {
+      backend,
+      epoch: next,
+      controller: described ? info.controller : prev.controller,
+      handback: described ? info.handback || null : prev.handback,
+    });
   }
 
   // Every reply shape that names a tab: open and claim answers carry it at
@@ -1583,13 +1812,13 @@ async function main() {
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.tabs)) {
       for (const tab of data.tabs) {
-        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend);
+        if (tab && typeof tab === 'object') noteKnownTab(tab.id, tab.epoch, normalizeHost(tab.host) || backend, tab);
       }
     }
     if (data.tab && typeof data.tab === 'object') {
-      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend);
+      noteKnownTab(data.tab.id, data.tab.epoch, normalizeHost(data.tab.host) || backend, data.tab);
     }
-    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend);
+    noteKnownTab(data.id, data.epoch, normalizeHost(data.host) || backend, data);
     if (typeof data.continuedTab === 'string') noteKnownTab(data.continuedTab, data.continuedEpoch, 'vm');
     forgetClosedTabs(data);
   }
@@ -1608,6 +1837,18 @@ async function main() {
     }
   }
 
+  // The refs an action call aimed at.
+  function actedRefs(req) {
+    if (req.name !== 'cua_alans_way_action') return [];
+    try {
+      const args = JSON.parse(req.line).params.arguments || {};
+      const steps = args.action === 'batch' && Array.isArray(args.steps) ? args.steps : [args];
+      return steps.flatMap((step) => (step ? [step.ref, step.toRef] : [])).filter((ref) => typeof ref === 'string');
+    } catch {
+      return [];
+    }
+  }
+
   function argsTabId(req) {
     try {
       return (JSON.parse(req.line).params.arguments || {}).tabId;
@@ -1620,7 +1861,16 @@ async function main() {
   // reply's own id wins, then a retargeted continued tab, then the id the
   // call named. A successful close forgets its tab entirely.
   function learnTabUse(line, req, backend) {
-    if (line.length > BIG_LINE || !req || req.method !== 'tools/call') return;
+    if (!req || req.method !== 'tools/call') return;
+    if (line.length > BIG_LINE) {
+      // Too big to read: whatever page it shows, the gate has not seen it.
+      const page = TAB_DEFAULTED_TOOLS.has(req.name) && tabPages.get(argsTabId(req));
+      if (page) {
+        page.full = false;
+        for (const ref of actedRefs(req)) page.names.delete(ref);
+      }
+      return;
+    }
     let data;
     try {
       const msg = JSON.parse(line);
@@ -1638,6 +1888,7 @@ async function main() {
     const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
     if (typeof used === 'string' && TAB_ID.test(used)) {
       noteKnownTab(used, undefined, backend);
+      learnTabPage(used, data, actedRefs(req));
       currentTabId = used;
     }
   }
@@ -1831,7 +2082,9 @@ async function main() {
         if (req.via !== 'vm') continue;
         pendingRequests.delete(id);
         noteDead(id);
-        emitToolError(id, 'The VM browser connector stopped. Retry the call.');
+        emitToolError(id, req.committed
+          ? `The VM browser connector stopped. ${COMMIT_LOST}`
+          : 'The VM browser connector stopped. Retry the call.');
       }
     };
     c.on('error', drop);
@@ -1840,13 +2093,390 @@ async function main() {
     process.stderr.write('workspace-router: started the VM browser connector\n');
   }
 
+  // Hermes bounds the whole tool call (setup writes timeout: 120), and the
+  // approval wait is inside it, so the window closes early enough to leave
+  // the action its time. A tap after that changes nothing.
+  const APPROVAL_MS = num('HERMES_ROUTER_APPROVAL_MS', 60000);
+  const decisionLog = path.join(path.dirname(macStateFile), 'commit-decisions.jsonl');
+  const approvals = new Map(); // elicitation id -> { callId, line, child, record, timer }
+  let approvalSeq = 0;
+
+  function logDecision(record, decision) {
+    try {
+      fs.mkdirSync(path.dirname(decisionLog), { recursive: true });
+      fs.appendFileSync(decisionLog, `${JSON.stringify({ ts: new Date().toISOString(), bot: botId, ...record, decision })}\n`, { mode: 0o600 });
+    } catch (e) {
+      process.stderr.write(`workspace-router: could not log a commit decision: ${e.message}\n`);
+    }
+  }
+
+  // Form-mode elicitation: `elicitation: {}` (form implied) or one naming form.
+  function clientElicits() {
+    try {
+      const caps = JSON.parse(handshake.initialize).params.capabilities;
+      const e = caps && caps.elicitation;
+      return Boolean(e && typeof e === 'object' && (Object.keys(e).length === 0 || e.form));
+    } catch {
+      return false;
+    }
+  }
+
+  // What this call (or any batch step) does, read four ways: `acts`
+  // describes each step for the approval card, `commits` says why one looks
+  // like a commit, `unseen` names a ref the router has not seen on this page,
+  // and `unread` says why the router cannot judge a step and what to do. A
+  // control is judged by its name (its ref's, the name it is targeted by, or
+  // its selector's words). Input that cannot be judged that way (a key other
+  // than a plain move or character, a click by position, on an unnamed
+  // control or on a selector that names no commit, page script, a DevTools
+  // call that can act, accepting a page dialog) counts as a commit on a page
+  // that shows a commit control, and is refused on one the router has not
+  // seen in full or that an earlier batch step may have left. Every step runs
+  // on the batch's own tab, whatever tabId a step names, so that is the page
+  // each is judged against. A reload on a commit page may resubmit it, and a
+  // same-site address that reads like an action may commit by loading.
+  const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
+  function clickTargets(args) {
+    const found = { acts: [], commits: [], unseen: null, unread: null, banned: null };
+    const page = tabPages.get(args.tabId);
+    const live = page && page.live.size ? [...page.live][0] : '';
+    const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
+    let moved = false;
+    let typed = false;
+    // Untargeted input (a key with no control named, a point) may land in a
+    // frame from another site; input aimed at a control lands on that control.
+    const blind = (what, untargeted = false) => {
+      if (live) {
+        found.commits.push(`${what} here could set off "${live}"`);
+      } else if (moved) {
+        found.unread = found.unread || `an earlier step in this batch can change the page, so this connector cannot tell what ${what} would do. Send the steps from there as a separate call once you have seen the page`;
+      } else if (untargeted && page && page.frame) {
+        found.unread = found.unread || `this page embeds ${page.frame} in a frame this connector cannot read, so it cannot tell what ${what} would do. Act on the page's own controls by ref or name instead`;
+      } else if (!page || !page.full || (untargeted && page.frame === undefined)) {
+        found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${what} would do. Take a snapshot (raise maxElements if it is cut off) and try again`;
+      }
+    };
+    // A link whose address reads like an action commits when followed.
+    const actionHref = (ref) => {
+      const href = page.hrefs.get(ref);
+      if (href && isActionUrl(href)) found.commits.push(`the link goes to ${cardText(href, 80)}, an address that confirms, orders, pays, submits or deletes`);
+    };
+    const accepts = (step) => step.dialog && typeof step.dialog === 'object' && step.dialog.accept === true;
+    if (args.action === 'batch' && accepts(args)) {
+      found.acts.push('accepts page dialogs');
+      blind('accepting a page dialog');
+    }
+    for (const step of steps) {
+      if (!step || typeof step !== 'object') continue;
+      if (accepts(step)) {
+        found.acts.push('accepts a page dialog');
+        blind('accepting a page dialog');
+      }
+      const safeKey = step.action === 'press' && isSafeKey(step);
+      if (step.action === 'press' && typeof step.key === 'string' && !safeKey) {
+        const key = keyLabel(step.key);
+        found.acts.push(`presses ${key}`);
+        // Typing then Enter in one call sends what was typed (a chat message)
+        // before the page can be read; on its own the key is judged by the page.
+        if (typed && key !== 'Space') found.commits.push(`pressing ${key} right after typing in the same batch could send what was typed. Press it as its own call, or pass commit`);
+        const aimed = [step.ref, step.name, step.selector].some((t) => typeof t === 'string' && t);
+        blind(`pressing ${key}`, !aimed);
+      }
+      if (step.action === 'type') typed = true;
+      const cdpUrl = step.action === 'cdp' && step.method === 'Page.navigate' && step.params && step.params.url;
+      const url = step.action === 'navigate' ? step.url : cdpUrl;
+      if (typeof url === 'string' && isActionUrl(url)) {
+        found.acts.push(`opens ${cardText(url, 80)}`);
+        found.commits.push(`${cardText(url, 80)} looks like an address that confirms, orders, pays, submits or deletes`);
+      }
+      if ((step.action === 'back' || step.action === 'forward') && page && page.visited) {
+        found.acts.push(`goes ${step.action}`);
+        found.commits.push(`going ${step.action} may load ${cardText(page.visited, 80)} again`);
+      }
+      if (step.action === 'cdp' && BANNED_CDP.test(String(step.method))) {
+        found.banned = `${step.method} would run a script on every later page in this tab, out of the commit gate's sight`;
+      }
+      if (step.action === 'reload' || (step.action === 'cdp' && step.method === 'Page.reload')) {
+        found.acts.push('reloads the page');
+        if (live) found.commits.push(`reloading here could resubmit "${live}"`);
+      }
+      if (step.action === 'eval') {
+        found.acts.push('runs a page script');
+        blind('a page script');
+      } else if (step.action === 'cdp' && !READ_ONLY_CDP.test(String(step.method))) {
+        const method = cardText(String(step.method), 60);
+        found.acts.push(`sends ${method}`);
+        blind(`the DevTools call ${method}`, /^Input\./.test(method));
+      }
+      // A click, or a key that acts, follows a link.
+      const follows = step.action === 'click' || step.action === 'double_click' || (step.action === 'press' && !safeKey);
+      const target = TARGET_STEPS[step.action];
+      const ends = !target ? [] : step.action === 'drag'
+        ? [step, { ref: step.toRef, selector: step.toSelector, x: step.toX, y: step.toY }] : [step];
+      for (const end of ends) {
+        const [act, noun] = end === step ? target : ['drops on', 'a drop'];
+        if (typeof end.ref === 'string') {
+          const name = page ? page.names.get(end.ref) : undefined;
+          if (name === undefined) {
+            found.unseen = found.unseen || `ref ${cardText(end.ref, 20)} is not from this page as this connector has seen it`;
+          } else if (!name) {
+            found.acts.push(`${act} an unnamed control`);
+            if (step.action !== 'press') blind(`${noun} on an unnamed control`);
+          } else {
+            found.acts.push(`${act} "${cardText(name, 80)}"`);
+            if (isCommitName(name)) found.commits.push(`"${cardText(name, 80)}" looks like it buys, books, sends, posts, submits or deletes`);
+            else if (follows) actionHref(end.ref);
+          }
+        } else if (typeof end.name === 'string' && end.name) {
+          // The app acts only on a control with exactly this name.
+          const name = cardText(end.name, 80);
+          found.acts.push(`${act} "${name}"`);
+          if (isCommitName(end.name)) found.commits.push(`"${name}" looks like it buys, books, sends, posts, submits or deletes`);
+          else if (page && follows) {
+            const wanted = end.name.trim().toLowerCase();
+            for (const [ref, known] of page.names) if (known.trim().toLowerCase() === wanted) actionHref(ref);
+          }
+        } else if (typeof end.selector === 'string' && end.selector) {
+          const selector = cardText(end.selector, 80);
+          found.acts.push(`${act} ${selector}`);
+          if (isCommitName(selectorWords(end.selector))) found.commits.push(`${selector} looks like it buys, books, sends, posts, submits or deletes`);
+          else if (step.action !== 'press') blind(`${noun} on ${selector}`);
+        } else if (step.action !== 'press' && (typeof end.x === 'number' || typeof end.y === 'number')) {
+          found.acts.push(`${act} at ${end.x},${end.y}`);
+          blind(`${noun} by position`, true);
+        }
+      }
+      const readOnly = step.action === 'cdp' && READ_ONLY_CDP.test(String(step.method)) && !url && step.method !== 'Page.reload';
+      if (!PAGE_STAYS.has(step.action) && !safeKey && !readOnly) moved = true;
+    }
+    return found;
+  }
+
+  const APPROVAL_REFUSALS = {
+    declined: 'declined: the user did not approve this, or no one could be asked (in a scheduled job Hermes declines on its own). It did not run. Do not retry it or reach the same result another way. Leave everything staged up to this step and tell the user it is waiting for them.',
+    approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
+    approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
+    host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
+    page_changed: 'page_changed: the tab left the approved page, or someone else took control of it, while the approval was pending. It did not run. Check the page, then ask again.',
+  };
+
+  // Returns true when the call was refused or is now awaiting approval.
+  function gateCommit(msg, line) {
+    const args = msg.params.arguments;
+    // Opening a tab is judged as navigating to its address.
+    const targets = msg.params.name === 'cua_alans_way_open'
+      ? clickTargets({ action: 'navigate', url: args.url })
+      : clickTargets(args);
+    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread && !targets.banned) return false;
+    unbuffer(line);
+    const page = tabPages.get(args.tabId);
+    const origin = page ? page.origin : '';
+    const refuse = (text) => {
+      pendingRequests.delete(msg.id);
+      emitToolError(msg.id, text);
+      return true;
+    };
+    // The browser would refuse a tab the human holds or a stale epoch anyway;
+    // say so in its words instead of asking the user to approve a call that
+    // cannot run, or hiding the handback behind commit_required.
+    const known = msg.params.name === 'cua_alans_way_action' ? knownTabs.get(args.tabId) : undefined;
+    if (known) {
+      const h = known.handback;
+      if (h && h.state === 'awaiting_human') {
+        return refuse(`awaiting_human: this tab was handed to the human (${cardText(h.reason, 20) || 'other'}). It did not run. Wait until they give it back; read the tab state later.`);
+      }
+      if (known.controller && known.controller !== 'agent') return refuse('human_has_control: the human has this tab. It did not run.');
+      if (Number.isInteger(args.epoch) && Number.isInteger(known.epoch) && args.epoch !== known.epoch) {
+        return refuse(h && h.state === 'human_returned'
+          ? 'human_returned: the human finished and gave this tab back. It did not run. Read the tab state for its fresh epoch and current page.'
+          : 'stale_control_epoch: it did not run. Read the tab state and retry after a fresh snapshot.');
+      }
+    }
+    if (targets.banned) {
+      return refuse(`not_allowed: ${targets.banned}. It did not run, and agents cannot run it.`);
+    }
+    if (targets.unseen) {
+      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
+    }
+    if (args.commit === undefined && !targets.commits.length) {
+      return refuse(`snapshot_required: ${targets.unread}, or pass commit so the user can approve it. It did not run.`);
+    }
+    if (args.commit === undefined) {
+      logDecision({ origin, target: targets.commits[0] }, 'commit_required');
+      return refuse(`commit_required: ${targets.commits[0]}. It did not run. Repeat the call with commit: {kind, summary, amount?, currency?, counterparty?} so the user can approve it.`);
+    }
+    const commit = cleanCommit(args.commit);
+    if (!commit) {
+      logDecision({ origin }, 'commit_invalid');
+      return refuse(`commit_invalid: commit needs kind (${Object.keys(COMMIT_VERBS).join(', ')}) and a summary of 1-200 characters. It did not run.`);
+    }
+    const record = { origin, ...commit };
+    if (!clientElicits()) {
+      logDecision(record, 'approval_unavailable');
+      return refuse(APPROVAL_REFUSALS.approval_unavailable);
+    }
+    const req = pendingRequests.get(msg.id);
+    // The window runs from when the call arrived, so time it spent held
+    // during a failover comes out of the user's share, not the action's.
+    const windowMs = APPROVAL_MS - (req ? Date.now() - req.at : 0);
+    if (windowMs <= 0) {
+      logDecision(record, 'approval_timeout');
+      return refuse(APPROVAL_REFUSALS.approval_timeout);
+    }
+    delete args.commit;
+    const forward = JSON.stringify(msg);
+    if (req) {
+      req.line = forward;
+      req.awaitingApproval = true;
+    }
+    const price = [commit.amount, commit.currency].filter(Boolean).join(' ');
+    const what = [commit.summary, price, commit.counterparty].filter(Boolean).join(' · ');
+    // The origin and the clicked controls are the router's own reading of
+    // the page; everything before them is the agent's description.
+    const acts = targets.acts.length ? ` (${targets.acts.join('; ')})` : '';
+    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${acts}`;
+    const id = `wsr-commit-${++approvalSeq}`;
+    const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), windowMs);
+    timer.unref();
+    // The page and control epoch the user approved; the receipt the app
+    // checks is bound to the same tab and epoch.
+    const bound = msg.params.name === 'cua_alans_way_action' ? { tabId: args.tabId, epoch: args.epoch, origin } : null;
+    approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer, bound, commit });
+    process.stdout.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method: 'elicitation/create',
+      params: {
+        message,
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            approve: {
+              type: 'boolean',
+              title: 'Approve',
+              description: targets.acts.length ? `Approve: ${targets.acts.join('; ')}` : 'Approve this action',
+            },
+          },
+          required: ['approve'],
+        },
+      },
+    })}\n`);
+    return true;
+  }
+
+  // Exactly one outcome per approval: the user's answer, the window closing,
+  // or the client cancelling the call. An approved commit runs once, on the
+  // backend it was asked about; nothing here ever retries it.
+  function settleApproval(id, decision) {
+    const entry = approvals.get(id);
+    if (!entry) return;
+    approvals.delete(id);
+    clearTimeout(entry.timer);
+    if (decision === 'approved' && entry.child !== activeChild) decision = 'host_changed';
+    if (decision === 'approved' && entry.bound) {
+      const known = knownTabs.get(entry.bound.tabId);
+      const page = tabPages.get(entry.bound.tabId);
+      if ((known && Number.isInteger(known.epoch) && known.epoch !== entry.bound.epoch)
+        || (page && page.origin && entry.bound.origin && page.origin !== entry.bound.origin)) decision = 'page_changed';
+    }
+    logDecision(entry.record, decision);
+    if (decision === 'approval_timeout' || decision === 'cancelled') {
+      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: decision } })}\n`);
+    }
+    const req = pendingRequests.get(entry.callId);
+    if (decision === 'cancelled') {
+      pendingRequests.delete(entry.callId);
+      return;
+    }
+    if (decision !== 'approved') {
+      pendingRequests.delete(entry.callId);
+      emitToolError(entry.callId, APPROVAL_REFUSALS[decision]);
+      return;
+    }
+    if (!req) return;
+    delete req.awaitingApproval;
+    req.committed = true;
+    req.at = Date.now();
+    let line = entry.line;
+    if (entry.bound) {
+      // The app runs a commit only with this receipt: one nonce, for this
+      // forward alone, bound to the approved tab and epoch.
+      const msg = JSON.parse(line);
+      msg.params.arguments.approval = {
+        nonce: crypto.randomUUID(),
+        kind: entry.commit.kind,
+        summary: entry.commit.summary,
+        issuedAt: Date.now(),
+        tabId: entry.bound.tabId,
+        epoch: entry.bound.epoch,
+      };
+      line = JSON.stringify(msg);
+    }
+    const out = routeToolCall(line, true);
+    if (out !== null) writeToChild(out);
+  }
+
+  // The client's answer to an elicitation, consumed here even when it comes
+  // too late to count; false for any other line.
+  function answerApproval(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    if (!msg || msg.method !== undefined || typeof msg.id !== 'string' || !msg.id.startsWith('wsr-commit-')) return false;
+    const r = msg.result;
+    // Hermes accepts with empty content; only an explicit approve:false says no.
+    const approved = r && r.action === 'accept' && !(r.content && r.content.approve === false);
+    settleApproval(msg.id, msg.error || !r ? 'approval_unavailable' : approved ? 'approved' : 'declined');
+    return true;
+  }
+
+  // A cancelled call never runs: withdraw its approval, or drop it from the
+  // calls held during a failover before it ever reaches the gate.
+  function cancelCall(callId) {
+    for (const [id, entry] of approvals) {
+      if (entry.callId === callId) settleApproval(id, 'cancelled');
+    }
+    const req = pendingRequests.get(callId);
+    const held = req ? heldCalls.indexOf(req.line) : -1;
+    if (held >= 0) {
+      heldCalls.splice(held, 1);
+      pendingRequests.delete(callId);
+    }
+  }
+
   // A tools/call the router answers or diverts itself. host:"computer" while
   // the session already runs on the VM is a clear error; host:"vm" and calls
   // aimed at a known VM tab go to the VM connector; a tabs call while it runs
   // merges both lists. Anything else falls through to the active backend.
   // Returns the line to forward (rewritten when defaults were injected) or
-  // null when the call was answered or sent on internally.
-  function routeToolCall(line) {
+  // null when the call was answered or sent on internally. `approved` is the
+  // commit gate's own second pass for a call the user just approved.
+  // Only the router's own approved forward may carry an approval receipt,
+  // so one the agent sends is dropped, top level and in every step, before
+  // the call is buffered, held or routed (a failover replays buffered lines).
+  function withoutApproval(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    const args = msg && msg.params && msg.params.arguments;
+    if (!args || typeof args !== 'object') return line;
+    let found = false;
+    for (const target of [args, ...(Array.isArray(args.steps) ? args.steps : [])]) {
+      if (target && typeof target === 'object' && 'approval' in target) {
+        delete target.approval;
+        found = true;
+      }
+    }
+    return found ? JSON.stringify(msg) : line;
+  }
+
+  function routeToolCall(line, approved = false) {
     let msg;
     try {
       msg = JSON.parse(line);
@@ -1877,13 +2507,15 @@ async function main() {
       emitToolError(msg.id, 'Use host "computer" or "vm", or omit it.');
       return null;
     }
-    if (host === 'computer') {
-      if (activeHost !== 'vps') return out;
+    if (host === 'computer' && activeHost === 'vps') {
       pendingRequests.delete(msg.id);
       unbuffer(line);
       emitToolError(msg.id, 'Your computer is offline. Omit host to use the VM browser, or pass host: "vm".');
       return null;
     }
+    // After the host checks, so a call that would fail anyway never asks.
+    if (!approved && msg.params && GATED_TOOLS.has(msg.params.name) && gateCommit(msg, line)) return null;
+    if (host === 'computer') return out;
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
       || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
@@ -1986,11 +2618,16 @@ async function main() {
 
   readline
     .createInterface({ input: process.stdin, crlfDelay: Infinity })
-    .on('line', (line) => {
+    .on('line', (raw) => {
       touchActivity();
+      if (raw.includes('wsr-commit-') && answerApproval(raw)) return;
+      const line = withoutApproval(raw);
       const method = noteClientRpc(line, pendingRequests);
       if (method === 'initialize') handshake.initialize = line;
       else if (method === 'notifications/initialized') handshake.initialized = line;
+      else if (method === 'notifications/cancelled') {
+        try { cancelCall(JSON.parse(line).params.requestId); } catch { /* nothing to withdraw */ }
+      }
       if (!provedAlive) bufferedStdin.push(line);
       if (holdCalls && method === 'tools/call') {
         heldCalls.push(line);
@@ -2034,7 +2671,7 @@ async function main() {
       if (activeHost !== 'mac' || fellBack || shuttingDown) return;
       const now = Date.now();
       for (const [id, req] of pendingRequests) {
-        if (req.method !== 'tools/call') continue;
+        if (req.method !== 'tools/call' || req.awaitingApproval) continue;
         const age = now - req.at;
         const hard = req.batch ? BATCH_HARD_MS : CALL_HARD_MS;
         if (req.via === 'vm') {
@@ -2043,7 +2680,9 @@ async function main() {
           if (age > hard) {
             pendingRequests.delete(id);
             noteDead(id);
-            emitToolError(id, 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
+            emitToolError(id, req.committed
+              ? `The VM browser did not answer the call in time. ${COMMIT_LOST}`
+              : 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
           }
           continue;
         }
@@ -2144,6 +2783,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isCommitName,
+  selectorWords,
   readMacState,
   freshMacState,
   workspaceNotice,

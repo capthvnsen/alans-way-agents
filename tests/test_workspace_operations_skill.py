@@ -54,13 +54,28 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
     def test_never_ask_merely_to_use_browser(self):
         self.assertIn("Never ask merely to use the browser.", self.normalized)
 
-    def test_native_approval_mandatory_actions_listed(self):
+    def test_consequential_actions_carry_a_commit_object(self):
+        self.assertNotIn("Native Hermes approval remains mandatory", self.normalized)
         self.assertIn(
-            "Native Hermes approval remains mandatory for sending external messages/posts, "
-            "purchases, bookings, deletions, financial actions, credential/permission "
-            "changes, destructive actions, and production changes.",
+            "Pass `commit` on the `cua_alans_way_action` call that does it: "
+            "`{kind: purchase|booking|send|post|submit|delete|account_change, summary, "
+            "amount?, currency?, counterparty?}`",
             self.normalized,
         )
+        for phrase in ("the action runs only on Approve",
+                       "Put a whole checkout batch under one `commit`.",
+                       "`declined`, `approval_timeout` and `approval_unavailable` mean it did not run",
+                       "do not retry it or reach the same result another way",
+                       "any key other than Tab, an arrow, Escape or a plain character; any click, drag or select by position, on an unnamed control or by a selector that names no commit; and any `eval` or `cdp` call that can act",
+                       "`eval` cannot commit: finish a purchase, booking, send, post, submit or delete with a click that carries `commit`",
+                       "Typing and then pressing Enter in the same batch needs `commit` too",
+                       "Never send `approval` yourself",
+                       "It does not stop a deliberately hostile agent that also has terminal or file tools",
+                       "Never work around the gate with any tool",
+                       "refused with `snapshot_required`, so snapshot first",
+                       "Ask the user before any other financial, destructive or production change."):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.normalized)
 
     def test_ownership_control_epoch_and_human_takeover_gates_remain(self):
         self.assertIn(
