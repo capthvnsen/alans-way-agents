@@ -571,6 +571,9 @@ function pageUrlFromMessage(msg) {
     // A tab list names every open page. Remembering the first one would
     // replace the page the agent was actually working on.
     if (/"tabs"\s*:/.test(part.text)) continue;
+    // A CAPTCHA or bot-check page (Google's /sorry/, a Cloudflare check) is
+    // not worth continuing: failover would reopen it in the VM browser.
+    if (/"challenge"\s*:\s*\{/.test(part.text)) continue;
     const match = part.text.match(/"url"\s*:\s*"(https:\/\/[^"\\]{8,500})"/);
     if (!match) continue;
     try {
@@ -844,12 +847,18 @@ function workspaceMeta(host, mac, ms, tabIdChanged) {
 }
 
 // Older connectors still declare open's `host` as Ignored; the router routes
-// it now, so the advertised schema says what it does.
+// it now, so the advertised schema says what it does. open's description also
+// carries the search routing: the tool list is in every turn, the skill is not.
+const SEARCH_ROUTING = 'For a plain lookup, use web_search or web_extract when you have them instead of opening a search engine page. '
+  + 'When a search needs the real page, omit host so it runs on the user\'s computer: the VM browser meets far more CAPTCHAs. '
+  + 'Never solve a CAPTCHA: release the tab with reason captcha and ask the user.';
 function rewriteOpenHost(result) {
   const tools = result && result.tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
-    const props = tool && tool.name === 'cua_alans_way_open' && tool.inputSchema && tool.inputSchema.properties;
+    if (!tool || tool.name !== 'cua_alans_way_open') continue;
+    tool.description = tool.description ? `${tool.description} ${SEARCH_ROUTING}` : SEARCH_ROUTING;
+    const props = tool.inputSchema && tool.inputSchema.properties;
     if (props && typeof props === 'object') {
       props.host = { type: 'string', description: '"computer" or "vm"; omit for the default.' };
     }
@@ -1746,6 +1755,10 @@ async function main() {
         }
       }
     } catch { /* keep the last page a reply named */ }
+    // The app puts a challenge on every snapshot or action reply while the
+    // page shows one, so a reply without it means the page has none.
+    const c = data.challenge;
+    page.challenge = c && typeof c === 'object' && typeof c.kind === 'string' ? { kind: c.kind, blocking: c.blocking === true } : null;
     if (Array.isArray(data.elements)) {
       page.full = data.truncated && typeof data.truncated === 'object'
         ? !data.truncated.elements
@@ -2158,7 +2171,9 @@ async function main() {
     let typed = false;
     // Untargeted input (a key with no control named, a point) may land in a
     // frame from another site; input aimed at a control lands on that control.
-    const blind = (what, untargeted = false) => {
+    // Any but a dialog's may also land on a CAPTCHA widget (`blind`).
+    const blind = (what, untargeted = false, dialog = false) => {
+      if (!dialog) found.blind = found.blind || what;
       if (live) {
         found.commits.push(`${what} here could set off "${live}"`);
       } else if (moved) {
@@ -2177,13 +2192,13 @@ async function main() {
     const accepts = (step) => step.dialog && typeof step.dialog === 'object' && step.dialog.accept === true;
     if (args.action === 'batch' && accepts(args)) {
       found.acts.push('accepts page dialogs');
-      blind('accepting a page dialog');
+      blind('accepting a page dialog', false, true);
     }
     for (const step of steps) {
       if (!step || typeof step !== 'object') continue;
       if (accepts(step)) {
         found.acts.push('accepts a page dialog');
-        blind('accepting a page dialog');
+        blind('accepting a page dialog', false, true);
       }
       const safeKey = step.action === 'press' && isSafeKey(step);
       if (step.action === 'press' && typeof step.key === 'string' && !safeKey) {
@@ -2307,6 +2322,16 @@ async function main() {
     }
     if (targets.banned) {
       return refuse(`not_allowed: ${targets.banned}. It did not run, and agents cannot run it.`);
+    }
+    // The app refuses input on a challenge, so asking the user to approve it
+    // would only waste their tap. A whole-page check refuses everything; with
+    // a widget, input the gate cannot place may land on it.
+    const challenge = page && page.challenge;
+    if (challenge && (challenge.blocking || targets.blind)) {
+      const kind = cardText(challenge.kind, 20);
+      return refuse(challenge.blocking
+        ? `challenge_present: this page shows a ${kind} challenge and bots never solve one. It did not run. Release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can; it comes back to you once the challenge clears.`
+        : `challenge_present: this page shows a ${kind} challenge and this connector cannot tell whether ${targets.blind} would land on it; bots never solve one. It did not run. Act on the page's other controls by ref or name, or, if the challenge must be solved to go on, release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can.`);
     }
     if (targets.unseen) {
       return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);

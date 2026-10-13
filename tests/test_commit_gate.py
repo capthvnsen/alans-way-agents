@@ -96,9 +96,13 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       const iframes = /embed/.test(a.url) ? [{ title: 'Scheduler', src: 'https://calendly.example/alan' }]
         : /own-frame/.test(a.url) ? [{ title: 'Map', src: 'https://shop.example/map' }]
         : /many-frames/.test(a.url) ? Array.from({ length: 8 }, (_, i) => ({ title: '', src: 'https://shop.example/f' + i })) : [];
+      // A checkout with a reCAPTCHA box in its form, and Google's whole-page check.
+      const challenge = /captcha/.test(a.url) ? { kind: 'recaptcha', blocking: false }
+        : /sorry/.test(a.url) ? { kind: 'google_sorry', blocking: true } : null;
+      if (challenge) elements.splice(0, 1, { ref: 'e21', role: 'button', name: challenge.blocking ? 'Submit' : 'Place order' });
       navs[a.tabId] = { url: a.url, elements, iframes };
       return reply(m.id, JSON.stringify({ effect: { navigated: true, url: a.url }, generation: 3,
-        ...(n ? { elements } : {}), tab: { id: a.tabId, epoch: ep(a.tabId) } }));
+        ...(n ? { elements } : {}), ...(challenge ? { challenge } : {}), tab: { id: a.tabId, epoch: ep(a.tabId) } }));
     }
     // Continue becomes Place order on the same control; Apply coupon leaves
     // the list the reply carries.
@@ -771,6 +775,39 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(self.actions(), [])
         self.ran(self.act(action="press", ref="e9", key="Tab"))
         self.ran(self.act(action="click", ref="e10"))
+
+    def test_input_that_may_land_on_a_captcha_is_refused_before_anyone_is_asked(self):
+        self.open_checkout()
+        self.ran(self.act(action="navigate", url="https://shop.example/captcha-form"))
+        for args in ({"action": "click", "x": 120, "y": 300},
+                     {"action": "click", "x": 120, "y": 300, "commit": PURCHASE},
+                     {"action": "press", "key": "Enter"},
+                     {"action": "eval", "code": "document.querySelector('iframe').click()"}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(**args), "challenge_present")
+                self.assertIn('recaptcha challenge', self.text(msg))
+                self.assertIn('reason "captcha"', self.text(msg))
+                self.assertNotIn("commit_required", self.text(msg))
+        self.assertEqual(self.decisions(), [])
+        # The rest of the page is still the bot's: a named commit asks as before.
+        self.refused(self.act(action="click", ref="e21"), "commit_required")
+        call = self.act(action="click", ref="e21", commit=PURCHASE)
+        self.answer(self.recv(), "decline")
+        self.refused(call, "declined")
+        self.assertEqual(self.actions()[-1]["action"], "navigate")
+        # A reply without the challenge means it has cleared.
+        self.ran(self.act(action="scroll", y=0))
+        self.refused(self.act(action="click", x=120, y=300), "commit_required")
+
+    def test_a_whole_page_check_refuses_its_commit_words(self):
+        self.open_checkout()
+        self.ran(self.act(action="navigate", url="https://www.google.com/sorry/index?continue=x"))
+        for args in ({"action": "click", "ref": "e21"}, {"action": "click", "name": "Submit", "commit": PURCHASE}):
+            with self.subTest(args=args):
+                msg = self.refused(self.act(**args), "challenge_present")
+                self.assertIn("google_sorry challenge", self.text(msg))
+        self.assertEqual(self.actions()[-1]["action"], "navigate")
+        self.assertEqual(self.decisions(), [])
 
     def test_a_tab_the_human_holds_is_refused_in_its_own_words(self):
         self.open_checkout()
