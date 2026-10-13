@@ -894,31 +894,16 @@ const COMMIT_VERBS = {
   delete: 'delete',
   account_change: 'change an account',
 };
-// Control names that commit. Words may be split by spaces, dashes or
-// underscores ("Buy-now"); a match must not touch another letter or digit, in
-// any script. Japanese has no word breaks, so its phrases match anywhere.
+// Control names that commit, and look-alikes that do not (a login or 2FA
+// code, a payment-method picker, an order history link, a filter chip's
+// delete, a saved-address picker, a sign-up form's confirm fields). The list
+// lives in commit-patterns.json so the app's own dispatch check can use the
+// same one; that file says how to read it.
+const COMMIT_PATTERNS = require(path.join(__dirname, 'commit-patterns.json'));
 const SEP = '[\\s_-]+';
 const phrase = (text) => text.split(' ').join(SEP);
-const COMMIT_PHRASES = [
-  'place order', 'place your order', 'pay', 'buy now', 'purchase', 'confirm and pay',
-  'complete booking', 'book now', 'book', 'reserve', 'request to book', 'confirm order',
-  'confirm booking', 'complete order', 'submit order', 'order now', 'send', 'post', 'publish',
-  'submit application', 'easy apply', 'delete', 'subscribe', 'donate', 'transfer', 'buy', 'submit',
-  'bestellen', 'kauf abschlie(?:ß|ss)en', 'kaufen', 'bezahlen', 'commander', 'payer', 'valider la commande',
-  'confirmer la commande', 'réserver', 'comprar', 'pagar', 'realizar pedido', 'confirmar pedido',
-].map(phrase);
-const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PHRASES.join('|')})(?![\\p{L}\\p{N}])|注文を確定する|購入する|支払う|予約する`, 'iu');
-// Look-alikes that do not commit, removed before matching: a login or 2FA
-// code, a payment-method picker (the whole name, so "Pay with Google Pay
-// now" still pays), an order history link, a filter chip's delete, a
-// saved-address picker.
-const NOT_COMMIT = new RegExp([
-  `send(?:${SEP}(?:me|a|new|verification|security|login|sign${SEP}in|one${SEP}time|sms|text))*${SEP}(?:code|otp|passcode)`,
-  `^\\s*pay${SEP}with${SEP}[\\p{L}\\p{N}]+(?:${SEP}pay)?\\s*$`,
-  `purchase${SEP}history`,
-  `delete${SEP}filter|filter[\\s,:_-]*delete\\s*$`,
-  `address${SEP}book`,
-].join('|'), 'giu');
+const COMMIT_NAME = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMMIT_PATTERNS.names.map(phrase).join('|')})(?![\\p{L}\\p{N}])|${COMMIT_PATTERNS.namesAnywhere.join('|')}`, 'iu');
+const NOT_COMMIT = new RegExp(COMMIT_PATTERNS.notCommit.map(phrase).join('|'), 'giu');
 const isCommitName = (name) => COMMIT_NAME.test(String(name).replace(NOT_COMMIT, ' '));
 // A selector read as words: #placeOrderBtn and [data-test=place-order] both
 // say "place order".
@@ -933,6 +918,7 @@ const isSafeKey = (step) => typeof step.key === 'string' && SAFE_KEYS.test(step.
 // and releases on the other, so both ends count; a select fires change.
 const TARGET_STEPS = {
   click: ['clicks', 'a click'],
+  right_click: ['right-clicks', 'a right-click'],
   double_click: ['double-clicks', 'a double-click'],
   drag: ['drags', 'a drag'],
   select: ['sets', 'setting a value'],
@@ -942,19 +928,23 @@ const TARGET_STEPS = {
 // Runtime.evaluate, a DOM edit) can act on the page, as eval can. A reload or
 // a navigation is judged on its own.
 const READ_ONLY_CDP = /^(?:\w+\.(?:get|describe|query|search|capture|enable|disable)|Emulation\.|Page\.(?:navigate|reload|stopLoading)$)/;
+// A script planted for every later page in the tab outlives the gate's view
+// of the page it was approved on, so agents never get one.
+const BANNED_CDP = /^Page\.addScriptToEvaluateOn(?:NewDocument|Load)$/;
 // Steps that leave the page where it is. After any other step a batch may be
 // on a page the router has not seen.
 const PAGE_STAYS = new Set(['type', 'wait', 'read', 'scroll', 'move', 'viewport']);
 // An address whose path or query reads like an action (/orders/7/delete,
-// ?step=confirm, /checkout/complete) can commit just by loading. "place"
-// counts only beside "order", since /maps/place/ is an ordinary page.
-const ACTION_URL = new RegExp(`(?<![\\p{L}\\p{N}])(?:confirm|place${SEP}order|order${SEP}place|placeorder|checkout${SEP}complete|pay|submit|delete)(?![\\p{L}\\p{N}])`, 'iu');
+// ?step=confirm, /checkout/complete, /buy) can commit just by loading.
+// "place" counts only beside "order", since /maps/place/ is an ordinary page.
+const ACTION_URL = new RegExp(`(?<![\\p{L}\\p{N}])(?:confirm|place${SEP}order|order${SEP}place|placeorder|(?:checkout|order)${SEP}complete|pay|buy|submit|delete)(?![\\p{L}\\p{N}])`, 'iu');
 // Whether a navigation on a page of `origin` lands on such an address, read
-// the way the app reads it (no scheme means https).
+// the way the app reads it (trimmed, and no scheme means https).
 function isActionUrl(url, origin) {
   let parsed;
+  const address = url.trim();
   try {
-    parsed = new URL(/^[a-z][\w+.-]*:\/\//i.test(url) ? url : `https://${url}`);
+    parsed = new URL(/^[a-z][\w+.-]*:\/\//i.test(address) ? address : `https://${address}`);
   } catch {
     return false;
   }
@@ -965,13 +955,15 @@ function isActionUrl(url, origin) {
   } catch { /* judge it encoded */ }
   return ACTION_URL.test(selectorWords(words));
 }
+// Tools the gate judges: actions, and opening a tab at an address.
+const GATED_TOOLS = new Set(['cua_alans_way_action', 'cua_alans_way_open']);
 const COMMIT_LOST = 'It may or may not have happened and was NOT retried. Check the page before repeating it.';
 
 function addCommitParam(result) {
   const tools = result && result.tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
-    const props = tool && tool.name === 'cua_alans_way_action' && tool.inputSchema && tool.inputSchema.properties;
+    const props = tool && GATED_TOOLS.has(tool.name) && tool.inputSchema && tool.inputSchema.properties;
     if (!props || typeof props !== 'object') continue;
     props.commit = {
       type: 'object',
@@ -1709,12 +1701,16 @@ async function main() {
   // page is refused, a key or a click by position on a page that shows a
   // commit control may set it off, and one whose controls the router has not
   // seen in full may hide one.
-  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name), full }
+  // A snapshot lists the page's frames: one from another site is unreadable,
+  // so input that may land in it cannot be judged (`frame`, unknown until a
+  // snapshot). `visited` is the last address the tab loaded that reads like an
+  // action, which back or forward may load again.
+  const tabPages = new Map(); // tabId -> { names: Map(ref -> name), origin, url, live: Set(name), full, frame, visited }
   // Action replies carry only the first 40 controls (the app's own cap, with
   // unlisted counting the rest), or with generation only what changed; a
   // snapshot says whether its list was cut.
   const ACTION_ELEMENT_CAP = 40;
-  function learnTabPage(tabId, data) {
+  function learnTabPage(tabId, data, acted = []) {
     if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
     let page = tabPages.get(tabId);
     if (!page) {
@@ -1732,6 +1728,8 @@ async function main() {
           page.names = new Map();
           page.live = new Set();
           page.full = false;
+          page.frame = undefined;
+          if (isActionUrl(page.url, '')) page.visited = page.url;
         }
       }
     } catch { /* keep the last page a reply named */ }
@@ -1741,6 +1739,18 @@ async function main() {
         : data.elements.length < ACTION_ELEMENT_CAP;
     } else if (Array.isArray(data.changed) || Array.isArray(data.removed)) {
       page.full = false;
+    }
+    if (data.truncated && typeof data.truncated === 'object') {
+      const frames = Array.isArray(data.iframes) ? data.iframes : [];
+      const foreign = frames.map((f) => {
+        try {
+          return new URL(f.src).origin;
+        } catch {
+          return 'an unknown site';
+        }
+      }).find((origin) => origin !== page.origin);
+      // The app lists at most 8 frames.
+      page.frame = foreign || (frames.length >= 8 ? 'more frames than it lists' : '');
     }
     const overlays = Array.isArray(data.overlays)
       ? data.overlays.map((o) => o && { ref: o.close, name: o.closeName }) : [];
@@ -1754,6 +1764,13 @@ async function main() {
         page.names.set(el.ref, name);
         if (name && isCommitName(name)) page.live.add(cardText(name, 80));
       }
+    }
+    // A control the call acted on may have been renamed by it. A delta or an
+    // unchanged reply would say so; a list that leaves it out does not, so
+    // its old name is dropped and the next use needs a fresh one.
+    if (Array.isArray(data.elements)) {
+      const listed = new Set(data.elements.map((el) => el && el.ref));
+      for (const ref of acted) if (!listed.has(ref)) page.names.delete(ref);
     }
     for (const ref of page.names.keys()) {
       if (page.names.size <= 2000) break;
@@ -1800,6 +1817,18 @@ async function main() {
     }
   }
 
+  // The refs an action call aimed at.
+  function actedRefs(req) {
+    if (req.name !== 'cua_alans_way_action') return [];
+    try {
+      const args = JSON.parse(req.line).params.arguments || {};
+      const steps = args.action === 'batch' && Array.isArray(args.steps) ? args.steps : [args];
+      return steps.flatMap((step) => (step ? [step.ref, step.toRef] : [])).filter((ref) => typeof ref === 'string');
+    } catch {
+      return [];
+    }
+  }
+
   function argsTabId(req) {
     try {
       return (JSON.parse(req.line).params.arguments || {}).tabId;
@@ -1816,7 +1845,10 @@ async function main() {
     if (line.length > BIG_LINE) {
       // Too big to read: whatever page it shows, the gate has not seen it.
       const page = TAB_DEFAULTED_TOOLS.has(req.name) && tabPages.get(argsTabId(req));
-      if (page) page.full = false;
+      if (page) {
+        page.full = false;
+        for (const ref of actedRefs(req)) page.names.delete(ref);
+      }
       return;
     }
     let data;
@@ -1836,7 +1868,7 @@ async function main() {
     const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
     if (typeof used === 'string' && TAB_ID.test(used)) {
       noteKnownTab(used, undefined, backend);
-      learnTabPage(used, data);
+      learnTabPage(used, data, actedRefs(req));
       currentTabId = used;
     }
   }
@@ -2085,7 +2117,7 @@ async function main() {
   // same-site address that reads like an action may commit by loading.
   const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
   function clickTargets(args) {
-    const found = { acts: [], commits: [], unseen: null, unread: null };
+    const found = { acts: [], commits: [], unseen: null, unread: null, banned: null };
     const page = tabPages.get(args.tabId);
     const live = page && page.live.size ? [...page.live][0] : '';
     const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
@@ -2095,7 +2127,9 @@ async function main() {
         found.commits.push(`${what} here could set off "${live}"`);
       } else if (moved) {
         found.unread = found.unread || `an earlier step in this batch can change the page, so this connector cannot tell what ${what} would do. Send the steps from there as a separate call once you have seen the page`;
-      } else if (!page || !page.full) {
+      } else if (page && page.frame) {
+        found.unread = found.unread || `this page embeds ${page.frame} in a frame this connector cannot read, so it cannot tell what ${what} would do. Act on the page's own controls by ref or name instead`;
+      } else if (!page || !page.full || page.frame === undefined) {
         found.unread = found.unread || `this connector has not seen all of this page's controls, so it cannot tell what ${what} would do. Take a snapshot (raise maxElements if it is cut off) and try again`;
       }
     };
@@ -2121,6 +2155,13 @@ async function main() {
       if (typeof url === 'string' && isActionUrl(url, page && page.origin)) {
         found.acts.push(`opens ${cardText(url, 80)}`);
         found.commits.push(`${cardText(url, 80)} looks like an address that confirms, orders, pays, submits or deletes`);
+      }
+      if ((step.action === 'back' || step.action === 'forward') && page && page.visited) {
+        found.acts.push(`goes ${step.action}`);
+        found.commits.push(`going ${step.action} may load ${cardText(page.visited, 80)} again`);
+      }
+      if (step.action === 'cdp' && BANNED_CDP.test(String(step.method))) {
+        found.banned = `${step.method} would run a script on every later page in this tab, out of the commit gate's sight`;
       }
       if (step.action === 'reload' || (step.action === 'cdp' && step.method === 'Page.reload')) {
         found.acts.push('reloads the page');
@@ -2182,8 +2223,11 @@ async function main() {
   // Returns true when the call was refused or is now awaiting approval.
   function gateCommit(msg, line) {
     const args = msg.params.arguments;
-    const targets = clickTargets(args);
-    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread) return false;
+    // Opening a tab is judged as navigating to its address.
+    const targets = msg.params.name === 'cua_alans_way_open'
+      ? clickTargets({ action: 'navigate', url: args.url })
+      : clickTargets(args);
+    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread && !targets.banned) return false;
     unbuffer(line);
     const page = tabPages.get(args.tabId);
     const origin = page ? page.origin : '';
@@ -2192,6 +2236,9 @@ async function main() {
       emitToolError(msg.id, text);
       return true;
     };
+    if (targets.banned) {
+      return refuse(`not_allowed: ${targets.banned}. It did not run, and agents cannot run it.`);
+    }
     if (targets.unseen) {
       return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
     }
@@ -2365,7 +2412,7 @@ async function main() {
       return null;
     }
     // After the host checks, so a call that would fail anyway never asks.
-    if (!approved && msg.params && msg.params.name === 'cua_alans_way_action' && gateCommit(msg, line)) return null;
+    if (!approved && msg.params && GATED_TOOLS.has(msg.params.name) && gateCommit(msg, line)) return null;
     if (host === 'computer') return out;
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))

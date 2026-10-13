@@ -29,6 +29,8 @@ const pages = {
     { ref: 'e3', role: 'link', name: 'Delete' },
     { ref: 'e4', role: 'input', name: 'Card number' },
     { ref: 'e5', role: 'button' },
+    { ref: 'e6', role: 'button', name: 'Continue' },
+    { ref: 'e8', role: 'button', name: 'Apply coupon' },
   ] },
   'mac-tab-2': { url: 'https://shop.example/search', elements: [
     { ref: 'e1', role: 'input', name: 'Search' },
@@ -38,6 +40,7 @@ const pages = {
     { ref: 'e1', role: 'input', name: 'Filter' },
   ] },
 };
+const navs = {};
 const tabFor = (url) => (/search/.test(url) ? 'mac-tab-2' : /catalog/.test(url) ? 'mac-tab-3' : 'mac-tab-1');
 const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
   result: { content: [{ type: 'text', text }] } }) + '\n');
@@ -51,6 +54,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
         tabId: { type: 'string' }, epoch: { type: 'integer' }, action: { type: 'string' },
         ref: { type: 'string' }, steps: { type: 'array' },
       }, required: ['tabId', 'epoch', 'action'] } },
+      { name: 'cua_alans_way_open', inputSchema: { type: 'object', properties: { url: { type: 'string' } } } },
     ] } }) + '\n');
   }
   const a = (m.params && m.params.arguments) || {};
@@ -60,8 +64,10 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
     const id = tabFor(a.url || '');
     return reply(m.id, JSON.stringify({ id, url: pages[id].url, host: 'mac', epoch: 1 }));
   }
+  // A snapshot always says whether it was cut and which frames the page holds.
   if (m.params.name === 'cua_alans_way_snapshot')
-    return reply(m.id, JSON.stringify({ generation: 1, ...pages[a.tabId], tab: { id: a.tabId, epoch: 1 },
+    return reply(m.id, JSON.stringify({ generation: 1, truncated: { text: false, elements: false }, iframes: [],
+      ...(navs[a.tabId] || pages[a.tabId]), tab: { id: a.tabId, epoch: 1 },
       ...(a.maxChars === 200000 ? { text: 'x'.repeat(150000) } : {}) }));
   if (m.params.name === 'cua_alans_way_action') {
     if (mode === 'die-on-commit' && line.includes('"ref":"e1"')) process.exit(1);
@@ -69,9 +75,20 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       // An action reply lists at most 40 controls; a long page fills all 40.
       const n = /long/.test(a.url) ? 40 : /bare/.test(a.url) ? 0 : 1;
       const elements = Array.from({ length: n }, (_, i) => ({ ref: 'e' + (21 + i), role: 'input', name: 'Field ' + (i + 1) }));
+      // A booking page embeds a scheduler from another site.
+      const iframes = /embed/.test(a.url) ? [{ title: 'Scheduler', src: 'https://calendly.example/alan' }]
+        : /own-frame/.test(a.url) ? [{ title: 'Map', src: 'https://shop.example/map' }]
+        : /many-frames/.test(a.url) ? Array.from({ length: 8 }, (_, i) => ({ title: '', src: 'https://shop.example/f' + i })) : [];
+      navs[a.tabId] = { url: a.url, elements, iframes };
       return reply(m.id, JSON.stringify({ effect: { navigated: true, url: a.url }, generation: 3,
         ...(n ? { elements } : {}), tab: { id: a.tabId, epoch: 1 } }));
     }
+    // Continue becomes Place order on the same control; Apply coupon leaves
+    // the list the reply carries.
+    if (a.action === 'click' && (a.ref === 'e6' || a.ref === 'e8'))
+      return reply(m.id, JSON.stringify({ elements: a.ref === 'e6' ? [{ ref: 'e6', role: 'button', name: 'Place order' }]
+        : [{ ref: 'e1', role: 'button', name: 'Place order' }], generation: 2,
+        effect: { url: pages['mac-tab-1'].url }, tab: { id: a.tabId, epoch: 1 } }));
     // With generation the app answers with what changed: here, a control
     // named after the typed text appears.
     if (a.generation !== undefined)
@@ -317,6 +334,10 @@ class CommitGateTests(unittest.TestCase):
         self.open_checkout()
         # The same tab, once it leaves the checkout page, no longer counts it.
         self.ran(self.act(action="navigate", url="https://shop.example/thanks"))
+        # A navigation reply names no frames; a snapshot does.
+        self.refused(self.act(action="press", ref="e21", key="Enter"), "snapshot_required")
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-1"})
+        self.recv()
         self.ran(self.act(action="press", ref="e21", key="Enter"))
         self.ran(self.act(action="press", ref="e21", key="Enter", modifiers=["control"]))
         self.open_search()
@@ -568,6 +589,93 @@ class CommitGateTests(unittest.TestCase):
             {"action": "type", "ref": "e1", "text": "lamp"}, {"action": "press", "key": "Tab"},
             {"action": "press", "key": "Enter"}]))
 
+    def test_a_frame_from_another_site_leaves_the_page_unjudgeable(self):
+        self.open_checkout()
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="navigate", url="https://shop.example/embed"))
+        for attempt in range(2):  # a snapshot cannot read into the frame
+            self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-2"})
+            self.recv()
+            for args in ({"action": "press", "key": "Enter"}, {"action": "click", "x": 300, "y": 400},
+                         {"action": "eval", "code": "1"}):
+                with self.subTest(attempt=attempt, args=args):
+                    msg = self.refused(self.act(tabId="mac-tab-2", **args), "snapshot_required")
+                    self.assertIn("https://calendly.example", self.text(msg))
+        self.ran(self.act(tabId="mac-tab-2", action="click", ref="e21"))
+        call = self.act(tabId="mac-tab-2", action="click", x=300, y=400,
+                        commit={"kind": "booking", "summary": "30 minute call"})
+        self.answer(self.recv(), "accept", {})
+        self.ran(call)
+        # A frame from the page's own site is readable.
+        self.ran(self.act(tabId="mac-tab-2", action="navigate", url="https://shop.example/own-frame"))
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-2"})
+        self.recv()
+        self.ran(self.act(tabId="mac-tab-2", action="press", key="Enter"))
+        # The app lists at most 8 frames, so a ninth may be from anywhere.
+        self.ran(self.act(tabId="mac-tab-2", action="navigate", url="https://shop.example/many-frames"))
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "mac-tab-2"})
+        self.recv()
+        msg = self.refused(self.act(tabId="mac-tab-2", action="press", key="Enter"), "snapshot_required")
+        self.assertIn("more frames than it lists", self.text(msg))
+
+    def test_a_script_for_every_later_page_is_never_allowed(self):
+        self.open_checkout()
+        self.open_search()
+        for args in ({"action": "cdp", "method": "Page.addScriptToEvaluateOnNewDocument", "params": {"source": "x"}},
+                     {"action": "cdp", "method": "Page.addScriptToEvaluateOnNewDocument", "commit": PURCHASE},
+                     {"action": "batch", "steps": [{"action": "cdp", "method": "Page.addScriptToEvaluateOnLoad"}]}):
+            with self.subTest(args=args):
+                self.refused(self.act(tabId="mac-tab-2", **args), "not_allowed")
+        self.assertEqual(self.actions(), [])
+
+    def test_a_right_click_is_judged_like_a_click(self):
+        self.open_checkout()
+        self.refused(self.act(action="right_click", ref="e1"), "commit_required")
+        self.refused(self.act(action="right_click", x=5, y=5), "commit_required")
+        self.assertEqual(self.actions(), [])
+
+    def test_back_or_forward_after_an_action_address_needs_commit(self):
+        self.open_checkout()
+        self.open_search()
+        self.ran(self.act(tabId="mac-tab-2", action="back"))
+        call = self.act(tabId="mac-tab-2", action="navigate", url="https://shop.example/order/complete", commit=PURCHASE)
+        self.answer(self.recv(), "accept", {})
+        self.ran(call)
+        self.ran(self.act(tabId="mac-tab-2", action="navigate", url="https://shop.example/search"))
+        for action in ("back", "forward"):
+            with self.subTest(action=action):
+                msg = self.refused(self.act(tabId="mac-tab-2", action=action), "commit_required")
+                self.assertIn("/order/complete", self.text(msg))
+
+    def test_opening_a_tab_at_an_action_address_needs_commit(self):
+        self.start()
+        self.handshake()
+        self.send("tools/list")
+        tools = {tool["name"]: tool for tool in self.recv()["result"]["tools"]}
+        self.assertIn("commit", tools["cua_alans_way_open"]["inputSchema"]["properties"])
+        for url in ("https://shop.example/orders/7/delete", "shop.example/buy", "  https://shop.example/pay"):
+            with self.subTest(url=url):
+                call = self.send("tools/call", name="cua_alans_way_open", arguments={"url": url})
+                self.refused(call, "commit_required")
+        self.refused(self.act(tabId="mac-tab-1", action="navigate", url="  https://shop.example/delete"),
+                     "commit_required")
+        self.assertEqual(self.actions(), [])
+        call = self.send("tools/call", name="cua_alans_way_open",
+                         arguments={"url": "https://shop.example/buy", "commit": PURCHASE})
+        ask = self.recv()
+        self.assertIn("opens https://shop.example/buy", ask["params"]["message"])
+        self.answer(ask, "accept", {})
+        self.ran(call)
+        self.ran(self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/search"}))
+
+    def test_a_ref_is_judged_by_its_name_after_the_last_click(self):
+        self.open_checkout()
+        self.ran(self.act(action="click", ref="e6"))  # Continue, now Place order
+        msg = self.refused(self.act(action="click", ref="e6"), "commit_required")
+        self.assertIn("Place order", self.text(msg))
+        self.ran(self.act(action="click", ref="e8"))  # the reply no longer lists it
+        self.refused(self.act(action="click", ref="e8"), "snapshot_required")
+
     def test_a_blind_press_on_a_tab_never_read_needs_a_snapshot(self):
         self.start()
         self.handshake()
@@ -728,7 +836,9 @@ class CommitNameTests(unittest.TestCase):
         "Delete", "Delete account", "Subscribe", "Donate", "Transfer",
         "Zahlungspflichtig bestellen", "Bestellen", "Kostenpflichtig bestellen",
         "Jetzt kostenpflichtig bestellen", "Kauf abschließen", "Kauf abschliessen",
-        "Pay with Google Pay now", "Confirm and pay with PayPal", "Remove filter, delete account", "Delete account filter", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
+        "Pay with Google Pay now", "Confirm and pay with PayPal",
+        "Complete reservation", "Confirm reservation", "Confirm", "Confirm payment", "Make payment",
+        "Reply", "Comment", "Remove", "Schedule Event", "Place bid", "Close account", "Remove filter, delete account", "Remove filter, delete account", "Delete account filter", "Jetzt kaufen", "Commander", "Comprar", "Pagar",
         "注文を確定する", "ご注文を確定する", "Réserver", "RÉSERVER UNE TABLE",
         "Buy", "Submit", "Payer", "Valider la commande", "Confirmer la commande",
         "Realizar pedido", "Confirmar pedido", "Kaufen", "Bezahlen", "Jetzt bezahlen",
@@ -741,6 +851,8 @@ class CommitNameTests(unittest.TestCase):
         "Resend", "PayPal", "Booking details", "Reserved seats", "Transferable",
         "Buying guide", "Submitted", "Einkaufswagen", "Pay with Google Pay",
         "Meine Bestellungen", "Pay with Amazon Pay",
+        "Confirm email", "Confirm password", "Confirm your e-mail address", "Remove filter: Red",
+        "Comments", "Bids", "Reservations",
     ]
 
     def judge(self, names, selectors=False):

@@ -33,11 +33,12 @@ and the action runs only on Approve. Put a whole checkout batch under one
 not run: do not retry it or reach the same result another way; tell the user,
 and in a scheduled job (where Hermes declines on its own) leave everything
 staged and ask them to finish. A click on a control or selector named like
-Place order, Pay, Book now, Send, Post or Delete without `commit` is refused
-with `commit_required`, whether targeted by ref, by `name` or by selector, and
-so is a navigation to a same-site address that reads like an action
-(`/checkout/complete`, `?step=confirm`, `/orders/7/delete`) and a reload of a
-page that shows such a control. So is any input the connector cannot judge by name, on
+Place order, Pay, Confirm, Reserve, Book now, Send, Reply, Post, Remove or
+Delete without `commit` is refused with `commit_required`, whether targeted by
+ref, by `name` or by selector, and so is opening or navigating to a same-site
+address that reads like an action (`/checkout/complete`, `?step=confirm`,
+`/orders/7/delete`, `/buy`), going back or forward after one, and a reload of
+a page that shows such a control. So is any input the connector cannot judge by name, on
 a page that shows such a control, since it can set one off: any key other than
 Tab, an arrow, Escape or a plain character; any click, drag or select by
 position, on an unnamed control or by a selector that names no commit; and
@@ -46,7 +47,9 @@ edit), accepting a page dialog, and any `name` that is not a commit. On a
 page whose controls the connector has not seen in full (including after a
 reply that listed only what changed) it is refused with `snapshot_required`,
 so snapshot first; after a batch step that may change the page, send the rest
-as a separate call. A ref the connector has not seen on the current page is
+as a separate call. On a page that embeds a frame from another site (a
+booking or payment widget) a snapshot cannot help: act by ref or name, or pass
+`commit`. `cdp Page.addScriptToEvaluateOnNewDocument` is never allowed. A ref the connector has not seen on the current page is
 refused with `snapshot_required` too. Ask the user before
 any other financial, destructive or production change. Ownership, control
 epoch, and human takeover gates remain.
