@@ -48,6 +48,13 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
+- **Telegram replies read like texts.** In every profile the plugin is enabled
+  in, the bot's Telegram replies use a short, warm texting voice. A minimal
+  send-time polish only drops a leading "Certainly!"-style opener, and only
+  from a message with no indented line, backtick or quotation mark. Fixed
+  Hermes messages (approval cards, errors, progress) and cron reports are not
+  changed. It layers on top of your SOUL.md and `agent.system_prompt` and never
+  edits them. `/tone default` turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.
@@ -176,6 +183,9 @@ rather not be asked. The proactivity toolset is enabled for Telegram. Once a
 route is bound, check-ins are on by default; `--proactive no` binds them
 paused, and the bot tunes them from the bound chat.
 
+For automatic compaction and the setup skill's optional early tool-output
+pruning, see [Long chats](docs/long-chats.md).
+
 ### Or let your agent do it
 
 Paste the [setup prompt](https://github.com/capthvnsen/alans-way/blob/main/docs/setup-prompt.md)
@@ -236,9 +246,12 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | `proactivity` tool + `/proactivity` + `hermes proactivity` CLI | bind the chat, tune the wait, level, timezone and pause — bound to one designated chat |
 | Idle-nudge loop | a 60-second daemon started when Telegram connects; injects one internal prompt when a check-in is due |
 | Turn hooks | `pre_llm_call`/`post_llm_call` note when the bound chat was last active and whether the bot is mid-turn |
-| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
+| `workspace_browser` MCP | Call `cua_alans_way_status`, `cua_alans_way_tabs`, `cua_alans_way_open`, `cua_alans_way_snapshot`, `cua_alans_way_screenshot`, `cua_alans_way_action`, `cua_alans_way_close`. An action that buys, books, sends, posts, submits, deletes or changes an account carries a `commit` object: the router asks you to approve it in Telegram (MCP elicitation) and runs it only on Approve, refuses a commit-looking click without one, never retries it, and logs each decision to `commit-decisions.jsonl` next to the mac-watch state file. The name check reads ref names, `name` targets and selector text. Input it cannot judge by name (keys other than Tab, arrows, Escape or a plain character; clicks, drags and selects by position, on unnamed controls or by selectors that name no commit; `eval`; `cdp` calls other than reads, `Emulation.*` and `Page.navigate`/`reload`; accepting a page dialog) needs `commit` on a page that shows a commit control, and a snapshot first on a page whose controls the router has not seen in full, including after a reply that listed only what changed. On a page that embeds a frame from another site, a key aimed at no control or a click by position never counts as judged. A reload of a commit page, typing then pressing Enter in one batch, and following a link to, opening, navigating, or going back or forward to an address that reads like an action on any site (`/checkout/complete`, `?step=confirm`, `/orders/7/delete`, `/buy`) need `commit`; a ref the router has not seen on the current page is refused, and `Page.addScriptToEvaluateOnNewDocument` is never allowed. A tab the human holds or a stale epoch is refused with the browser's own reason before anyone is asked, and a new control epoch drops what the router knew of the page. On Approve the router adds the app's single-use `approval` receipt (`{nonce, kind, summary, issuedAt, tabId, epoch}`, bound to the approved tab and epoch) to that one forwarded call; an `approval` the agent sends is dropped from every call and step, and an approval whose tab changed page or epoch while it waited is refused with `page_changed`. The name list lives in `alans-way/scripts/commit-patterns.json`, which the app's own dispatch check mirrors. Approvals need Hermes v0.21.6 or newer (it includes commit 239740a19e, first in date tag v2026.6.19); older Hermes cannot show them, so every commit is refused with `approval_unavailable`. Desktop apps on the Mac and the Linux machine are read with `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot`, and driven by the approval-gated `computer_use` tool (the `alans-way-computer` provider). `workspace_computer_action` is excluded from the managed block unless setup ran with `--allow-desktop-actions`. The config key is not a tool name. |
 | Router | probes the Mac's ssh alias for ~8s; unreachable → VPS browser host. Mac drops mid-session → the router fails over in-process within ~10s, restoring the agent's tabs and cookies on the VPS; the call that was in flight fails visibly and is never retried. Tool results carry the serving host and mac-watch state |
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
+| Texting voice + `/tone` + `hermes tone` CLI | on Telegram turns, `pre_llm_call` adds the voice note and `transform_llm_output` polishes the final reply; every profile, on by default. Fixed Hermes messages (approvals, errors, progress) are not changed; see [docs/voice.md](docs/voice.md) |
+
+**Commit gate limit.** The commit gate protects against agent mistakes and against clicks steered by prompt injection or a malicious website. It does not stop a deliberately hostile agent that also has terminal or file tools: that agent runs as the same OS user as the router and the browser services, so it can reach them directly. Full isolation (a separate OS account plus router-signed approvals) is planned for v0.21.6.
 
 ## Orgo / fresh Linux hosts
 
@@ -343,12 +356,13 @@ at it.
 ## Layout
 
 ```
-alans-way/            the plugin (plugin.yaml + tool + idle-nudge hooks + skills + router + mac-watch)
+alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hooks + skills + router + mac-watch)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
-docs/                 proactivity guide, agent-driven setup prompt
+docs/                 proactivity and voice guides, agent-driven setup prompt
 docs/catalog/         Hermes plugin-catalog entry drafts (alans-way-computer.yaml)
-scripts/              check_publication.py, the pre-publication secret and path check CI runs
+scripts/              check_publication.py, the pre-publication secret and path check CI runs;
+                      voice_eval.py, a local-only model-judged eval of the texting voice
 tests/                unittest suite — python3 -m unittest discover -s tests
 setup.sh              one-command bootstrap (install, wire, restart, bind, verify)
 setup-workspace.sh    per-bot mcp_servers config writer (called by setup.sh)

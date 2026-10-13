@@ -458,6 +458,27 @@ class AgentShellTests(unittest.TestCase):
             self.assertIn('proactivity set --settings {"paused_until": "off"}', calls)
             self.assertNotIn("proactivity probe", calls)
 
+    def test_tone_default_opts_out_and_no_flag_leaves_the_voice_alone(self):
+        for flag, expected in ((("--tone", "default"), True), ((), False)):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory) / "hermes_home"
+                home.mkdir()
+                log = Path(directory) / "log"
+                bin_dir = logging_hermes_bin(Path(directory), log)
+                env = dict(os.environ, HERMES_HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+                result = run(*flag, "--non-interactive", "--skip-browser", "--skip-services",
+                             "--hermes-home", str(home), env=env, check=False)
+                calls = log.read_text(encoding="utf-8")
+                self.assertEqual("tone default" in calls, expected)
+                self.assertEqual("Telegram voice: default" in result.stdout, expected)
+                self.assertNotIn("system_prompt", calls)
+                self.assertNotIn("personality", calls)
+
+    def test_tone_must_be_texting_or_default(self):
+        result = run("--tone", "loud", "--verify", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--tone", result.stderr)
+
     def test_proactive_must_be_yes_or_no(self):
         result = run("--proactive", "maybe", "--verify", check=False)
         self.assertEqual(result.returncode, 2)
@@ -2910,17 +2931,52 @@ class SupervisordServiceTests(unittest.TestCase):
         self.assertIn('DISPLAY=":98"', self.conf())
 
     def test_a_live_display_stack_prints_the_viewer_url(self):
-        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
-             '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
              'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
-        result = self.run_setup()
-        self.assertIn("6080", result.stdout)
-        self.assertIn("vnc.html", result.stdout)
-        self.assertIn(ip, result.stdout)
-        self.assertNotIn("apt-get install xvfb", result.stdout)
+        for listener in ("6080", ".".join(["0"] * 4) + ":6080"):
+            with self.subTest(listener=listener):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc %s localhost:5999";;\n'
+                     '  *) echo "548 /usr/bin/Xtigervnc :99 -rfbport 5999 -localhost";;\nesac\n' % listener)
+                result = self.run_setup()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html" % ip,
+                              result.stdout)
+                self.assertNotIn("not reachable over the tailnet", result.stdout)
+                self.assertNotIn("apt-get install xvfb", result.stdout)
+
+    def test_setup_recognizes_websockify_bound_to_this_hosts_tailnet_ip(self):
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n' % ip)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        result = self.run_setup("--skip-services")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html" % ip,
+                      result.stdout)
+        self.assertNotIn("not reachable over the tailnet", result.stdout)
+
+    def test_setup_warns_for_websockify_binds_without_a_matching_tailnet_ip(self):
+        ip = tailnet_ip(64, 0, 2)
+        private_ip = ".".join(str(part) for part in (192, 168, 1, 2))
+        for host, observed in (("127.0.0.1", ip), ("localhost", ip),
+                               (private_ip, ip), (tailnet_ip(64, 0, 9), ip), (ip, "")):
+            with self.subTest(host=host, observed=observed):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+                     '  *) exit 1;;\nesac\n' % host)
+                fake(self.bin_dir, "tailscale",
+                     'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (observed, TAILSCALE_UP))
+                result = self.run_setup("--skip-services")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("remote desktop is already serving: http://%s:6080/vnc.html "
+                              "(bound to %s, so not reachable over the tailnet)" % (host, host),
+                              result.stdout)
+                if host != ip:
+                    self.assertNotIn("http://%s:6080/vnc.html" % ip, result.stdout)
 
     def test_a_running_vnc_display_beats_a_lower_numbered_socket(self):
         import socket as socket_mod
@@ -3405,6 +3461,50 @@ class LiveGatewayRefusalTests(unittest.TestCase):
         retry = calls.rindex("plugins install --force file://")
         self.assertLess(calls.index("-p default gateway stop"), retry)
         self.assertLess(retry, calls.index("-p default gateway start"))
+
+    def test_tone_default_is_applied_after_a_deferred_install_and_before_restart(self):
+        """--tone default on an upgrade whose install the running gateway refused:
+        the old plugin has no `tone` command, so the tone must ride the retry,
+        after the reinstall and before each profile's gateway starts again. A
+        second bot profile's first install is deferred the same way."""
+        (self.home / "profiles" / "beta").mkdir(parents=True)
+        (self.home / "profiles" / "beta" / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=333:AAFakeSecretTokenForTests\n", encoding="utf-8")
+        fake(self.bin_dir, "hermes", 'echo "$*" >> "%(log)s"\n'
+             'prof=default; [ "$1" = -p ] && { prof="$2"; shift 2; }\n'
+             'st="%(root)s/gw-$prof"\n'
+             'case "$1" in\n'
+             '  --version) echo "hermes 0.21.5";;\n'
+             '  gateway)\n'
+             '    [ "$2" = stop ] && echo stopped > "$st"\n'
+             '    [ "$2" = start ] && echo running > "$st";;\n'
+             '  plugins) case "$2" in\n'
+             '      list) [ "$prof" = beta ] || echo "alans-way";;\n'
+             '      install|update|remove)\n'
+             '        if [ "$(cat "$st" 2>/dev/null || echo running)" = running ]; then\n'
+             '          echo "%(refusal)s" >&2; exit 1\n'
+             '        fi\n'
+             '        touch "%(root)s/installed-$prof";;\n'
+             '    esac;;\n'
+             '  tone) [ -e "%(root)s/installed-$prof" ] || { echo "unknown command: tone" >&2; exit 2; };;\n'
+             'esac\nexit 0\n' % {"log": self.log, "root": self.root, "refusal": self.REFUSAL})
+        result = run("--tone", "default", "--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(self.home),
+                     env=env_for(self.root, self.bin_dir, self.home, ALANS_WAY_MISSING="systemctl supervisorctl"),
+                     check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = read_log(self.log)
+        for prof in ("default", "beta"):
+            with self.subTest(prof):
+                install = calls.rindex("-p %s plugins install" % prof)
+                tone = calls.index("-p %s tone default" % prof)
+                self.assertLess(calls.index("-p %s gateway stop" % prof), install)
+                self.assertLess(install, tone)
+                self.assertLess(tone, calls.index("-p %s gateway start" % prof))
+                self.assertEqual(calls.count("-p %s tone default" % prof), 1, calls)
+        self.assertIn("queued behind the plugin install", result.stdout)
+        self.assertNotIn("could not set the Telegram voice", result.stdout)
+        self.assertNotIn("still failed", result.stdout)
 
     def test_a_failed_systemctl_stop_falls_back_to_hermes_gateway_stop(self):
         """On a systemd host whose unit stop fails (a unit that is not really
@@ -4006,6 +4106,17 @@ class VerifyHostStateTests(unittest.TestCase):
                              ALANS_WAY_SYS_CLASS_NET=str(sysnet))
         self.assertIn("tunnels through 'tailscale nc'", result.stdout)
 
+    def test_verify_reads_key_equals_value_ssh_config(self):
+        # ssh_config also writes 'Key=value'; '=' must not hide the directive.
+        sysnet = self.userspace_tailscale()
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "config").write_text(
+            "Host=mac.tail1234.ts.net\n  ProxyCommand=tailscale nc %h %p\n", encoding="utf-8")
+        result = self.verify("--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_SYS_CLASS_NET=str(sysnet))
+        self.assertIn("tunnels through 'tailscale nc'", result.stdout)
+
     def test_verify_accepts_a_wildcard_host_block_proxycommand(self):
         # The bootstrap writes 'Host 100.*': a 100.x --mac-ssh is covered by it.
         sysnet = self.userspace_tailscale()
@@ -4042,16 +4153,76 @@ class VerifyHostStateTests(unittest.TestCase):
 
     def test_verify_prints_the_websockify_viewer_url(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
-        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
-             '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5999";;\n'
-             '  *) exit 1;;\nesac\n')
         ip = tailnet_ip(64, 0, 2)
         fake(self.bin_dir, "tailscale",
              'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
+        for listener in ("6080", ".".join(["0"] * 4) + ":6080"):
+            with self.subTest(listener=listener):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc %s localhost:5999";;\n'
+                     '  *) exit 1;;\nesac\n' % listener)
+                result = self.verify()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html" % ip,
+                              result.stdout)
+                self.assertNotIn("not reachable over the tailnet", result.stdout)
+
+    def test_verify_recognizes_websockify_bound_to_this_hosts_tailnet_ip(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        ip = tailnet_ip(64, 0, 2)
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n' % ip)
+        fake(self.bin_dir, "tailscale",
+             'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (ip, TAILSCALE_UP))
         result = self.verify()
-        self.assertIn("6080", result.stdout)
-        self.assertIn("vnc.html", result.stdout)
-        self.assertIn(ip, result.stdout)
+        self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html" % ip,
+                      result.stdout)
+        self.assertNotIn("not reachable over the tailnet", result.stdout)
+
+    def test_verify_skips_websockify_option_values_for_the_listen_port(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify --heartbeat 30 --web /usr/share/novnc 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+        self.assertNotIn("on port 30\n", result.stdout)
+
+    def test_verify_treats_ssl_target_as_a_flag_not_a_port(self):
+        # Upstream websockify makes --ssl-target a store_true flag: the port
+        # after it is the listener, not an option value.
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify --ssl-target 6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        empty_x11 = self.root / "no-x11"
+        empty_x11.mkdir()
+        result = self.verify(ALANS_WAY_X11_DIR=str(empty_x11))
+        self.assertIn("websockify is bridging a desktop on port 6080", result.stdout)
+        self.assertNotIn("on port 5900", result.stdout)
+
+    def test_verify_warns_for_websockify_binds_without_a_matching_tailnet_ip(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        ip = tailnet_ip(64, 0, 2)
+        private_ip = ".".join(str(part) for part in (192, 168, 1, 2))
+        for host, observed in (("127.0.0.1", ip), ("localhost", ip),
+                               (private_ip, ip), (tailnet_ip(64, 0, 9), ip), (ip, "")):
+            with self.subTest(host=host, observed=observed):
+                fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+                     '  *websockify*) echo "581 /usr/bin/websockify %s:6080 localhost:5900";;\n'
+                     '  *) exit 1;;\nesac\n' % host)
+                fake(self.bin_dir, "tailscale",
+                     'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (observed, TAILSCALE_UP))
+                result = self.verify(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html "
+                              "(bound to %s, so not reachable over the tailnet)" % (host, host),
+                              result.stdout)
+                if host != ip:
+                    self.assertNotIn("http://%s:6080/vnc.html" % ip, result.stdout)
 
     def test_verify_reports_a_websockify_only_desktop(self):
         fake(self.bin_dir, "uname", "echo Linux\n")

@@ -37,7 +37,9 @@ The Mac app requires an Apple Silicon Mac; the Windows app requires Windows
 10/11 x64. This plugin is already installed, so do not run a `setup.sh` line
 from that page that omits `--skip-plugin`. Use this command instead.
 `--non-interactive` means you do not wait for `setup.sh` prompts; ask the
-proactivity question yourself first. Add `--profile <name>` unless the profile
+proactivity question yourself first. The bots text on Telegram in the plugin's
+texting voice by default; pass `--tone default` only when the user asked for
+Hermes' own voice (they can also send `/tone default` any time). Add `--profile <name>` unless the profile
 is `default`. Give `--mac-ssh` the computer's Tailscale name or IP; `setup.sh`
 refuses anything else.
 
@@ -66,7 +68,7 @@ git -C ~/alans-way-agents checkout "$PIN"
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
-    --bind --proactive <yes|no> [--profile <name>] --restart
+    --bind --proactive <yes|no> [--tone default] [--profile <name>] --restart
 ```
 
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
@@ -74,6 +76,8 @@ audit. With `--restart` it restarts the gateway last, detached, about ten
 seconds after it prints its summary. If it asks which Telegram route is the primary, pick the bot matching
 the conversation you're in unless the user said otherwise: do not bind a
 different bot's route silently.
+
+**Long chats (before the gateway restart).** Hermes can prune old tool output early to reduce context buildup without another summarizer. For each Alan's Way profile, follow [the long-chat setup procedure](references/long-chats.md): report the effective compression threshold and `auxiliary.compression` route, then obtain explicit user consent before enabling pruning at 48,000 tokens with 8,000-character eligibility and 4,096-token minimum reclaim. Preserve customized values, leave `micro_compact` unchanged, and use the supported profile-scoped Hermes config CLI. Only suggest a dedicated summary model; never switch it automatically.
 
 ## Order of work
 

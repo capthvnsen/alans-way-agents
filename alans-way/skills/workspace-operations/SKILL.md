@@ -20,11 +20,53 @@ background; it never moves the human's cursor or touches their tabs.
 
 Ordinary actions in a bot-owned in-app browser tab are preauthorized and require
 no extra browser permission prompt: navigation, typing, forms, upload/download,
-research, and normal account work. Never ask merely to use the browser. Native
-Hermes approval remains mandatory for sending external messages/posts,
-purchases, bookings, deletions, financial actions, credential/permission
-changes, destructive actions, and production changes. Ownership, control epoch,
-and human takeover gates remain.
+research, and normal account work. Never ask merely to use the browser.
+
+Sending messages or posts, purchases, bookings, submissions, deletions, and
+account or permission changes need the user's Approve tap, and the connector
+enforces it. Pass `commit` on the `cua_alans_way_action` call that does it:
+`{kind: purchase|booking|send|post|submit|delete|account_change, summary,
+amount?, currency?, counterparty?}`, with the summary, total and merchant or
+recipient read off the page. The user gets an approval prompt in chat,
+and the action runs only on Approve. Put a whole checkout batch under one
+`commit`. `declined`, `approval_timeout` and `approval_unavailable` mean it did
+not run: do not retry it or reach the same result another way; tell the user,
+and in a scheduled job (where Hermes declines on its own) leave everything
+staged and ask them to finish. A click on a control or selector named like
+Place order, Pay, Confirm, Reserve, Book now, Send, Reply, Post, Remove or
+Delete without `commit` is refused with `commit_required`, whether targeted by
+ref, by `name` or by selector, and so is following a link to, opening or
+navigating to an address that reads like an action on any site
+(`/checkout/complete`, `?step=confirm`, `/orders/7/delete`, `/buy`), going
+back or forward after one, and a reload of a page that shows such a control.
+Typing and then pressing Enter in the same batch needs `commit` too: press the
+key as its own call so it is judged against the page. So is any input the connector cannot judge by name, on
+a page that shows such a control, since it can set one off: any key other than
+Tab, an arrow, Escape or a plain character; any click, drag or select by
+position, on an unnamed control or by a selector that names no commit; and
+any `eval` or `cdp` call that can act (`Input.*`, `Runtime.evaluate`, a DOM
+edit), and accepting a page dialog. On a
+page whose controls the connector has not seen in full (including after a
+reply that listed only what changed) it is refused with `snapshot_required`,
+so snapshot first; after a batch step that may change the page, send the rest
+as a separate call. On a page that embeds a frame from another site (a
+booking or payment widget), a key aimed at no control or a click by position
+cannot be judged and a snapshot cannot help: act by ref or name, or pass
+`commit`. `cdp Page.addScriptToEvaluateOnNewDocument` is never allowed. A ref
+the connector has not seen on the current page is refused with
+`snapshot_required` too. A tab the human holds, or a stale epoch, is refused
+with the browser's own reason (`awaiting_human`, `human_has_control`,
+`stale_control_epoch`) before anyone is asked. Never send `approval` yourself:
+the connector drops it and adds its own only to the call the user approved.
+The gate protects against agent mistakes and against clicks steered by
+prompt injection or a malicious website. It does not stop a deliberately
+hostile agent that also has terminal or file tools, because that agent runs as
+the same OS user as the router and the browser services. Full isolation (a
+separate OS account plus router-signed approvals) is planned for v0.21.6.
+Never work around the gate with any tool: a refused commit goes to the user.
+Ask the user before
+any other financial, destructive or production change. Ownership, control
+epoch, and human takeover gates remain.
 
 Reach for the browser when:
 
@@ -149,7 +191,7 @@ as an error. It may have happened, so snapshot the VPS tab and check before
 repeating it.
 
 You do not have to wait for an error to learn a tab moved. After the move,
-every VPS result's `_meta.workspace.tabIdChanged` lists one
+the first VPS result's `_meta.workspace.tabIdChanged` lists one
 `[workspace] tab id changed: <old> -> <new>, reason: <handoff or host unreachable>`
 line per tab. Swap any Mac tab id you saved (in a plan, a note, or a
 sub-agent prompt) for its new id before you use it.
@@ -213,8 +255,10 @@ the tab stays yours to keep working.
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use
-   `action=eval` with `code` to run JS in the page: read DOM state, extract
-   data, or complete a whole interaction in one call. `eval` awaits Promises,
+   `action=eval` with `code` to run JS in the page to read DOM state or
+   extract data. `eval` cannot commit: finish a purchase, booking, send,
+   post, submit or delete with a click that carries `commit`, and read a
+   page that shows such a control with snapshot or `read`. `eval` awaits Promises,
    so `await new Promise(r => setTimeout(r, 500))` and polling loops work
    inside it; state you store on `window` (for example `window.__h = {}`)
    persists between eval calls on that tab. Keep the return value small;
@@ -309,6 +353,10 @@ screencapture, osascript or ssh scripts to drive the user's desktop.
 If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp) in System Settings, then retry.
 
 ## Preserve vanilla Hermes
+
+Save durable user facts, decisions and preferences to memory as they come up during work,
+so nothing important lives only in chat history. Transient tab state, element refs and handback state
+must never go into durable memory; reacquire live workspace state from the tools when needed.
 
 Keep integration in supported profile configuration, optional plugins, hooks
 and skills. Use Hermes' native conversation, model, approval and delegation

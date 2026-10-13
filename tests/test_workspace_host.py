@@ -259,7 +259,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vps"})
         self.recv()
-        action = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r1"})
+        action = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "name": "Next"})
         answered = self.recv()
         self.assertEqual((answered["id"], self.served(answered)), (action, "vm-action"))
         self.assertEqual(answered["result"]["_meta"]["workspace"]["host"], "vm")
@@ -321,7 +321,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
-        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r1"})
+        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "name": "Next"})
         msg = self.recv(timeout=10)
         self.assertEqual(msg["id"], call)
         self.assertTrue(msg["result"]["isError"])
@@ -382,7 +382,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual(len(self.vm_spawns()), 1)
         self.call("cua_alans_way_status", {})
         self.assertEqual(self.served(self.recv()), "mac")
-        lost = self.call("cua_alans_way_action", {"tabId": "mac-tab-1", "action": "click", "ref": "r1"})
+        lost = self.call("cua_alans_way_action", {"tabId": "mac-tab-1", "action": "click", "name": "Next"})
         failed = self.recv()
         self.assertEqual((failed["id"], failed["result"]["isError"]), (lost, True))
         self.assertIn("NOT retried", self.text(failed))
@@ -405,6 +405,79 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertIn("vm-tab-1", self.text(msg))
         self.assertEqual(len(self.vm_spawns()), 1)
 
+    def fake_browser_host(self):
+        """A local browser host: no mirror to restore, and it opens the
+        continued page as vps-tab-1."""
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def reply(self, status, body):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.reply(200, b'{"tabs":[]}')
+
+            def do_POST(self):
+                if self.path == "/v1/restore":
+                    self.reply(404, b"{}")
+                else:
+                    self.reply(200, b'{"id":"vps-tab-1","url":"https://mac.example/"}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        (self.dir / "conn.json").write_text(
+            json.dumps({"url": "http://127.0.0.1:%d" % server.server_address[1], "token": "tok"}))
+
+    def test_a_forced_handoff_reports_the_tab_id_change_once(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The snapshot is the call the Mac dies under: a read, so it is
+        # replayed and its VPS answer is the first result after the move.
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertEqual(
+            workspace["tabIdChanged"],
+            ["[workspace] tab id changed: mac-tab-1 -> vps-tab-1, reason: handoff"])
+        self.assertIn("moved to the VPS browser", self.text(moved))
+        # The change was reported once; the next VPS result does not repeat it.
+        again = self.call("cua_alans_way_tabs")
+        repeated = self.recv()
+        self.assertEqual(repeated["id"], again)
+        self.assertNotIn("tabIdChanged", repeated["result"]["_meta"]["workspace"])
+
+    def test_a_handoff_does_not_pair_the_change_with_a_vm_tab(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The tab used last belongs to the VM backend: it is not a Mac tab the
+        # continued page stands in for, so no id pair is reported for it.
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertNotIn("tabIdChanged", workspace)
+        self.assertIn("moved to the VPS browser", self.text(moved))
+
     def test_a_vm_page_is_not_recorded_as_the_computers_resume_page(self):
         self.start()
         self.handshake()
@@ -419,7 +492,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://mac.example/"})
         self.recv()
-        action = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        action = self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         answered = self.recv()
         self.assertEqual(answered["id"], action)
         self.assertFalse(answered["result"].get("isError"))
@@ -467,7 +540,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
-        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r1"})
+        call = self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "name": "Next"})
         msg = self.recv(timeout=10)
         self.assertEqual(msg["id"], call)
         self.assertTrue(msg["result"]["isError"])
@@ -485,7 +558,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.call("cua_alans_way_open", {"url": "https://vm.example/1", "host": "vm"})
         first = json.loads(self.text(self.recv()))
         self.assertEqual(first["id"], "vm-tab-1")
-        self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         self.recv()
         self.assertEqual(
             self.backend_calls("vm.log", "cua_alans_way_action")[-1].get("tabId"), "vm-tab-1")
@@ -494,7 +567,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual(second["id"], "vm-tab-2")
         self.assertEqual([t["tabId"] for t in second["closedTabs"]], ["vm-tab-1"])
         # The reaped id no longer routes calls to the VM backend.
-        self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "ref": "r2"})
+        self.call("cua_alans_way_action", {"tabId": "vm-tab-1", "action": "click", "name": "Next"})
         self.recv()
         self.assertEqual(
             self.backend_calls("mac.log", "cua_alans_way_action")[-1].get("tabId"), "vm-tab-1")
@@ -502,7 +575,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         # call goes out with no tabId instead of the dead one.
         self.call("cua_alans_way_tabs")
         self.recv()
-        self.call("cua_alans_way_action", {"action": "click", "ref": "r3"})
+        self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         self.recv()
         args = self.backend_calls("mac.log", "cua_alans_way_action")[-1]
         self.assertNotIn("tabId", args)
@@ -512,7 +585,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
-        action = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        action = self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         answered = self.recv()
         self.assertEqual((answered["id"], self.served(answered)), (action, "vm-action"))
         args = self.backend_calls("vm.log", "cua_alans_way_action")[-1]
@@ -530,7 +603,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         # and the error reply teaches the router nothing new.
         self.call("cua_alans_way_action", {"tabId": "mac-tab-1", "epoch": 1, "action": "takeover"})
         self.assertTrue(self.recv()["result"]["isError"])
-        stale = self.call("cua_alans_way_action", {"action": "click", "ref": "r2"})
+        stale = self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         rejected = self.recv()
         self.assertEqual(rejected["id"], stale)
         self.assertTrue(rejected["result"]["isError"])
@@ -538,7 +611,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         # The re-read learns the fresh epoch, so the next action succeeds.
         self.call("cua_alans_way_snapshot", {})
         self.recv()
-        retry = self.call("cua_alans_way_action", {"action": "click", "ref": "r2"})
+        retry = self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         self.assertFalse(self.recv()["result"].get("isError"))
         epochs = [a.get("epoch") for a in self.backend_calls("mac.log", "cua_alans_way_action")]
         self.assertEqual(epochs, [1, 1, 1, 2])
@@ -565,7 +638,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
     def test_a_call_without_a_known_tab_passes_through(self):
         self.start()
         self.handshake()
-        call = self.call("cua_alans_way_action", {"action": "click", "ref": "r1"})
+        call = self.call("cua_alans_way_action", {"action": "click", "name": "Next"})
         msg = self.recv()
         self.assertEqual(msg["id"], call)
         self.assertTrue(msg["result"]["isError"])
