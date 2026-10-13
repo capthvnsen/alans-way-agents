@@ -8,6 +8,7 @@ import socket
 import stat
 import subprocess
 import signal
+import sys
 import tempfile
 import time
 import unittest
@@ -287,6 +288,13 @@ def fake(bin_dir: Path, name: str, body: str):
 
 def tailnet_ip(*tail):
     return ".".join(["100"] + [str(part) for part in tail])
+
+
+def isolated_path(bin_dir):
+    # Keep required runtimes without adding their directories' other commands.
+    for name, executable in (("python3", sys.executable), ("node", shutil.which("node"))):
+        fake(bin_dir, name, 'exec "%s" "$@"\n' % executable)
+    return os.pathsep.join([str(bin_dir), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
 
 
 TAILSCALE_UP = """case "$1" in
@@ -1613,6 +1621,7 @@ class WindowsGuestSetupTests(unittest.TestCase):
         self.ps_log = self.root / "powershell.log"
         self.ps_state = self.root / "tasks"
         self.bin_dir = logging_hermes_bin(self.root, self.log)
+        self.path = isolated_path(self.bin_dir)
         fake(self.bin_dir, "uname", "echo MINGW64_NT-10.0-26100\n")
         fake(self.bin_dir, "cygpath", 'echo "$*" >> "%s"\ncase "$1" in\n'
              '  -m) case "$2" in "$FAKE_PREFIXED"*) printf "C:%%s" "$2";; */tmp.*) [ -d "$2" ] && printf "C:%%s" "$2" || printf "%%s" "$2";; *) printf "%%s" "$2";; esac;;\n'
@@ -1635,13 +1644,11 @@ class WindowsGuestSetupTests(unittest.TestCase):
         path.chmod(0o755)
 
     def env(self, **extra):
-        node = Path(shutil.which("node")).parent
-        env = {k: v for k, v in os.environ.items() if k not in ("HERMES_HOME", "WSL_DISTRO_NAME")}
-        env.update(HOME=str(self.home), USERPROFILE=str(self.home), USERNAME="winuser", LOCALAPPDATA=str(self.local),
+        env = dict(HOME=str(self.home), USERPROFILE=str(self.home), USERNAME="winuser", LOCALAPPDATA=str(self.local),
                    PROGRAMFILES=str(self.programs), PROGRAMDATA=str(self.program_data), SYSTEMROOT=str(self.system_root),
                    PS_LOG=str(self.ps_log), PS_STATE=str(self.ps_state),
                    FAKE_PREFIXED=str(ROOT), ALANS_WAY_RESTART_DELAY="3",
-                   PATH=os.pathsep.join([str(self.bin_dir), str(node), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+                   TMPDIR=str(self.root), PATH=self.path)
         env.update(extra)
         return env
 
@@ -2085,11 +2092,14 @@ class ComputerProbeShimTests(unittest.TestCase):
         (bin_dir / "hermes").chmod(0o755)
         fake(bin_dir, "import", 'echo "$0 $*" >> "%s"\nsleep 1000\n' % self.probes)
         extra = {"ALANS_WAY_PROBE_TIMEOUT": probe_timeout} if probe_timeout else {}
+        env = dict(HOME=str(root), HERMES_HOME=str(home), TMPDIR=str(root),
+                   PATH=isolated_path(bin_dir), ALANS_WAY_NO_INSTALL="1", ALANS_WAY_SETTLE_SECS="0",
+                   **extra)
         started = time.monotonic()
         result = subprocess.run(
             [SH, str(repo_with_computer_plugin(root)), "--bot-id", "111222333", "--skip-browser", "--skip-services",
              "--non-interactive", "--hermes-home", str(home)],
-            capture_output=True, text=True, timeout=60, env=env_for(root, bin_dir, home, **extra))
+            capture_output=True, text=True, timeout=60, env=env)
         self.elapsed = time.monotonic() - started
         self.probe_log = read_log(self.probes)
         return result, agent
