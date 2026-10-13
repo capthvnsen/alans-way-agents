@@ -319,7 +319,9 @@ A snapshot or action reply on a page with a challenge carries
 
 - `blocking:false` is a widget inside a page that stays yours, such as a
   reCAPTCHA box in a form. Use the rest of the page. Input that would land on
-  the widget is refused with `challenge_present`. If you need the widget
+  the widget is refused with `challenge_present`, and so is a click by
+  position, a key or page script, which may land on it: aim at the page's
+  other controls by ref or name. If you need the widget
   solved to go on, release the tab:
   `{action:"release", reason:"captcha", note:"Solve the CAPTCHA, then give the tab back."}`.
 - `blocking:true` (a whole-page check such as Google's "unusual traffic"
