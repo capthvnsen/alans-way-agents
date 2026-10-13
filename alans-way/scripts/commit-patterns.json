@@ -78,6 +78,6 @@
     "use this payment method",
     "buy it again",
     "book a demo",
-    "subscribe & save"
+    "subscribe (?:&|and) save"
   ]
 }
