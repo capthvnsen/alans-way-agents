@@ -479,7 +479,7 @@ class RegistrationTests(unittest.TestCase):
                 ctx.register_cli_command = lambda name, desc, setup, run: clis.__setitem__(name, run)
                 ctx.register_skill = lambda *a: None
                 ctx.on_unload = unloads.append
-                runtime = sys.modules[P.__package__].register(ctx, background=False)
+                runtime = sys.modules[P.__package__].register(ctx, background=False, legacy_home=tmp)
                 self.addCleanup(lambda callbacks=unloads: [fn() for fn in callbacks])
                 for name in ("pre_llm_call", "post_llm_call", "on_session_end"):
                     self.assertTrue(any(isinstance(fn.__self__, C.CrossBot) for fn in hooks[name]))
