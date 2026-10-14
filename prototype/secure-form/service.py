@@ -20,6 +20,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.request import Request as HttpRequest, urlopen
 
 MAX_BODY = 16384
 MAX_AGE = 300
@@ -196,6 +197,34 @@ def button_payload(request, public_origin):
     return {'chat_id': request.chat_id, 'text': request.label + ' — Secure Form',
             'reply_markup': {'inline_keyboard': [[{'text': 'Open Secure Form',
                 'web_app': {'url': public_origin.rstrip('/') + '/form/' + request.request_id}}]]}}
+
+
+class BotApiSender:
+    """New outbound Telegram call, disabled in demo; tests mock the HTTP boundary.
+
+    Token injected by trusted profile setup, never read from files or model args.
+    No retries on uncertain delivery, no URL/response/exception logging.
+    Production must add profile rate limits and provisioning/consent plumbing.
+    """
+    def __init__(self, token):
+        if not re.fullmatch(r'[A-Za-z0-9_:-]+', token):
+            raise Rejected()
+        self.token = token
+
+    def __call__(self, payload):
+        try:
+            request = HttpRequest('https://api.telegram.org/bot' + self.token + '/sendMessage',
+                                  data=json.dumps(payload).encode(), method='POST',
+                                  headers={'Content-Type': 'application/json'})
+            with urlopen(request, timeout=5) as response:
+                data = response.read(MAX_BODY + 1)
+            if len(data) > MAX_BODY:
+                return False
+            result = json.loads(data)
+            return (result.get('ok') is True and isinstance(result.get('result'), dict)
+                    and type(result['result'].get('message_id')) is int)
+        except Exception:
+            return False
 
 
 def register_trigger(ctx, service, sender, *, public_origin, profile):

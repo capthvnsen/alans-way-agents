@@ -22,7 +22,7 @@ python3 -m unittest discover -s tests -p test_secure_form_spike.py
 
 `service.py` contains HMAC validation, trusted private request issuance,
 single-use/replay/expiry state, exact Host/Origin checks, the HTML form, a dry
-Bot API `web_app` payload, and a stdin-only bridge to the public interactive
+Bot API `web_app` payload/sender (HTTP mocked in tests), and a stdin-only bridge to the public interactive
 `hermes vault add --kind login` CLI. The demo points that bridge exclusively at
 `fixture_vault_cli.py`. No private Hermes imports or vault file writes.
 

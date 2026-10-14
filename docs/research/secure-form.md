@@ -50,10 +50,11 @@ the ordinary release process; this spike performs no upgrade.
 
 `register_trigger` is dependency-injected and tested against a fake context and
 fake sender. `button_payload` builds a real Bot API payload with an HTTPS
-`web_app` URL and opaque request ID. It never sends anything. Production would
-inject a bounded, rate-limited sender using the receiving profile's own bot
-token, not a second bot or `getUpdates` consumer. Disclose this new outbound
-call. No credential/config-reading implementation is shipped in this spike;
+`web_app` URL and opaque request ID. `BotApiSender` implements a bounded
+`sendMessage` POST; its HTTP boundary is mocked in tests and it is never wired
+into the demo. Production must add rate limits and inject the receiving
+profile's own bot token, not a second bot or `getUpdates` consumer. Disclose this
+new outbound call. No credential/config-reading implementation is shipped;
 token provisioning remains a production task. Never log token-bearing Bot API
 URLs, HTTP traces or exceptions. Send failure expires the newly issued request.
 
@@ -211,7 +212,8 @@ Ctrl-C. Tests: `python3 -m unittest discover -s tests -p test_secure_form_spike.
 They cover valid/tampered/stale/future initData, wrong bot/user/chat/profile,
 duplicate/malformed data, expiry, single use/replay/restart/concurrency,
 stdin-only CLI receipt/failure/timeout, secret canaries in logs/status,
-Host/Origin/type/size guards and admitted-hook payload delivery.
+Host/Origin/type/size guards, admitted-hook payload delivery and mocked Bot API
+success/failure with no token-bearing logs.
 Browser fixture showed masked input, cleared field and “Submitted”; screenshot
 capture timed out after semantic verification. No live Telegram, actual vault,
 tunnel, browser fill, recorder or cross-host test was run. Full-suite and CI

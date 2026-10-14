@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +181,40 @@ class SecureFormTests(unittest.TestCase):
         with self.assertRaises(sf.Rejected):
             other.submit(self.rid, signed(), CANARY)
         self.assertEqual(self.calls, [])
+
+    def test_bot_api_sender_mock_only_and_no_token_in_result_or_logs(self):
+        sender = sf.BotApiSender(TOKEN)
+        payload = sf.button_payload(self.service.requests[self.rid], 'https://form.example')
+        output = io.StringIO()
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok":true,"result":{"message_id":77}}'
+        with mock.patch.object(sf, 'urlopen', return_value=response) as open_mock:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertIs(sender(payload), True)
+            sent = open_mock.call_args.args[0]
+            self.assertEqual(sent.full_url, 'https://api.telegram.org/bot' + TOKEN + '/sendMessage')
+            self.assertEqual(json.loads(sent.data), payload)
+            self.assertEqual(open_mock.call_count, 1)
+        with mock.patch.object(sf, 'urlopen', side_effect=RuntimeError(TOKEN + CANARY)):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertIs(sender(payload), False)
+        self.assertNotIn(TOKEN, output.getvalue())
+        self.assertNotIn(CANARY, output.getvalue())
+
+    def test_hook_send_failure_expires_request_without_echoing_token(self):
+        registered = {}
+        class Context:
+            def register_hook(self, name, callback):
+                registered[name] = callback
+        def broken(payload):
+            raise RuntimeError(TOKEN)
+        sf.register_trigger(Context(), self.service, broken,
+                            public_origin='https://form.example', profile='fixture')
+        result = registered['post_gateway_admission'](
+            platform='telegram', text='/secure-form',
+            source={'profile': 'fixture', 'chat_type': 'dm', 'user_id': str(USER), 'chat_id': str(USER)})
+        self.assertNotIn(TOKEN, json.dumps(result))
+        self.assertEqual(list(self.service.requests.values())[-1].status, 'expired')
 
 
 class HttpTests(unittest.TestCase):
