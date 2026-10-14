@@ -2351,6 +2351,69 @@ class AllProfilesHarness(IntegrationBase):
         return result, home, read_log(log)
 
 
+class TelegramProgressTests(AllProfilesHarness, unittest.TestCase):
+    def test_setup_defaults_live_progress_for_every_telegram_profile(self):
+        result, home, _ = self.run_all()
+        for name in (None, "alpha", "beta", "gamma", "quoted"):
+            cfg = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+            text = cfg.read_text()
+            self.assertIn("display:\n  busy_input_mode: steer\n  interim_assistant_messages: true\n", text, name)
+        self.assertNotIn("display:", (home / "profiles" / "botless" / "config.yaml").read_text())
+        self.assertIn("busy mode applies to every platform in this profile", result.stdout)
+
+    def test_rerun_is_idempotent_and_keeps_a_later_user_choice(self):
+        _, home, _ = self.run_all()
+        config = home / "config.yaml"
+        before = config.read_bytes()
+        args = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
+        run(*args, env=self.env, check=False, script=self.script)
+        self.assertEqual(config.read_bytes(), before)
+        config.write_text(config.read_text().replace("busy_input_mode: steer", "busy_input_mode: queue"))
+        run(*args, env=self.env, check=False, script=self.script)
+        self.assertIn("busy_input_mode: queue", config.read_text())
+        self.assertNotIn("busy_input_mode: steer", config.read_text())
+
+    def test_existing_display_choices_are_preserved_with_comments_and_indent(self):
+        def layout(home):
+            self.layout(home)
+            (home / "config.yaml").write_text(
+                "display: # mine\n    'busy_input_mode': interrupt # deliberate\n"
+                "    interim_assistant_messages: false\n    tool_progress: false\n"
+                "    platforms:\n        telegram:\n            interim_assistant_messages: false\n")
+        _, home, _ = self.run_all(layout=layout)
+        self.assertIn("display: # mine\n    'busy_input_mode': interrupt # deliberate\n"
+                      "    interim_assistant_messages: false\n    tool_progress: false\n"
+                      "    platforms:\n        telegram:\n            interim_assistant_messages: false\n",
+                      (home / "config.yaml").read_text())
+        self.assertNotIn("busy_input_mode: steer", (home / "config.yaml").read_text())
+
+    def test_partial_display_adds_only_missing_default_and_keeps_platform_override(self):
+        def layout(home):
+            self.layout(home)
+            (home / "config.yaml").write_text(
+                "display:\n    busy_input_mode: queue\n    platforms:\n        telegram:\n"
+                "            interim_assistant_messages: false\n")
+        _, home, _ = self.run_all(layout=layout)
+        text = (home / "config.yaml").read_text()
+        self.assertIn("display:\n    interim_assistant_messages: true\n    busy_input_mode: queue\n", text)
+        self.assertIn("            interim_assistant_messages: false\n", text)
+
+    def test_empty_inline_display_becomes_block_and_complex_display_is_left_alone(self):
+        for value in ("{} # mine", "{busy_input_mode: interrupt}", "&defaults"):
+            with self.subTest(value=value):
+                def layout(home):
+                    self.layout(home)
+                    (home / "config.yaml").write_text("display: " + value + "\n")
+                result, home, _ = self.run_all(layout=layout)
+                text = (home / "config.yaml").read_text()
+                if value.startswith("{}"):
+                    self.assertIn("display: # mine\n  busy_input_mode: steer\n", text)
+                else:
+                    self.assertIn("display: " + value + "\n", text)
+                    self.assertIn("warn live progress left unchanged", result.stdout)
+                    self.assertNotIn("busy_input_mode: steer", text)
+
+
 class AllProfilesTests(AllProfilesHarness, unittest.TestCase):
     def test_every_profile_with_a_telegram_bot_gets_its_own_bot_id(self):
         result, home, calls = self.run_all()

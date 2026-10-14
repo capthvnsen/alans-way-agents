@@ -55,6 +55,17 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   Hermes messages (approval cards, errors, progress) and cron reports are not
   changed. It layers on top of your SOUL.md and `agent.system_prompt` and never
   edits them. `/tone default` turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
+- **Progress while working.** Multi-step Telegram tasks get short updates about
+  what is happening and what comes next, including side effects and mistakes;
+  mid-task messages are folded into the running task. Setup defaults each
+  Telegram profile to `display.busy_input_mode: steer` and
+  `display.interim_assistant_messages: true` where unset. Explicit values are
+  kept, including platform overrides; busy mode applies to all platforms in
+  that profile. To change an existing `interrupt` choice, run
+  `hermes -p NAME config set display.busy_input_mode steer`; to enable interim
+  texts, set `display.interim_assistant_messages true` the same way (and check
+  `display.platforms.telegram.interim_assistant_messages` for an override).
+  Restart the gateway through its supervisor to load the changes.
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.
@@ -128,7 +139,9 @@ The bootstrap runs every step in order and says what it did:
 - **Workspace config** — writes the managed `workspace_browser` block into the
   right profile's config, then turns off Hermes' built-in browser toolset for
   Telegram and cron so the agent uses your workspace browser (setup says so;
-  pass `--keep-browser` to leave it on)
+  pass `--keep-browser` to leave it on). It also adds the live-progress display
+  defaults above in the same backed-up write, preserving explicit choices;
+  inline or merged display mappings are left alone with a warning
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)

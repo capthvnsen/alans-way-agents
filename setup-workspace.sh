@@ -486,6 +486,61 @@ out.extend(blanks)
 if not has_managed and not inserted:
     out.append(nl + "mcp_servers:" + nl + block + nl)
 result = "".join(out)
+
+# setup.sh opts in for each Telegram profile. Keep config editing in the same
+# write/backup as workspace_browser, and preserve every explicit display value.
+if os.environ.get("ALANS_WAY_TELEGRAM_PROGRESS") == "1":
+    progress = re.findall(r"[^\n]*\n|[^\n]+", result)
+    display_key = re.compile(r"(?:display|'display'|\"display\"):(.*)$")
+    heads = [(i, display_key.match(text(line))) for i, line in enumerate(progress)
+             if display_key.match(text(line))]
+    defaults = {"busy_input_mode": "steer", "interim_assistant_messages": "true"}
+    reason = ""
+    if not heads:
+        progress.append(nl + "display:" + nl)
+        progress.extend("  " + key + ": " + value + nl for key, value in defaults.items())
+    elif len(heads) != 1:
+        reason = "duplicate display mappings"
+    else:
+        start, match = heads[0]
+        value = re.sub(r"(^|\s)#.*$", "", match.group(1)).strip()
+        end = start + 1
+        while end < len(progress):
+            line = text(progress[end])
+            if line.strip() and not line.lstrip().startswith("#") and not line.startswith(" "):
+                break
+            end += 1
+        body = [text(line) for line in progress[start + 1:end]
+                if text(line).strip() and not line.lstrip().startswith("#")]
+        depth = min((indent(line) for line in body), default=2)
+        if value and value not in EMPTY_VALUES:
+            reason = "inline or anchored display mapping"
+        elif any(line.lstrip().startswith("<<:") for line in body):
+            reason = "merged display mapping"
+        elif any(not re.match(r" +[\w.\"'-]+:(\s|$)", line) for line in body
+                 if indent(line) == depth):
+            reason = "unsupported display mapping"
+        else:
+            present = set()
+            for line in body:
+                key = re.match(r" *([\w]+|'[^']+'|\"[^\"]+\"):", line)
+                if indent(line) == depth and key:
+                    present.add(key.group(1).strip("\"'"))
+            missing = [" " * depth + key + ": " + val + nl
+                       for key, val in defaults.items() if key not in present]
+            if missing:
+                # Empty inline maps/null become a block while keeping comments.
+                comment = re.search(r"(^|\s)(#.*)$", match.group(1))
+                if value:
+                    progress[start] = "display:" + (" " + comment.group(2) if comment else "") + nl
+                progress[start + 1:start + 1] = missing
+    if reason:
+        print("setup-workspace: warn live progress left unchanged (" + reason + "); "
+              "set display.busy_input_mode and display.interim_assistant_messages with hermes config")
+    else:
+        result = "".join(progress)
+        print("setup-workspace: live progress defaults: steer + interim messages; explicit values kept; "
+              "busy mode applies to every platform in this profile")
 for what in removed:
     print("setup-workspace: removed " + what)
 if result != original:

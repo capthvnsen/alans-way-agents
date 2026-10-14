@@ -11,9 +11,9 @@ Treat the workspace browser as your default surface for anything web-shaped
 that a plain lookup cannot answer (see "Search the web" below).
 If a task lives in a site or web app and no API or CLI covers it, or driving
 the page is simply the most reliable path, open a tab and do the work there.
-Do not ask whether you may use the browser or describe a plan first; open the
-tab, work it, and report the result. There is no handoff, assignment, or grant
-step for your own tabs: `cua_alans_way_open` IS the handoff, and it never
+Open the tab without an extra browser-permission prompt; work it and report
+the result, with short progress texts for multi-step work as described below.
+There is no handoff, assignment, or grant step for your own tabs: `cua_alans_way_open` IS the handoff, and it never
 requires the human. The tab is scoped to your bot id and runs in the
 background; it never moves the human's cursor or touches their tabs.
 
@@ -277,10 +277,16 @@ the tab stays yours to keep working.
    the state after the last step: it already shows the page after the
    action's own updates, so the whole run answers in one call, and you add
    `wait` or `read` steps only when you need something `effect` does not
-   show. For
-   a multi-step browser run, write no chat text between tool calls and send
-   one short message when it is done (the one exception is the CAPTCHA
-   message below). Put `wait` steps
+   show. Before each multi-step chunk, send one short plain sentence saying
+   what you are doing now and what comes next. Before a noticeable step
+   (email sent, form submitted, or page the user must act on), say what is
+   about to happen; report side effects and mistakes right away, plainly.
+   Keep progress to at most one update per roughly two actions, except for
+   a noticeable step or mistake; add nothing for one quick action. Use
+   no tool names, headings or step counters. When a new message arrives
+   mid-task, acknowledge it in one line and fold it into the running task;
+   do not restart. Finish with one short result message.
+   The CAPTCHA message below keeps its own handback rules. Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use
