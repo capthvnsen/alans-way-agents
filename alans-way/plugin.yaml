@@ -1,5 +1,5 @@
 name: alans-way
-version: "0.21.5"
+version: "0.21.6"
 description: "Idle check-ins from your primary Hermes bot, plus workspace browser skills and integrations: consented account setup through native Hermes routes or pinned VM toolbox recipes for email, calendar, contacts, files, tasks, home and social. Includes web-errands for gated shopping, booking, applications and filings. Alan's Workspace is a separate desktop app. Optional cross-bot export stores bounded sanitized recent owner-DM excerpts for up to 24 hours in a private shared directory; default off, controlled per bot with /proactivity cross on|off|status. Dispatch is disabled. Sanitization cannot detect every secret; expiry does not erase existing Hermes/provider history."
 author: "capthvnsen, Hermes Agent"
 license: MIT

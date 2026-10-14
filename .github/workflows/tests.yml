@@ -3,10 +3,24 @@ on: [push, pull_request]
 jobs:
   python:
     runs-on: ubuntu-latest
+    env:
+      HERMES_SCANNER_ROOT: ${{ github.workspace }}/../hermes-scanner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Fetch pinned upstream Hermes scanner (no Hermes install)
+        # Authenticated: anonymous raw.githubusercontent.com fetches got HTTP 429.
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HERMES_SCANNER_ROOT/tools"
+          for name in plugin_guard.py plugin_guard_context.py skills_guard.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/NousResearch/hermes-agent/contents/tools/$name?ref=6e7b83a2f1c093e992a8d838ed77ea320fbd8e51" \
+              > "$HERMES_SCANNER_ROOT/tools/$name"
+          done
       - run: python -m unittest discover -s tests
       - run: python scripts/check_publication.py
