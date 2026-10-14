@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/31ac0de9ee22307e2df03feb08a5e5217a90243b/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/a82f5010248455600acfe275010e3e725355a2a8/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -320,13 +320,13 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.5
+[ -n "$PIN" ] || PIN=v0.21.6
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref 31ac0de9ee22307e2df03feb08a5e5217a90243b \
+    --desktop-ref a82f5010248455600acfe275010e3e725355a2a8 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \

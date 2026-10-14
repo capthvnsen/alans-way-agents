@@ -1,5 +1,5 @@
 name: alans-way
-version: "0.21.5"
+version: "0.21.6"
 description: "Idle check-ins from your primary Hermes bot, plus workspace browser skills and integrations: consented account setup through native Hermes routes or pinned VM toolbox recipes for email, calendar, contacts, files, tasks, home and social. Includes web-errands for gated shopping, booking, applications and filings. Alan's Workspace is a separate desktop app."
 author: "capthvnsen, Hermes Agent"
 license: MIT
