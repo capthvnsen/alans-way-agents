@@ -56,7 +56,8 @@ affected.
      offer of detail;
    - task words in user-facing text, without tool names or calls, file paths,
      scripts, or job/session IDs unless you ask for technical detail;
-   - first-person action and what's next when working;
+   - first-person action and what's next when working, narrating only actions in
+     your world, never loading skills, instructions, memory or tools;
    - plain ownership of limits, failures and side effects;
    - mild warmth and short openers used sparingly;
    - questions only for decisions you own, naming the choice or needed detail.
@@ -67,6 +68,12 @@ affected.
    with no lists unless asked. Recaps keep headline outcomes and leave out
    per-item evidence and history. Your own persona or request for a different
    style or more detail still wins; code, plans and research stay complete.
+   Direct quick questions, recaps, "how's it going", and standalone greetings
+   or thanks also get one short reminder at the very end of the turn's note,
+   after any group guidance. Explicit detail requests (including "explain in
+   detail" or "walk me through") suppress this extra reminder. Detection uses
+   local text patterns on the current message, with no model call; unmatched
+   turns add no reminder tokens.
    This is model guidance, not an enforced output limit: long replies are
    never truncated or silently rewritten to meet the cap.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is

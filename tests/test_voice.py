@@ -240,7 +240,10 @@ class RecapLengthTests(unittest.TestCase):
                 self.assertIn("without per-item evidence or history", tail)
                 self.assertIn("theirs wins", tail)
                 self.assertIn(V.RECAP, tail)
-                self.assertTrue(note.endswith("theirs wins." + (V.GROUP if chat == "group" else "")))
+                self.assertTrue(note.endswith(
+                    "theirs wins." + (V.GROUP if chat == "group" else "")
+                    + "\nThis one wants a short answer: at most 3 sentences, the headline only,"
+                    " then offer detail."))
 
     def test_length_default_preserves_explicit_detail_and_persona_requests(self):
         for text in ("Give me a detailed recap with evidence for every item.",
@@ -258,6 +261,66 @@ class RecapLengthTests(unittest.TestCase):
                 "I checked the installed versions. The reminder is set. One check failed.\n\n"
                 "The draft is still waiting for approval. Want details?")
         self.assertIsNone(voice().on_output(response_text=text, platform="telegram"))
+
+
+class ShortReplyIntentTests(unittest.TestCase):
+    """The hook scopes an extra reminder; it does not enforce generated reply length."""
+
+    turn = NoteTests.turn
+    reminder = ("This one wants a short answer: at most 3 sentences, the headline only,"
+                " then offer detail.")
+
+    def test_short_reply_requests_get_one_reminder_at_the_very_end(self):
+        for text in ("hey, quick one: what did you get done today?",
+                     "Quick question: is it ready?", "TL;DR: what's the status?",
+                     "What did you get done today?", "Recap today's work.",
+                     "Can you give me a recap?", "How’s it going?", "how's it going",
+                     "hi", "Hey!", "Good morning!", "thanks", "Thank you!",
+                     "Thanks, that's helpful."):
+            for chat in ("dm", "group", "forum", "channel"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(voice(), "telegram", chat, text)["context"]
+                    self.assertEqual(note.count(self.reminder), 1)
+                    self.assertTrue(note.endswith("\n" + self.reminder))
+
+    def test_detail_requests_override_short_reply_cues(self):
+        for text in ("Quick question: explain in detail how this works.",
+                     "Quick one: walk me through the deployment.",
+                     "Recap today in detail.", "TL;DR first, then a detailed explanation.",
+                     "What did you get done? Include details and evidence.",
+                     "How's it going? Give me the full report.",
+                     "Recap the changes step-by-step.",
+                     "Quick question: give me a comprehensive comparison.",
+                     "Recap everything thoroughly.",
+                     "Quick one: explain in depth.",
+                     "My persona says to write detailed reports; use it for this recap."):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                self.assertEqual(note, V.NOTE)
+
+    def test_unmatched_turns_add_no_reminder_and_do_not_inherit_previous_intent(self):
+        v = voice()
+        self.turn(v, "telegram", text="quick one: is it ready?")
+        for text in ("Explain the architecture.", "Write the implementation plan.",
+                     "Check my calendar tomorrow.", "hey can you check my calendar tomorrow",
+                     "Thanks! Please write the migration script.",
+                     "Hello, research available flights.", "Hi, compare these options.",
+                     "Add a recap endpoint to the service.",
+                     'Translate "quick question" into French.',
+                     'The document says "recap". Check its claims.',
+                     "How's it going to handle retries?",
+                     "Run the quick questionnaire.", "Recapitalize the company.", "", None):
+            for chat in ("dm", "group"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(v, "telegram", chat, text)["context"]
+                    self.assertEqual(note, V.NOTE + (V.GROUP if chat == "group" else ""))
+
+    def test_short_intent_respects_existing_platform_mode_and_injected_turn_exclusions(self):
+        for platform in ("cli", "cron", "discord", "", None):
+            self.assertIsNone(self.turn(voice(), platform, text="quick question: ready?"))
+        self.assertIsNone(self.turn(voice("default"), "telegram", text="quick question: ready?"))
+        for marker in (P.MARKER, P.BRIEF_MARKER):
+            self.assertIsNone(self.turn(voice(), "telegram", text=marker + " quick question: ready?"))
 
 
 class CorpusRuleTests(unittest.TestCase):
@@ -283,6 +346,10 @@ class CorpusRuleTests(unittest.TestCase):
 
     def test_progress_uses_first_person_action_and_next_step(self):
         self.assert_rules("For work in progress, use first-person action and say what's next")
+
+    def test_narrates_only_user_world_actions_not_internal_loading(self):
+        self.assert_rules("Never narrate loading skills, instructions, memory or tools",
+                          "Narrate only actions in the user's world")
 
     def test_questions_name_a_user_owned_decision(self):
         self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
