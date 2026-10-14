@@ -18,9 +18,9 @@ holds what your agents need to think and act:
   `scripts/workspace-router.cjs`, which probes your computer first and falls
   back to the VPS browser when it is asleep. Pass `--host-os windows` or `--host-os linux`
   when the user's computer is not a Mac (default `mac`).
-- **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations` and
-  `web-errands` skills ship inside the plugin so agents know how to use the
-  tools correctly.
+- **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations`,
+  `web-errands` and `integrations` skills ship inside the plugin so agents know
+  how to use the tools correctly.
 - **`alans-way-computer/`**: a second plugin (v0.21.5): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
@@ -87,9 +87,13 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   texts, set `display.interim_assistant_messages true` the same way (and check
   `display.platforms.telegram.interim_assistant_messages` for an override).
   Restart the gateway through its supervisor to load the changes.
-- **No bundled account connections.** Email, calendar, Notion and similar
-  connectors exist for an agent only if you install and authorize them
-  separately in Hermes; this plugin provisions none of them.
+- **Connect your stuff from Telegram.** The [integrations skill](alans-way/skills/integrations/SKILL.md)
+  checks account access before promising a task, reuses Hermes' Google,
+  Himalaya, Home Assistant, Honcho and X routes, and offers pinned rclone,
+  Taskwarrior and Mastodon.py recipes. Package installs on the VM require your
+  agreement; account authorization stays private, with secure handback when
+  phone-only auth cannot finish. Installing the plugin connects no accounts
+  and starts no integration services.
 
 ## Install — zero to working
 
@@ -389,7 +393,7 @@ at it.
 
 ```
 alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hooks + skills + router + mac-watch)
-alans-way/skills/     workspace-setup, workspace-operations and web-errands (with per-kind recipes)
+alans-way/skills/     workspace-setup, workspace-operations, web-errands and integrations (with recipes)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
 docs/                 proactivity and voice guides, agent-driven setup prompt
