@@ -35,8 +35,11 @@ that could repeat it; a host switch is not evidence that it failed.
 
 When price matters, check at least two sources and compare the real
 total — price plus shipping, tax, fees and the delivery or travel dates —
-never the headline number. The echo before a commit says what each source
-costs, so the approval shows the comparison, not just the winner.
+never the headline number. Tell the user the comparison in chat before
+requesting approval. Put the deciding facts — the chosen source, the total
+with fees and shipping, and the runner-up if it matters — in
+`commit.summary` (at most 200 characters) so they appear on the approval
+card.
 
 For a used or marketplace listing, open its photos and inspect them on a
 screenshot before pricing it: haze or fungus in a lens, scratches,

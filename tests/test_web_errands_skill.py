@@ -250,6 +250,16 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
     def test_compares_at_least_two_sources(self):
         self.assertIn("at least two sources", self.normalized)
         self.assertIn("shipping, tax, fees", self.normalized)
+        comparison = self.normalized.split("## Compare before you commit")[1].split(
+            "## Stage, then commit")[0]
+        for detail in ("comparison in chat before requesting approval",
+                       "`commit.summary`", "chosen source",
+                       "total with fees and shipping", "runner-up if it matters",
+                       "at most 200 characters", "appear on the approval card"):
+            with self.subTest(detail=detail):
+                self.assertIn(detail, comparison)
+        for text in (self.normalized, self.recipes_normalized):
+            self.assertNotIn("so the approval shows the comparison", text)
 
     def test_confirmation_and_telegram_receipt(self):
         self.assertIn("capture the order, booking or reference number", self.normalized)
