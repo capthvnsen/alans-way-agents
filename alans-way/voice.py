@@ -18,7 +18,9 @@ PLAIN = ("Use plain words and contractions. Skip greetings, preambles and filler
 FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code), never headings,"
           " tables or walls of bold; emoji only if they use them.")
 REPORT = ("Lead with the concrete status, then evidence or a caveat. For work in progress, use"
-          " first-person action and say what's next. Own limits, failures and side effects plainly.")
+          " first-person action and say what's next. Own limits, failures and side effects plainly."
+          " Never narrate loading skills, instructions, memory or tools."
+          " Narrate only actions in the user's world.")
 RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
          " Offer detail ('want the details on any of these?').")
 INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"
@@ -53,6 +55,40 @@ NOTE = (
     + " For casual replies and recaps, use at most 3 sentences total, including any offer of detail;"
     " no lists unless asked. Keep recaps to headline outcomes, without per-item evidence or history."
     " If their own persona or instructions ask for a different style or more detail, theirs wins.")
+
+
+SHORT_REPLY = ("This one wants a short answer: at most 3 sentences, the headline only,"
+               " then offer detail.")
+# A closed set of whole-message recaps and social replies. Prefixes never
+# imply short intent by themselves; unfamiliar wording is left uncapped.
+_REPLY_SEPARATOR = r"[\s,.!?;:\-\u2026\u2600-\u27bf\U0001f300-\U0001faff\ufe0f\u200d]"
+_GREETING = r"(?:hi|hey|hello|good morning|good afternoon|good evening)"
+_RECAP_REQUEST = re.compile(
+    _REPLY_SEPARATOR + r"*(?:" + _GREETING + _REPLY_SEPARATOR + r"+)?"
+    r"(?:quick (?:one|question)" + _REPLY_SEPARATOR + r"+)?"
+    r"(?:what did you get done(?: today)?|how's it going(?: today)?"
+    r"|(?:can you |could you |please )?(?:give me a )?recap(?: today(?:'s work)?| the meeting)?"
+    r"|tl;dr(?:[: ]+(?:what changed|what's the status))?)" + _REPLY_SEPARATOR + r"*")
+_SOCIAL_REPLY = re.compile(
+    _REPLY_SEPARATOR + r"*(?:" + _GREETING + _REPLY_SEPARATOR + r"+)?"
+    r"(?:" + _GREETING + r"|thanks|thank you|ok|okay|got it|understood|sounds good)"
+    r"(?:" + _REPLY_SEPARATOR + r"+that's helpful)?" + _REPLY_SEPARATOR + r"*")
+
+_DETAIL_REQUEST = re.compile(
+    r"\b(?:detail(?:ed|s)?|walk me through|step[ -]by[ -]step|in depth|thoroughly"
+    r"|comprehensive|long|extensive(?:ly)?|everything|all of it|full|complete|with evidence)\b")
+
+
+def wants_short_reply(user_message):
+    """Cheap, conservative intent check on this turn only; no history or model call."""
+    text = str(user_message or "")
+    # Check the raw length before normalization; truncation could hide a task
+    # after a recap, and whitespace/Unicode normalization must stay bounded too.
+    if len(text) > 200:
+        return False
+    text = " ".join(text.casefold().replace("’", "'").split())
+    return not _DETAIL_REQUEST.search(text) and bool(
+        _RECAP_REQUEST.fullmatch(text) or _SOCIAL_REPLY.fullmatch(text))
 
 
 # Hermes suppresses a reply that is (or starts/ends with) one of these; any reply mentioning
@@ -119,7 +155,8 @@ def note_for(user_message, *, platform, chat_type="", on=True):
     # Check-ins and the brief carry the same rules in their own prompts, with their own length.
     if not on or platform != "telegram" or str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
         return None
-    return NOTE + (GROUP if chat_type in ("group", "forum", "channel") else "")
+    note = NOTE + (GROUP if chat_type in ("group", "forum", "channel") else "")
+    return note + ("\n" + SHORT_REPLY if wants_short_reply(user_message) else "")
 
 
 class Voice:
