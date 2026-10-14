@@ -141,7 +141,15 @@ hermes -p <profile> tools enable proactivity --platform telegram
 ```
 
 Select an existing owner DM route for that profile; `default`/`custom` uses
-`agent:main`, and a profile literally named `main` uses `agent:main~`. Collector
+`agent:main`, and a profile literally named `main` uses `agent:main~`.
+Hermes' public binding hooks do not expose a DM's persisted receiving-bot identity.
+The receiver therefore refuses enabled Telegram `profile_routes` into this profile
+when `bot_profile` names another bot (including the implicit default bot for a
+named profile). This conservative check covers the entire profile, even routes
+for another chat. It reads launch-gateway routing policy through public configuration
+and home-scope APIs; unavailable policy fails closed. Routes explicitly owned by
+this bot, disabled routes and other platforms do not prevent receiving. Opt-out
+remains available from the bound DM even when route verification fails. Collector
 checks use the exact bound session key, never just the human's ID. Shared-root
 changes take effect on plugin reload under the normal operator update/drain
 procedure. Set the primary before the root when creating a store; all profiles
@@ -169,9 +177,11 @@ make exports unavailable. Custom shared roots are supported; the plugin never
 infers one from the launch profile's environment or accesses Hermes' session DB.
 Presence includes heartbeat, enabled/bound booleans, profile identity/generation
 and captured timezone/window/pause/busy eligibility; it contains no DM address.
-Eligibility is refreshed in the owning hooks/connect/command scope. Timers use
-captured settings, never the launch profile's ambient state. Operator CLI binding
-or settings changes require reconnect/reload to refresh that capture. Primary
+Before every claim, the scoped receiver rereads its owning profile's live binding
+and pause/timezone/hours settings under the owner and shared-store locks. Commands,
+tools and CLI changes apply to the next claim without reconnect/reload. A timer
+outside its inherited owning scope refuses to claim; it never reads another
+profile's state. Primary
 snapshot freshness selection belongs to stage 3.
 
 Each digest holds at most the last **four exchanges**, at most **2 KiB serialized**,
@@ -210,8 +220,14 @@ it. There is no receipt store, completion tracking or result polling.
 
 Imported task text is untrusted and grants no routing or approval. The receiver
 supplies its own captured key and a correlated prompt marker. Replies retain the
-target's voice and show one “Primary asked me to …” attribution line. Imported
-turns cannot enter digests or chain into another bot. Their tool hook blocks
+target's voice and show one “Primary asked me to …” attribution line without
+removing task content. Hermes silence markers pass through unchanged. Restrictions
+follow the immutable scheduled session key through rebinding and opt-out, including
+other turns in that session while an import is pending or active. An expired or
+uncorrelatable guard blocks tools rather than granting ordinary-turn authority;
+only a matching session-end hook clears a correlated import. Missing hook IDs may
+leave receiving blocked until host correlation is restored or the plugin reloads.
+Imported turns cannot enter digests or chain into another bot. Their tool hook blocks
 cross-bot asks, messaging/delegation, scheduler creation, general terminal/code
 execution, desktop actions and unknown connectors. Only reviewed web/session and
 workspace-browser reads plus existing gated workspace-browser actions are allowed;

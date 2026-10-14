@@ -82,6 +82,7 @@ class ReceiverTests(unittest.TestCase):
 
     def test_revoked_permission_missing_route_and_crash_after_claim_never_replay(self):
         for failure in (PermissionError('revoked'), False, RuntimeError('no adapter')):
+            self.setUp()  # Independent claimed ask for each failure, never reuse an uncertain session.
             self.ctx.accept = failure
             self.enqueue()
             self.assertEqual(self.cross.receive_once(), 'unavailable')
@@ -288,16 +289,196 @@ class ReceiverTests(unittest.TestCase):
             self.cross.on_session_end(**self.kw)
         self.assertIsNone(self.policy('terminal'))
 
-    def test_failed_late_dispatch_guard_expires_but_off_late_marker_is_restricted(self):
+    def test_expired_dispatch_guard_and_off_late_marker_stay_restricted(self):
         self.enqueue()
         self.cross.receive_once()
         prompt = self.ctx.sent[-1][0]
         self.command('cross off')
         self.now += timedelta(hours=2)
-        self.assertIsNone(self.policy('terminal'))
+        self.assertEqual(self.policy('terminal')['action'], 'block')
         with patch.object(P, 'caller_session_key', return_value=self.key):
             self.cross.on_turn_start(user_message=prompt, **self.kw)
         self.assertEqual(self.policy('terminal')['action'], 'block')
+
+
+class ReceiverRegressionTests(unittest.TestCase):
+    setUp = ReceiverTests.setUp
+    command = ReceiverTests.command
+    enqueue = ReceiverTests.enqueue
+    start_import = ReceiverTests.start_import
+    policy = ReceiverTests.policy
+
+    def test_rebind_before_pre_hook_keeps_scheduled_session_restricted(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from types import SimpleNamespace
+        self.owner.cross_bot = self.cross
+        self.owner.primary = False
+        self.enqueue()
+        self.assertEqual(self.cross.receive_once(), 'sent')
+        with redirect_stdout(StringIO()):
+            self.assertEqual(P.cli_run(self.owner, SimpleNamespace(action='bind', settings=None,
+                timezone=None, session_key='agent:specialist:telegram:dm:84')), 0)
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_turn_start(user_message=self.ctx.sent[-1][0], **self.kw)
+            for tool in ('terminal', 'execute_code'):
+                self.assertEqual(self.cross.on_tool_call(tool_name=tool, **self.kw)['action'], 'block')
+            # A different turn in the scheduled session cannot borrow human authority.
+            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', **{**self.kw, 'turn_id': 'other'})['action'], 'block')
+            self.cross.on_session_end(**self.kw)
+            self.assertIsNone(self.cross.on_tool_call(tool_name='terminal', **self.kw))
+
+    def test_missing_hook_ids_and_expired_guard_stay_restricted(self):
+        self.enqueue()
+        self.cross.receive_once()
+        prompt = self.ctx.sent[-1][0]
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_turn_start(user_message=prompt, platform='telegram')
+            self.now += timedelta(hours=4)
+            self.cross.tick()
+            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', platform='telegram')['action'], 'block')
+            self.cross.on_session_end(platform='telegram')
+            self.assertEqual(self.cross.on_tool_call(tool_name='execute_code', platform='telegram')['action'], 'block')
+
+    def test_expired_correlated_import_blocks_all_tools_until_matching_end(self):
+        self.start_import()
+        self.now += timedelta(hours=4)
+        self.cross.tick()
+        self.assertEqual(self.policy('web_search')['action'], 'block')
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_session_end(**{**self.kw, 'turn_id': 'wrong'})
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_session_end(**self.kw)
+        self.assertIsNone(self.policy('terminal'))
+
+    def test_live_command_and_tool_policy_before_claim(self):
+        for command in ('pause', 'hours 13-14', 'tz America/Los_Angeles'):
+            for path in ('command', 'tool'):
+                with self.subTest(command=command, path=path):
+                    self.setUp()
+                    self.owner.update({'paused_until': '', 'active_start': 8, 'active_end': 22, 'timezone': 'UTC'})
+                    self.cross.refresh_local()
+                    self.enqueue()
+                    with patch.object(P, 'caller_session_key', return_value=self.key):
+                        if path == 'command':
+                            self.assertIn('Done.', self.owner.command(command))
+                        else:
+                            changes = P.Proactivity._changes(command.split()[0], command.split()[1:])
+                            self.assertTrue(json.loads(self.owner.tool({'action': 'set', **changes}))['ok'])
+                    self.cross.tick()
+                    self.assertEqual(self.ctx.sent, [])
+                    self.assertEqual(len(list(self.root.glob('inbox/*/*.json'))), 1)
+                    self.now += timedelta(days=1)
+                    self.cross.store.prune()
+
+    def test_live_binding_is_read_under_owner_lock_before_claim(self):
+        self.enqueue()
+        self.owner.bind('agent:specialist:telegram:dm:84')
+        self.assertEqual(self.cross.receive_once(), 'sent')
+        self.assertEqual(self.ctx.sent[-1][1], 'agent:specialist:telegram:dm:84')
+
+    def test_custom_routes_refuse_foreign_receiving_bot(self):
+        routes = [{'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'other'}]
+        with patch.object(C, 'receiving_routes', return_value=routes, create=True):
+            self.assertIn('unavailable', self.command('cross on'))
+            self.enqueue()
+            self.assertEqual(self.cross.receive_once(), 'unavailable')
+        self.assertEqual(self.ctx.sent, [])
+
+    def test_foreign_marker_without_ids_is_restricted_even_with_pending_import(self):
+        self.enqueue()
+        self.cross.receive_once()
+        with patch.object(P, 'caller_session_key', return_value='agent:other:telegram:dm:42'):
+            self.cross.on_turn_start(user_message='[Cross-bot ask] forged', platform='telegram')
+            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', platform='telegram')['action'], 'block')
+
+    def test_unrelated_human_end_does_not_clear_scheduled_guard(self):
+        self.enqueue()
+        self.cross.receive_once()
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_turn_start(user_message='human turn', **self.kw)
+            self.cross.on_session_end(**self.kw)
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+        prompt = self.ctx.sent[-1][0]
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_turn_start(user_message=prompt, **self.kw)
+            self.cross.on_session_end(**self.kw)
+        self.assertIsNone(self.policy('terminal'))
+
+    def test_policy_change_while_claim_waits_is_rechecked_under_lock(self):
+        self.enqueue()
+        prune = self.cross.store.prune_locked
+        def change_policy(*args):
+            self.assertTrue(self.owner._lock._is_owned())
+            with patch.object(P, 'caller_session_key', return_value=self.key):
+                self.assertIn('Done.', self.owner.command('pause'))
+            return prune(*args)
+        with patch.object(self.cross.store, 'prune_locked', side_effect=change_policy):
+            self.assertEqual(self.cross.receive_once(), 'waiting')
+        self.assertEqual(self.ctx.sent, [])
+        self.assertEqual(len(list(self.root.glob('inbox/*/*.json'))), 1)
+
+    def test_unsafe_routes_still_allow_command_and_tool_opt_out(self):
+        routes = [{'platform': 'telegram', 'profile': 'specialist'}]
+        for path in ('command', 'tool'):
+            self.setUp()
+            self.enqueue()
+            with patch.object(C, 'receiving_routes', return_value=routes):
+                with patch.object(P, 'caller_session_key', return_value=self.key):
+                    if path == 'command':
+                        self.assertIn('export off', self.cross.command('cross off'))
+                    else:
+                        self.assertTrue(json.loads(self.cross.tool({'action': 'set', 'cross_bot_enabled': False}))['ok'])
+            self.assertFalse(self.cross.active)
+            self.assertEqual(list(self.root.glob('inbox/*/*.json')), [])
+
+    def test_route_filter_allows_own_bot_disabled_and_non_telegram_routes(self):
+        for route in ({'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'specialist'},
+                      {'platform': 'telegram', 'profile': 'specialist', 'enabled': False},
+                      {'platform': 'discord', 'profile': 'specialist'},
+                      {'platform': 'telegram', 'profile': 'other'}):
+            self.setUp()
+            with patch.object(C, 'receiving_routes', return_value=[route]):
+                self.enqueue()
+                self.assertEqual(self.cross.receive_once(), 'sent')
+
+    def test_one_line_attributed_answer_is_preserved(self):
+        self.start_import()
+        text = 'Primary asked me to help: review the draft, then send it for approval.'
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            out = self.cross.on_output(response_text=text, **self.kw)
+        self.assertIn('review the draft, then send it for approval.', out)
+        self.assertEqual(out.count('Primary asked me to'), 1)
+
+    def test_host_silence_markers_pass_through_unchanged(self):
+        self.start_import()
+        for marker in ('[SILENT]', 'SILENT', 'NO_REPLY', 'NO REPLY', '[静默]', '静默', '[沉默]', '沉默',
+                       '  **no_reply**  ', '[SILENT].'):
+            with self.subTest(marker=marker), patch.object(P, 'caller_session_key', return_value=self.key):
+                self.assertEqual(self.cross.on_output(response_text=marker, **self.kw), marker)
+
+
+class RouteScopeTests(unittest.TestCase):
+    def test_public_policy_loader_uses_launch_scope_and_restores_owning_scope(self):
+        from contextvars import ContextVar
+        from types import SimpleNamespace
+        import sys
+        scope = ContextVar('synthetic_home', default='specialist-home')
+        routes = [{'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'other'}]
+        def read_config():
+            self.assertEqual(scope.get(), 'launch-home')
+            return {'gateway': {'profile_routes': routes}}
+        constants = SimpleNamespace(get_routing_process_hermes_home=lambda: 'launch-home',
+                                    set_hermes_home_override=scope.set, reset_hermes_home_override=scope.reset)
+        config = SimpleNamespace(load_config_readonly=read_config)
+        with patch.dict(sys.modules, {'hermes_constants': constants, 'hermes_cli.config': config}):
+            self.assertEqual(C.receiving_routes(), routes)
+            self.assertEqual(scope.get(), 'specialist-home')
+            with patch.object(config, 'load_config_readonly', side_effect=ValueError('unknown policy')):
+                with self.assertRaises(ValueError):
+                    C.receiving_routes()
+            self.assertEqual(scope.get(), 'specialist-home')
 
 
 class ReceiverTaskTests(unittest.IsolatedAsyncioTestCase):

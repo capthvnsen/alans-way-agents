@@ -123,7 +123,13 @@ Receiver validates the envelope and target's bind/pause/window/busy state, then 
 literal `main` `agent:main~` (H `gateway/session.py:656-665`); restored source selects the target's adapter
 and scoped runtime (H `gateway/run_plugin_injection.py:126-154`). Custom `profile_routes` can separate runtime
 from receiving bot; bind an explicitly verified target-bot DM, not just a matching namespace (H
-`gateway/authz_mixin.py:285-313,380-391`). Permission is read from the target plugin's immutable manager home
+`gateway/authz_mixin.py:285-313,380-391`). Because binding hooks expose no supported
+persisted transport identity, this implementation refuses enabled Telegram routes
+into its runtime profile from a foreign `bot_profile` (including implicit default).
+It reads launch routing policy with public `hermes_cli.config.load_config_readonly`
+and context-local home APIs, restoring the owning scope before reading plugin
+state; route-policy errors fail closed. Opt-out does not depend on route provenance.
+Permission is read from the target plugin's immutable manager home
 (H `hermes_cli/plugins.py:622-630`); each target needs `allow_gateway_injection: true`. Session-key injection
 itself does **not** enforce “same plugin profile”: only the origin variant carries `plugin_home` (H
 `hermes_cli/plugins_injection.py:52-59`). Our receiver must pin its own key and reject any supplied route; no
