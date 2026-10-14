@@ -1,6 +1,8 @@
 """setup.sh CLI: verify strictness, bot-id derivation, timezone, and doc flags."""
 from pathlib import Path
 import json
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "setup.sh"
@@ -123,9 +126,9 @@ class SetupVerifyTests(unittest.TestCase):
             result = run(
                 "--verify", "--skip-browser", "--hermes-home", str(home), env=env, check=False,
             )
-            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 2)
             self.assertIn("skip workspace_browser block", result.stdout)
-            self.assertIn("all required checks passed", result.stdout)
+            self.assertIn("partial install", result.stdout)
 
 
 class StaleHookTests(unittest.TestCase):
@@ -454,6 +457,18 @@ class TelegramHomeBindingTests(unittest.TestCase):
                 self.assertIn("check-ins bound but paused", result.stdout)
                 self.assertIn("== Done", result.stdout)
 
+
+    def test_timed_out_non_exec_shim_cannot_write_config_later(self):
+        cli = self.bin_dir / "hermes"
+        completed = self.root / "late-config-write"
+        stall = (f'[ "$1 $2 $3" = "config set TELEGRAM_HOME_CHANNEL" ] && '
+                 f'"{sys.executable}" -c \'import pathlib, time; time.sleep(0.6); '
+                 f'pathlib.Path("{completed}").touch()\'\n')
+        cli.write_text(cli.read_text().replace('case "$1" in', stall + 'case "$1" in'))
+        result = self.run_setup(ALANS_WAY_CONFIG_TIMEOUT="0.1")
+        self.assertIn("could not set Telegram home channel", result.stdout)
+        time.sleep(0.7)
+        self.assertFalse(completed.exists(), "config-writing child survived the timeout")
 
     def test_binding_sets_the_selected_profiles_telegram_home_through_cli(self):
         result = self.run_setup()
@@ -2142,6 +2157,51 @@ class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
         self.assertIn("proactivity set --timezone Europe/Berlin", calls)
 
 
+class WindowsProbeCleanupTests(unittest.TestCase):
+    """Exercise the exact embedded helper with Windows subprocess doubles."""
+
+    def cleanup(self, taskkill, final_wait=0):
+        code = re.search(r"run_with_timeout\(\) \{\s*python3 -c '(.*?)' \"\$@\"",
+                         SCRIPT.read_text(), re.S).group(1)
+        process = mock.Mock(pid=123)
+        process.wait.side_effect = [subprocess.TimeoutExpired("probe", 1), final_wait]
+        error = io.StringIO()
+        with mock.patch.object(os, "name", "nt"), \
+             mock.patch.object(sys, "argv", ["helper", "1", "probe"]), \
+             mock.patch.object(subprocess, "Popen", return_value=process), \
+             mock.patch.object(subprocess, "run", **({"side_effect": taskkill} if isinstance(taskkill, Exception)
+                                                       else {"return_value": taskkill})) as kill, \
+             contextlib.redirect_stderr(error):
+            with self.assertRaises(SystemExit) as result:
+                exec(compile(code, "setup.sh:run_with_timeout", "exec"), {})
+        self.assertTrue(all(call.kwargs.get("timeout") is not None
+                            for call in process.wait.call_args_list))
+        kill.assert_called_once_with(["taskkill", "/PID", "123", "/T", "/F"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return result.exception.code, error.getvalue(), process
+
+    def test_failed_missing_or_timed_out_taskkill_reports_tree_failure_and_kills_child(self):
+        for failure in (subprocess.CompletedProcess([], 1), FileNotFoundError("taskkill"),
+                        subprocess.TimeoutExpired("taskkill", 5)):
+            with self.subTest(failure=type(failure).__name__):
+                code, error, process = self.cleanup(failure)
+                self.assertEqual(code, 125)
+                self.assertIn("process-tree cleanup failed", error)
+                process.kill.assert_called_once_with()
+
+    def test_successful_tree_cleanup_returns_timeout_with_a_bounded_reap(self):
+        code, error, process = self.cleanup(subprocess.CompletedProcess([], 0))
+        self.assertEqual(code, 124)
+        self.assertEqual(error, "")
+        process.kill.assert_not_called()
+
+    def test_child_that_cannot_be_reaped_reports_cleanup_failure(self):
+        code, error, _ = self.cleanup(subprocess.CompletedProcess([], 0),
+                                      subprocess.TimeoutExpired("probe", 5))
+        self.assertEqual(code, 125)
+        self.assertIn("process cleanup failed", error)
+
+
 class ComputerProbeShimTests(unittest.TestCase):
     """Hermes 0.21.5 installs `hermes` as a bash shim around its venv, and ImageMagick's `import` hangs."""
 
@@ -2201,6 +2261,39 @@ class ComputerProbeShimTests(unittest.TestCase):
         self.assertIn("timed out", result.stdout + result.stderr)
         self.assertNotIn("alans-way-computer", read_log(self.log))
 
+
+class ComputerApiDiagnosisTests(unittest.TestCase):
+    def probe(self, backend):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        home = root / "home"
+        home.mkdir()
+        log = root / "log"
+        bin_dir = tooling(root, log)
+        package = root / "modules" / "tools" / "computer_use"
+        package.mkdir(parents=True)
+        (package.parent / "__init__.py").touch()
+        (package / "__init__.py").touch()
+        if backend is not None:
+            (package / "backend.py").write_text(backend)
+        env = env_for(root, bin_dir, home, HERMES_PYTHON=sys.executable,
+                      PYTHONPATH=str(root / "modules"))
+        return run("--skip-browser", "--skip-services", "--skip-plugin", "--non-interactive",
+                   "--hermes-home", str(home), env=env, check=False)
+
+    def test_absent_api_is_distinct_from_a_failed_probe(self):
+        for backend in (None, "unrelated = True\n"):
+            with self.subTest(backend=backend):
+                result = self.probe(backend)
+                self.assertIn("computer-use API absent", result.stdout)
+                self.assertNotIn("API probe failed", result.stdout)
+        for backend in ("import fixture_missing_dependency\n", 'raise RuntimeError("broken install")\n',
+                        'raise ModuleNotFoundError("Hermes root unavailable", name="tools")\n'):
+            with self.subTest(backend=backend):
+                result = self.probe(backend)
+                self.assertIn("computer-use API probe failed", result.stdout)
+                self.assertNotIn("API absent", result.stdout)
 
 class ComputerProviderTests(IntegrationBase, unittest.TestCase):
     def test_installed_per_profile_and_selected_when_hermes_has_the_provider_api(self):
@@ -4158,6 +4251,67 @@ class VerifyHostStateTests(unittest.TestCase):
     def dead_systemd(self):
         linux_without_systemd(self.bin_dir, self.root / "systemctl.log")
 
+    def test_complete_local_audit_requires_live_browser_and_services(self):
+        import http.server
+        import threading
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"Browser":"fixture"}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.data.mkdir()
+        (self.data / "config.json").write_text(json.dumps({
+            "cdpUrl": "http://127.0.0.1:%d" % server.server_address[1]}))
+        (self.data / "connection.json").write_text("{}")
+        linux_with_systemd(self.bin_dir, self.root / "systemctl.log")
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("complete install", result.stdout)
+        self.assertNotIn("partial install", result.stdout)
+
+    def test_missing_browser_capabilities_are_partial_not_complete(self):
+        self.dead_systemd()
+        result = self.verify(ALANS_WAY_MISSING="supervisorctl")
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("partial install", result.stdout)
+        self.assertNotIn("all required checks passed", result.stdout)
+
+    def test_service_skips_do_not_audit_service_health(self):
+        self.dead_systemd()
+        result = self.verify("--skip-services", "--mac-ssh", "me@mac.tail1234.ts.net",
+                             ALANS_WAY_MISSING="supervisorctl")
+        self.assertIn("browser services (--skip-services)", result.stdout)
+        self.assertNotIn("nothing supervises", result.stdout)
+        self.assertNotIn("watcher service is not running", result.stdout)
+        self.assertIn("partial install", result.stdout)
+
+    def test_profile_audit_does_not_borrow_another_profiles_computer(self):
+        other = self.home / "profiles" / "other"
+        other.mkdir(parents=True)
+        (other / "config.yaml").write_text(
+            "# >>> alans-way workspace_browser managed block >>>\n"
+            "    HERMES_WORKSPACE_MAC_SSH: me@other.tail1234.ts.net\n"
+            "# <<< alans-way workspace_browser managed block <<<\n")
+        result = self.verify("--profile", "default")
+        self.assertIn("host availability watcher (no configured computer)", result.stdout)
+        self.assertNotIn("no host availability watcher state", result.stdout)
+
+    def test_an_unconfigured_computer_ignores_shared_watcher_state(self):
+        state = self.root / "shared-state.json"
+        state.write_text('{"state":"online"}')
+        os.utime(state, (1, 1))
+        result = self.verify(HERMES_MAC_STATE_FILE=str(state))
+        self.assertNotIn("watcher state is stale", result.stdout)
+        self.assertIn("host availability watcher (no configured computer)", result.stdout)
+
     def test_verify_reports_supervisord_program_states(self):
         self.dead_systemd()
         fake_supervisord(self.bin_dir, self.root, state=(
@@ -4321,6 +4475,16 @@ class VerifyHostStateTests(unittest.TestCase):
         result = self.verify()
         self.assertIn("a desktop display is live (DISPLAY=:99)", result.stdout)
 
+    def test_loopback_viewer_prints_an_actionable_forward_handoff(self):
+        fake(self.bin_dir, "uname", "echo Linux\n")
+        fake(self.bin_dir, "pgrep", 'case "$*" in\n'
+             '  *websockify*) echo "581 /usr/bin/websockify 127.0.0.1:6080 localhost:5900";;\n'
+             '  *) exit 1;;\nesac\n')
+        result = self.verify()
+        self.assertIn("SSH forward", result.stdout)
+        self.assertIn("workspace-setup", result.stdout)
+        self.assertIn("verify /vnc.html from the computer", result.stdout)
+
     def test_verify_prints_the_websockify_viewer_url(self):
         fake(self.bin_dir, "uname", "echo Linux\n")
         ip = tailnet_ip(64, 0, 2)
@@ -4333,7 +4497,7 @@ class VerifyHostStateTests(unittest.TestCase):
                      '  *websockify*) echo "581 /usr/bin/python3 /usr/bin/websockify --web /usr/share/novnc %s localhost:5999";;\n'
                      '  *) exit 1;;\nesac\n' % listener)
                 result = self.verify()
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html" % ip,
                               result.stdout)
                 self.assertNotIn("not reachable over the tailnet", result.stdout)
@@ -4389,7 +4553,7 @@ class VerifyHostStateTests(unittest.TestCase):
                              '  *websockify*) echo "581 /usr/bin/websockify %s%s localhost:5900";;\n'
                              '  *) exit 1;;\nesac\n' % (options, listener))
                         result = self.verify(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
-                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                         self.assertIn("the remote desktop viewer is at http://[%s]:6080/vnc.html" % host,
                                       result.stdout)
                         self.assertNotIn("not reachable over the tailnet", result.stdout)
@@ -4409,7 +4573,7 @@ class VerifyHostStateTests(unittest.TestCase):
                          'case "$*" in\n  "ip -4") echo "%s";;\n  "ip -6") echo "%s";;\nesac\n%s'
                          % (tailnet_ip(64, 0, 2), observed, TAILSCALE_UP))
                     result = self.verify(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                     self.assertIn("the remote desktop viewer is at http://[%s]:6080/vnc.html "
                                   "(bound to [%s], so not reachable over the tailnet)" % (host, host),
                                   result.stdout)
@@ -4428,7 +4592,7 @@ class VerifyHostStateTests(unittest.TestCase):
                 fake(self.bin_dir, "tailscale",
                      'case "$1" in\n  ip) echo "%s";;\nesac\n%s' % (observed, TAILSCALE_UP))
                 result = self.verify(ALANS_WAY_X11_DIR=str(self.root / "no-x11"))
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("the remote desktop viewer is at http://%s:6080/vnc.html "
                               "(bound to %s, so not reachable over the tailnet)" % (host, host),
                               result.stdout)

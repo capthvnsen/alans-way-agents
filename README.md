@@ -26,7 +26,22 @@ holds what your agents need to think and act:
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
   Telegram and choose what to always allow. Needs a Hermes build with the
-  pluggable computer-use API (on main after 0.21.5).
+  pluggable computer-use API described below.
+
+Browser-only setup needs stock Hermes `>= 0.21.5`. Desktop control through
+`alans-way-computer` also needs `tools.computer_use.backend.ComputerUseProvider`,
+introduced in Hermes commit
+[`63f5e0ea45726c5d8d7d207d140613997730aab3`](https://github.com/NousResearch/hermes-agent/commit/63f5e0ea45726c5d8d7d207d140613997730aab3)
+and verified in `6e7b83a2f1`. A version string alone does not establish this API.
+Set `HERMES_PYTHON` to the interpreter belonging to the selected Hermes install
+(`python.exe` on Windows); setup probes that interpreter with a bounded timeout.
+“API absent” means the provider module/class is missing; “probe failed”,
+“timed out”, or “probe unavailable” means support is unknown, so check the
+interpreter/dependencies before retrying. For an absent API, offer a supported
+Hermes upgrade with the user's consent, then rerun setup and
+`hermes -p <profile> computer-use doctor`. Browser setup can finish meanwhile;
+do not claim desktop control is ready until the provider is selected and its
+doctor succeeds.
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
@@ -199,7 +214,11 @@ Useful flags:
 
 - `--profile NAME`: configure only one Hermes profile.
 - `--host-os windows|linux`: the user's computer is not a Mac.
-- `--verify`: audit without changing anything.
+- `--verify`: audit without changing anything. Exit 0 means a complete local
+  audit, 1 means failed required checks, and 2 means partial (warnings or
+  skipped browser/services). Repeat the install's skip flags when auditing.
+  Computer-side preview/control and Telegram delivery still need their human
+  handoffs and end-to-end checks.
 - `--non-interactive`: scripted runs.
 - `--skip-browser`: proactivity-only installs.
 - `--skip-plugin`: leave an already installed plugin as it is (catalog installs).

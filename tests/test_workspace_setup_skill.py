@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,18 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("name: workspace-setup", match.group(1))
         self.assertIn("description:", match.group(1))
 
+    def test_desktop_api_prerequisite_has_a_known_build_and_diagnostic(self):
+        for path in (SKILL_PATH, ROOT / "README.md"):
+            text = _normalized(path.read_text())
+            for rule in ("0.21.5", "63f5e0ea45726c5d8d7d207d140613997730aab3",
+                         "ComputerUseProvider", "HERMES_PYTHON", "probe failed"):
+                self.assertIn(rule, text)
+
+    def test_noninteractive_scan_confirmation_requires_review_and_consent(self):
+        for rule in ("--enable does not confirm", "--force", "dangerous",
+                     "Never disable scanning", "explicit consent", "dependency consent"):
+            self.assertIn(rule, self.normalized)
+
     def test_directs_to_setup_script(self):
         self.assertIn("setup.sh", self.normalized)
         self.assertIn("--bot-id", self.normalized)
@@ -131,7 +144,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                        "config set display.busy_input_mode steer",
                        "config set display.busy_input_mode interrupt"):
             self.assertIn(phrase, self.normalized)
-        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\ngit clone"))
+        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\n# Prepare"))
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
@@ -176,6 +189,13 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("websockify", self.normalized)
         self.assertIn("/vnc.html", self.text)
         self.assertIn("Remote desktop connection", self.text)
+
+    def test_loopback_viewer_requires_consented_bounded_computer_forward_and_probe(self):
+        for rule in ("127.0.0.1 only", "explicit consent", "StrictHostKeyChecking=yes",
+                     "ExitOnForwardFailure=yes", "ServerAliveCountMax=2", "sleep 1800",
+                     "127.0.0.1:16080:127.0.0.1:<viewer-port>", "--max-time 10",
+                     "from the user's computer", "Ctrl-C", "never change the listener"):
+            self.assertIn(rule, self.normalized)
 
     def test_vm_moved_checklist_lists_every_saved_address(self):
         # A VM move leaves several independently stored addresses stale and
@@ -224,6 +244,173 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                 self.assertIn(requirement, self.normalized)
         self.assertIn("references/long-chats.md", self.text)
 
+
+class SetupPinProcedureTests(unittest.TestCase):
+    SHA = "1234567890abcdef1234567890abcdef12345678"
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / "profile"
+        (self.home / "plugins").mkdir(parents=True)
+        self.source = self.root / "source with spaces"
+        self.env = dict(os.environ, HERMES_HOME=str(self.home), GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_CONFIG_SYSTEM=os.devnull)
+        subprocess.run(["git", "init", "-q", str(self.source)], check=True, env=self.env)
+        self.git("remote", "add", "origin", "https://github.com/capthvnsen/alans-way-agents")
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.source), *args], check=True, env=self.env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def resolve(self, row):
+        (self.home / "plugins" / ".install-metadata.json").write_text(json.dumps({"alans-way": row}))
+        code = re.search(r"PIN=\$\(python3 -c '(.*?)'\)", SKILL_PATH.read_text(), re.DOTALL).group(1)
+        return subprocess.run([sys.executable, "-c", code], env=self.env,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_file_source_uses_installer_revision_after_validating_origin(self):
+        result = self.resolve({"source": self.source.as_uri() + "#alans-way", "revision": self.SHA})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.SHA)
+
+    def test_unrecorded_install_fetches_and_checks_out_the_release_tag(self):
+        self.prepare_checkout()
+        (self.home / "plugins" / ".install-metadata.json").unlink()
+        result = self.procedure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
+                                   "describe", "--tags", "--exact-match"],
+                                  capture_output=True, text=True, env=self.env)
+        self.assertEqual(checkout.stdout.strip(), "v0.21.5")
+
+    def prepare_checkout(self, existing=False):
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "first")
+        self.git("tag", "-f", "v0.21.5")
+        self.destination = self.root / "alans-way-agents"
+        if existing:
+            subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],
+                           check=True, env=self.env)
+            subprocess.run(["git", "-C", str(self.destination), "remote", "set-url", "origin",
+                            "https://github.com/capthvnsen/alans-way-agents"], check=True, env=self.env)
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "installed")
+        self.revision = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"],
+                                                 env=self.env, text=True).strip()
+        (self.home / "plugins" / ".install-metadata.json").write_text(json.dumps({"alans-way": {
+            "source": "https://github.com/capthvnsen/alans-way-agents#alans-way",
+            "revision": self.revision}}))
+        # Only the transport is mocked: origin/config/status validation uses real Git.
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.fetch_log = self.root / "fetches"
+        real_git = shutil.which("git")
+        wrapper = self.bin / "git"
+        wrapper.write_text(f"#!{sys.executable}\n" +
+            "import os, pathlib, subprocess, sys\nargs = sys.argv[1:]\n" +
+            f"if len(args) > 2 and args[2] == 'fetch':\n    pathlib.Path({str(self.fetch_log)!r}).touch()\n" +
+            f"    args[4] = {str(self.source)!r}\n" +
+            f"sys.exit(subprocess.call([{real_git!r}, *args]))\n")
+        wrapper.chmod(0o755)
+
+    def procedure(self):
+        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n~/alans-way-agents/setup.sh",
+                          SKILL_PATH.read_text(), re.S).group(1)
+        return subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root),
+                              PATH=str(self.bin) + os.pathsep + os.environ["PATH"]),
+                              capture_output=True, text=True, timeout=15)
+
+    def test_new_checkout_rejects_effective_origin_rewrite_before_fetch(self):
+        self.prepare_checkout()
+        config = self.root / "gitconfig"
+        config.write_text('[url "' + self.source.as_uri() + '"]\n'
+                          '    insteadOf = https://github.com/capthvnsen/alans-way-agents\n')
+        self.env["GIT_CONFIG_GLOBAL"] = str(config)
+        result = self.procedure()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.fetch_log.exists())
+        self.assertIn("Setup checkout unavailable", result.stderr)
+
+    def test_clean_existing_clone_fetches_and_checks_out_installed_revision(self):
+        self.prepare_checkout(existing=True)
+        result = self.procedure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.fetch_log.exists())
+        head = subprocess.check_output(["git", "-C", str(self.destination), "rev-parse", "HEAD"], text=True)
+        self.assertEqual(head.strip(), self.revision)
+
+    def test_invalid_existing_clone_stops_with_reason_before_fetch(self):
+        for invalid in ("foreign", "multiple", "rewrite", "dirty", "plain-directory"):
+            with self.subTest(invalid=invalid):
+                # Each case has independent Git config and destination contents.
+                if hasattr(self, "destination"):
+                    shutil.rmtree(self.destination)
+                    shutil.rmtree(self.bin)
+                self.prepare_checkout(existing=True)
+                git = ["git", "-C", str(self.destination)]
+                if invalid == "foreign":
+                    subprocess.run([*git, "remote", "set-url", "origin", "https://example.invalid/foreign"], check=True)
+                elif invalid == "multiple":
+                    subprocess.run([*git, "config", "--add", "remote.origin.url", "https://github.com/capthvnsen/alans-way-agents.git"], check=True)
+                elif invalid == "rewrite":
+                    subprocess.run([*git, "config", "url.https://example.invalid/foreign.insteadOf",
+                                    "https://github.com/capthvnsen/alans-way-agents"], check=True)
+                elif invalid == "dirty":
+                    (self.destination / "untracked").write_text("preserve me")
+                else:
+                    shutil.rmtree(self.destination / ".git")
+                result = self.procedure()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.fetch_log.exists())
+                self.assertIn("Setup checkout unavailable", result.stderr)
+                if invalid == "dirty":
+                    self.assertEqual((self.destination / "untracked").read_text(), "preserve me")
+
+    def test_catalog_pin_outranks_a_revision_and_missing_record_allows_tag_fallback(self):
+        result = self.resolve({"source": "catalog", "catalog": {"sha": self.SHA}, "revision": "a" * 40})
+        self.assertEqual(result.stdout.strip(), self.SHA)
+        self.assertEqual(self.resolve({}).stdout.strip(), "")
+
+    def test_all_six_origin_forms_and_foreign_push_urls_are_allowed(self):
+        for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
+            for suffix in ("", ".git"):
+                url = prefix + "capthvnsen/alans-way-agents" + suffix
+                self.git("config", "remote.origin.url", url)
+                self.git("config", "remote.origin.pushurl", "https://example.invalid/push-only")
+                result = self.resolve({"source": self.source.as_uri() + "#alans-way", "revision": self.SHA})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), self.SHA)
+
+    def test_foreign_ambiguous_and_rewritten_file_origins_stop_without_fallback(self):
+        row = {"source": self.source.as_uri() + "#alans-way", "revision": self.SHA}
+        valid = "https://github.com/capthvnsen/alans-way-agents"
+        for extra in ("https://example.invalid/foreign", ""):
+            self.git("config", "--add", "remote.origin.url", extra)
+            result = self.resolve(row)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.git("config", "--unset-all", "remote.origin.url")
+            self.git("config", "remote.origin.url", valid)
+        self.git("config", "remote.origin.url", "https://example.invalid/foreign")
+        self.assertNotEqual(self.resolve(row).returncode, 0)
+        self.git("config", "remote.origin.url", valid)
+        self.git("config", "url.https://example.invalid/foreign.insteadOf", valid)
+        result = self.resolve(row)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("example.invalid", result.stderr)
+
+    def test_untrusted_sources_or_malformed_revisions_never_use_tag_fallback(self):
+        for source in ("https://github.com/other/repo", "file://remote/path#alans-way", "file:///missing#alans-way"):
+            result = self.resolve({"source": source, "revision": self.SHA})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        for revision in ("v0.21.5", "a" * 39, ""):
+            result = self.resolve({"source": self.source.as_uri(), "revision": revision})
+            self.assertNotEqual(result.returncode, 0)
+        result = self.resolve({"source": "https://github.com/capthvnsen/alans-way-agents#alans-way", "revision": self.SHA})
+        self.assertEqual(result.stdout.strip(), self.SHA)
 
 class LongChatsSetupProcedureTests(unittest.TestCase):
     """Execute the documented opt-in block with an isolated Hermes CLI double."""

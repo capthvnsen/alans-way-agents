@@ -281,7 +281,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)
         self.assertIn("Before each multi-step chunk", self.normalized)
-        self.assertIn("what you are doing now and what comes next", self.normalized)
+        self.assertIn("the current action and the next step", self.normalized)
         self.assertNotIn("write no chat text between tool calls", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
 
