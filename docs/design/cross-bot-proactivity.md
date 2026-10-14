@@ -191,7 +191,8 @@ Scan each bounded message in linear time with fixed keyword/prefix alternatives,
 character-class repetitions and no nested or adjacent quantifiers. Disjoint long-token
 matches start only at token boundaries, preventing repeated near-match work. The fixed
 number of linear searches is O(n); direct 1 MiB timing regressions exercise the detector,
-not just the size gate, with a 50 ms budget.
+not just the size gate: each probe must finish under 250 ms and doubling the input must not
+more than triple the time (production input is capped at 8 KiB before detection).
 
 Skip runs of at least 12 digits after removing spaces/dashes; credential words matched
 inside compounds after removing `_`/`-` (password/passwd/passcode/passphrase, secret, token,
