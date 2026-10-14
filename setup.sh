@@ -1892,7 +1892,7 @@ if [ -n "${HERMES_PYTHON:-}" ]; then
 try:
     import tools.computer_use.backend as b
 except ModuleNotFoundError as error:
-    if error.name in ("tools", "tools.computer_use", "tools.computer_use.backend"):
+    if error.name in ("tools.computer_use", "tools.computer_use.backend"):
         sys.exit(3)
     raise
 sys.exit(0 if hasattr(b, "ComputerUseProvider") else 3)' || _probe_rc=$?

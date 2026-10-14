@@ -2240,7 +2240,8 @@ class ComputerApiDiagnosisTests(unittest.TestCase):
                 result = self.probe(backend)
                 self.assertIn("computer-use API absent", result.stdout)
                 self.assertNotIn("API probe failed", result.stdout)
-        for backend in ("import fixture_missing_dependency\n", 'raise RuntimeError("broken install")\n'):
+        for backend in ("import fixture_missing_dependency\n", 'raise RuntimeError("broken install")\n',
+                        'raise ModuleNotFoundError("Hermes root unavailable", name="tools")\n'):
             with self.subTest(backend=backend):
                 result = self.probe(backend)
                 self.assertIn("computer-use API probe failed", result.stdout)
