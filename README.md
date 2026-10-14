@@ -149,9 +149,7 @@ The bootstrap runs every step in order and says what it did:
 - **Workspace config** — writes the managed `workspace_browser` block into the
   right profile's config, then turns off Hermes' built-in browser toolset for
   Telegram and cron so the agent uses your workspace browser (setup says so;
-  pass `--keep-browser` to leave it on). It also adds the live-progress display
-  defaults above in the same backed-up write, preserving explicit choices;
-  inline or merged display mappings are left alone with a warning
+  pass `--keep-browser` to leave it on)
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
   re-run `setup.sh --bind`)
