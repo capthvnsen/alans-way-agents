@@ -12,6 +12,10 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_real_decisions_use_native_clarify_with_text_and_no_approvals(self):
+        self.assertIn("Hermes's `clarify` buttons for real decisions the user owns", self.normalized)
+        self.assertIn("keep Other/free text possible and never use them for approvals", self.normalized)
+
     def test_toolbox_provenance_follows_the_running_routers_precedence(self):
         tools = self.normalized.split("- Alan's Tools:", 1)[1].split("- Alan's Workspace:", 1)[0]
         candidates = (
