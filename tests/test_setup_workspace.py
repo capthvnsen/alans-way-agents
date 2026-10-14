@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -620,6 +621,107 @@ class WindowsGuestTests(unittest.TestCase):
         env["SYSTEMROOT"] = str(self.root / "Windows")
         run("--verify", "--mac-ssh", "me@mac", env=env, check=False)
         self.assertIn("native", (self.root / "ssh.log").read_text())
+
+
+class TelegramProgressTests(unittest.TestCase):
+    def apply(self, config, enabled=True):
+        env = dict(os.environ, HERMES_PYTHON=sys.executable)
+        env.pop("ALANS_WAY_TELEGRAM_PROGRESS", None)
+        if enabled:
+            env["ALANS_WAY_TELEGRAM_PROGRESS"] = "1"
+        return run("--bot-id", "bot123", "--config", str(config), env=env)
+
+    def test_progress_requires_opt_in_and_adds_missing_keys_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text("# user config\nmodel: test\n")
+            self.apply(config, enabled=False)
+            self.assertNotIn("display:", config.read_text())
+            before = config.read_bytes()
+            backups = set(config.parent.glob("*.bak-*"))
+            self.apply(config)
+            self.assertIn("busy_input_mode: steer", config.read_text())
+            self.assertIn("interim_assistant_messages: true", config.read_text())
+            new = set(config.parent.glob("*.bak-*")) - backups
+            self.assertEqual(len(new), 1)
+            self.assertEqual(new.pop().read_bytes(), before)
+            written = config.read_bytes()
+            backups = set(config.parent.glob("*.bak-*"))
+            self.apply(config)
+            self.assertEqual(config.read_bytes(), written)
+            self.assertEqual(set(config.parent.glob("*.bak-*")), backups)
+
+    def test_decoded_display_keys_preserve_choices_and_platform_overrides(self):
+        from ruamel.yaml import YAML
+        for spelling in ("display :", "'display' :", '"display":', '"dis\\u0070lay":'):
+            with self.subTest(spelling=spelling), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                original = (spelling + " # mine\n"
+                            "    'busy_input_mode': interrupt # explicit\n"
+                            "    tool_progress: false\n"
+                            "    platforms:\n        telegram:\n"
+                            "            interim_assistant_messages: false\n")
+                config.write_text(original)
+                self.apply(config)
+                data = YAML(typ="safe").load(config.read_text())
+                self.assertEqual(data["display"]["busy_input_mode"], "interrupt")
+                self.assertIs(data["display"]["interim_assistant_messages"], True)
+                self.assertIs(data["display"]["platforms"]["telegram"]["interim_assistant_messages"], False)
+                self.assertIn("# mine", config.read_text())
+                self.assertIn("'busy_input_mode'", config.read_text())
+                self.assertIn("# explicit", config.read_text())
+                backups = list(config.parent.glob("*.bak-*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_text(), original)
+                written = config.read_bytes()
+                self.apply(config)
+                self.assertEqual(config.read_bytes(), written)
+                self.assertEqual(list(config.parent.glob("*.bak-*")), backups)
+
+    def test_explicit_false_and_queue_remain_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            display = "display:\n  busy_input_mode: queue\n  interim_assistant_messages: false\n"
+            config.write_text(display)
+            self.apply(config)
+            self.assertIn(display, config.read_text())
+
+    def test_ambiguous_or_complex_display_is_warned_and_preserved(self):
+        for display in ("display: {busy_input_mode: interrupt}\n",
+                        "display: &settings\n  tool_progress: false\n",
+                        "display: &settings\n",
+                        "defaults: &settings {tool_progress: false}\ndisplay:\n  <<: *settings\n",
+                        "display: {}\ndisplay : {}\n"):
+            with self.subTest(display=display), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                config.write_text(display)
+                result = self.apply(config)
+                self.assertIn("warn live progress left unchanged", result.stdout)
+                self.assertIn(display, config.read_text())
+                self.assertNotIn("busy_input_mode: steer", config.read_text())
+
+    def test_missing_hermes_interpreter_warns_without_adding_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            config.write_text("model: test\n")
+            env = dict(os.environ, ALANS_WAY_TELEGRAM_PROGRESS="1", HERMES_PYTHON="/nonexistent/python")
+            result = run("--bot-id", "bot123", "--config", str(config), env=env)
+            self.assertIn("warn live progress left unchanged", result.stdout)
+            self.assertNotIn("display:", config.read_text())
+            self.assertIn("workspace_browser:", config.read_text())
+
+    def test_progress_keeps_crlf_and_empty_map_comment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yaml"
+            original = b'display : {} # mine\r\n'
+            config.write_bytes(original)
+            self.apply(config)
+            written = config.read_bytes()
+            self.assertIn(b"# mine\r\n", written)
+            self.assertNotIn(b"\n", written.replace(b"\r\n", b""))
+            self.assertEqual(next(config.parent.glob("*.bak-*")).read_bytes(), original)
+            self.apply(config)
+            self.assertEqual(config.read_bytes(), written)
 
 
 if __name__ == "__main__":

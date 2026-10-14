@@ -61,7 +61,13 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   Telegram profile to `display.busy_input_mode: steer` and
   `display.interim_assistant_messages: true` where unset. Explicit values are
   kept, including platform overrides; busy mode applies to all platforms in
-  that profile. To change an existing `interrupt` choice, run
+  that profile. Defaults are parsed with Hermes's own Python/YAML library;
+  unavailable parsers and ambiguous, anchored, merged or nonempty flow maps
+  are skipped with a warning. Guided setup asks once before changing an
+  existing `interrupt` mode. Keeping it records
+  `skills.config.workspace-setup.busy_input_choice: keep-interrupt` in that
+  profile's config so reruns do not ask again; silence records nothing.
+  To change an existing `interrupt` choice, run
   `hermes -p NAME config set display.busy_input_mode steer`; to enable interim
   texts, set `display.interim_assistant_messages true` the same way (and check
   `display.platforms.telegram.interim_assistant_messages` for an override).

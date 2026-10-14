@@ -240,7 +240,11 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         # the action instead of a snapshot-and-check.
         self.assertIn("Every action reply carries `effect`, the page's new state: `effect.text` is its new visible text.", self.normalized)
         self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
-        self.assertIn("Do multi-step work as one batch", self.normalized)
+        self.assertIn("Do ordinary multi-step work in short chunks", self.normalized)
+        self.assertIn("End the chunk before any noticeable step", self.normalized)
+        self.assertIn("read the returned errors and side effects before continuing", self.normalized)
+        self.assertIn("Put a whole checkout batch under one `commit`.", self.normalized)
+        self.assertNotIn("Do multi-step work as one batch", self.normalized)
         self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
         self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)

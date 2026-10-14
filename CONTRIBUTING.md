@@ -1,9 +1,12 @@
 # Contributing
 
-You need Python 3.11+ and Node 18+ (the router and VPS browser host scripts use fetch and AbortSignal.timeout; Electron is only for the Mac app). The tests use only the standard library, so no virtual environment or install step is needed.
+You need Python 3.11+ and Node 18+ (the router and VPS browser host scripts use fetch and AbortSignal.timeout; Electron is only for the Mac app). The YAML regressions use `ruamel.yaml`, the same parser as Hermes; other tests use the standard library. Use a virtual environment for this test dependency.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents && cd alans-way-agents
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install "ruamel.yaml==0.18.17"
 python3 -m unittest discover -s tests -v
 python3 scripts/check_publication.py
 ```

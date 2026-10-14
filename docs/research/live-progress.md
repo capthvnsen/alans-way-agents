@@ -37,6 +37,51 @@ Available plugin hooks include `pre_tool_call`, `post_tool_call`, `transform_too
 
 No cadence hook is justified by a demonstrated missing transport mechanism. Model behavior still needs observation; if real usage stays silent across long chains after these instructions, the optional `transform_tool_result` nudge requires session/turn-scoped counting and fake-clock tests. Secure Form password cards were not investigated or implemented in this lane.
 
+## Configuration follow-up after review of 1acf14c
+
+A fresh checkout still resolves to Hermes `d97007c32d6340f7ba79ac1dfb5773cc00846448`,
+263 commits ahead and zero behind the Orgo build. The supported commands are
+`hermes -p <profile> config get display.busy_input_mode` and
+`hermes -p <profile> config set display.busy_input_mode steer` (or `interrupt`).
+The profile selector resolves only that profile's home.
+[Hermes `hermes_cli/profiles.py:2546-2568`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/profiles.py#L2546)
+
+The CLI writer preserves comments, quoted strings and platform overrides;
+its own regression suite exercises comment and quote preservation. However,
+`config get` reads merged defaults; `--raw` disables secret masking, rather
+than selecting raw stored YAML. A fixture with no stored interim-message key
+returns `true` from `config get display.interim_assistant_messages --json`.
+The CLI therefore cannot establish which stored keys are missing.
+[Hermes `hermes_cli/config.py:2067-2070,3577-3708,3714-3752`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config.py#L3714),
+[Hermes `tests/hermes_cli/test_config_yaml_comment_preservation.py:72-86`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/tests/hermes_cli/test_config_yaml_comment_preservation.py#L72)
+
+For missing-key defaults, setup uses the allowed offline fallback: Hermes's
+selected `HERMES_PYTHON` and its public `ruamel.yaml` dependency decode keys
+and round-trip comments/quotes, using Hermes's YAML 1.1 policy and long-line
+emission width. This adds only missing display keys inside the existing
+workspace-browser backup/write. Nonempty flow, anchored and merged display
+maps, ambiguous roots and unavailable interpreters/parsers are skipped with a
+warning. YAML errors are not printed because they may contain config values.
+An actual changed file can have indentation or key spelling normalized by the
+YAML writer; comments, quoting and values are preserved. Reruns are byte-identical.
+[Hermes `hermes_yaml.py:15-38,89-99`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_yaml.py#L89)
+
+Guided setup asks an existing `interrupt` profile the explicit busy-mode
+question before setup/restart. Only an answered choice is applied through the
+profile-scoped CLI. Already-`steer` profiles are stateless. An explicit choice to
+keep `interrupt` records `skills.config.workspace-setup.busy_input_choice:
+keep-interrupt` through that CLI, after disclosure, to avoid re-asking on later
+runs. Silence and non-interactive runs leave mode and marker untouched. The
+marker never restores a mode over a later user change. Fixture CLI set/get
+confirmed this custom skill-config key round-trips (Hermes warns it is not a
+runtime config key; the setup skill is its consumer).
+
+The follow-up evidence is retained in the `next-G3F-work` scratch folder:
+`verify-cli.py` and `cli-verification.log` exercise the actual profile-scoped
+CLI against fixture homes; the YAML regressions reproduce duplicate-key errors
+on `1acf14c` and then verify preservation, one backup and byte-identical reruns.
+No real Hermes configuration or gateway was used.
+
 ## Isolated scripted transport demo
 
 The retained scratch folder `next-live-progress-research-0wTfSp` contains `demo.py`, `demo.log`, both clones, a scratch virtual environment, and empty/mock homes. No Git worktree registration was created. The script uses DirectSDK's own `tests/test_directsdk.py` fake native subprocess, then actual Hermes `StreamDeliveryMixin`, `GatewayStreamConsumer`, `GatewayInboundMixin._hm_busy_steer`, `InterruptControlMixin.steer`, `apply_pending_steer_to_tool_results`, and DirectSDK `prepare_history`. It asserts delivery before tool work, no interrupt flag, no queued new turn, normal completion of an in-flight mock tool, and preservation of the steer in the next native request frame.

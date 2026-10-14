@@ -2782,7 +2782,7 @@ workspace_for_profile() {
   if [ -n "$PROFILE" ]; then set -- "$@" --profile "$PROFILE"
   elif [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
-  if ALANS_WAY_TELEGRAM_PROGRESS=1 sh "$REPO_DIR/setup-workspace.sh" "$@"; then
+  if ALANS_WAY_TELEGRAM_PROGRESS=1 HERMES_PYTHON="${HERMES_PYTHON:-}" sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     WORKSPACE_CONFIGURED=1
     if [ "$COMPUTER_READY" = 1 ]; then

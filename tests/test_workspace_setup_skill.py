@@ -72,6 +72,16 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "setup.sh must be passed the pinned desktop ref",
         )
 
+    def test_busy_mode_choice_requires_an_answer_before_restart(self):
+        for phrase in ("When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?",
+                       "every platform in that profile", "after the current step finishes",
+                       "Never treat silence or non-interactive runs as consent",
+                       "already `steer`", "skills.config.workspace-setup.busy_input_choice",
+                       "config set display.busy_input_mode steer",
+                       "config set display.busy_input_mode interrupt"):
+            self.assertIn(phrase, self.normalized)
+        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\ngit clone"))
+
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)

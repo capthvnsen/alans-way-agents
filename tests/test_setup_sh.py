@@ -2330,7 +2330,7 @@ class AllProfilesHarness(IntegrationBase):
         config = (home / "profiles" / name / "config.yaml") if name else home / "config.yaml"
         return re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8"))
 
-    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra="", python_ok=True):
+    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra="", python_ok=True, hermes_python=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -2343,7 +2343,7 @@ class AllProfilesHarness(IntegrationBase):
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };\n'
              '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *file://*) case "$*" in *--force*) ;; *) echo BLOCKED community source >&2; exit 1;; esac;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
-        env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        env = env_for(root, bin_dir, home, HERMES_PYTHON=hermes_python or str(bin_dir / "hermes-python"))
         self.env, self.root = env, root
         self.script = repo_with_computer_plugin(root)
         result = run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
@@ -2352,6 +2352,9 @@ class AllProfilesHarness(IntegrationBase):
 
 
 class TelegramProgressTests(AllProfilesHarness, unittest.TestCase):
+    def run_all(self, *args, **kwargs):
+        return super().run_all(*args, hermes_python=sys.executable, **kwargs)
+
     def test_setup_defaults_live_progress_for_every_telegram_profile(self):
         result, home, _ = self.run_all()
         for name in (None, "alpha", "beta", "gamma", "quoted"):
@@ -2395,8 +2398,9 @@ class TelegramProgressTests(AllProfilesHarness, unittest.TestCase):
                 "            interim_assistant_messages: false\n")
         _, home, _ = self.run_all(layout=layout)
         text = (home / "config.yaml").read_text()
-        self.assertIn("display:\n    interim_assistant_messages: true\n    busy_input_mode: queue\n", text)
-        self.assertIn("            interim_assistant_messages: false\n", text)
+        self.assertIn("display:\n  busy_input_mode: queue\n", text)
+        self.assertIn("  interim_assistant_messages: true\n", text)
+        self.assertIn("      interim_assistant_messages: false\n", text)
 
     def test_empty_inline_display_becomes_block_and_complex_display_is_left_alone(self):
         for value in ("{} # mine", "{busy_input_mode: interrupt}", "&defaults"):
@@ -2407,7 +2411,7 @@ class TelegramProgressTests(AllProfilesHarness, unittest.TestCase):
                 result, home, _ = self.run_all(layout=layout)
                 text = (home / "config.yaml").read_text()
                 if value.startswith("{}"):
-                    self.assertIn("display: # mine\n  busy_input_mode: steer\n", text)
+                    self.assertRegex(text, r"display:\s+# mine\n\s+busy_input_mode: steer\n")
                 else:
                     self.assertIn("display: " + value + "\n", text)
                     self.assertIn("warn live progress left unchanged", result.stdout)
