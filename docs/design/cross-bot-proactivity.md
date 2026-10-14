@@ -1,6 +1,6 @@
-# Cross-bot proactivity — design only
+# Cross-bot proactivity — staged design
 
-Status: ready for implementation review; no runtime change or deployment in this PR. Scope: one multiplexed
+Status: approved with lead trims; PR 1 implements export/control only, with dispatch disabled. No deployment. Scope: one multiplexed
 gateway, all its bot profiles eligible, one primary; automatic read/research/draft asks; results in the
 target's own Telegram DM. Consequential actions retain human approval. No task reassignment or second agent
 loop.
@@ -31,7 +31,7 @@ primary: existing check-in -> digest data -> cross_bot_ask (one permit)
                                       -> target inbox
 target: supervised receiver -> own captured binding -> ctx.inject_message
                                       -> ordinary target turn + attribution
-                                      -> target DM; metadata receipt only
+                                      -> target DM; status "sent" only
 ```
 
 Enablement provisions one explicit absolute `cross_bot.shared_root` through `ctx.get_config`, identical in
@@ -45,10 +45,10 @@ configuration also handles custom roots without a private root/profile import.
 Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes):
 
 - `control.json`: schema, designated primary profile, generation, enabled flag; default launch profile, operator override supports the test primary.
-- `profiles/<profile>/presence.json`: profile, generation, share/receive flags,
+- `profiles/<profile>/presence.json`: profile, generation, one enabled flag,
   heartbeat, bound boolean, timezone/window/pause; no DM address exported.
 - `profiles/<profile>/digest.json`: bounded exchange ring; replace on append.
-- `inbox/<target>/<uuid>.json`: pending ask; `receipts/<uuid>.json`: status only.
+- `inbox/<target>/<uuid>.json`: pending ask (future stage only); no receipt store.
 - `limits.json` and lock files: spent check-in permits, rate counters, dedup IDs.
 
 ```json
@@ -67,12 +67,12 @@ destination, primary identity or approval. Directories 0700, all JSON/temp/lock 
 unsafe ownership and permissive roots; use exclusive temp creation, atomic replace and bounded locks.
 Per-profile digest: last **4 completed exchanges**, at most **2 KiB serialized**, **24-hour TTL per
 exchange**, no backup generations; evict oldest until within bounds. Primary snapshot at most 32 KiB, at most
-64 profiles, fair rotation if it overflows; the current eleven-profile topology fits without a policy
-shortlist. Read only validated, fresh profile exports; all profiles are eligible, but old/disabled plugins
+16 profiles; refuse an oversized snapshot with a clear "too many profiles" or "snapshot too large"
+status. No rotation; the current eleven-profile topology fits without a policy shortlist. Read only validated, fresh profile exports; all profiles are eligible, but old/disabled plugins
 provide no digest and status reports that gap. No historical backfill. Prune expired text every 60 seconds and
 before reads/writes; startup prunes too. Offline files may physically remain beyond TTL until startup, but are
 never read expired. Ask TTL 2 hours, at most one pending ask per target, at most 64 pending gateway-wide.
-Delete ask body on claim; keep body-free receipts/dedup/budget records for 48 hours, at most 256 receipts.
+Delete ask body on claim; keep only body-free dedup/budget records for 48 hours for the rate limits; no receipt lifecycle or receipt store.
 Counts survive restart; storage corruption disables dispatch.
 
 ## 1. Read mechanism: profile-exported digests
@@ -125,10 +125,9 @@ to launch/home channel, and no automatic session creation.
 Claim durably before injection; no automatic replay after a crash or unknown result. Receivers start
 idempotently on reconnect, stop on unload, and recheck enablement/generation under lock immediately before
 claim. `True` means scheduled, not delivered (H `gateway/run_plugin_injection.py:38-96`); missing
-session/adapter or authorization can fail later. Correlated target pre-hook marks `started`; post supplies
-the result and session-end confirms `completed` or interrupted/failed. Timeout becomes `unknown`; never call it
-completed or resend automatically. Busy targets wait only until expiry; operator status shows metadata, not
-results. The primary finishes without polling; replies stay in the target DM.
+session/adapter or authorization can fail later. Operator ask status is **sent** only, meaning injection was scheduled, never proof of delivery or
+completion. Do not track started/completed/interrupted/unknown receipts or resend automatically. Busy targets
+wait only until expiry; operator status shows body-free scheduling metadata, not results. The primary finishes without polling; replies stay in the target DM.
 
 `message_agent` loses here: it is gated to managed canonical “Bot Chat”, not an ordinary Telegram DM (H
 `tools/bot_mode_dm.py:123-134,212-217`; `website/docs/user-guide/bot-mode.md:199-219`). Local delivery
@@ -191,14 +190,21 @@ replies/compaction may retain derived facts (H `run_agent.py:887-916`, `agent/me
 Tell the primary not to save other bots' excerpts in memory; that is model policy, not deletion enforcement.
 No plugin memory/Honcho writes; disclose normal host retention. Opt-out cannot erase prior host/provider
 copies through these hooks. Operator `/proactivity cross off` on each bot stops sharing and receiving, deletes
-its digest/pending text and increments generation. `cross on` is operator-only; `cross share off` and `cross
-receive off` allow separate narrowing. Bound-chat ownership checks mirror P
+its digest/pending text and increments generation. `cross on` is operator-only; a single per-bot on/off switch controls both export and future receiving. Bound-chat ownership checks mirror P
 `alans-way/proactivity.py:469-485`; initial bind/shared-root configuration is operator CLI only. Model tool
-may disable/narrow, never enable, rebind, resume, shorten cooldown or expand scope (P
+may only turn cross-bot off, never enable, rebind, resume, shorten cooldown or expand scope (P
 `alans-way/proactivity.py:130-153,437-459`). Default install remains off until operator enrollment; once
 enabled, all enrolled profiles are eligible without a read shortlist. Global off cancels permits/queues.
 
-## 6. Exact disclosure delta for the implementation PR
+## 6. Disclosure delta by implementation stage
+
+For PR 1, catalog description and supplement disclose only shipped behavior: “Optional cross-bot
+export stores bounded, sanitized recent owner-DM excerpts from enabled profiles for up to 24 hours in a
+private shared plugin-owned directory. Default off; /proactivity cross on|off|status controls each bot.
+Dispatch is disabled: no asks are sent and no other bot context enters model prompts. Sanitization cannot
+guarantee detection of every secret; digest expiry cannot erase existing Hermes/provider history.”
+
+For the completed feature, use this disclosure (do not claim it ships in PR 1):
 
 Append these sentences to `alans-way/plugin.yaml:3`'s catalog description and the catalog disclosure
 supplement (P `docs/catalog/alans-way-disclosure.md:3-6`): “Optional cross-bot proactivity reads bounded
@@ -206,19 +212,19 @@ recent owner-DM excerpts exported by all enabled profiles on one gateway. It sto
 hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files), and may
 automatically inject one read-only or draft-only ask per primary check-in into another bot's bound Telegram
 DM. Results appear there with primary attribution. Existing approvals still govern consequential actions.
-Disable sharing or receiving per bot with /proactivity cross off; copied context may remain in Hermes history,
+Disable cross-bot proactivity per bot with /proactivity cross off; copied context may remain in Hermes history,
 memory-provider records and model-provider retention after digest expiry.”
 
 ## 7. Implementation PRs, tests and live acceptance
 
 1. **Export/control only:** collector, sanitizer, private shared store, enrollment,
-   receiver bindings/status and opt-out; dispatch disabled. Tests: real hook kwargs,
+   owner-DM bindings/status and opt-out; dispatch disabled, no receiver or ask tool. Tests: real hook kwargs,
    bound DM vs group/cron/child filtering, dedup/TTL/size/UTF-8, secret-before-truncate,
    corrupt schemas, symlink/mode/path attacks, atomic concurrent writes, off/purge and
    per-profile task scope including identical human IDs and custom roots.
-2. **Queue/receiver only:** correlated import turn, attribution, tool policy, receipts,
+2. **Queue/receiver only:** correlated import turn, attribution, tool policy, sent-only status,
    cancellation/lease/unload. Tests: mocked public ctx injection per profile, revoked
-   permission/auth, missing binding/session/adapter, busy/expiry, acceptance vs start,
+   permission/auth, missing binding/session/adapter, busy/expiry, scheduling without delivery claims,
    crash before/after claim, no replay, hook errors, approve/deny/timeout, no chains,
    unknown/terminal tools blocked and existing commit/CAPTCHA/ownership tests unchanged.
 3. **Primary selection/cadence:** one-use tool permit, fresh digest context, limits,
@@ -230,14 +236,12 @@ Source verification plus **13 mocked probes** exercised public PluginContext rou
 distinct profile keys, missing routes and scope/permission behavior; fixtures only, no model/Telegram/network
 delivery. These are mechanism probes, not tests of the proposed feature. Full plugin suite/publication check
 remain required for each PR; add RED→GREEN regressions when implementing behavior. Live plan on the test
-gateway: `alansway` primary plus recommend `personal` target to avoid business profiles, conditional on the operator
-confirming its suitability and explicitly approving that profile's plugin update. Nothing was installed here.
+gateway: `alansway` primary plus **`utd` target**, selected by Alex with its plugin update approved for the future live test. Nothing was installed here.
 Authorized operator backs up both profiles, installs reviewed pins, binds each existing owner DM with
 per-profile injection permission, sets one primary and shared root. Use synthetic “draft a three-line
 checklist” exchanges only. `/proactivity now` must produce exactly one attributed result in the target DM, no
-result in primary, no secret/exported address, no chain, and body-free completion status. Check off, busy,
+result in primary, no secret/exported address, no chain, and body-free sent status. Check off, busy,
 expired, quiet-hours and approval-denial cases; restore bindings/settings/builds. Automatic cadence uses a
 fake-clock fixture first; any real restart follows the existing drain procedure (P
-`docs/proactivity.md:77-81`) under operator authority. Open decisions: approve `personal` (or a dedicated
-empty test profile) and its plugin update. Retention and sanitizer limitations are review caveats; the fixed read
+`docs/proactivity.md:77-81`) under operator authority. Retention and sanitizer limitations are review caveats; the fixed read
 scope and autonomy decisions stand.
