@@ -193,17 +193,21 @@ matches start only at token boundaries, preventing repeated near-match work. The
 number of linear searches is O(n); direct 1 MiB timing regressions exercise the detector,
 not just the size gate, with a 50 ms budget.
 
-Skip runs of at least 12 digits after removing spaces/dashes; word-bounded PIN, passcode,
-CVV/CVC, password/passwd, secret, token, API key, private key, OTP, verification code,
-2FA, SSN, routing number and account number labels (case-insensitive); known credential
-prefixes (`sk_`, `rk_`, `pk_live`, `ghp_`, `gho_`, `github_pat_`, `xox`, `AKIA`, `AIza`,
-`sk-ant-`, `sk-`, `eyJ`, `-----BEGIN`, `Bearer `); URLs with userinfo; and tokens of at
-least 32 ASCII letters/digits/underscore/dash/plus/slash/equals mixing letters and digits.
-Existing credential-field aliases and bounded operator `cross_bot.redact_terms` literals
-also skip the exchange. Normalize Unicode and remove format characters for detection only;
-otherwise keep text as-is, then truncate to digest bounds. Failure also drops the exchange.
-This intentionally loses some order IDs and ordinary keyword mentions; synthetic review
-fixtures keep 19/30 ordinary messages unchanged and export zero signal-bearing exchanges.
+Skip runs of at least 12 digits after removing spaces/dashes; credential words matched
+inside compounds after removing `_`/`-` (password/passwd/passcode/passphrase, secret, token,
+API key, private key, access key, one-time code/pass, verification code, routing number,
+account number, CVV/CVC), so `dbPassword`, `refreshToken` and `api-key` count; word-bounded
+OTP, 2FA, SSN, "your code", cookie and authorization; "pin" followed by 4-8 digits within 20
+characters (labels, quotes and newlines included); Telegram bot tokens (`<8-10 digits>:<30+
+chars>`); known credential prefixes (`sk_`, `rk_`, `pk_live`, `ghp_`, `gho_`, `github_pat_`,
+`xox`, `AKIA`, `AIza`, `sk-ant-`, `sk-`, `eyJ`, `-----BEGIN`, `Bearer `); URLs with userinfo;
+and tokens of at least 32 ASCII letters/digits/underscore/dash/plus/slash/equals mixing
+letters and digits. Bounded operator `cross_bot.redact_terms` literals also skip the
+exchange. Normalize Unicode and remove format characters for detection only; otherwise keep
+text as-is, then truncate to digest bounds. Failure also drops the exchange. Detection is
+best-effort, not a guarantee: it intentionally loses some order IDs and ordinary mentions of
+credential words (e.g. "tokens", "secretary") to keep leaks at zero on the review fixtures;
+synthetic review fixtures keep 23/30 ordinary messages unchanged.
 
 Existing voice/proactivity has no reusable text sanitizer. Hermes has forced egress
 redaction (H `agent/redact.py:1158-1170`) but no documented plugin text-redaction facade;

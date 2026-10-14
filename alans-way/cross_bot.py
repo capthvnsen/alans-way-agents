@@ -30,15 +30,19 @@ EXCHANGE_BYTES = 8192
 # Fixed alternatives and single character-class quantifiers: no overlapping or
 # nested repetitions. Each search consumes O(n); the fixed number of searches
 # and disjoint token matches keep the entire signal check linear in input size.
-_KEYWORDS = re.compile(
-    r"\b(?:passcode|cvv|cvc|password|passwd|secret|token|api key|private key|otp|"
-    r"verification code|2fa|ssn|routing number|account number|passphrase|authorization|"
-    r"cookie|your code|clientsecret|access key)\b")
+# Credential words match inside compounds too (dbPassword, refreshToken, api-key): the text is
+# matched with "_" and "-" removed, and over-dropping an exchange is the accepted cost.
+_SECRET_WORDS = re.compile(
+    r"pass(?:word|wd|code|phrase)|secret|token|api ?key|private ?key|access ?key|"
+    r"one ?time ?(?:code|pass)|verification ?code|routing ?number|account ?number|cvv|cvc")
+_SHORT_WORDS = re.compile(r"\b(?:otp|2fa|ssn|your code|cookie|authorization)\b")
 _PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox", "akia", "aiza",
              "sk-ant-", "sk-", "eyj", "-----begin", "bearer ")
-# "pin" is everyday map/pinning language; only a PIN followed closely by digits is a signal.
-# Bounded {0,3} gaps (no open-ended quantifiers) keep this linear.
-_PIN = re.compile(r"\bpin\b[ \t]{0,3}(?:is|code|number|no|#|:|=)?[ \t:.#]{0,3}\d{4,8}\b")
+# "pin" is everyday map/pinning language; a PIN counts when 4-8 digits follow within 20
+# characters (quotes, labels and newlines included). The bounded gap keeps this linear.
+_PIN = re.compile(r"\bpin\b[^0-9]{0,20}[0-9]{4,8}")
+# Telegram bot tokens: <bot id>:<35-char secret>.
+_BOT_TOKEN = re.compile(r"\b[0-9]{8,10}:[A-Za-z0-9_-]{30,}")
 _USERINFO = re.compile(r"://[^\s/@:]*:[^\s/@]*@")
 # A fixed first character class lets the engine skip non-digits in C.
 _DIGITS = re.compile(r"[0-9]" * 12)
@@ -61,7 +65,8 @@ def secret_signal(text):
                     and (start <= digit.start() or _DIGIT.search(text, start, end))):
                 return True
     folded = text.casefold()
-    return bool(_KEYWORDS.search(folded.replace("_", " ")) or _PIN.search(folded)
+    return bool(_SECRET_WORDS.search(folded.replace("_", "").replace("-", ""))
+                or _SHORT_WORDS.search(folded) or _PIN.search(folded) or _BOT_TOKEN.search(text)
                 or any(prefix in folded for prefix in _PREFIXES) or _USERINFO.search(text))
 
 

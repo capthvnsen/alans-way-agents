@@ -44,6 +44,10 @@ SECRET_PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox"
 SECRET_EXAMPLES += ["Before " + word.upper() + " after" for word in SECRET_KEYWORDS]
 SECRET_EXAMPLES += [prefix + "synthetic-value" for prefix in SECRET_PREFIXES]
 SECRET_EXAMPLES += ["PIN: 9876", "my pin is 1234", "Pin 0000 for the door"]
+# X2R4 regressions: compound credential names, Telegram bot tokens, PIN phrasings.
+SECRET_EXAMPLES += ["dbPassword=synthetic-value", "refreshToken=synthetic-value", "api-key=synthetic-value",
+                    "one-time-code: 123456", "1234567890:" + "A" * 35, "PIN number is 2468",
+                    'PIN is "2468"', "PIN:\n2468"]
 ORDINARY_MESSAGES = [
     'Call me at 202-555-0123.',
     'Phone +1 (303) 555-0198 is the office.',
@@ -99,14 +103,22 @@ class SanitizerTests(unittest.TestCase):
         for terms in ("bad", [""], ["x" * 129], ["x"] * 33):
             self.assertIsNone(C.sanitize("Draft", redact_terms=terms))
 
+    def test_credential_words_inside_compounds_drop_the_exchange(self):
+        # Accepted over-drop: substring matching catches dbPassword/refreshToken/api-key.
+        for text in ("secretive tokens", "dbPassword=x", "refreshToken=x", "api-key=x"):
+            with self.subTest(text=text):
+                self.assertIsNone(C.sanitize(text))
+
     def test_word_boundaries_and_short_tokens_keep_text(self):
-        for text in ("spinning pushpin secretive tokens", "A" * 32, "Ab1" * 10,
+        for text in ("spinning pushpin", "A" * 32, "Ab1" * 10,
                      "Drop a pin at 123 Main Street.", "The map pin is at 456 Elm Avenue.",
                      "https://example.invalid/page?view=draft", "202-555-0123"):
             with self.subTest(text=text):
                 self.assertEqual(C.sanitize(text), text)
 
-    def test_direct_signal_scan_one_mib_under_fifty_ms(self):
+    def test_direct_signal_scan_is_linear_at_one_mib(self):
+        # Production input is capped at EXCHANGE_BYTES (8 KiB) before detection; this
+        # guards against super-linear backtracking, not a CI runner's absolute speed.
         size = 1024 * 1024
         probes = (("pin" + " " * (size - 3), False), ("pin is 1234" + " " * (size - 11), True), ("passcode" + " " * (size - 8), True),
                   ("q" * size, False), (" " * size, False), ("4" + "0" * (size - 1), True),
@@ -117,12 +129,19 @@ class SanitizerTests(unittest.TestCase):
         for text, expected in probes:
             with self.subTest(prefix=text[:8]):
                 timings = []
+                half = text[:size // 2]
+                half_timings = []
                 for _ in range(3):
                     start = time.perf_counter()
                     result = C.secret_signal(text)
                     timings.append(time.perf_counter() - start)
                     self.assertEqual(bool(result), expected)
-                self.assertLess(min(timings), 0.050, timings)
+                    start = time.perf_counter()
+                    C.secret_signal(half)
+                    half_timings.append(time.perf_counter() - start)
+                self.assertLess(min(timings), 0.250, timings)
+                # Doubling the input must not more than ~triple the time (quadratic would be 4x).
+                self.assertLess(min(timings), 3 * max(min(half_timings), 0.002), (timings, half_timings))
 
     def test_one_mib_pin_whitespace_is_bounded(self):
         import subprocess
