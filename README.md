@@ -113,8 +113,9 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
 - **Connect your stuff from Telegram.** The [integrations skill](alans-way/skills/integrations/SKILL.md)
   checks account access before promising a task, reuses Hermes' Google,
   Himalaya, Home Assistant, Honcho and X routes, and offers pinned rclone,
-  Taskwarrior and Mastodon.py recipes. Package installs on the VM require your
-  agreement; account authorization stays private, with secure handback when
+  Taskwarrior recipes. Social posting is not built in; the
+  [Mastodon recipe](docs/integrations/mastodon.md) is separate human-run
+  documentation. Package installs on the VM require your agreement; account authorization stays private, with secure handback when
   phone-only auth cannot finish. Installing the plugin connects no accounts
   and starts no integration services.
 
@@ -283,6 +284,32 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 - Telegram: `hermes proactivity status` → route bound, check-ins on
 - Browser: ask the bot to open a page — a tab appears in the app (host)
   while your computer is awake, on the VPS host when it isn't
+
+### Plugin security review
+
+For the reviewed release candidate, Hermes' unmodified scanner at
+`6e7b83a2f1c093e992a8d838ed77ea320fbd8e51` reports **SAFE: 0 HIGH,
+2 MEDIUM and 3 LOW findings** in `alans-way/`. These are real capabilities
+documented in the bundled skills:
+
+- Workspace setup runs two bounded, read-only local Git subprocess helpers
+  to validate the setup checkout and a file-source install's origin before
+  selecting the reviewed revision.
+- With explicit consent, the viewer handoff uses a temporary SSH forward
+  bound to computer loopback, checks the loopback URL with curl, and gives
+  that same URL to the app. The human enters the VNC password privately.
+
+The Mastodon recipe now lives in [human-run repository documentation](docs/integrations/mastodon.md)
+outside `alans-way/`; the plugin no longer ships its connector or identity probe.
+The scanner and remaining matched commands are unchanged. MEDIUM/LOW findings
+alone produce SAFE, which requires no scanner confirmation. If a later revision
+receives CAUTION, review every finding and explicitly confirm the exact tree:
+`--enable` and setup consent do not confirm a scanner warning. Follow the bundled
+[reviewed-install confirmation steps](alans-way/skills/workspace-setup/SKILL.md#reviewed-plugin-install-confirmation);
+`--force` can confirm CAUTION and replace an install, but cannot override
+DANGEROUS. A catalog install uses the catalog's reviewed pin; it does not
+approve a newer checkout. Changed revisions and unknown findings need a new
+review. See the [complete inventory and catalog disclosure supplement](docs/catalog/alans-way-disclosure.md).
 
 ### Upgrading
 

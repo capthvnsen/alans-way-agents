@@ -35,11 +35,10 @@ doctor succeeds.
 For a manual/file install, Hermes scans the candidate tree before installing.
 --enable does not confirm a security warning; dependency consent is separate.
 If a non-interactive install stops at CAUTION, review every finding against
-its exact source revision and explain the capabilities to the user. The scoped
-Mastodon identity probe, for example, reads only its granted environment keys
-and calls the chosen instance; it prints only the account handle. The pin
+its exact source revision and explain the capabilities to the user. The pin
 resolver starts bounded, read-only local Git commands; the SSH-forward
-examples name only loopback endpoints. Review these findings too. Obtain
+examples name only loopback endpoints. This candidate scans SAFE with only
+MEDIUM/LOW findings; later candidates can require confirmation. Obtain
 explicit consent for that reviewed tree before retrying the same identifier
 and exact `--ref <40-character SHA>` with `hermes -p <profile> plugins install
 <identifier> --ref <SHA> --enable --force`. `--force` confirms a caution verdict
