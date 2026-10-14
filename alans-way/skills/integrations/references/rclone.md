@@ -18,7 +18,10 @@ unpinned curl installer. No mount, serve, sync/bisync, scheduler or daemon.
 
 Connect: choose the provider, account and one folder with the user. Define
 `RCLONE_CONFIG` as this profile's private `HERMES_HOME/integrations/rclone.conf`
-and `FILES_REMOTE` as its selected non-secret remote name. Create the parent
+and `FILES_REMOTE` as its selected non-secret remote name. Set `FILES_RESOURCE`
+to the agreed full `remote:path`, including the bucket/folder, for example
+`files:allowed-bucket/team folder`. Keep both values: resource probes use
+`FILES_RESOURCE`; config removal uses only `FILES_REMOTE`. Create the parent
 directory mode 0700; configuration mode 0600. Authentication is provider-specific,
 not a universal phone device grant.
 
@@ -42,10 +45,12 @@ in the owning Hermes profile's `.env` or existing secret source as
 encrypted provider tokens natively; do not copy them to a repo or Hermes memory.
 The browser credential vault does not export these tokens to a CLI.
 
-Verify: `rclone --config "$RCLONE_CONFIG" lsf "$FILES_REMOTE:" --max-depth 1 --checkers 2 --contimeout 10s --timeout 20s`.
+Verify: `rclone --config "$RCLONE_CONFIG" lsf "$FILES_RESOURCE" --max-depth 1 --checkers 2 --contimeout 10s --timeout 20s`.
 Use the selected pinned binary's path if it is not on PATH. Confirm the selected
 account with the user and one familiar folder; no recursive listing or secret
 config dump. Run through the parent skill's 30-second execution bound.
+Do not substitute the remote root: S3 root listing requires broader ListBuckets
+permission and proves nothing about access to the selected bucket/folder.
 
 For an approved transfer, prefer bounded `copyto` to the agreed destination,
 checking overwrite explicitly, with `--transfers 1 --checkers 2 --buffer-size 8M`.

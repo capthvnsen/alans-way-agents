@@ -3,6 +3,7 @@ from pathlib import Path
 import importlib.util
 import json
 import re
+import shlex
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ RECIPES = {"hermes-native.md", "rclone.md", "taskwarrior.md", "mastodon.md"}
 # Verified at Hermes 1f6c02c07c and official homeassistant a4e311e433.
 TOOLS = {"skills_list", "skill_view", "terminal", "cronjob_manage",
          "ha_list_entities", "ha_get_state"}
+COMMIT_OUTCOMES = {"declined", "approval_timeout", "approval_unavailable"}
 
 
 def _register_calls(profile_name):
@@ -93,7 +95,8 @@ class IntegrationsSkillTests(unittest.TestCase):
         identifiers = {n for n in re.findall(r"`([a-z][a-z_]+)`", text) if "_" in n}
         mentioned = calls | declared | identifiers
         self.assertTrue(mentioned)
-        self.assertEqual(mentioned - TOOLS, set())
+        self.assertEqual((calls | declared) - TOOLS, set())
+        self.assertEqual(identifiers - TOOLS - COMMIT_OUTCOMES, set())
 
     def test_no_secrets_or_unfinished_scaffolds(self):
         spec = importlib.util.spec_from_file_location("publication_integrations", ROOT / "scripts/check_publication.py")
@@ -142,6 +145,74 @@ class IntegrationsSkillTests(unittest.TestCase):
     def test_scheduled_reads_recheck_and_stop_on_auth_failure(self):
         text = self.read_skill()
         for phrase in ("cronjob_manage", "self-contained", "delivery", "reauthorization", "pause"):
+            self.assertIn(phrase, text)
+
+    def verify_args(self, filename, recipe, variables):
+        text = (SKILL_DIR / "references" / filename).read_text()
+        section = text.split(f"## Recipe: {recipe}\n", 1)[1].split("\n## Recipe:", 1)[0]
+        command = re.search(r"Verify: `([^`]+)`", section).group(1)
+        return [variables.get(arg, arg) for arg in shlex.split(command)]
+
+    def test_himalaya_verify_uses_subcommand_account_option(self):
+        args = self.verify_args("hermes-native.md", "Himalaya", {
+            "$MAIL_CONFIG": "/fixture/mail config.toml", "$MAIL_ACCOUNT": "fixture",
+        })
+        # v1.2.0 --help exposes --account on envelope list, not the root parser.
+        self.assertEqual(args[:5], ["himalaya", "--config", "/fixture/mail config.toml",
+                                    "envelope", "list"])
+        self.assertEqual(args[5:], ["--account", "fixture", "--page-size", "1",
+                                   "--output", "json"])
+
+    def test_rclone_verify_probes_selected_bucket_or_folder(self):
+        for resource in ("files:allowed-bucket", "files:allowed-bucket/team folder"):
+            with self.subTest(resource=resource):
+                args = self.verify_args("rclone.md", "rclone", {
+                    "$RCLONE_CONFIG": "/fixture/rclone.conf", "$FILES_REMOTE": "files",
+                    "$FILES_RESOURCE": resource,
+                })
+                self.assertEqual(args[:5], ["rclone", "--config", "/fixture/rclone.conf",
+                                           "lsf", resource])
+                for option, value in (("--max-depth", "1"), ("--contimeout", "10s"),
+                                      ("--timeout", "20s")):
+                    self.assertEqual(args[args.index(option) + 1], value)
+        text = " ".join((SKILL_DIR / "references" / "rclone.md").read_text().split())
+        self.assertIn("`FILES_RESOURCE`", text)
+        self.assertIn("remote:path", text)
+        self.assertIn('config delete "$FILES_REMOTE"', text)
+
+    def test_taskwarrior_build_minimums_follow_pinned_manifests(self):
+        text = " ".join((SKILL_DIR / "references" / "taskwarrior.md").read_text().split())
+        self.assertRegex(text, r"Rust\s*>=\s*1\.91\.1")
+        self.assertRegex(text, r"CMake\s*>=\s*3\.24")
+        self.assertIn("rustc --version", text)
+        self.assertIn("cmake --version", text)
+        self.assertIn("src/taskchampion-cpp/Cargo.toml", text)
+        self.assertIn("CMakeLists.txt", text)
+        self.assertIn("take precedence over INSTALL", text)
+        self.assertIn("ask before installing or replacing any toolchain", text)
+
+    def test_refused_commits_cannot_switch_to_api(self):
+        for path in (SKILL, SKILL_DIR / "references" / "mastodon.md"):
+            with self.subTest(path=path.name):
+                text = " ".join(path.read_text().split())
+                for outcome in ("declined", "approval_timeout", "approval_unavailable"):
+                    self.assertIn(f"`{outcome}`", text)
+                self.assertIn("never complete it through another tool", text)
+                self.assertIn("fresh explicit approval", text)
+
+    def test_himalaya_pinned_binary_is_mit_only(self):
+        text = (SKILL_DIR / "references" / "hermes-native.md").read_text()
+        section = text.split("## Recipe: Himalaya\n", 1)[1].split("\n## Recipe:", 1)[0]
+        self.assertIn("Himalaya v1.2.0 binary MIT", section)
+        self.assertNotIn("Apache-2.0", section)
+        self.assertIn("https://github.com/pimalaya/himalaya/blob/v1.2.0/Cargo.toml#L7", section)
+
+    def test_scheduled_failure_has_owner_pause_and_persistent_count(self):
+        text = " ".join(self.read_skill().split())
+        for phrase in ("owning cron job ID", "profile-local", "failure count",
+                       "reset it after a successful read", "owner conversation",
+                       "hermes -p", "cron pause", "disabled within cron runs by default",
+                       "never enable recursive scheduling silently"):
             self.assertIn(phrase, text)
 
 

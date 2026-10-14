@@ -91,15 +91,38 @@ audience, file destination/overwrite or entity/service) and obtain explicit
 approval before sending, posting, deleting, sharing or actuating. Keep any native
 approval controls intact; never retry an ambiguous write. Reconcile its receipt
 or read-back first. For UI writes use the existing web-errands commit flow.
+If a commit returns `declined`, `approval_timeout` or `approval_unavailable`,
+never complete it through another tool, including a CLI/library/API; tell the
+user what remains staged and let them finish. A later API post needs its own
+fresh explicit approval in the live conversation; switching routes does not
+carry approval forward. Follow the
+[browser authorization policy](../workspace-operations/SKILL.md#browser-authorization-policy).
 
 ## Recurring outcomes
 
 Tool: `cronjob_manage`. Only schedule after a successful read probe and agreement
 on timing/timezone, account/resource, scope and Telegram delivery. Use a
-self-contained prompt naming the recipe, owning profile, read probe and failure
-receipt; store no secrets in it. Confirm the scheduler's actual delivery route.
+self-contained prompt naming the recipe, owning profile, read probe, failure
+receipt and pause route; store no secrets in it. Before scheduling, select a
+dedicated profile-local status file for that job's consecutive failure count;
+persist only the count and safe error category, and reset it after a successful
+read. Include that file's path in the prompt. If that state cannot be persisted
+or no pause route is available, leave scheduling pending. After creation, record
+the owning cron job ID/name and include them in the prompt and every failure
+receipt. Confirm the scheduler's actual delivery route.
+
 Each run checks access again. On auth/scope failure report reauthorization is
-needed and pause the job; back off transient network failures and pause after
-three consecutive failures. Scheduled runs remain read-only: stage proposed
-writes for approval in a live conversation. Do not use this skill to add a
-second reminder daemon or cross-profile coordinator.
+needed and request immediate pause; back off transient network failures and
+request pause after three consecutive failures. Cron scheduling tools are
+disabled within cron runs by default; never enable recursive scheduling silently.
+Arrange pausing through the owner conversation using `cronjob_manage` after
+listing/matching the owning job ID and profile, or an explicitly authorized,
+profile-scoped CLI step: `hermes -p "$OWNER_PROFILE" cron pause "$JOB_ID"`.
+Do not assume the scheduled agent can pause itself. Confirm paused status before
+claiming it stopped; if neither route is available, report pause pending with
+the job ID and owner action needed. Scheduled runs remain read-only: stage
+proposed writes for approval in a live conversation. Do not use this skill to
+add a second reminder daemon or cross-profile coordinator.
+
+Sources: [default cron tool restrictions:414–434](https://github.com/NousResearch/hermes-agent/blob/1f6c02c07c697026888f1c66e634534fa2aae358/cron/scheduler.py#L414),
+[CLI pause command:156–157](https://github.com/NousResearch/hermes-agent/blob/1f6c02c07c697026888f1c66e634534fa2aae358/hermes_cli/subcommands/cron.py#L156).

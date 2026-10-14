@@ -54,6 +54,10 @@ explicit approval in the live conversation. Keep it draft-only until scope and
 approval are complete. A library/API call has no browser commit receipt. Return
 the published URL only from a successful response; reconcile an ambiguous
 response before any repeat. Use the existing web-errands gate for UI posting.
+If that commit returns `declined`, `approval_timeout` or `approval_unavailable`,
+never complete it through another tool, including this API. Tell the user what
+is staged and let them finish. A later API post requires its own fresh explicit
+approval in the live conversation; the refused UI commit grants no API approval.
 
 Remove: user revokes this application/token in the instance's Development or
 Authorized applications UI, privately removes this profile's token and

@@ -12,13 +12,17 @@ Install: after consent, use **v3.5.0**, exact release commit
 when its resolved version is exactly 3.5.0 and its package provenance is verified;
 do not assume an unversioned `apt install taskwarrior` gives that pin.
 Otherwise offer the pinned upstream source build below. Check available build
-dependencies first (CMake, make, C++17, libuuid on Linux, Rust >=1.88.0). Any
-missing build tool installation needs consent; do not upgrade shared toolchains
-silently. No TaskChampion sync server is installed.
+dependencies first (CMake >=3.24, make, C++17, libuuid on Linux, Rust >=1.91.1).
+Run `cmake --version` and `rustc --version` and compare numeric versions before
+configuring the build. If either is missing or older, stop and ask before
+installing or replacing any toolchain; do not upgrade shared toolchains silently.
+No TaskChampion sync server is installed.
 
 In a new temporary build directory, clone the public upstream source, fetch and
 check out the exact commit above detached, and verify HEAD equals that SHA.
-Follow its INSTALL; choose a fresh dedicated prefix, not /usr/local:
+The pinned `CMakeLists.txt` and `src/taskchampion-cpp/Cargo.toml` minimums
+take precedence over INSTALL, whose Rust requirement is stale. Follow the
+remaining build instructions; choose a fresh dedicated prefix, not /usr/local:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local/share/alans-tools/taskwarrior-3.5.0"
@@ -58,4 +62,6 @@ is needed for this local-only list.
 
 Sources: [v3.5.0 release](https://github.com/GothenburgBitFactory/taskwarrior/releases/tag/v3.5.0),
 [INSTALL at release commit](https://github.com/GothenburgBitFactory/taskwarrior/blob/3419d5ba1e6a780fbbb0a8d68d8fd31e675c1bf8/INSTALL),
+[CMake minimum:1](https://github.com/GothenburgBitFactory/taskwarrior/blob/3419d5ba1e6a780fbbb0a8d68d8fd31e675c1bf8/CMakeLists.txt#L1),
+[Rust minimum:6](https://github.com/GothenburgBitFactory/taskwarrior/blob/3419d5ba1e6a780fbbb0a8d68d8fd31e675c1bf8/src/taskchampion-cpp/Cargo.toml#L6),
 [MIT LICENSE](https://github.com/GothenburgBitFactory/taskwarrior/blob/3419d5ba1e6a780fbbb0a8d68d8fd31e675c1bf8/LICENSE).

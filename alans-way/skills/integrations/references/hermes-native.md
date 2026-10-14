@@ -68,7 +68,7 @@ Source: [skill setup/usage](https://github.com/NousResearch/hermes-agent/blob/1f
 
 ## Recipe: Himalaya
 
-License: Hermes skill MIT; Himalaya binary MIT OR Apache-2.0.
+License: Hermes skill MIT; Himalaya v1.2.0 binary MIT.
 Footprint: roughly 20–50 MiB disk, 20–80 MiB RAM while invoked, no daemon.
 
 Connect: load `himalaya` and its configuration reference. Use the existing
@@ -88,8 +88,9 @@ model. CLI configuration goes in that profile's explicitly selected config
 path, not the shared default when multiple bots use the same OS account.
 No universal IMAP OAuth device flow is provided. Pause if private entry is unavailable.
 
-Verify: `himalaya --config "$MAIL_CONFIG" --account "$MAIL_ACCOUNT" envelope list --page-size 1 --output json`.
+Verify: `himalaya --config "$MAIL_CONFIG" envelope list --account "$MAIL_ACCOUNT" --page-size 1 --output json`.
 Set both variables from the selected profile config path and account name.
+In v1.2.0, `--account` belongs to `envelope list`, not the global options.
 This proves inbox read, not SMTP send. Use the plural `folder.aliases` syntax:
 an incorrect Sent folder can fail after delivery. Never retry that send blindly.
 
@@ -97,7 +98,8 @@ Remove: user revokes the provider app password/OAuth grant, removes only the
 selected account configuration and associated secret in private setup, and
 pauses dependent jobs. Remove a binary only if installed solely for this account.
 
-Source: [bundled skill and alias warning:30–103](https://github.com/NousResearch/hermes-agent/blob/1f6c02c07c697026888f1c66e634534fa2aae358/skills/email/himalaya/SKILL.md#L30).
+Sources: [bundled skill and alias warning:30–103](https://github.com/NousResearch/hermes-agent/blob/1f6c02c07c697026888f1c66e634534fa2aae358/skills/email/himalaya/SKILL.md#L30),
+[v1.2.0 license manifest:7](https://github.com/pimalaya/himalaya/blob/v1.2.0/Cargo.toml#L7).
 
 ## Recipe: Home Assistant
 
