@@ -368,6 +368,7 @@ at it.
 
 ```
 alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hooks + skills + router + mac-watch)
+alans-way/skills/     workspace-setup, workspace-operations and web-errands (with per-kind recipes)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
 docs/                 proactivity and voice guides, agent-driven setup prompt

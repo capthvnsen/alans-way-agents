@@ -2,6 +2,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
 import re
 import sys
 import tempfile
@@ -101,6 +105,28 @@ class WebErrandsSkillTests(unittest.TestCase):
                          "cronjob_manage"):
             self.assertIn(required, mentioned)
 
+    @unittest.skipUnless(os.environ.get("ALANS_WAY_APP"),
+                         "set ALANS_WAY_APP to an app checkout for cross-repo schema drift")
+    def test_tools_and_release_reasons_match_app_schema(self):
+        # Release enums belong to the app connector, not the plugin router.
+        # Run this against a detached origin/main checkout when refreshing N4.
+        connector = (Path(os.environ["ALANS_WAY_APP"]) / "desktop" / "scripts"
+                     / "browser-mcp.cjs").read_text()
+        actual_tools = set(re.findall(r"name: '(cua_alans_way_[a-z_]+)'", connector))
+        mentioned = {name for name in _tool_mentions(self.all_text)
+                     if name.startswith("cua_alans_way_")}
+        self.assertEqual(mentioned - actual_tools, set())
+        match = re.search(r"reason: \{ type: 'string', enum: \[(.*?)\]", connector)
+        self.assertIsNotNone(match)
+        reasons = set(re.findall(r"'([a-z_]+)'", match.group(1)))
+        documented = set(re.findall(r'reason:\s*"([a-z_]+)"', self.all_text))
+        # Plain backticked alternatives in the handback paragraph count too.
+        section = self.text.split("## The walls you hand back")[1].split("## Verify")[0]
+        documented.update(re.findall(r"`([a-z_]+)`", section))
+        documented -= {"note", "awaiting_human", "human_returned", "challenge_present"}
+        self.assertTrue(documented)
+        self.assertEqual(documented - reasons, set())
+
     def test_deleted_proactivity_tools_are_never_mentioned(self):
         for deleted in ("proactive_control", "watch_manage", "record_task",
                         "`watch`", "/watch", "proactive-primary"):
@@ -113,7 +139,7 @@ class WebErrandsSkillTests(unittest.TestCase):
     def test_commit_step_uses_the_gate(self):
         self.assertIn(
             "`{kind: purchase|booking|send|post|submit|delete|account_change, "
-            "summary, amount, currency, counterparty}`",
+            "summary, amount?, currency?, counterparty?}`",
             self.normalized,
         )
         for phrase in ("`declined`, `approval_timeout` and `approval_unavailable`",
@@ -122,6 +148,70 @@ class WebErrandsSkillTests(unittest.TestCase):
                        "leaves the last click to the user"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.normalized)
+
+    def test_shared_operations_are_linked(self):
+        links = re.findall(r"\]\(([^)]+workspace-operations[^)]*)\)", self.text)
+        self.assertTrue(links, "link to the shared operations skill")
+        for link in links:
+            self.assertTrue((SKILL_DIR / link.split("#")[0]).resolve().is_file())
+
+    def test_documented_refusals_exist_in_the_router(self):
+        router = (PLUGIN / "scripts" / "workspace-router.cjs").read_text()
+        # Read literal refusal prefixes, including template-string refusals;
+        # do not maintain a second allowlist that could drift with the docs.
+        actual = set(re.findall(r"['`\"]([a-z_]+): ", router))
+        mentioned = {token for token in re.findall(r"`([a-z_]+)`", self.all_text)
+                     if token.endswith(("_required", "_invalid", "_changed", "_present"))
+                     or token.startswith("approval_")
+                     or token in {"declined", "awaiting_human", "human_returned"}}
+        self.assertTrue(mentioned)
+        self.assertEqual(mentioned - actual, set())
+        for code in ("commit_required", "commit_invalid", "snapshot_required",
+                     "host_changed", "page_changed", "challenge_present"):
+            self.assertIn(code, mentioned)
+
+    def test_commit_fields_and_kinds_match_router_schema(self):
+        router = (PLUGIN / "scripts" / "workspace-router.cjs").read_text()
+        verbs = re.search(r"const COMMIT_VERBS = \{(.*?)\n\};", router, re.S).group(1)
+        actual_kinds = re.findall(r"^  ([a-z_]+):", verbs, re.M)
+        schema = re.search(r"props.commit = \{(.*?)\n    \};", router, re.S).group(1)
+        fields = re.findall(r"^        ([a-z_]+):", schema, re.M)
+        required = re.search(r"required: \[(.*?)\]", schema).group(1)
+        required = re.findall(r"'([a-z_]+)'", required)
+        documented = re.search(r"`\{kind: ([^}]+)\}`", self.normalized).group(1)
+        kinds, *optional = documented.split(", ")
+        self.assertEqual(kinds.split("|"), actual_kinds)
+        self.assertEqual(["kind"] + [f.rstrip("?") for f in optional], fields)
+        self.assertEqual(["kind"] + [f for f in optional if not f.endswith("?")], required)
+        max_length = re.search(r"summary:.*?maxLength: (\d+)", schema).group(1)
+        self.assertIn(f"1–{max_length} characters", self.normalized)
+        self.assertIn("strings", self.normalized)
+        self.assertIn("Never supply `approval`", self.normalized)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required to check Unicode commit patterns")
+    def test_documented_commit_controls_match_shared_patterns(self):
+        match = re.search(r"Commit-name examples: (.*?)\.", self.normalized)
+        self.assertIsNotNone(match, "document the commit controls used by the recipes")
+        examples = match.group(1)
+        names = re.findall(r'"([^"\n]+)"', examples)
+        # Include the application recipe's claim as well as the skill examples.
+        names += re.findall(r'"(Easy Apply|Submit application)"', self.recipes)
+        self.assertGreaterEqual(len(names), 3)
+        router = PLUGIN / "scripts" / "workspace-router.cjs"
+        script = """
+const fs = require('node:fs'), path = require('node:path');
+const file = process.argv[1], names = JSON.parse(process.argv[2]);
+const source = fs.readFileSync(file, 'utf8');
+const start = source.indexOf('const COMMIT_PATTERNS =');
+const end = source.indexOf('// A selector read as words:', start);
+const check = new Function('require', 'path', '__dirname', 'names',
+  source.slice(start, end) + '; return names.map(isCommitName);');
+process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), names)));
+"""
+        result = subprocess.run([shutil.which("node"), "-e", script, str(router),
+                                 json.dumps(names)], capture_output=True, text=True,
+                                timeout=10, check=True)
+        self.assertEqual(json.loads(result.stdout), [True] * len(names))
 
     def test_echo_before_commit_covers_the_decision(self):
         for detail in ("the dates", "the party size",
@@ -137,11 +227,18 @@ class WebErrandsSkillTests(unittest.TestCase):
                 self.assertIn(reason, self.normalized)
         self.assertIn("`note`", self.normalized)
         self.assertIn("awaiting_human", self.normalized)
-        self.assertIn("a plain `release` still hands the tab over", self.normalized)
+        self.assertIn("On the user's computer", self.normalized)
+        self.assertIn("On the VPS", self.normalized)
+        self.assertIn("does not hold the tab", self.normalized)
+        self.assertIn("140 characters", self.normalized)
+        self.assertIn("[CAPTCHA handback]", self.text)
+        self.assertIn("human_returned", self.normalized)
 
     def test_never_solves_a_captcha(self):
         self.assertIn("Never solve a CAPTCHA.", self.normalized)
-        for line in re.findall(r"[^.]*[Cc][Aa][Pp][Tt][Cc][Hh][Aa][^.]*\.", self.all_text):
+        # Sentence boundaries apply to prose, not dots in Markdown link URLs.
+        prose = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", self.all_text)
+        for line in re.findall(r"[^.]*[Cc][Aa][Pp][Tt][Cc][Hh][Aa][^.]*\.", prose):
             self.assertTrue(
                 re.search(r"[Nn]ever|[Rr]elease|hand", line),
                 f"CAPTCHA mention without a handback or refusal: {line!r}")

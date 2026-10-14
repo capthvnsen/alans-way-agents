@@ -1,9 +1,8 @@
 # Web-errand recipes
 
-The shared rules are in the skill: pick the host, compare at least two
-sources when price matters, stage up to the commit control, echo the
-decision, commit through the gate, verify the confirmation, receipt in
-Telegram. These are the per-kind shapes.
+Run the shared loop in [web-errands](../SKILL.md) first. Use
+[workspace-operations](../../workspace-operations/SKILL.md) for browser
+policy, dispatch and human handback. These are the per-kind steps.
 
 ## Shopping and cart comparison
 
@@ -51,8 +50,8 @@ Telegram. These are the per-kind shapes.
 2. Draft in batches when the user asked for volume: several drafts, one
    review round, then submit each with its own `commit` —
    `kind:"submit"`, the summary naming the company and role. "Easy Apply"
-   and "Submit application" are commit controls, so the gate sees them
-   either way.
+   and "Submit application" match the shared commit-name patterns; keep
+   the explicit commit even when a site's label differs.
 3. Never message, connect with, or DM a recruiter or poster without a
    `kind:"send"` commit of its own. An application flow that asks for a
    sign-in or a code is a wall: release it.
@@ -73,8 +72,10 @@ Telegram. These are the per-kind shapes.
    only if it takes payment. Capture the reference or case number and
    screenshot the receipt page; for a civic fix-it request, keep the
    asset or ticket number in the echo so the request can be tracked.
-5. A portal that mails a code or calls back is a follow-up, not a wall:
-   note the expected channel in the receipt.
+5. If a portal needs an emailed sign-in or 2FA code before filing, release
+   with the corresponding reason and wait for the user. If it sends a
+   status update or calls back after filing, note that follow-up channel
+   in the receipt.
 
 ## Cancellations and refunds
 
@@ -89,7 +90,8 @@ Telegram. These are the per-kind shapes.
    it, do not accept or decline it yourself.
 4. Capture the cancellation confirmation. A refund in flight or a pending
    cancellation is a watch: a cron job on the portal or the inbox,
-   polling every 10 minutes or slower, stopping when the refund lands.
+   polling every 10 minutes or slower, stopping when the refund lands or
+   after three consecutive failures, with the shared cron backoff rules.
 
 ## Claims pipeline: receipt to resolution
 
@@ -104,6 +106,6 @@ Telegram. These are the per-kind shapes.
    number, and screenshot the confirmation.
 4. Claims resolve slowly, so set a cron watch on the claim status or the
    mailbox the portal writes to — polling every 10 minutes or slower,
-   stopping on resolution or after a few consecutive failures — and
+   stopping on resolution or after three consecutive failures — and
    report only on change. Each follow-up appeal or reply goes out as its
    own `kind:"send"` commit.

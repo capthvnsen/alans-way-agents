@@ -11,25 +11,25 @@ stage, commit, verify, report — and the per-kind recipes live in
 [references/recipes.md](references/recipes.md). Load it once the errand's
 kind is clear.
 
-All page work uses the `cua_alans_way_*` tools under the rules in the
-workspace-operations skill: open a tab you own, act from each reply's
-`effect`, batch steps, snapshot only for refs no reply gave you. A step
-that only exists inside a native app uses `computer_use`, which asks the
-user per action. Nothing else drives a browser or a desktop.
+Before page work, read [workspace-operations](../workspace-operations/SKILL.md)
+for tool dispatch, tab ownership, reply-driven actions, batching and the
+browser authorization policy. This skill uses its `cua_alans_way_*` tools;
+native-app steps use its approval-gated `computer_use` path.
 
 ## Pick the host
 
 `cua_alans_way_open` takes an optional `host`. Run the errand on the
 user's computer when their own session matters — a logged-in account, a
 cart they built, member pricing, a checkout that needs their saved
-details. That tab shares the user's real browser profile, so what you see
-is what they would see. Run it on the VPS (`host:"vm"`) when their
+details. That tab shares the user's Alan's Workspace browser profile,
+so what you see is what they would see. Run it on the VPS (`host:"vm"`) when their
 computer is asleep or the errand must finish while they are away; the VPS
 browser keeps its own profile, so expect to sign in once per site — ask
 the user rather than working past a login wall. If the computer drops
-mid-errand the connector carries the page to the VPS and names the new
-tab id: keep working in it, and do not mark the errand blocked just
-because the host changed.
+mid-errand, follow workspace-operations' continuation notice and new tab
+id. Re-read the staged details on that host before committing. If a
+commit's outcome is uncertain, inspect the page before doing anything
+that could repeat it; a host switch is not evidence that it failed.
 
 ## Compare before you commit
 
@@ -51,26 +51,54 @@ page and not from memory: the dates, the party size, the total with fees
 and shipping, and the merchant, seller, agency or recipient getting it.
 Then run the commit click as a `cua_alans_way_action` carrying a `commit`
 object: `{kind: purchase|booking|send|post|submit|delete|account_change,
-summary, amount, currency, counterparty}`. The summary and total are what
-the user approves in Telegram, so make them accurate; one `commit` covers
-the whole staged action. `declined`, `approval_timeout` and
+summary, amount?, currency?, counterparty?}`. `kind` and `summary` are
+required; the summary is 1–200 characters. The optional amount, currency
+and counterparty are strings; include the final total and recipient when
+relevant. The summary and total are what the user approves in Telegram,
+so make them accurate; one `commit` covers the whole staged action.
+Never supply `approval`: the router adds its own request-bound receipt
+only after the user approves.
+
+Commit-name examples: "Place order", "Easy Apply", "Submit application".
+These match the shared name patterns in
+[scripts/commit-patterns.json](../../scripts/commit-patterns.json).
+Every consequential action needs `commit`, even if its label is unusual;
+follow the [browser authorization policy](../workspace-operations/SKILL.md#browser-authorization-policy)
+for the full gate rules. `commit_required` means the call did not run:
+add the accurate commit object and request approval. `commit_invalid`
+means fix the object first. `snapshot_required` means read a full current
+snapshot and use its fresh refs; follow the latest reply's names and refs.
+
+`declined`, `approval_timeout` and
 `approval_unavailable` all mean it did not run: do not retry it, do not
 reach the same result another way, and never work around the gate — say
 what is staged and let the user finish. In a cron job nobody is there to
 approve, so a scheduled errand stages everything, reports where it
-stopped, and leaves the last click to the user.
+stopped, and leaves the last click to the user. `host_changed` and
+`page_changed` also mean a pending approval did not run: re-read the page
+and ask for fresh approval after confirming the staged decision. A lost
+reply after an approved action can have an uncertain outcome; verify it
+before repeating anything.
 
 ## The walls you hand back
 
-At a CAPTCHA, a sign-in or 2FA prompt, or a card-number field, hand the
-tab to the human instead of working past it:
-`{action:"release", reason:"captcha"}` — or `login`, `two_factor`,
-`payment_details`, `review`, `other` — with a short `note` naming the
-site and what you need, plus one chat message so the user knows to look.
-A reasoned release marks the tab `awaiting_human` and your calls on it
-are refused until the human gives it back; where a release cannot carry a
-reason yet, a plain `release` still hands the tab over — the chat message
-says why either way.
+At a sign-in or 2FA prompt, or a card-number field, hand the tab to the
+human with `action:"release"`, `reason:"login"`, `reason:"two_factor"`
+or `reason:"payment_details"` respectively; `review` and `other` cover
+other human-only steps. Include a plain-text `note` of at most 140
+characters naming the site and what you need, and send one chat message.
+On the user's computer, a reasoned release marks the tab `awaiting_human`
+and refuses bot input until the human gives it back or the 30-minute hold
+expires. Read the current tab state and fresh epoch on `human_returned`.
+On the VPS, an ordinary reasoned release records the reason but does not
+hold the tab; wait for the user's reply before claiming it again.
+
+For a CAPTCHA, follow [CAPTCHA handback](../workspace-operations/SKILL.md#when-a-site-shows-a-captcha).
+Release a needed widget with `{action:"release", reason:"captcha"}` and
+a note; a blocking challenge is handed back automatically. A
+`challenge_present` refusal calls for handback, never a commit approval.
+The shared flow covers the safe viewer link, waiting via tab status,
+automatic return, fresh epochs and backoff; follow it when resuming.
 
 Never solve a CAPTCHA. Never ask the user to read a card number aloud or
 paste it in chat, and never store a card number — not in memory, not in a
@@ -91,11 +119,15 @@ success the page did not show.
 
 A price, restock, ticket, refund-status or appointment watch is a Hermes
 cron job, not a loop inside this conversation: create it with
-`cronjob_manage` (`create`, and later `update`, `pause` or `remove`), or
+`cronjob_manage` (`create`, and later `update`, `pause` or `remove`; list
+jobs before managing one by its id), or
 ask the operator for a `hermes cron` entry, delivering to Telegram. Poll
 no more often than every 10 minutes — tighter polling is what gets
 accounts rate-limited or suspended — and back off when a check fails.
-Give the job its stop conditions in the prompt: stop on success, and stop
-after a few consecutive failures; report either way. A cron run has no
-one to answer an approval, so a watch that hits its target stages the
-result and asks the user to finish it.
+Give the job a self-contained prompt with the URL, constraints and stop
+conditions: stop on success, and stop after three consecutive failures;
+report either way. Cron scheduling tools are disabled within cron runs by
+default; arrange the pause/remove with the operator or an explicitly
+enabled scheduler toolset, rather than assuming a job can stop itself.
+A cron run has no one to answer an approval, so a watch that hits its
+target stages the result and asks the user to finish it.
