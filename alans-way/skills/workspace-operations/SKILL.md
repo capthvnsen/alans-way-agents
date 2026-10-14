@@ -19,15 +19,23 @@ anything you cannot read; a planned pin is not an observed running version.
   For a manual git install, use that installed checkout's `git rev-parse HEAD`;
   if neither has provenance, say the SHA is unavailable. A separate setup clone
   or the current remote tip does not prove what the installed plugin runs.
-- Alan's Tools: find the VM browser checkout from `HERMES_WORKSPACE_VPS_MCP`
-  or the managed workspace browser config's `--vps-script` (read only that
-  field), then the router's installed script candidates:
-  `/opt/hermes-alans-way/browser` or
-  `~/.local/share/hermes-alans-way/app`. Run
+- Alan's Tools: identify the installed router actually launched by this profile
+  (read only its command/args and the relevant environment field). Follow
+  `workspace-router.cjs:104` exactly: its nonempty CLI `--vps-script` first,
+  then its nonempty `HERMES_WORKSPACE_VPS_MCP`, then the first existing candidate
+  in this order: the router's sibling `browser-mcp.cjs`,
+  `/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs`,
+  `~/.local/share/hermes-alans-way/app/desktop/scripts/browser-mcp.cjs`.
+  If no candidate exists, the router defaults to the `/opt` script above.
+  An explicit path wins even if it is missing; report unavailable in that case,
+  rather than choosing an inactive checkout. Resolve the selected script's symlinks
+  and derive its checkout with
+  `git -C <selected-script-directory> rev-parse --show-toplevel`. Run
   `git -C <toolbox-checkout> describe --tags --always --dirty` and
   `git -C <toolbox-checkout> rev-parse HEAD`. For a non-git copy read its
-  `desktop/package.json` version and `desktop/build-info.json` if present;
-  label missing SHA/tag unavailable. This identifies the toolbox scripts;
+  `desktop/package.json` version and `desktop/build-info.json` only if you can
+  establish that the metadata belongs to the selected script; otherwise report
+  unavailable. Label missing SHA/tag unavailable. This identifies the toolbox scripts;
   it is separate from Hermes and the computer's app.
 - Alan's Workspace: call `cua_alans_way_status` and report its `version` and
   `build` (commit/channel/dirty when supplied) only when the response identifies
