@@ -64,6 +64,11 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
+- **Optional cross-bot digest export (stage 1).** Each enabled bot exports only
+  its last four completed owner-DM exchanges (2 KiB, 24-hour expiry) to a private
+  shared directory. Default off; `/proactivity cross on|off|status` controls each
+  bot. Dispatch is disabled and exports never enter another bot's prompt in this
+  stage. See [setup and privacy limits](docs/proactivity.md#cross-bot-digest-export-stage-1).
 - **Web errands stop at your Approve tap.** The `web-errands` skill drives
   the research → stage → commit → verify → report loop for shopping, cart
   comparison, booking and travel, job applications, form and civic-portal

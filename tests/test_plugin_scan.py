@@ -23,6 +23,7 @@ from tools.plugin_guard import scan_plugin, should_allow_plugin_install
 result = scan_plugin(Path("alans-way"))
 findings = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
 expected = Counter({
+    ("unicode_escape_chain", "medium", "voice.py"): 1,
     ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"): 2,
     ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3})
 assert findings == expected, (findings, expected, result.findings)

@@ -6,6 +6,7 @@ import sys
 
 from . import voice as voice_mod
 from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
+from .cross_bot import CrossBot, CROSS_SCHEMA
 
 
 def _owning_home() -> Path:
@@ -54,20 +55,33 @@ def register(ctx, *, legacy_home=None, background=True):
     if hasattr(ctx, "register_cli_command"):
         ctx.register_cli_command("tone", "The Telegram texting voice: status, texting or default",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
-    if not _primary_profile(ctx):
-        return None
-    runtime = Proactivity(ctx, legacy_home=legacy_home or _owning_home())
-    ctx.register_tool(name="proactivity", toolset="proactivity", schema=SCHEMA,
-                      handler=runtime.tool, check_fn=lambda: True)
-    ctx.register_hook("pre_llm_call", runtime.on_turn_start)
-    ctx.register_hook("post_llm_call", runtime.on_turn_end)
-    ctx.register_command("proactivity", runtime.command,
-                         description="Check-ins: status, now, less, normal, more, pause [until], resume, hours 9-21, tz Area/City, brief on|off",
-                         args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief]")
+    primary = _primary_profile(ctx)
+    runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)
+    runtime.primary = primary
+    cross = CrossBot(ctx, runtime)
+    runtime.cross_bot = cross
+    # Collector and narrowing controls belong to every profile, before the
+    # primary scheduler gate. Secondary bots still get no spontaneous check-ins.
+    ctx.register_hook("pre_llm_call", cross.on_turn_start)
+    ctx.register_hook("post_llm_call", cross.on_turn_end)
+    ctx.register_hook("on_session_end", cross.on_session_end)
+    ctx.register_tool(name="proactivity", toolset="proactivity", schema=SCHEMA if primary else CROSS_SCHEMA,
+                      handler=runtime.tool if primary else cross.tool, check_fn=lambda: True)
+    if primary:
+        ctx.register_hook("pre_llm_call", runtime.on_turn_start)
+        ctx.register_hook("post_llm_call", runtime.on_turn_end)
+    ctx.register_command("proactivity", runtime.command if primary else cross.command,
+                         description="Check-ins and cross-bot export: cross on|off|status (dispatch disabled)",
+                         args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief|cross on|off|status]")
     if background:
-        ctx.register_platform_handler("telegram", runtime.on_telegram_connect)
+        def connect(native=None, adapter=None, **kwargs):
+            cross.on_telegram_connect(native, adapter, **kwargs)
+            if primary:
+                runtime.on_telegram_connect(native, adapter, **kwargs)
+        ctx.register_platform_handler("telegram", connect)
     if hasattr(ctx, "register_cli_command"):
-        ctx.register_cli_command("proactivity", "Idle check-ins from the primary bot", cli_setup,
+        ctx.register_cli_command("proactivity", "Local owner-DM binding, check-ins and cross-bot export", cli_setup,
                                  lambda args: cli_run(runtime, args))
     ctx.on_unload(runtime.close)
-    return runtime
+    ctx.on_unload(cross.close)
+    return runtime if primary else None

@@ -436,6 +436,9 @@ class Proactivity:
 
     def tool(self, args, **kwargs):
         args = args if isinstance(args, dict) else {}
+        cross = getattr(self, "cross_bot", None)
+        if cross and (args.get("action") == "cross_status" or "cross_bot_enabled" in args):
+            return cross.tool(args, **kwargs)
         try:
             bound = self.load().get("session_key")
             own = bool(bound) and caller_session_key() == bound
@@ -471,6 +474,8 @@ class Proactivity:
         try:
             words = str(raw_args or "").split()
             verb, rest = (words[0].lower(), words[1:]) if words else ("status", [])
+            if verb == "cross" and getattr(self, "cross_bot", None):
+                return self.cross_bot.command(" ".join(rest))
             bound = self.load().get("session_key")
             own = bool(bound) and caller_session_key() == bound
             if verb == "status":
@@ -572,11 +577,15 @@ SCHEMA = {
         " offset; 'stop checking in' -> paused_until 'off'; 'I'm in Tokyo' -> timezone 'Asia/Tokyo';"
         " 'not before 9am' -> active_start 9; 'stop the morning brief' -> morning_brief false. Only the"
         " user can turn the morning brief on, with /proactivity brief on. After set, confirm the change"
-        " from the returned status in plain words."),
+        " from the returned status in plain words. Optional cross-bot export is default off and dispatch"
+        " is disabled. cross_status reads its status; set cross_bot_enabled false turns it off and purges"
+        " this bot's digest. Only the operator can turn it on with /proactivity cross on; use that setting"
+        " alone, without other check-in settings."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {
-            "action": {"type": "string", "enum": ["status", "set"]},
+            "action": {"type": "string", "enum": ["status", "set", "cross_status"]},
+            "cross_bot_enabled": {"type": "boolean"},
             "level": {"type": "string", "enum": list(LEVELS)},
             "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
             "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
@@ -605,7 +614,14 @@ def cli_run(runtime, args):
             runtime.update(changes, min_base=1)
         if args.action == "bind":
             runtime.bind(args.session_key or "")
-        print(json.dumps(runtime.status(), indent=2))
+        cross = getattr(runtime, "cross_bot", None)
+        if cross:
+            cross.refresh_local()
+            cross.tick()
+        status = runtime.status() if getattr(runtime, "primary", True) else cross.status()
+        if cross and getattr(runtime, "primary", True):
+            status["cross_bot"] = cross.status()
+        print(json.dumps(status, indent=2))
         return 0
     except ValueError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))

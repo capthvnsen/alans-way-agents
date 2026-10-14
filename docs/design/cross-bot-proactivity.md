@@ -44,12 +44,14 @@ configuration also handles custom roots without a private root/profile import.
 
 Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes):
 
-- `control.json`: schema, designated primary profile, generation, enabled flag; default launch profile, operator override supports the test primary.
+- `control.json`: schema, designated primary profile, generation, enabled flag; default `default`, explicit `cross_bot.primary` operator override supports the test primary. Stage 1 only records the designation.
+  Control generation is the shared settings epoch; presence/digest generation is a separate per-profile enrollment epoch, so opting one bot out does not invalidate others.
 - `profiles/<profile>/presence.json`: profile, generation, one enabled flag,
   heartbeat, bound boolean, timezone/window/pause; no DM address exported.
 - `profiles/<profile>/digest.json`: bounded exchange ring; replace on append.
 - `inbox/<target>/<uuid>.json`: pending ask (future stage only); no receipt store.
-- `limits.json` and lock files: spent check-in permits, rate counters, dedup IDs.
+- `profiles/<profile>/dedup.json`: body-free hashed turn IDs, 48-hour TTL, maximum 512 per profile; refuse overflow until expiry.
+- `limits.json` (future stages) and lock files: spent check-in permits and rate counters.
 
 ```json
 {"schema":1,"profile":"specialist","generation":3,"updated_at":"<UTC>",
@@ -61,7 +63,7 @@ Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes)
  "ask":"Draft an outline for the open project","attribution":"Primary"}
 ```
 
-Validate exact keys/types, UTC timestamps, enum `read_only|draft_only`, canonical profile IDs, generation and
+Reject presence older than 180 seconds from snapshots. Validate exact keys/types, UTC timestamps, enum `read_only|draft_only`, canonical profile IDs, generation and
 depth; reject self/unknown targets and path separators. User/model text never supplies a file path, DM
 destination, primary identity or approval. Directories 0700, all JSON/temp/lock files 0600; reject symlinks,
 unsafe ownership and permissive roots; use exclusive temp creation, atomic replace and bounded locks.

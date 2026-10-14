@@ -33,31 +33,48 @@ scanner warning. `--force` confirms CAUTION and can replace an install; it
 cannot override DANGEROUS. Catalog installs use the catalog's reviewed commit,
 which does not approve arbitrary newer revisions.
 
+Optional cross-bot export stores bounded, sanitized recent owner-DM excerpts from
+enabled profiles for up to 24 hours in a private shared plugin-owned directory.
+Default off; `/proactivity cross on|off|status` controls each bot. Dispatch is
+disabled: no asks are sent and no other bot context enters model prompts.
+Sanitization cannot guarantee detection of every secret; digest expiry cannot
+erase existing Hermes/provider history. No historical backfill, attachment or
+tool-history export. Offline files are pruned at startup, then every 60 seconds
+while connected; expired exchanges are never read.
+
 ## Reviewed scanner inventory
 
 Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
 Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
-Paths below are relative to `alans-way/`. The remaining five matches are true
-capabilities and their commands are preserved; no scanner rule was changed.
+Current release baseline: `02f52a0f74f44ed7ee069ffd7cdc8093894b06bf` (includes #112).
+Paths below are relative to `alans-way/`. Six reviewed matches remain; no scanner
+rule was changed. Stage 1 export/control code adds no findings.
 LOW findings document the loopback-only forward/check/app examples. The only
 HIGH finding (`python_os_environ` at the former
 `skills/integrations/references/mastodon.md:45`) is gone because the plugin no
 longer ships the recipe. Its environment-reading command remains visible in
 the human-run document outside the plugin.
 
+The third MEDIUM is #112's intentional Unicode/emoji separator regex in
+`voice.py`; it matches punctuation in short-reply intent classification. It
+does not decode or execute text. Its scanner match is included explicitly in
+the inventory rather than suppressed.
+
 | File:line | Rule | Severity | Matched text | Before → after |
 |---|---|---|---|---|
-| `skills/workspace-setup/SKILL.md:180` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:235` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:339` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:345` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:348` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:249` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:304` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:408` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:414` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:417` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
+| `voice.py:64` | `unicode_escape_chain` | MEDIUM | Unicode/emoji character class in `_REPLY_SEPARATOR` | baseline 1 → stage 1 1 |
 
-Verdict: **CAUTION → SAFE**. Inventory: 1 HIGH + 2 MEDIUM + 3 LOW →
-0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
-There are no remaining false positives to reword.
+Verdict: **SAFE**. Current baseline → stage 1: 0 HIGH + 3 MEDIUM + 3 LOW
+→ 0 HIGH + 3 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
+Historically, removing the Mastodon recipe changed CAUTION to SAFE; #112 later
+added the benign Unicode regex MEDIUM.
 
 `tests/test_plugin_scan.py` asserts exact counts by rule, severity and file,
 plus SAFE allowance, CAUTION/confirmation and DANGEROUS rejection gates. Supply

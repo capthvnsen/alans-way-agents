@@ -111,3 +111,78 @@ State lives in Hermes' plugin state (`ctx.state`).
 
 Upgrading from 0.6 keeps your bound chat, timezone and pause. Watches, sweeps
 and `/watch` are gone.
+
+## Cross-bot digest export (stage 1)
+
+Optional and **off by default**. Each enrolled profile exports only completed
+exchanges from its locally bound owner Telegram DM. Groups, other chats, cron,
+check-ins, morning briefs, child turns and imported cross-bot turns are excluded.
+There is no historical backfill. Only the user message and final assistant text
+are exported; attachments, reasoning, tool history and configuration files are
+not collected. All eligible bots may participate; a hard limit of 16 profiles
+and a 32 KiB snapshot produces a clear error if exceeded.
+
+This stage only exports digests and records presence/enrollment. **Dispatch is
+disabled**: there is no ask tool or receiver, no cross-chat injection, and no
+shared excerpts enter a model prompt. The primary designation is metadata for
+later stages; secondary bots still do not run spontaneous check-ins.
+
+An operator configures each profile through Hermes' CLI. Use the **same explicit
+absolute directory and primary designation** in every participating profile:
+
+```sh
+hermes -p <profile> config set plugins.entries.alans-way.settings.cross_bot.shared_root /absolute/gateway/companion/alans-way-cross-bot/v1
+hermes -p <profile> config set plugins.entries.alans-way.settings.cross_bot.primary <primary-profile>
+hermes -p <profile> proactivity bind --session-key 'agent:<profile>:telegram:dm:<owner-chat-id>'
+hermes -p <profile> tools enable proactivity --platform telegram
+```
+
+Select an existing owner DM route for that profile; `default`/`custom` uses
+`agent:main`, and a profile literally named `main` uses `agent:main~`. Collector
+checks use the exact bound session key, never just the human's ID. Shared-root
+and primary changes take effect on plugin reload under the normal operator
+update/drain procedure. No installer changes or automatic enrollment are added.
+The approved future live test uses `alansway` as primary and `utd` as target.
+
+From each bot's bound owner DM, send:
+
+- `/proactivity cross on` to enable that bot's exports.
+- `/proactivity cross off` to disable and delete that bot's digest.
+- `/proactivity cross status` to show enrollment and exchange count, with
+  “Dispatch disabled.” No message bodies or DM addresses appear in status.
+
+The model's existing `proactivity` tool can read `cross_status` or set
+`cross_bot_enabled` to `false`. It can only turn this feature off; enabling,
+rebinding or expanding scope requires the operator. A refused enable returns
+`/proactivity cross on`, like other settings that would widen proactivity.
+
+The plugin-owned POSIX store uses owner-only directories (0700) and files (0600),
+checked directory handles, symlink/ownership checks, a bounded lock and atomic
+replacement. Unsafe permissions, invalid schemas or mismatched primary settings
+make exports unavailable. Custom shared roots are supported; the plugin never
+infers one from the launch profile's environment or accesses Hermes' session DB.
+Presence contains a heartbeat, enabled/bound booleans and local hours/pause/zone;
+it contains no DM address. Snapshots exclude presence older than 180 seconds.
+
+Each digest holds at most the last **four exchanges**, at most **2 KiB serialized**,
+with a **24-hour TTL per exchange**. Sanitization runs before UTF-8 truncation;
+credential-bearing lines, private-key blocks, recognizable tokens and credential
+URLs are omitted. Failure drops the whole exchange. Operators may add literal
+line-omission terms using the plugin setting `cross_bot.redact_terms` (up to 32
+terms, 128 characters each). Arbitrary unlabeled secrets are not guaranteed
+detectable, so avoid sharing sensitive material even with export enabled.
+
+Pruning runs at startup, before store reads/writes and every 60 seconds through
+Hermes' supervised profile-scoped task while Telegram is connected. Expired text
+is never read; offline files can physically remain until startup. Interrupted
+atomic-write temporary files are removed under the store lock. Body-free hashed
+turn IDs prevent duplicates for 48 hours (512 per profile; overflow refuses new
+exports until expiry). Counts and IDs survive restart; turning off does not
+remove these body-free records. Off revokes pending exports with an enrollment
+generation change, so a turn staged before off cannot publish after re-enabling.
+
+Expiry and opt-out apply to this plugin's digests. They do not erase existing
+Hermes history, Honcho/memory-provider records or model-provider retention. Later
+stages must treat shared excerpts as untrusted observations, preserve approval
+and browser commit gates, block unsafe imported-turn tools, and prevent chains;
+see the [staged design](design/cross-bot-proactivity.md).
