@@ -108,8 +108,9 @@ class SanitizerTests(unittest.TestCase):
         size = 1024 * 1024
         probes = (("pin" + " " * (size - 3), True), ("passcode" + " " * (size - 8), True),
                   ("q" * size, False), (" " * size, False), ("4" + "0" * (size - 1), True),
-                  ("4 " + "0 " * (size // 2 - 1), True), ("a" * (size - 1) + "1", True),
+                  ("4 " + "0 " * (size // 2 - 1), True), ("a" * (size - 1) + "1", True), ("1" + "a" * (size - 1), True),
                   (("A" * 31 + " ") * (size // 32), False),
+                  (("A" * 30 + "1 ") * (size // 32), False),
                   (("draft. " * (size // 7 + 1))[:size], False))
         for text, expected in probes:
             with self.subTest(prefix=text[:8]):
