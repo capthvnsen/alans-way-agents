@@ -247,6 +247,9 @@ function noteClientRpc(line, pending) {
 // {"result":...,"jsonrpc":"2.0","id":N}; other servers put the id first.
 // An unrecognised shape returns undefined and the caller parses.
 const BIG_LINE = 100000;
+// BIG_LINE is the screenshot fast-path threshold, not a parsing ceiling.
+// Allow ordinary large tab lists, but bound text parsing/decoration memory.
+const REPLY_PARSE_MAX_BYTES = 4 * 1024 * 1024;
 const ID_AT_HEAD = /^\{\s*"jsonrpc"\s*:\s*"2\.0"\s*,\s*"id"\s*:\s*(\d+|"[^"\\]*")/;
 const ID_AT_TAIL = /,\s*"id"\s*:\s*(\d+|"[^"\\]*")\s*\}$/;
 function bigLineId(line) {
@@ -1079,6 +1082,10 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
     const shape = resultShape(line);
     let msg;
     if (!shape) {
+      if (Buffer.byteLength(line, 'utf8') > REPLY_PARSE_MAX_BYTES) {
+        process.stderr.write(`workspace-router: reply exceeds ${REPLY_PARSE_MAX_BYTES}-byte parse limit; refusing decoration and forwarding unchanged\n`);
+        return line;
+      }
       try {
         msg = JSON.parse(line);
       } catch {
