@@ -22,7 +22,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
                            .split("```sh", 1)[0])
 
-    def test_telegram_preset_keys_are_platform_scoped_with_memory_support_gate(self):
+    def test_telegram_preset_uses_global_memory_notice_key(self):
         step = self.telegram_step()
         expected = {
             "platforms.telegram.typing_indicator": "true",
@@ -31,7 +31,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "display.platforms.telegram.notifications": "important",
             "display.platforms.telegram.long_running_notifications": "generic",
             "display.platforms.telegram.busy_steer_ack_enabled": "false",
-            "display.platforms.telegram.memory_notifications": "off",
+            "display.memory_notifications": "off",
             "cron.wrap_response": "false",
             "platforms.telegram.reactions": "true",
         }
@@ -128,17 +128,23 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "Preserve the legacy key", "null legacy values inherit"):
             self.assertIn(rule, step)
 
-    def test_memory_skill_notice_offer_is_scoped_consented_and_checks_banner_support(self):
+    def test_memory_skill_notice_offer_is_global_consented_and_read_back(self):
         step = self.telegram_step()
-        for rule in ("hide memory/skill bookkeeping notices on Telegram",
-                     "| `display.platforms.telegram.memory_notifications` | `off` |",
+        for rule in ("hide memory/skill bookkeeping notices",
+                     "| `display.memory_notifications` | `off` |",
+                     "Hiding “💾 Memory updated / Self-improvement review” notices affects every platform this profile uses, not only Telegram",
                      "off|on|verbose", "background review still runs",
-                     "Self-improvement review", "run_turn_runner.py#L1289",
-                     "background_review.py#L1264", "reads only the global",
-                     "skip this leaf", "do not claim the banner is suppressed",
-                     "Read back each changed key"):
+                     "run_turn_runner.py#L1289", "use the global `display.memory_notifications` directly",
+                     "boolean `false` means `off`",
+                     "A Telegram-only memory/skill notice switch isn't supported by Hermes yet",
+                     "`display.memory_notifications` must read back `off` (or `false`)",
+                     "report only that stored value", "not verified banner suppression",
+                     "Read back each changed key", "already-planned gateway restart"):
             self.assertIn(rule, step)
-        self.assertNotIn("config set display.memory_notifications", step)
+        for obsolete in ("display.platforms.telegram.memory_notifications",
+                         "skip this leaf", "where supported",
+                         "memory/skill notice support check"):
+            self.assertNotIn(obsolete, step)
 
     def test_binding_explains_native_telegram_home_and_manual_fallback(self):
         for rule in ("same primary DM becomes Hermes' Telegram home channel",
@@ -249,7 +255,8 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
 
     def test_global_interim_preference_is_preserved_by_telegram_offer(self):
         self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
-        self.assertIn("Leave global display settings and other platforms untouched", self.telegram_step())
+        self.assertIn("Leave other global display settings and other platforms untouched",
+                      self.telegram_step())
 
     def test_display_stack_is_guided_not_auto(self):
         self.assertIn("never auto-installed", self.normalized)
