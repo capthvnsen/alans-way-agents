@@ -41,7 +41,7 @@ affected.
 
 1. **A style note on every Telegram-bound turn** (`pre_llm_call`). Hermes appends
    it to that turn's user message, never to the system prompt. It asks for:
-   - 1-4 sentences by default, matching your energy and length;
+   - 1-3 short sentences for casual replies, matching your energy and length;
    - contractions and plain words, with no "Certainly!", "Great question" or "I'd
      be happy to";
    - no headings or walls of bold, and lists only when you ask for steps or the
@@ -51,9 +51,37 @@ affected.
    - a real pick with a reason when you ask what it thinks;
    - long answers (code, plans, research) kept complete, led by a one-line answer;
    - a one-line heads-up before a long multi-step task;
-   - a closing question only when there's a real next step.
+   - status first, followed by evidence or a caveat;
+   - recaps as 2-3 headline outcomes in 1-3 sentences, without bullets, then an
+     offer of detail;
+   - task words in user-facing text, without tool names or calls, file paths,
+     scripts, or job/session IDs unless you ask for technical detail;
+   - first-person action and what's next when working, narrating only actions in
+     your world, never loading skills, instructions, memory or tools;
+   - plain ownership of limits, failures and side effects;
+   - mild warmth and short openers used sparingly;
+   - questions only for decisions you own, naming the choice or needed detail.
 
    In groups it also keeps replies shorter and talks to whoever asked.
+   The casual/recap length rule comes after the general detail and list
+   guidance: at most three sentences total, including any offer of detail,
+   with no lists unless asked. Recaps keep headline outcomes and leave out
+   per-item evidence and history. Your own persona or request for a different
+   style or more detail still wins; code, plans and research stay complete.
+   A whole-message recap request (such as "what did you get done today?",
+   "recap", "tl;dr", or "how's it going") or standalone greeting, thanks or
+   acknowledgment also gets one short reminder at the very end of the turn's
+   note, after any group guidance. Recaps can follow a greeting or "quick
+   one/question:" prefix; social replies can include punctuation, emoji or
+   "that's helpful". A prefix alone, another request, or an action such as
+   booking, finding, sending or fixing gets no extra reminder. Explicit detail
+   requests (including "long", "extensively", "everything", "all of it",
+   "full", "complete", "explain in detail" or "walk me through") also suppress
+   it. Local patterns check the whole current message, with no model call;
+   messages over 200 characters are skipped before normalization, never
+   truncated. Unmatched turns add no reminder tokens.
+   This is model guidance, not an enforced output limit: long replies are
+   never truncated or silently rewritten to meet the cap.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
    deterministic, with no model call, and does exactly one thing: it drops a
    known assistant opener ("Certainly!", "Absolutely!", "Of course!", "Sure
@@ -114,6 +142,11 @@ No supported Hermes hook reaches these, so the plugin does not touch them:
   and gives hooks no public way to see those destinations (the target list is
   only reachable through a private Hermes function, which this repo doesn't
   import). Cron runs keep the default voice until Hermes exposes it.
+
+The setup skill can offer to switch off Hermes' extra steering acknowledgment
+with `display.busy_steer_ack_enabled=false`, only after the user's explicit
+answer. The model still acknowledges additions in its own short reply; setup
+scripts do not change this setting. No Hermes message is rewritten.
 
 Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the

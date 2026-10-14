@@ -12,6 +12,62 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_finished_tabs_are_closed_only_with_live_ownership_and_control(self):
+        section = re.search(r"## Tab hygiene(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section, "finished tasks need a tab cleanup policy")
+        policy = _normalized(section.group(1))
+        for rule in (
+            "When a task finishes, close the tabs you opened for it",
+            "say which tabs you kept and why",
+            "`requestingBotId`", "`botId` matches `requestingBotId`",
+            "`allowedBots` is a grant, not ownership",
+            "`controller` is `agent`", "fresh `epoch`",
+            "Never close another bot's or the user's tabs",
+            "At the tab limit, close your own confirmed finished tabs first",
+            "retry opening once", "after `/new` or compaction",
+            "do not infer that a tab is finished from its age or URL",
+            "If ownership or task status is uncertain, leave the tab alone",
+            "Do not claim a tab just to close it",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_real_decisions_use_native_clarify_with_text_and_no_approvals(self):
+        self.assertIn("Hermes's `clarify` buttons for real decisions the user owns", self.normalized)
+        self.assertIn("keep Other/free text possible and never use them for approvals", self.normalized)
+
+    def test_toolbox_provenance_follows_the_running_routers_precedence(self):
+        tools = self.normalized.split("- Alan's Tools:", 1)[1].split("- Alan's Workspace:", 1)[0]
+        candidates = (
+            "`--vps-script`", "`HERMES_WORKSPACE_VPS_MCP`", "sibling `browser-mcp.cjs`",
+            "`/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs`",
+            "`~/.local/share/hermes-alans-way/app/desktop/scripts/browser-mcp.cjs`")
+        for candidate in candidates:
+            self.assertIn(candidate, tools)
+        order = [tools.index(needle) for needle in candidates]
+        self.assertEqual(order, sorted(order))
+        for rule in ("workspace-router.cjs:104", "first existing candidate",
+                     "explicit path wins even if it is missing",
+                     "Resolve the selected script's symlinks",
+                     "git -C <selected-script-directory> rev-parse --show-toplevel",
+                     "unavailable", "metadata belongs to the selected script"):
+            self.assertIn(rule, tools)
+
+    def test_version_questions_can_discover_the_skill_without_a_browser_task(self):
+        description = re.search(r"^description: (.*)$", self.text, re.M).group(1)
+        self.assertIn("installed versions", description)
+
+    def test_versions_include_all_components_and_observed_provenance(self):
+        for requirement in ("When asked what versions", "hermes --version",
+                            "plugin.yaml", ".install-metadata.json", "release SHA",
+                            "git -C <toolbox-checkout> describe --tags --always --dirty",
+                            "git -C <toolbox-checkout> rev-parse HEAD",
+                            "HERMES_WORKSPACE_VPS_MCP", "/opt/hermes-alans-way/browser",
+                            "cua_alans_way_status", "`version` and `build`",
+                            "A response with `host: vps`", "unavailable",
+                            "planned pin is not an observed running version"):
+            self.assertIn(requirement, self.normalized)
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
@@ -240,12 +296,25 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         # the action instead of a snapshot-and-check.
         self.assertIn("Every action reply carries `effect`, the page's new state: `effect.text` is its new visible text.", self.normalized)
         self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
-        self.assertIn("Do multi-step work as one batch", self.normalized)
+        self.assertIn("Do ordinary multi-step work in short chunks", self.normalized)
+        self.assertIn("End the chunk before any noticeable step", self.normalized)
+        self.assertIn("read the returned errors and side effects before continuing", self.normalized)
+        self.assertIn("Put a whole checkout batch under one `commit`.", self.normalized)
+        self.assertNotIn("Do multi-step work as one batch", self.normalized)
         self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
         self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)
-        self.assertIn("write no chat text between tool calls and send one short message when it is done", self.normalized)
+        self.assertIn("Before each multi-step chunk", self.normalized)
+        self.assertIn("the current action and the next step", self.normalized)
+        self.assertNotIn("write no chat text between tool calls", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
+
+    def test_progress_is_bounded_and_mid_task_messages_are_folded_in(self):
+        for rule in ("email sent, form submitted, or page the user must act on",
+                     "side effects and mistakes right away", "at most one update per roughly two actions",
+                     "one quick action", "no tool names, headings or step counters",
+                     "acknowledge it in one line and fold it into the running task", "do not restart"):
+            self.assertIn(rule, self.normalized)
 
     def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
         # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
@@ -453,8 +522,7 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertIn("For a VM tab, include the handback's `viewerUrl`", self.captcha)
         self.assertIn("Google wants a CAPTCHA before I can search.", self.captcha)
         self.assertIn("I'll pick it back up.", self.captcha)
-        # The no-chat-between-calls rule makes room for this one message.
-        self.assertIn("(the one exception is the CAPTCHA message below)", self.normalized)
+        self.assertIn("The CAPTCHA message below keeps its own handback rules.", self.normalized)
 
     def test_a_viewer_link_with_a_secret_is_never_pasted(self):
         self.assertIn("Never paste a viewer link that has a password, token or key in it", self.captcha)

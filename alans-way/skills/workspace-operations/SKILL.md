@@ -1,9 +1,49 @@
 ---
 name: workspace-operations
-description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
+description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
 ---
 
 # Workspace operations
+
+## Report installed versions
+
+When asked what versions are running, check all four pieces in this turn and
+give one short line for each: Hermes, plugin, Alan's Tools (the VM browser),
+and Alan's Workspace (the app on the user's computer). Say unavailable for
+anything you cannot read; a planned pin is not an observed running version.
+
+- Hermes: run `hermes --version` (include its commit if reported).
+- Plugin: read the installed `alans-way/plugin.yaml` version and this profile's
+  `plugins/.install-metadata.json` entry for `alans-way`. Report the recorded
+  revision/catalog SHA as the release SHA, identifying a catalog pin as such.
+  For a manual git install, use that installed checkout's `git rev-parse HEAD`;
+  if neither has provenance, say the SHA is unavailable. A separate setup clone
+  or the current remote tip does not prove what the installed plugin runs.
+- Alan's Tools: identify the installed router actually launched by this profile
+  (read only its command/args and the relevant environment field). Follow
+  `workspace-router.cjs:104` exactly: its nonempty CLI `--vps-script` first,
+  then its nonempty `HERMES_WORKSPACE_VPS_MCP`, then the first existing candidate
+  in this order: the router's sibling `browser-mcp.cjs`,
+  `/opt/hermes-alans-way/browser/desktop/scripts/browser-mcp.cjs`,
+  `~/.local/share/hermes-alans-way/app/desktop/scripts/browser-mcp.cjs`.
+  If no candidate exists, the router defaults to the `/opt` script above.
+  An explicit path wins even if it is missing; report unavailable in that case,
+  rather than choosing an inactive checkout. Resolve the selected script's symlinks
+  and derive its checkout with
+  `git -C <selected-script-directory> rev-parse --show-toplevel`. Run
+  `git -C <toolbox-checkout> describe --tags --always --dirty` and
+  `git -C <toolbox-checkout> rev-parse HEAD`. For a non-git copy read its
+  `desktop/package.json` version and `desktop/build-info.json` only if you can
+  establish that the metadata belongs to the selected script; otherwise report
+  unavailable. Label missing SHA/tag unavailable. This identifies the toolbox scripts;
+  it is separate from Hermes and the computer's app.
+- Alan's Workspace: call `cua_alans_way_status` and report its `version` and
+  `build` (commit/channel/dirty when supplied) only when the response identifies
+  the user's computer. A response with `host: vps` is the VM browser, so the
+  computer app version is unavailable while it is offline. Missing fields on
+  an older app are unavailable, not the connector's MCP protocol version.
+  The existing connector passes `/v1/status` through; no app API token, SSH
+  request, install, update or restart is needed for this check.
 
 ## Open a browser when the task needs one
 
@@ -11,11 +51,36 @@ Treat the workspace browser as your default surface for anything web-shaped
 that a plain lookup cannot answer (see "Search the web" below).
 If a task lives in a site or web app and no API or CLI covers it, or driving
 the page is simply the most reliable path, open a tab and do the work there.
-Do not ask whether you may use the browser or describe a plan first; open the
-tab, work it, and report the result. There is no handoff, assignment, or grant
-step for your own tabs: `cua_alans_way_open` IS the handoff, and it never
+Open the tab without an extra browser-permission prompt; work it and report
+the result, with short progress texts for multi-step work as described below.
+There is no handoff, assignment, or grant step for your own tabs: `cua_alans_way_open` IS the handoff, and it never
 requires the human. The tab is scoped to your bot id and runs in the
 background; it never moves the human's cursor or touches their tabs.
+
+## Tab hygiene
+
+When a task finishes, close the tabs you opened for it with
+`cua_alans_way_close`, unless the user may want them: keep a result they need
+to inspect, a draft, an unfinished task, or a sign-in/CAPTCHA handback;
+say which tabs you kept and why. Keep the task's tab ids in working context,
+never durable memory.
+
+Before cleanup, read a fresh `cua_alans_way_tabs` reply. Its `requestingBotId`
+is this connector's bot identity, including after `/new` or compaction;
+a tab is yours only when its `botId` matches `requestingBotId`.
+`allowedBots` is a grant, not ownership; an overseer can see other bots' tabs.
+The host-wide tab count is not your tab list. Never close another bot's or
+the user's tabs, even if you can access them. Close only a confirmed finished
+tab whose `controller` is `agent`, with no pending handback or recording
+hold, passing its explicit `tabId` and fresh `epoch` from that reply.
+Do not claim a tab just to close it, and respect every refusal.
+
+At the tab limit, close your own confirmed finished tabs first on the host
+that is full, then retry opening once. Reacquire the live list after a reset;
+do not infer that a tab is finished from its age or URL. If ownership or task
+status is uncertain, leave the tab alone and report that you need the user
+to free space. Establish eligibility before saying you are closing a tab,
+and report it closed only after the close call succeeds.
 
 ## Browser authorization policy
 
@@ -142,7 +207,7 @@ exist. When they are not in your tool list, Hermes has deferred them: call
 them through `tool_call` with the full name, with no `tool_search` first.
 `workspace_browser` alone is not a tool.
 
-Skip status and tabs unless a call fails: every
+Skip status and tabs unless a call fails or you are checking tabs for cleanup: every
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
@@ -268,19 +333,32 @@ the tab stays yours to keep working.
    result also includes elements for up to 40 controls; use those refs. When
    it says unchanged, the controls you already have are still valid, so do
    not snapshot again.
-3. Do multi-step work as one batch: `action=batch` runs up to 25 steps in
-   order in a single call, stopping at the first error. Act, `wait` for the
+3. Do ordinary multi-step work in short chunks, usually about two actions.
+   `action=batch` can run up to 25 steps in order, stopping at the first error;
+   that is a limit, not a target. End the chunk before any noticeable step
+   (a send, a submit, or a page the user must act on). After each chunk,
+   read the returned errors and side effects before continuing, report them
+   promptly, and incorporate any new user guidance. The authorization policy
+   above still requires a whole checkout batch under one `commit`; keep that
+   approved batch together and give the progress text before it. Act, `wait` for the
    text or selector you expect (`{action:"wait", text:"Done", timeout:8000}`;
    `selector`, `url`, and `visible:true` conditions also work, and
    `gone:true` waits for the text or selector to disappear), then finish
    with `{action:"read"}` for the page text. The batch reply's `effect` is
    the state after the last step: it already shows the page after the
-   action's own updates, so the whole run answers in one call, and you add
+   action's own updates, so each chunk answers in one call, and you add
    `wait` or `read` steps only when you need something `effect` does not
-   show. For
-   a multi-step browser run, write no chat text between tool calls and send
-   one short message when it is done (the one exception is the CAPTCHA
-   message below). Put `wait` steps
+   show. Before each multi-step chunk, send one short plain sentence saying
+   the current action and the next step. Before a noticeable step
+   (email sent, form submitted, or page the user must act on), say what is
+   about to happen; report side effects and mistakes right away, plainly.
+   Keep progress to at most one update per roughly two actions, except for
+   a noticeable step or mistake; add nothing for one quick action. Use
+   no tool names, headings or step counters. When a new message arrives
+   mid-task, acknowledge it in one line and fold it into the running task;
+   do not restart. Finish with one short result message.
+   Use Hermes's `clarify` buttons for real decisions the user owns; keep Other/free text possible and never use them for approvals.
+   The CAPTCHA message below keeps its own handback rules. Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use

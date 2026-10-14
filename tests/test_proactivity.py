@@ -893,13 +893,13 @@ class PromptTests(unittest.TestCase):
         for name, text in self.prompts().items():
             with self.subTest(name):
                 self.assertIn(BriefTests.SAFETY, text)
-                for rule in ("texting them on Telegram", "lead with the concrete thing",
+                for rule in ("texting them on Telegram", "Lead with the concrete status",
                              "plain words and contractions", "No bullet lists",
                              "never headings, tables", "numbered list only for decisions",
                              "emoji only if they use them",
                              "Never mention timers, schedules, check-ins or being prompted",
                              "Open differently from your recent messages",
-                             "end with a short question or offer"):
+                             "Ask only when the user owns a decision; name the choice"):
                     self.assertIn(rule, text)
 
     def test_check_ins_are_short_and_name_one_open_thread(self):

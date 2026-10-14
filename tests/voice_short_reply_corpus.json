@@ -1,0 +1,290 @@
+[
+  {
+    "text": "hey, quick one: what did you get done today?",
+    "expected": true
+  },
+  {
+    "text": "Quick question: is it ready?",
+    "expected": false
+  },
+  {
+    "text": "TL;DR: what changed?",
+    "expected": true
+  },
+  {
+    "text": "What did you get done today?",
+    "expected": true
+  },
+  {
+    "text": "Recap today’s work.",
+    "expected": true
+  },
+  {
+    "text": "Can you give me a recap?",
+    "expected": true
+  },
+  {
+    "text": "Could you send me a recap?",
+    "expected": false
+  },
+  {
+    "text": "Please recap the meeting.",
+    "expected": true
+  },
+  {
+    "text": "How’s it going?",
+    "expected": true
+  },
+  {
+    "text": "how's it going today?",
+    "expected": true
+  },
+  {
+    "text": "hi",
+    "expected": true
+  },
+  {
+    "text": "Hey!",
+    "expected": true
+  },
+  {
+    "text": "Hello.",
+    "expected": true
+  },
+  {
+    "text": "Good morning!",
+    "expected": true
+  },
+  {
+    "text": "Good afternoon",
+    "expected": true
+  },
+  {
+    "text": "Good evening!",
+    "expected": true
+  },
+  {
+    "text": "thanks",
+    "expected": true
+  },
+  {
+    "text": "Thank you!",
+    "expected": true
+  },
+  {
+    "text": "Thanks, that's helpful.",
+    "expected": true
+  },
+  {
+    "text": "  HEY, QUICK ONE: ready?  ",
+    "expected": false
+  },
+  {
+    "text": "Hey, how's it going?",
+    "expected": true
+  },
+  {
+    "text": "Hey 👋",
+    "expected": true
+  },
+  {
+    "text": "Thanks 😊",
+    "expected": true
+  },
+  {
+    "text": "Quick question: did the job finish?",
+    "expected": false
+  },
+  {
+    "text": "hey can you check my calendar tomorrow",
+    "expected": false
+  },
+  {
+    "text": "Hey, book me a table for two tonight.",
+    "expected": false
+  },
+  {
+    "text": "Hello, research available flights.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: can you book a flight for tomorrow?",
+    "expected": false
+  },
+  {
+    "text": "Hey, quick question: can you book a table for six?",
+    "expected": false
+  },
+  {
+    "text": "Quick one: write a migration script for the database.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: please send the report to the team.",
+    "expected": false
+  },
+  {
+    "text": "Quick one: cancel my appointment tomorrow.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: compare these three laptops and recommend one.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: can you implement OAuth in this repo?",
+    "expected": false
+  },
+  {
+    "text": "Quick one: schedule a reminder for 5 pm.",
+    "expected": false
+  },
+  {
+    "text": "thanks, now do X",
+    "expected": false
+  },
+  {
+    "text": "Thanks! Please write the migration script.",
+    "expected": false
+  },
+  {
+    "text": "Thank you, now book that flight.",
+    "expected": false
+  },
+  {
+    "text": "Hi, compare these options.",
+    "expected": false
+  },
+  {
+    "text": "recap the meeting notes in detail",
+    "expected": false
+  },
+  {
+    "text": "Quick question: explain in detail how this works.",
+    "expected": false
+  },
+  {
+    "text": "Quick one: walk me through deployment.",
+    "expected": false
+  },
+  {
+    "text": "Recap the changes step-by-step.",
+    "expected": false
+  },
+  {
+    "text": "Recap the project with evidence.",
+    "expected": false
+  },
+  {
+    "text": "Recap everything thoroughly.",
+    "expected": false
+  },
+  {
+    "text": "TL;DR first, then a detailed explanation.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: give me a long explanation of the architecture.",
+    "expected": false
+  },
+  {
+    "text": "Recap the meeting notes extensively.",
+    "expected": false
+  },
+  {
+    "text": "Recap every agenda item, decisions, owners, and deadlines.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: explain the entire implementation, including all edge cases.",
+    "expected": false
+  },
+  {
+    "text": "Recap in full, with examples for each change.",
+    "expected": false
+  },
+  {
+    "text": "Quick question: return the complete source code, not just the headline.",
+    "expected": false
+  },
+  {
+    "text": "Explain the architecture.",
+    "expected": false
+  },
+  {
+    "text": "Write the implementation plan.",
+    "expected": false
+  },
+  {
+    "text": "Add a recap endpoint to the service.",
+    "expected": false
+  },
+  {
+    "text": "Translate \"quick question\" into French.",
+    "expected": false
+  },
+  {
+    "text": "The document says \"recap\". Check its claims.",
+    "expected": false
+  },
+  {
+    "text": "How's it going to handle retries?",
+    "expected": false
+  },
+  {
+    "text": "Run the quick questionnaire.",
+    "expected": false
+  },
+  {
+    "text": "Recapitalize the company.",
+    "expected": false
+  },
+  {
+    "text": "hola, reserva una mesa para dos mañana",
+    "expected": false
+  },
+  {
+    "text": "merci, maintenant écris le script de migration",
+    "expected": false
+  },
+  {
+    "text": "你好，请预订明天的航班",
+    "expected": false
+  },
+  {
+    "text": "ありがとう、次に予定を追加して",
+    "expected": false
+  },
+  {
+    "text": "привет, составь подробный план",
+    "expected": false
+  },
+  {
+    "text": "👋",
+    "expected": false
+  },
+  {
+    "text": "👍",
+    "expected": false
+  },
+  {
+    "text": "🙏",
+    "expected": false
+  },
+  {
+    "text": "😊",
+    "expected": false
+  },
+  {
+    "text": "✅",
+    "expected": false
+  },
+  {
+    "text": "",
+    "expected": false
+  },
+  {
+    "text": null,
+    "expected": false
+  }
+]

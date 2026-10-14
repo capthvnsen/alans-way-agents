@@ -73,6 +73,7 @@ setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS
                    every profile that has a Telegram bot, each with its own bot ID)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
+                   and make that DM Hermes' Telegram home for delivery
   --proactive yes|no  keep proactivity on (default) or pause it after binding
   --tone texting|default  the bot's voice on Telegram: texting (the default)
                    or Hermes' own; applies to every profile setup configures
@@ -216,7 +217,7 @@ elif [ -z "$MAC_SSH" ]; then
   # #62): `--profile <name> --mac-ssh` writes it there, and a bare re-run
   # must still keep the watcher, the shared state file and the managed ssh
   # block it set up.
-  if [ -z "$MAC_SSH" ] && [ -z "$CONFIG" ] && [ -d "$HERMES_HOME/profiles" ]; then
+  if [ -z "$MAC_SSH" ] && [ "$ONLY_PROFILE" = 0 ] && [ -z "$CONFIG" ] && [ -d "$HERMES_HOME/profiles" ]; then
     for _prof_cfg in "$HERMES_HOME"/profiles/*/config.yaml; do
       [ -f "$_prof_cfg" ] || continue
       _v="$(managed_env_value "$_prof_cfg" HERMES_WORKSPACE_MAC_SSH)"
@@ -239,10 +240,10 @@ done
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 ok()   { printf '  ok   %s\n' "$*"; }
-warn() { printf '  warn %s\n' "$*"; }
+warn() { VERIFY_WARNINGS=$((VERIFY_WARNINGS + 1)); printf '  warn %s\n' "$*"; }
 skip() { printf '  skip %s\n' "$*"; }
 bad()  { printf '  FAIL %s\n' "$*"; FAILS=$((FAILS + 1)); }
-FAILS=0
+FAILS=0 VERIFY_WARNINGS=0
 
 # Agent shells often have a readable /dev/tty node but no terminal behind it;
 # only an open that succeeds means a human can answer.
@@ -901,8 +902,9 @@ check_computer_provider() {
 # so --verify reports the owning manager and each service's state rather than
 # whether the files exist.
 check_browser_services() {
-  [ "$GUEST_OS" = Linux ] || return 0
+  [ "$SKIP_SERVICES" = 0 ] || { skip "browser services (--skip-services)"; return 0; }
   [ "$SKIP_BROWSER" = 0 ] || { skip "browser service manager (--skip-browser)"; return 0; }
+  [ "$GUEST_OS" = Linux ] || { warn "browser service health was not checked on $GUEST_OS: verify its LaunchAgents or Scheduled Tasks on that host"; return 0; }
   if systemd_live; then
     for _unit in hermes-alans-way-chromium hermes-alans-way-browser ${MAC_SSH:+mac-watch}; do
       if systemctl is-active --quiet "$_unit.service" 2>/dev/null \
@@ -981,6 +983,7 @@ check_display_stack() {
       say "  the remote desktop viewer is at http://$_viewer_addr:$_wsport/vnc.html"
     else
       say "  the remote desktop viewer is at http://$_wsaddr:$_wsport/vnc.html (bound to $_wsaddr, so not reachable over the tailnet)"
+      warn "viewer needs a computer-side handoff: with explicit consent, use the temporary SSH forward in workspace-setup (viewer port $_wsport), then verify /vnc.html from the computer and confirm the desktop"
     fi
   fi
 }
@@ -1231,6 +1234,7 @@ fi
 
 if [ "$VERIFY" = 1 ]; then
   # --verify: report state without changing anything
+  VERIFY_WARNINGS=0
   step "Install state"
   have hermes && plugin_listed "$PLUGIN_NAME" \
     && ok "plugin '$PLUGIN_NAME' installed" || bad "plugin '$PLUGIN_NAME' not in hermes plugins list"
@@ -1280,12 +1284,21 @@ print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is T
     Darwin) CONN_DIR="$HOME/Library/Application Support/hermes-alans-way/browser";;
     *) CONN_DIR="$BROWSER_HOME/.local/share/hermes-alans-way/browser";;
   esac
-  [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
-    || warn "browser host connection file absent (browser host not started?)"
+  CONN_DIR="${HERMES_VPS_BROWSER_DATA:-$CONN_DIR}"
+  if [ "$SKIP_BROWSER" = 1 ]; then
+    skip "browser host connection (--skip-browser)"
+  else
+    [ -f "$CONN_DIR/connection.json" ] && ok "browser host connection file present" \
+      || warn "browser host connection file absent (browser host not started?)"
+  fi
   # The availability watcher rewrites its state file every --interval seconds;
   # a stale or missing one means the watcher is not running.
   _watch_state="$(mac_state_path)"
-  if [ -n "$MAC_SSH" ] || [ -f "$_watch_state" ]; then
+  if [ -z "$MAC_SSH" ]; then
+    skip "host availability watcher (no configured computer)"
+  elif [ "$SKIP_SERVICES" = 1 ]; then
+    skip "host availability watcher (--skip-services)"
+  else
     if [ -f "$_watch_state" ]; then
       _age=$(( $(date +%s) - $(file_mtime "$_watch_state") ))
       if [ "$_age" -le 300 ]; then
@@ -1348,8 +1361,15 @@ print("bound" if s.get("bound") else "unbound", "paused" if s.get("paused") is T
     check_computer_provider
   done
   PROFILE=""
-  [ "$FAILS" = 0 ] && say "setup: all required checks passed" || say "setup: $FAILS check(s) failed"
-  exit "$([ "$FAILS" = 0 ] && echo 0 || echo 1)"
+  if [ "$FAILS" != 0 ]; then
+    say "setup: $FAILS check(s) failed; install incomplete ($VERIFY_WARNINGS warning(s))"
+    exit 1
+  elif [ "$VERIFY_WARNINGS" != 0 ] || [ "$SKIP_BROWSER" = 1 ] || [ "$SKIP_SERVICES" = 1 ]; then
+    say "setup: partial install ($VERIFY_WARNINGS warning(s); browser skipped=$SKIP_BROWSER; services skipped=$SKIP_SERVICES): resolve the warnings and verify skipped capabilities before claiming readiness"
+    exit 2
+  fi
+  say "setup: complete install: all required checks passed (local audit; computer, viewer and Telegram handoffs still need end-to-end verification)"
+  exit 0
 fi
 
 # ---------------------------------------------------------------- host path
@@ -1848,17 +1868,59 @@ if [ -z "${HERMES_PYTHON:-}" ] && [ "$GUEST_OS" != Windows ]; then
 fi
 # Probed through that interpreter only (never a shell), under a hard limit: python3
 # is already required, and macOS has no `timeout`. Exit 124 means it timed out.
+run_with_timeout() {
+  python3 -c 'import os, signal, subprocess, sys
+process = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=os.name != "nt")
+try:
+    sys.exit(process.wait(timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    cleanup_failed = False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            cleanup_failed = result.returncode != 0
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup_failed = True
+        if cleanup_failed:
+            print("Probe process-tree cleanup failed: taskkill failed or unavailable; descendants may remain.", file=sys.stderr)
+            try:
+                process.kill()
+            except OSError:
+                print("Probe direct-child termination failed.", file=sys.stderr)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("Probe process cleanup failed: child did not exit within 5 seconds.", file=sys.stderr)
+        sys.exit(125)
+    if cleanup_failed:
+        sys.exit(125)
+    sys.exit(124)' "$@"
+}
 COMPUTER_API=0 _probe_rc=0
 if [ -n "${HERMES_PYTHON:-}" ]; then
-  python3 -c 'import subprocess, sys
+  run_with_timeout "${ALANS_WAY_PROBE_TIMEOUT:-30}" "$HERMES_PYTHON" -c 'import sys
 try:
-    sys.exit(subprocess.run(sys.argv[2:], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=float(sys.argv[1])).returncode)
-except subprocess.TimeoutExpired:
-    sys.exit(124)' "${ALANS_WAY_PROBE_TIMEOUT:-30}" "$HERMES_PYTHON" -c 'import tools.computer_use.backend as b; b.ComputerUseProvider' || _probe_rc=$?
+    import tools.computer_use.backend as b
+except ModuleNotFoundError as error:
+    if error.name in ("tools.computer_use", "tools.computer_use.backend"):
+        sys.exit(3)
+    raise
+sys.exit(0 if hasattr(b, "ComputerUseProvider") else 3)' || _probe_rc=$?
   case "$_probe_rc" in
     0) COMPUTER_API=1;;
-    124) warn "the computer-use API probe timed out: skipping the computer-use provider";;
+    3) warn "computer-use API absent: desktop control needs Hermes commit 63f5e0ea45726c5d8d7d207d140613997730aab3 or a newer build with ComputerUseProvider; browser-only setup can continue";;
+    124) warn "the computer-use API probe timed out: API status unknown; skipping the computer-use provider";;
+    *) warn "computer-use API probe failed (exit $_probe_rc): API status unknown; check HERMES_PYTHON and the Hermes interpreter/dependencies, then retry";;
   esac
+else
+  warn "computer-use API probe unavailable: set HERMES_PYTHON to Hermes' Python interpreter (python.exe on Windows); API status unknown"
 fi
 ensure_computer_provider() {
   COMPUTER_READY=0
@@ -1899,7 +1961,7 @@ if [ "$COMPUTER_API" = 1 ]; then
 elif [ "$GUEST_OS" = Windows ] && [ -z "${HERMES_PYTHON:-}" ]; then
   skip "computer-use provider (set HERMES_PYTHON to Hermes' python.exe to let setup look for the pluggable computer-use API)"
 else
-  skip "computer-use provider (this Hermes has no pluggable computer-use API yet)"
+  skip "computer-use provider (API not confirmed; see the probe diagnostic above)"
 fi
 
 # ---------------------------------------------------------------- old hook
@@ -3059,6 +3121,23 @@ for i, line in enumerate(sys.stdin, 1):
          fi
          if [ "$BOUND" = 1 ]; then
            ok "bound primary route: $SEL_AGENT"
+           # Native Hermes reads this legacy home setting for bare Telegram
+           # delivery. Use its CLI (profile scoped), never write env/config here.
+           # DM keys can carry a topic suffix: the chat id is the first DM part.
+           HOME_CHAT="${SEL_KEY#*:telegram:dm:}"
+           HOME_CHAT="${HOME_CHAT%%:*}"
+           case "$HOME_CHAT" in
+             ''|*[!0-9]*|0)
+               warn "could not set Telegram home channel: send /sethome in the primary DM";;
+             *)
+               # Clear any old forum topic before making this DM the home.
+               if run_with_timeout "${ALANS_WAY_CONFIG_TIMEOUT:-30}" hermes -p "$BIND_PROF" config set TELEGRAM_HOME_CHANNEL_THREAD_ID "" >/dev/null 2>&1 \
+                   && run_with_timeout "${ALANS_WAY_CONFIG_TIMEOUT:-30}" hermes -p "$BIND_PROF" config set TELEGRAM_HOME_CHANNEL "$HOME_CHAT" >/dev/null 2>&1; then
+                 ok "Telegram home channel uses the primary DM (loads on gateway restart)"
+               else
+                 warn "could not set Telegram home channel: send /sethome in the primary DM"
+               fi;;
+           esac
            if [ -z "$TIMEZONE" ]; then
              warn "no timezone known: the bot will ask you for it. Or set it with: hermes -p $BIND_PROF proactivity set --timezone <IANA zone>"
            elif [ "$TZ_SET" != 1 ]; then

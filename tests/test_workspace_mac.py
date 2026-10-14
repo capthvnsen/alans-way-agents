@@ -52,6 +52,38 @@ ROUTER_DRIVER = (
 
 @unittest.skipUnless(NODE, "node is required for router tests")
 class RouterNoticeTests(MacStateEnvTest):
+    def test_tab_list_identifies_requester_after_a_fresh_connection(self):
+        tabs = [
+            {"id": "own", "botId": "bot-a", "controller": "agent", "epoch": 3, "host": "computer"},
+            {"id": "granted", "botId": "bot-b", "allowedBots": ["bot-a"], "epoch": 2},
+            {"id": "human", "botId": "bot-a", "controller": "human", "epoch": 4,
+             "handback": {"state": "awaiting_human", "reason": "captcha"}},
+            {"id": "vm", "botId": "bot-a", "host": "vm", "epoch": 1},
+        ]
+        reply = {"jsonrpc": "2.0", "id": 7, "result": {"content": [
+            {"type": "text", "text": json.dumps({"tabs": tabs, "requestingBotId": "untrusted"})}]}}
+        for host in ("mac", "vps"):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                [line], _ = self.annotate(directory, [{"line": json.dumps(reply)}],
+                                          host=host, mac_configured=False, bot="bot-a")
+                data = json.loads(json.loads(line)["result"]["content"][0]["text"])
+                self.assertEqual(data["requestingBotId"], "bot-a")
+                self.assertEqual(data["tabs"], tabs)
+
+    def test_large_tab_list_still_identifies_requester(self):
+        tabs = [{"id": "own", "botId": "bot-a", "title": "x" * 100100}]
+        for sdk_order in (False, True):
+            content = [{"type": "text", "text": json.dumps({"tabs": tabs})}]
+            reply = ({"result": {"content": content}, "jsonrpc": "2.0", "id": 8}
+                     if sdk_order else
+                     {"jsonrpc": "2.0", "id": 8, "result": {"content": content}})
+            with self.subTest(sdk_order=sdk_order), tempfile.TemporaryDirectory() as directory:
+                [line], _ = self.annotate(directory, [{"line": json.dumps(reply, separators=(",", ":"))}],
+                                          mac_configured=False, bot="bot-a")
+                data = json.loads(json.loads(line)["result"]["content"][0]["text"])
+                self.assertEqual(data.get("requestingBotId"), "bot-a")
+                self.assertEqual(data["tabs"], tabs)
+
     def annotate(self, directory, ops, host="vps", mac_configured=True, bot=""):
         proc = subprocess.run(
             [NODE, "-e", ROUTER_DRIVER, str(ROUTER), host,
@@ -1055,6 +1087,110 @@ class RouterHelperTests(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
+
+    def test_text_reply_parse_byte_boundary_preserves_tabs(self):
+        out = self.js(r"""
+const router = require(process.argv[1]);
+const limit = 4 * 1024 * 1024;
+const realParse = JSON.parse;
+const out = [];
+for (const sdkOrder of [false, true]) {
+  for (const delta of [-1, 0, 1]) {
+    const tab = { id: 'own', botId: 'bot-a', controller: 'human', epoch: 7,
+      allowedBots: ['bot-b'], handback: { state: 'awaiting_human', reason: 'captcha' }, title: '' };
+    const makeLine = () => {
+      const content = [{ type: 'text', text: JSON.stringify({ tabs: [tab], requestingBotId: 'untrusted' }) }];
+      return JSON.stringify(sdkOrder
+        ? { result: { content }, jsonrpc: '2.0', id: 7 }
+        : { jsonrpc: '2.0', id: 7, result: { content } });
+    };
+    // Multibyte titles distinguish a byte limit from a JS string-length limit.
+    const padding = limit + delta - Buffer.byteLength(makeLine(), 'utf8');
+    tab.title = 'é'.repeat(Math.floor(padding / 2)) + 'x'.repeat(padding % 2);
+    const line = makeLine();
+    let parses = 0, diagnostic = '';
+    const realWrite = process.stderr.write;
+    process.stderr.write = (text) => { diagnostic += text; return true; };
+    JSON.parse = (text, ...rest) => {
+      parses += 1;
+      if (delta > 0) throw new Error('oversized reply was parsed');
+      return realParse(text, ...rest);
+    };
+    let annotated;
+    try {
+      annotated = router.makeAnnotator('vm', false, '/nonexistent', 'Mac', { botId: 'bot-a' })(line);
+    } finally {
+      JSON.parse = realParse;
+      process.stderr.write = realWrite;
+    }
+    const data = annotated === null ? null : realParse(realParse(annotated).result.content[0].text);
+    out.push({ sdkOrder, delta, bytes: Buffer.byteLength(line, 'utf8'), chars: line.length,
+      parses, diagnostic, untouched: annotated === line,
+      requester: data && data.requestingBotId, tabsPreserved: data && JSON.stringify(data.tabs) === JSON.stringify([tab]) });
+  }
+}
+process.stdout.write(JSON.stringify(out));
+""")
+        for result in json.loads(out):
+            with self.subTest(sdk_order=result["sdkOrder"], delta=result["delta"]):
+                self.assertEqual(result["bytes"], 4 * 1024 * 1024 + result["delta"])
+                self.assertLess(result["chars"], 4 * 1024 * 1024)
+                self.assertTrue(result["tabsPreserved"])
+                if result["delta"] > 0:
+                    self.assertEqual(result["parses"], 0)
+                    self.assertTrue(result["untouched"])
+                    self.assertEqual(result["requester"], "untrusted")
+                    self.assertIn("reply exceeds 4194304-byte parse limit", result["diagnostic"])
+                    self.assertIn("forwarding unchanged", result["diagnostic"])
+                    self.assertNotIn("é", result["diagnostic"])
+                else:
+                    self.assertGreater(result["parses"], 0)
+                    self.assertEqual(result["requester"], "bot-a")
+                    self.assertFalse(result["untouched"])
+                    self.assertEqual(result["diagnostic"], "")
+
+    def test_oversized_title_passes_through_with_a_small_heap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "reply.json"
+            with fixture.open("w") as stream:
+                stream.write('{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\\"tabs\\":[{\\"id\\":\\"own\\",\\"title\\":\\"')
+                for _ in range(40):
+                    stream.write("x" * 1024 * 1024)
+                stream.write('\\"}]}"}]}}')
+            proc = subprocess.run([NODE, "--max-old-space-size=64", "-e", r"""
+const router = require(process.argv[1]);
+const line = require('fs').readFileSync(process.argv[2], 'utf8');
+let parses = 0;
+JSON.parse = () => { parses += 1; throw new Error('oversized reply was parsed'); };
+const annotated = router.makeAnnotator('vm', false, '/nonexistent', 'Mac', { botId: 'bot-a' })(line);
+process.stdout.write(JSON.stringify({ untouched: annotated === line, parses }));
+""", str(ROUTER), str(fixture)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout), {"untouched": True, "parses": 0})
+            self.assertIn("forwarding unchanged", proc.stderr)
+            self.assertLess(len(proc.stderr), 200)
+
+    def test_screenshot_fast_path_above_the_parse_limit(self):
+        out = self.js(r"""
+const router = require(process.argv[1]);
+const size = 4 * 1024 * 1024 + 1;
+const content = [{ type: 'image', data: 'A'.repeat(size), mimeType: 'image/png' }];
+const realParse = JSON.parse;
+const out = [];
+for (const sdkOrder of [false, true]) {
+  const line = JSON.stringify(sdkOrder
+    ? { result: { content }, jsonrpc: '2.0', id: 7 }
+    : { jsonrpc: '2.0', id: 7, result: { content } });
+  JSON.parse = () => { throw new Error('parsed a screenshot'); };
+  let annotated;
+  try { annotated = router.makeAnnotator('vm', false, '/nonexistent')(line); }
+  finally { JSON.parse = realParse; }
+  const msg = realParse(annotated);
+  out.push({ size: msg.result.content[0].data.length, host: msg.result._meta.workspace.host });
+}
+process.stdout.write(JSON.stringify(out));
+""")
+        self.assertEqual(json.loads(out), [{"size": 4 * 1024 * 1024 + 1, "host": "vm"}] * 2)
 
     def test_control_path_stays_under_the_unix_socket_limit_with_a_long_tmpdir(self):
         env = dict(os.environ, TMPDIR="/var/folders/zz/" + "x" * 40 + "/T/")

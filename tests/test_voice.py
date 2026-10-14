@@ -1,5 +1,6 @@
 """Texting voice: the Telegram note, the send-time polish, and the on/off switch."""
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 import importlib
@@ -160,6 +161,18 @@ def env(**values):
 
 
 class NoteTests(unittest.TestCase):
+    def test_user_facing_narration_uses_task_words(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("user-facing text", "workflow", "tool call", "MCP", "tab id",
+                     "I'm checking the airline's prices now"):
+            self.assertIn(rule, note)
+
+    def test_recommendations_require_facts_read_live_this_turn(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("Prices, availability and policies", "page read live this turn",
+                     "label anything else unconfirmed", "never recommend using an unconfirmed number"):
+            self.assertIn(rule, note)
+
     def turn(self, v, platform, chat_type="dm", text="hey can you check my calendar tomorrow"):
         with env(HERMES_SESSION_CHAT_TYPE=chat_type):
             return v.on_turn_start(user_message=text, platform=platform, session_id="s", sender_id="42")
@@ -184,18 +197,241 @@ class NoteTests(unittest.TestCase):
             self.assertIsNone(self.turn(voice(), "telegram", text=text))
 
     def test_note_carries_the_rules(self):
-        for rule in ("1-4 sentences", "contractions", "'Certainly!', 'Great question' or 'I'd be happy to'",
+        for rule in ("1-3 short sentences", "contractions", "'Certainly!', 'Great question' or 'I'd be happy to'",
                      "never headings", "emoji only if they use them", "only when they ask for steps",
                      "never at their expense and never with bad news", "pick one and say why",
-                     "stay complete: lead with a one-line answer", "real next step",
+                     "stay complete: lead with a one-line answer", "user owns a decision",
                      "approvals, CAPTCHA handbacks and safety checks work exactly as before",
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
+
+    def test_live_progress_note_reaches_the_telegram_turn(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("Before each multi-step chunk", "what you're doing now and what comes next",
+                     "email sent, form submitted, or page they must act on", "side effects and mistakes",
+                     "at most one update per roughly two actions", "one quick action",
+                     "no tool names", "acknowledge it in one line and fold it into the running task",
+                     "don't restart"):
+            self.assertIn(rule, note)
 
     def test_check_ins_share_the_same_rules(self):
         for shared in (V.TEXTING, V.PLAIN, V.FORMAT):
             self.assertIn(shared, P.VOICE)
             self.assertIn(shared, V.NOTE)
+
+
+class RecapLengthTests(unittest.TestCase):
+    """Prompt-order regressions at the hook, not generated-reply compliance tests."""
+
+    turn = NoteTests.turn
+
+    def test_quick_recap_length_is_last_after_general_detail_and_list_guidance(self):
+        for chat in ("dm", "group"):
+            with self.subTest(chat=chat):
+                note = self.turn(voice(), "telegram", chat,
+                                 "hey, quick one: what did you get done today?")["context"]
+                start = note.index("Casual replies:")
+                for competing in ("Long answers (code, plans, research) stay complete",
+                                  "Use a list only", V.SAFE):
+                    self.assertGreater(start, note.index(competing))
+                tail = note[start:]
+                self.assertIn("at most 3 sentences total, including any offer of detail", tail)
+                self.assertIn("no lists unless asked", tail)
+                self.assertIn("without per-item evidence or history", tail)
+                self.assertIn("theirs wins", tail)
+                self.assertIn(V.RECAP, tail)
+                self.assertTrue(note.endswith(
+                    "theirs wins." + (V.GROUP if chat == "group" else "")
+                    + "\nThis one wants a short answer: at most 3 sentences, the headline only,"
+                    " then offer detail."))
+
+    def test_length_default_preserves_explicit_detail_and_persona_requests(self):
+        for text in ("Give me a detailed recap with evidence for every item.",
+                     "Give me the full step-by-step plan and runnable code.",
+                     "My persona says to write detailed reports; use it for this recap."):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                tail = note[note.index("Casual replies:"):]
+                self.assertIn("their own persona or instructions ask for a different style or more detail", tail)
+                self.assertIn("theirs wins", tail)
+                self.assertIn("Long answers (code, plans, research) stay complete", note)
+
+    def test_long_recap_is_never_silently_shortened_at_output(self):
+        text = ("I checked the calendar. I compared the available options. Nothing was booked.\n\n"
+                "I checked the installed versions. The reminder is set. One check failed.\n\n"
+                "The draft is still waiting for approval. Want details?")
+        self.assertIsNone(voice().on_output(response_text=text, platform="telegram"))
+
+
+class ShortReplyIntentTests(unittest.TestCase):
+    """The hook scopes an extra reminder; it does not enforce generated reply length."""
+
+    turn = NoteTests.turn
+    reminder = ("This one wants a short answer: at most 3 sentences, the headline only,"
+                " then offer detail.")
+
+    def test_short_reply_requests_get_one_reminder_at_the_very_end(self):
+        for text in ("hey, quick one: what did you get done today?",
+                     "Quick question: recap?", "TL;DR: what's the status?",
+                     "What did you get done today?", "Recap today's work.",
+                     "Can you give me a recap?", "How’s it going?", "how's it going",
+                     "hi", "Hey!", "Good morning!", "thanks", "Thank you!",
+                     "Thanks, that's helpful."):
+            for chat in ("dm", "group", "forum", "channel"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(voice(), "telegram", chat, text)["context"]
+                    self.assertEqual(note.count(self.reminder), 1)
+                    self.assertTrue(note.endswith("\n" + self.reminder))
+
+    def test_reviewer_corpus_at_decided_expectations(self):
+        # Whole-message recap/social intent only: generic status questions and
+        # "send me a recap" are left uncapped under the lead's conservative rule.
+        cases = json.loads(Path(__file__).with_name("voice_short_reply_corpus.json").read_text())
+        self.assertEqual(len(cases), 72)
+        for case in cases:
+            text, expected = case["text"], case["expected"]
+            with self.subTest(text=text):
+                self.assertEqual(V.wants_short_reply(text), expected)
+            for chat in ("dm", "group", "forum", "channel"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(voice(), "telegram", chat, text)["context"]
+                    base = V.NOTE + (V.GROUP if chat != "dm" else "")
+                    self.assertEqual(note, base + ("\n" + self.reminder if expected else ""))
+
+    def test_standalone_recaps_social_replies_and_acknowledgments(self):
+        for text in ("recap", "tl;dr", "Hi 👋, quick question: recap?",
+                     "Hey! What did you get done?", "Hello, how’s it going today?",
+                     "Thanks! That's helpful 😊", "ok", "Okay 👍", "Got it!",
+                     "Understood.", "Sounds good!", "Hey, thanks 🙏"):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                self.assertTrue(note.endswith("\n" + self.reminder))
+
+    def test_any_second_request_or_task_object_prevents_the_cap(self):
+        for opener in ("recap", "tl;dr", "what did you get done today?",
+                       "how's it going?", "Hi 👋", "Thanks, that's helpful", "Got it!"):
+            for task in ("book a flight", "find flights", "send the report", "fix this bug",
+                         "write a script", "explain OAuth", "compare these options"):
+                for separator in (". ", "; ", "\n", " and ", " 😊 "):
+                    text = opener + separator + task
+                    with self.subTest(text=text):
+                        self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+        for text in ("quick one", "quick question", "Quick question: is it ready?",
+                     "Quick one: find flights", "Recap how to book a flight",
+                     "Recap and send it", "TL;DR: fix the bug", "hi <= fix the bug",
+                     "What did you get done today? Also recap the meeting."):
+            with self.subTest(text=text):
+                self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+
+    def test_detail_words_anywhere_prevent_the_cap(self):
+        for word in ("long", "extensive", "extensively", "everything", "all of it", "full", "complete",
+                     "detail", "detailed", "details", "thoroughly", "comprehensive"):
+            for text in (f"{word}: recap", f"recap {word}", f"Hi, {word}, how's it going?"):
+                with self.subTest(text=text):
+                    self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+
+    def test_raw_input_limit_does_not_truncate_or_normalize_away_tasks(self):
+        at_limit = "recap" + " " * 195
+        self.assertEqual(len(at_limit), 200)
+        self.assertTrue(V.wants_short_reply(at_limit))
+        for text in (at_limit + " ", at_limit + "fix this bug", " " * 196 + "recap",
+                     "recap" + "." * 1000000, "hey" + " 👋" * 100000):
+            with self.subTest(length=len(text)):
+                self.assertFalse(V.wants_short_reply(text))
+
+    def test_detail_requests_override_short_reply_cues(self):
+        for text in ("Quick question: explain in detail how this works.",
+                     "Quick one: walk me through the deployment.",
+                     "Recap today in detail.", "TL;DR first, then a detailed explanation.",
+                     "What did you get done? Include details and evidence.",
+                     "How's it going? Give me the full report.",
+                     "Recap the changes step-by-step.",
+                     "Quick question: give me a comprehensive comparison.",
+                     "Recap everything thoroughly.",
+                     "Quick one: explain in depth.",
+                     "My persona says to write detailed reports; use it for this recap."):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                self.assertEqual(note, V.NOTE)
+
+    def test_unmatched_turns_add_no_reminder_and_do_not_inherit_previous_intent(self):
+        v = voice()
+        self.turn(v, "telegram", text="quick one: recap?")
+        for text in ("Explain the architecture.", "Write the implementation plan.",
+                     "Check my calendar tomorrow.", "hey can you check my calendar tomorrow",
+                     "Thanks! Please write the migration script.",
+                     "Hello, research available flights.", "Hi, compare these options.",
+                     "Add a recap endpoint to the service.",
+                     'Translate "quick question" into French.',
+                     'The document says "recap". Check its claims.',
+                     "How's it going to handle retries?",
+                     "Run the quick questionnaire.", "Recapitalize the company.", "", None):
+            for chat in ("dm", "group"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(v, "telegram", chat, text)["context"]
+                    self.assertEqual(note, V.NOTE + (V.GROUP if chat == "group" else ""))
+
+    def test_short_intent_respects_existing_platform_mode_and_injected_turn_exclusions(self):
+        for platform in ("cli", "cron", "discord", "", None):
+            self.assertIsNone(self.turn(voice(), platform, text="quick question: recap?"))
+        self.assertIsNone(self.turn(voice("default"), "telegram", text="quick question: recap?"))
+        for marker in (P.MARKER, P.BRIEF_MARKER):
+            self.assertIsNone(self.turn(voice(), "telegram", text=marker + " quick question: recap?"))
+
+
+class CorpusRuleTests(unittest.TestCase):
+    """Offline prompt fixtures, not a claim about generated replies."""
+
+    def prompts(self):
+        p = P.Proactivity(SimpleNamespace(state=FakeState()))
+        s, now = P.Settings(timezone="UTC"), datetime(2026, 10, 7, 11, tzinfo=timezone.utc)
+        return {"chat": V.note_for("hey", platform="telegram"),
+                "group": V.note_for("hey", platform="telegram", chat_type="group"),
+                "check-in": p.prompt(s, timedelta(hours=3), now),
+                "asked": p.prompt(s, timedelta(hours=3), now, asked=True),
+                "brief": p.brief_prompt(s, now)}
+
+    def assert_rules(self, *rules):
+        for name, text in self.prompts().items():
+            for rule in rules:
+                with self.subTest(prompt=name, rule=rule):
+                    self.assertIn(rule, text)
+
+    def test_status_precedes_evidence_or_caveat(self):
+        self.assert_rules("Lead with the concrete status, then evidence or a caveat")
+
+    def test_progress_uses_first_person_action_and_next_step(self):
+        self.assert_rules("For work in progress, use first-person action and say what's next")
+
+    def test_narrates_only_user_world_actions_not_internal_loading(self):
+        self.assert_rules("Never narrate loading skills, instructions, memory or tools",
+                          "Narrate only actions in the user's world")
+
+    def test_questions_name_a_user_owned_decision(self):
+        self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
+                          "Otherwise give a next step or caveat when useful, then stop")
+
+    def test_owns_limits_failures_and_side_effects(self):
+        self.assert_rules("Own limits, failures and side effects plainly")
+
+    def test_warmth_and_openers_are_sparse(self):
+        self.assert_rules("Mild warmth is fine; use a short opener sparingly")
+
+    def test_casual_chat_is_one_to_three_short_sentences(self):
+        self.assertIn("Casual replies: 1-3 short sentences", self.prompts()["chat"])
+
+    def test_recaps_lead_with_headlines_and_offer_detail(self):
+        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets",
+                          "Offer detail ('want the details on any of these?')")
+
+    def test_quick_daily_recap_gets_the_rule_on_the_actual_turn(self):
+        note = V.note_for("hey, quick one: what did you get done today?", platform="telegram")
+        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets", note)
+        self.assertIn("Offer detail ('want the details on any of these?')", note)
+
+    def test_internals_stay_out_of_user_text_unless_technical_detail_is_requested(self):
+        self.assert_rules("In user-facing text, use task words, never tool names, tool calls,"
+                          " file paths, scripts, job or session IDs unless they ask for technical detail")
 
 
 class OutputTests(unittest.TestCase):

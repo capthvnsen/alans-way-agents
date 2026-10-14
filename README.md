@@ -18,14 +18,30 @@ holds what your agents need to think and act:
   `scripts/workspace-router.cjs`, which probes your computer first and falls
   back to the VPS browser when it is asleep. Pass `--host-os windows` or `--host-os linux`
   when the user's computer is not a Mac (default `mac`).
-- **`alans-way/skills/`** — the `workspace-setup` and `workspace-operations` skills ship
-  inside the plugin so agents know how to use the tools correctly.
-- **`alans-way-computer/`**: a second plugin (v0.21.5): a computer-use provider
+- **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations`,
+  `web-errands` and `integrations` skills ship inside the plugin so agents know
+  how to use the tools correctly.
+- **`alans-way-computer/`**: a second plugin (v0.21.6): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
   Telegram and choose what to always allow. Needs a Hermes build with the
-  pluggable computer-use API (on main after 0.21.5).
+  pluggable computer-use API described below.
+
+Browser-only setup needs stock Hermes `>= 0.21.5`. Desktop control through
+`alans-way-computer` also needs `tools.computer_use.backend.ComputerUseProvider`,
+introduced in Hermes commit
+[`63f5e0ea45726c5d8d7d207d140613997730aab3`](https://github.com/NousResearch/hermes-agent/commit/63f5e0ea45726c5d8d7d207d140613997730aab3)
+and verified in `6e7b83a2f1`. A version string alone does not establish this API.
+Set `HERMES_PYTHON` to the interpreter belonging to the selected Hermes install
+(`python.exe` on Windows); setup probes that interpreter with a bounded timeout.
+“API absent” means the provider module/class is missing; “probe failed”,
+“timed out”, or “probe unavailable” means support is unknown, so check the
+interpreter/dependencies before retrying. For an absent API, offer a supported
+Hermes upgrade with the user's consent, then rerun setup and
+`hermes -p <profile> computer-use doctor`. Browser setup can finish meanwhile;
+do not claim desktop control is ready until the provider is selected and its
+doctor succeeds.
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
@@ -48,6 +64,16 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
+- **Web errands stop at your Approve tap.** The `web-errands` skill drives
+  the research → stage → commit → verify → report loop for shopping, cart
+  comparison, booking and travel, job applications, form and civic-portal
+  filing, cancellations, refunds and document-driven claims — in your real
+  browser session on your computer, or on the VPS browser while it's
+  asleep. Every purchase, booking, send, submission and deletion waits for
+  the commit gate's Approve prompt; a CAPTCHA, sign-in or card-entry wall
+  hands the tab back to you with a reason instead of working past it, and
+  after each commit the bot reads the confirmation, captures the reference
+  number and sends a Telegram receipt.
 - **Telegram replies read like texts.** In every profile the plugin is enabled
   in, the bot's Telegram replies use a short, warm texting voice. A minimal
   send-time polish only drops a leading "Certainly!"-style opener, and only
@@ -55,9 +81,33 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   Hermes messages (approval cards, errors, progress) and cron reports are not
   changed. It layers on top of your SOUL.md and `agent.system_prompt` and never
   edits them. `/tone default` turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
-- **No bundled account connections.** Email, calendar, Notion and similar
-  connectors exist for an agent only if you install and authorize them
-  separately in Hermes; this plugin provisions none of them.
+- **Progress while working.** Multi-step Telegram tasks get short updates about
+  what is happening and what comes next, including side effects and mistakes;
+  mid-task messages can be folded into the running task with `steer`.
+  Neither setup script writes `display.busy_input_mode` or
+  `display.interim_assistant_messages`. Guided setup asks once when the
+  profile's effective busy mode is `interrupt` and no remembered choice exists.
+  Only an explicit answer lets the setup skill set busy mode through
+  `hermes -p NAME config set`; the choice applies to all platforms in that
+  profile and is read back afterwards. Keeping interrupt also records
+  `skills.config.workspace-setup.busy_input_choice: keep-interrupt` in that
+  profile's config through the CLI, after disclosure and the answer, so reruns
+  do not ask again. Silence and non-interactive runs write nothing; already
+  `steer` or `queue` profiles are skipped. Later user changes are preserved.
+  Guided setup offers one consented “Make Telegram feel right” choice for typing, updates, quiet delivery, its own steer acknowledgment, reactions, profile-wide cron wrapping and a city-confirmed IANA timezone; existing preferences and silence are preserved, choices remembered, and each CLI write read back.
+  To change an existing `interrupt` choice, run
+  `hermes -p NAME config set display.busy_input_mode steer`; to enable interim
+  texts, set `display.interim_assistant_messages true` the same way (and check
+  `display.platforms.telegram.interim_assistant_messages` for an override).
+  Restart the gateway through its supervisor to load the changes.
+- **Connect your stuff from Telegram.** The [integrations skill](alans-way/skills/integrations/SKILL.md)
+  checks account access before promising a task, reuses Hermes' Google,
+  Himalaya, Home Assistant, Honcho and X routes, and offers pinned rclone,
+  Taskwarrior recipes. Social posting is not built in; the
+  [Mastodon recipe](docs/integrations/mastodon.md) is separate human-run
+  documentation. Package installs on the VM require your agreement; account authorization stays private, with secure handback when
+  phone-only auth cannot finish. Installing the plugin connects no accounts
+  and starts no integration services.
 
 ## Install — zero to working
 
@@ -131,7 +181,10 @@ The bootstrap runs every step in order and says what it did:
   pass `--keep-browser` to leave it on)
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
-  re-run `setup.sh --bind`)
+  re-run `setup.sh --bind`). After a successful bind, uses Hermes' profile-scoped
+  config CLI to make that DM the Telegram home for scheduled/cross-platform
+  delivery and clear any old topic ID; it loads on gateway restart. If that
+  write fails, send `/sethome` in the primary DM and check its confirmation.
 - **Verify** — prints a pass/fail summary of the whole install
 - **Gateway restart**: last, through the detected supervisor (a SIGUSR1 drain
   under supervisord, a one-shot
@@ -152,7 +205,11 @@ Useful flags:
 
 - `--profile NAME`: configure only one Hermes profile.
 - `--host-os windows|linux`: the user's computer is not a Mac.
-- `--verify`: audit without changing anything.
+- `--verify`: audit without changing anything. Exit 0 means a complete local
+  audit, 1 means failed required checks, and 2 means partial (warnings or
+  skipped browser/services). Repeat the install's skip flags when auditing.
+  Computer-side preview/control and Telegram delivery still need their human
+  handoffs and end-to-end checks.
 - `--non-interactive`: scripted runs.
 - `--skip-browser`: proactivity-only installs.
 - `--skip-plugin`: leave an already installed plugin as it is (catalog installs).
@@ -217,6 +274,32 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 - Telegram: `hermes proactivity status` → route bound, check-ins on
 - Browser: ask the bot to open a page — a tab appears in the app (host)
   while your computer is awake, on the VPS host when it isn't
+
+### Plugin security review
+
+For the reviewed release candidate, Hermes' unmodified scanner at
+`6e7b83a2f1c093e992a8d838ed77ea320fbd8e51` reports **SAFE: 0 HIGH,
+2 MEDIUM and 3 LOW findings** in `alans-way/`. These are real capabilities
+documented in the bundled skills:
+
+- Workspace setup runs two bounded, read-only local Git subprocess helpers
+  to validate the setup checkout and a file-source install's origin before
+  selecting the reviewed revision.
+- With explicit consent, the viewer handoff uses a temporary SSH forward
+  bound to computer loopback, checks the loopback URL with curl, and gives
+  that same URL to the app. The human enters the VNC password privately.
+
+The Mastodon recipe now lives in [human-run repository documentation](docs/integrations/mastodon.md)
+outside `alans-way/`; the plugin no longer ships its connector or identity probe.
+The scanner and remaining matched commands are unchanged. MEDIUM/LOW findings
+alone produce SAFE, which requires no scanner confirmation. If a later revision
+receives CAUTION, review every finding and explicitly confirm the exact tree:
+`--enable` and setup consent do not confirm a scanner warning. Follow the bundled
+[reviewed-install confirmation steps](alans-way/skills/workspace-setup/SKILL.md#reviewed-plugin-install-confirmation);
+`--force` can confirm CAUTION and replace an install, but cannot override
+DANGEROUS. A catalog install uses the catalog's reviewed pin; it does not
+approve a newer checkout. Changed revisions and unknown findings need a new
+review. See the [complete inventory and catalog disclosure supplement](docs/catalog/alans-way-disclosure.md).
 
 ### Upgrading
 
@@ -357,6 +440,7 @@ at it.
 
 ```
 alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hooks + skills + router + mac-watch)
+alans-way/skills/     workspace-setup, workspace-operations, web-errands and integrations (with recipes)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
 docs/                 proactivity and voice guides, agent-driven setup prompt

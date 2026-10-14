@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,140 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
+    def telegram_step(self):
+        return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
+                           .split("```sh", 1)[0])
+
+    def test_telegram_preset_uses_global_memory_notice_key(self):
+        step = self.telegram_step()
+        expected = {
+            "platforms.telegram.typing_indicator": "true",
+            "display.platforms.telegram.interim_assistant_messages": "true",
+            "display.platforms.telegram.tool_progress": "off",
+            "display.platforms.telegram.notifications": "important",
+            "display.platforms.telegram.long_running_notifications": "generic",
+            "display.platforms.telegram.busy_steer_ack_enabled": "false",
+            "display.memory_notifications": "off",
+            "cron.wrap_response": "false",
+            "platforms.telegram.reactions": "true",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                self.assertIn(f"| `{key}` | `{value}` |", step)
+        self.assertIn("hermes -p <profile> config set <key> <answered-value>", step)
+        self.assertIn("6e7b83a2f1c093e992a8d838ed77ea320fbd8e51", step)
+        for forbidden in ("config set display.busy_steer_ack_enabled",
+                          "config set display.interim_assistant_messages",
+                          "display.message_reactions"):
+            self.assertNotIn(forbidden, self.normalized)
+
+    def test_telegram_choice_reuses_answer_and_readback_gate(self):
+        step = self.telegram_step()
+        for rule in ("An absent marker means ask once", "one grouped question",
+                     "Apply only the answered choice with the supported CLI",
+                     "Never treat silence or non-interactive runs as consent",
+                     "with no answer, leave the settings and marker untouched",
+                     "General setup, proactivity or busy-mode consent does not answer this question",
+                     "Read back each changed key", "report the mismatch",
+                     "leave the marker untouched", "only after that answer and successful readbacks"):
+            self.assertIn(rule, step)
+        self.assertLess(step.index("config set <key> <answered-value>"),
+                        step.index("Read back each changed key"))
+        self.assertLess(step.index("Read back each changed key"),
+                        step.index("config set skills.config.workspace-setup.telegram_feel_choice chosen"))
+        self.assertLess(self.text.index("**Make Telegram feel right.**"),
+                        self.text.index("```sh\n# Prepare"))
+
+    def test_telegram_choice_preserves_existing_values_and_remembers_decline(self):
+        step = self.telegram_step()
+        for rule in ("config get <key>", "config get skills.config.workspace-setup.telegram_feel_choice",
+                     "platform override → global value → Telegram default → global default",
+                     "show current values that differ", "Preserve existing user values",
+                     "unless the answer explicitly includes changing them",
+                     "A recorded `keep-current` or `chosen`", "continue without asking or rewriting",
+                     "never restore settings from it or override later user changes",
+                     "confirmed “Config key not set”", "report the unknown state",
+                     "An explicit no records `keep-current`",
+                     "config unset skills.config.workspace-setup.telegram_feel_choice",
+                     "config.yaml", "remember the answer",
+                     "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", "HERMES_TELEGRAM_NOTIFICATIONS",
+                     "TELEGRAM_REACTIONS", "Environment overrides"):
+            self.assertIn(rule, step)
+
+    def test_telegram_offer_explains_defaults_scope_and_lifecycle_limits(self):
+        step = self.telegram_step()
+        for rule in ("typing", "short updates", "mechanical tool progress",
+                     "sound", "visual notifications", "plain words", "my own acknowledgment",
+                     "profile-wide", "all delivery targets", "job IDs",
+                     "👀", "👍", "👎", "cancellation clears",
+                     "does not verify the user's goal", "cannot reply immediately while a tool is blocked"):
+            self.assertIn(rule, step)
+
+    def test_upgrade_honors_legacy_steer_ack_answers_until_explicit_revisit(self):
+        step = self.telegram_step()
+        self.assertIn("config get skills.config.workspace-setup.busy_steer_ack_choice", step)
+        for answer in ("keep-ack", "own-ack"):
+            with self.subTest(answer=answer):
+                self.assertIn(f"`{answer}`", step)
+        for rule in ("legacy answer", "continue without asking or rewriting",
+                     "unless the user explicitly revisits", "Preserve unknown legacy markers",
+                     "never migrate the legacy marker automatically"):
+            self.assertIn(rule, step)
+
+    def test_timezone_is_city_based_explicit_and_read_back(self):
+        step = self.telegram_step()
+        for rule in ("config get timezone", "empty", "MST", "EST", "PST", "CST",
+                     "UTC offsets", "daylight-saving", "ask the user's city; don't guess",
+                     "offer the matching IANA zone", "Preserve an existing IANA zone",
+                     "config set timezone <answered-IANA-zone>", "read back `timezone`",
+                     "Never change it silently", "no city or explicit zone answer",
+                     "leave timezone untouched", "--timezone"):
+            self.assertIn(rule, step)
+
+    def test_presentation_consent_is_remembered_independently_of_timezone(self):
+        step = self.telegram_step()
+        self.assertNotIn("leave timezone and the marker untouched", step)
+        for rule in ("Remember the completed presentation answer independently of timezone",
+                     "unresolved timezone or a failed timezone write/readback",
+                     "does not block the presentation marker",
+                     "perform the timezone check below even when a saved answer skips",
+                     "ask only the separate timezone question",
+                     "defer the setup invocation that requires it"):
+            self.assertIn(rule, step)
+
+    def test_legacy_tool_progress_all_wins_over_global_off_until_platform_off(self):
+        step = self.telegram_step()
+        for rule in ("config get display.tool_progress_overrides.telegram",
+                     "platform override → legacy Telegram override → global value",
+                     "global `off` plus legacy `all` still enables progress",
+                     "write `display.platforms.telegram.tool_progress off`",
+                     "Preserve the legacy key", "null legacy values inherit"):
+            self.assertIn(rule, step)
+
+    def test_memory_skill_notice_offer_is_global_consented_and_read_back(self):
+        step = self.telegram_step()
+        for rule in ("hide memory/skill bookkeeping notices",
+                     "| `display.memory_notifications` | `off` |",
+                     "Hiding “💾 Memory updated / Self-improvement review” notices affects every platform this profile uses, not only Telegram",
+                     "off|on|verbose", "background review still runs",
+                     "run_turn_runner.py#L1289", "use the global `display.memory_notifications` directly",
+                     "boolean `false` means `off`",
+                     "A Telegram-only memory/skill notice switch isn't supported by Hermes yet",
+                     "`display.memory_notifications` must read back `off` (or `false`)",
+                     "report only that stored value", "not verified banner suppression",
+                     "Read back each changed key", "already-planned gateway restart"):
+            self.assertIn(rule, step)
+        for obsolete in ("display.platforms.telegram.memory_notifications",
+                         "skip this leaf", "where supported",
+                         "memory/skill notice support check"):
+            self.assertNotIn(obsolete, step)
+
+    def test_binding_explains_native_telegram_home_and_manual_fallback(self):
+        for rule in ("same primary DM becomes Hermes' Telegram home channel",
+                     "config set TELEGRAM_HOME_CHANNEL", "send `/sethome` in that DM",
+                     "loads on gateway restart", "config_env.py:515"):
+            self.assertIn(rule, self.normalized)
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
@@ -27,6 +162,18 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIsNotNone(match, "SKILL.md must start with frontmatter")
         self.assertIn("name: workspace-setup", match.group(1))
         self.assertIn("description:", match.group(1))
+
+    def test_desktop_api_prerequisite_has_a_known_build_and_diagnostic(self):
+        for path in (SKILL_PATH, ROOT / "README.md"):
+            text = _normalized(path.read_text())
+            for rule in ("0.21.5", "63f5e0ea45726c5d8d7d207d140613997730aab3",
+                         "ComputerUseProvider", "HERMES_PYTHON", "probe failed"):
+                self.assertIn(rule, text)
+
+    def test_noninteractive_scan_confirmation_requires_review_and_consent(self):
+        for rule in ("--enable does not confirm", "--force", "dangerous",
+                     "Never disable scanning", "explicit consent", "dependency consent"):
+            self.assertIn(rule, self.normalized)
 
     def test_directs_to_setup_script(self):
         self.assertIn("setup.sh", self.normalized)
@@ -72,9 +219,44 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "setup.sh must be passed the pinned desktop ref",
         )
 
+    def test_busy_mode_choice_requires_an_answer_before_restart(self):
+        for phrase in ("When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?",
+                       "every platform in that profile", "after the current step finishes",
+                       "Never treat silence or non-interactive runs as consent",
+                       "already `steer`", "skills.config.workspace-setup.busy_input_choice",
+                       "config set display.busy_input_mode steer",
+                       "config set display.busy_input_mode interrupt"):
+            self.assertIn(phrase, self.normalized)
+        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\n# Prepare"))
+
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)
+
+    def test_busy_mode_uses_effective_value_and_skips_steer_queue_or_remembered_interrupt(self):
+        for rule in ("effective value", "config get display.busy_input_mode",
+                     "already `steer` or `queue`", "A recorded `keep-interrupt`",
+                     "An absent marker means ask once", "report the unknown state"):
+            self.assertIn(rule, self.normalized)
+
+    def test_silence_cannot_be_overridden_by_setup(self):
+        for rule in ("with no answer, leave the mode and marker untouched",
+                     "General setup or proactivity consent does not answer this question",
+                     "Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices"):
+            self.assertIn(rule, self.normalized)
+
+    def test_answer_and_readback_gate_marker_write(self):
+        for rule in ("Apply only the answered choice with the supported CLI",
+                     "Read back that key and report a failure before continuing",
+                     "only after that answer and a successful mode readback",
+                     "never restore a mode from it or override later user changes",
+                     "config unset skills.config.workspace-setup.busy_input_choice"):
+            self.assertIn(rule, self.normalized)
+
+    def test_global_interim_preference_is_preserved_by_telegram_offer(self):
+        self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
+        self.assertIn("Leave other global display settings and other platforms untouched",
+                      self.telegram_step())
 
     def test_display_stack_is_guided_not_auto(self):
         self.assertIn("never auto-installed", self.normalized)
@@ -86,6 +268,13 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("websockify", self.normalized)
         self.assertIn("/vnc.html", self.text)
         self.assertIn("Remote desktop connection", self.text)
+
+    def test_loopback_viewer_requires_consented_bounded_computer_forward_and_probe(self):
+        for rule in ("127.0.0.1 only", "explicit consent", "StrictHostKeyChecking=yes",
+                     "ExitOnForwardFailure=yes", "ServerAliveCountMax=2", "sleep 1800",
+                     "127.0.0.1:16080:127.0.0.1:<viewer-port>", "--max-time 10",
+                     "from the user's computer", "Ctrl-C", "never change the listener"):
+            self.assertIn(rule, self.normalized)
 
     def test_vm_moved_checklist_lists_every_saved_address(self):
         # A VM move leaves several independently stored addresses stale and
@@ -134,6 +323,173 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                 self.assertIn(requirement, self.normalized)
         self.assertIn("references/long-chats.md", self.text)
 
+
+class SetupPinProcedureTests(unittest.TestCase):
+    SHA = "1234567890abcdef1234567890abcdef12345678"
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / "profile"
+        (self.home / "plugins").mkdir(parents=True)
+        self.source = self.root / "source with spaces"
+        self.env = dict(os.environ, HERMES_HOME=str(self.home), GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_CONFIG_SYSTEM=os.devnull)
+        subprocess.run(["git", "init", "-q", str(self.source)], check=True, env=self.env)
+        self.git("remote", "add", "origin", "https://github.com/capthvnsen/alans-way-agents")
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.source), *args], check=True, env=self.env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def resolve(self, row):
+        (self.home / "plugins" / ".install-metadata.json").write_text(json.dumps({"alans-way": row}))
+        code = re.search(r"PIN=\$\(python3 -c '(.*?)'\)", SKILL_PATH.read_text(), re.DOTALL).group(1)
+        return subprocess.run([sys.executable, "-c", code], env=self.env,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_file_source_uses_installer_revision_after_validating_origin(self):
+        result = self.resolve({"source": self.source.as_uri() + "#alans-way", "revision": self.SHA})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.SHA)
+
+    def test_unrecorded_install_fetches_and_checks_out_the_release_tag(self):
+        self.prepare_checkout()
+        (self.home / "plugins" / ".install-metadata.json").unlink()
+        result = self.procedure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
+                                   "describe", "--tags", "--exact-match"],
+                                  capture_output=True, text=True, env=self.env)
+        self.assertEqual(checkout.stdout.strip(), "v0.21.6")
+
+    def prepare_checkout(self, existing=False):
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "first")
+        self.git("tag", "-f", "v0.21.6")
+        self.destination = self.root / "alans-way-agents"
+        if existing:
+            subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],
+                           check=True, env=self.env)
+            subprocess.run(["git", "-C", str(self.destination), "remote", "set-url", "origin",
+                            "https://github.com/capthvnsen/alans-way-agents"], check=True, env=self.env)
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "installed")
+        self.revision = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"],
+                                                 env=self.env, text=True).strip()
+        (self.home / "plugins" / ".install-metadata.json").write_text(json.dumps({"alans-way": {
+            "source": "https://github.com/capthvnsen/alans-way-agents#alans-way",
+            "revision": self.revision}}))
+        # Only the transport is mocked: origin/config/status validation uses real Git.
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.fetch_log = self.root / "fetches"
+        real_git = shutil.which("git")
+        wrapper = self.bin / "git"
+        wrapper.write_text(f"#!{sys.executable}\n" +
+            "import os, pathlib, subprocess, sys\nargs = sys.argv[1:]\n" +
+            f"if len(args) > 2 and args[2] == 'fetch':\n    pathlib.Path({str(self.fetch_log)!r}).touch()\n" +
+            f"    args[4] = {str(self.source)!r}\n" +
+            f"sys.exit(subprocess.call([{real_git!r}, *args]))\n")
+        wrapper.chmod(0o755)
+
+    def procedure(self):
+        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n~/alans-way-agents/setup.sh",
+                          SKILL_PATH.read_text(), re.S).group(1)
+        return subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root),
+                              PATH=str(self.bin) + os.pathsep + os.environ["PATH"]),
+                              capture_output=True, text=True, timeout=15)
+
+    def test_new_checkout_rejects_effective_origin_rewrite_before_fetch(self):
+        self.prepare_checkout()
+        config = self.root / "gitconfig"
+        config.write_text('[url "' + self.source.as_uri() + '"]\n'
+                          '    insteadOf = https://github.com/capthvnsen/alans-way-agents\n')
+        self.env["GIT_CONFIG_GLOBAL"] = str(config)
+        result = self.procedure()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.fetch_log.exists())
+        self.assertIn("Setup checkout unavailable", result.stderr)
+
+    def test_clean_existing_clone_fetches_and_checks_out_installed_revision(self):
+        self.prepare_checkout(existing=True)
+        result = self.procedure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.fetch_log.exists())
+        head = subprocess.check_output(["git", "-C", str(self.destination), "rev-parse", "HEAD"], text=True)
+        self.assertEqual(head.strip(), self.revision)
+
+    def test_invalid_existing_clone_stops_with_reason_before_fetch(self):
+        for invalid in ("foreign", "multiple", "rewrite", "dirty", "plain-directory"):
+            with self.subTest(invalid=invalid):
+                # Each case has independent Git config and destination contents.
+                if hasattr(self, "destination"):
+                    shutil.rmtree(self.destination)
+                    shutil.rmtree(self.bin)
+                self.prepare_checkout(existing=True)
+                git = ["git", "-C", str(self.destination)]
+                if invalid == "foreign":
+                    subprocess.run([*git, "remote", "set-url", "origin", "https://example.invalid/foreign"], check=True)
+                elif invalid == "multiple":
+                    subprocess.run([*git, "config", "--add", "remote.origin.url", "https://github.com/capthvnsen/alans-way-agents.git"], check=True)
+                elif invalid == "rewrite":
+                    subprocess.run([*git, "config", "url.https://example.invalid/foreign.insteadOf",
+                                    "https://github.com/capthvnsen/alans-way-agents"], check=True)
+                elif invalid == "dirty":
+                    (self.destination / "untracked").write_text("preserve me")
+                else:
+                    shutil.rmtree(self.destination / ".git")
+                result = self.procedure()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.fetch_log.exists())
+                self.assertIn("Setup checkout unavailable", result.stderr)
+                if invalid == "dirty":
+                    self.assertEqual((self.destination / "untracked").read_text(), "preserve me")
+
+    def test_catalog_pin_outranks_a_revision_and_missing_record_allows_tag_fallback(self):
+        result = self.resolve({"source": "catalog", "catalog": {"sha": self.SHA}, "revision": "a" * 40})
+        self.assertEqual(result.stdout.strip(), self.SHA)
+        self.assertEqual(self.resolve({}).stdout.strip(), "")
+
+    def test_all_six_origin_forms_and_foreign_push_urls_are_allowed(self):
+        for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
+            for suffix in ("", ".git"):
+                url = prefix + "capthvnsen/alans-way-agents" + suffix
+                self.git("config", "remote.origin.url", url)
+                self.git("config", "remote.origin.pushurl", "https://example.invalid/push-only")
+                result = self.resolve({"source": self.source.as_uri() + "#alans-way", "revision": self.SHA})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), self.SHA)
+
+    def test_foreign_ambiguous_and_rewritten_file_origins_stop_without_fallback(self):
+        row = {"source": self.source.as_uri() + "#alans-way", "revision": self.SHA}
+        valid = "https://github.com/capthvnsen/alans-way-agents"
+        for extra in ("https://example.invalid/foreign", ""):
+            self.git("config", "--add", "remote.origin.url", extra)
+            result = self.resolve(row)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.git("config", "--unset-all", "remote.origin.url")
+            self.git("config", "remote.origin.url", valid)
+        self.git("config", "remote.origin.url", "https://example.invalid/foreign")
+        self.assertNotEqual(self.resolve(row).returncode, 0)
+        self.git("config", "remote.origin.url", valid)
+        self.git("config", "url.https://example.invalid/foreign.insteadOf", valid)
+        result = self.resolve(row)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("example.invalid", result.stderr)
+
+    def test_untrusted_sources_or_malformed_revisions_never_use_tag_fallback(self):
+        for source in ("https://github.com/other/repo", "file://remote/path#alans-way", "file:///missing#alans-way"):
+            result = self.resolve({"source": source, "revision": self.SHA})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        for revision in ("v0.21.5", "a" * 39, ""):
+            result = self.resolve({"source": self.source.as_uri(), "revision": revision})
+            self.assertNotEqual(result.returncode, 0)
+        result = self.resolve({"source": "https://github.com/capthvnsen/alans-way-agents#alans-way", "revision": self.SHA})
+        self.assertEqual(result.stdout.strip(), self.SHA)
 
 class LongChatsSetupProcedureTests(unittest.TestCase):
     """Execute the documented opt-in block with an isolated Hermes CLI double."""

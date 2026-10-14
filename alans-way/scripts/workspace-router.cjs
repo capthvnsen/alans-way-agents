@@ -247,6 +247,9 @@ function noteClientRpc(line, pending) {
 // {"result":...,"jsonrpc":"2.0","id":N}; other servers put the id first.
 // An unrecognised shape returns undefined and the caller parses.
 const BIG_LINE = 100000;
+// BIG_LINE is the screenshot fast-path threshold, not a parsing ceiling.
+// Allow ordinary large tab lists, but bound text parsing/decoration memory.
+const REPLY_PARSE_MAX_BYTES = 4 * 1024 * 1024;
 const ID_AT_HEAD = /^\{\s*"jsonrpc"\s*:\s*"2\.0"\s*,\s*"id"\s*:\s*(\d+|"[^"\\]*")/;
 const ID_AT_TAIL = /,\s*"id"\s*:\s*(\d+|"[^"\\]*")\s*\}$/;
 function bigLineId(line) {
@@ -1010,11 +1013,24 @@ function cleanCommit(commit) {
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
-function annotateResult(msg, host, mac, notice, ms, tabIdChanged) {
+function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotId) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
   addCommitParam(msg.result);
+  // The app lists owners and grants, but a new conversation may not know
+  // this connector's identity. Describe it without deriving ownership from
+  // a grant or the router's transient tab cache; all access gates stay in
+  // the backend. Keep the original tab records, including human holds.
+  if (requestingBotId && Array.isArray(msg.result.content)) {
+    msg.result.content = msg.result.content.map((part) => {
+      if (!part || part.type !== 'text' || typeof part.text !== 'string' || !part.text.includes('"tabs"')) return part;
+      let data;
+      try { data = JSON.parse(part.text); } catch { return part; }
+      if (!data || !Array.isArray(data.tabs)) return part;
+      return { ...part, text: JSON.stringify({ ...data, requestingBotId }) };
+    });
+  }
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
     msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
   }
@@ -1034,6 +1050,9 @@ const RESULT_ID_FIRST = /^\{"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*"),"result":\{"
 const RESULT_SDK_TAIL = /\]\},"jsonrpc":"2\.0","id":(?:\d+|"[^"\\]*")\}$/;
 function resultShape(line) {
   if (line.length < BIG_LINE) return null;
+  // Large text replies (including tab lists) still need content decoration.
+  // Only an image payload takes the no-parse screenshot path.
+  if (!/"type":"image"/.test(line.slice(0, 200))) return null;
   if (line.endsWith(']}}') && RESULT_ID_FIRST.test(line.slice(0, 200))) return 'id-first';
   if (line.startsWith('{"result":{"content":[') && RESULT_SDK_TAIL.test(line.slice(-120))) return 'sdk';
   return null;
@@ -1063,6 +1082,10 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
     const shape = resultShape(line);
     let msg;
     if (!shape) {
+      if (Buffer.byteLength(line, 'utf8') > REPLY_PARSE_MAX_BYTES) {
+        process.stderr.write(`workspace-router: reply exceeds ${REPLY_PARSE_MAX_BYTES}-byte parse limit; refusing decoration and forwarding unchanged\n`);
+        return line;
+      }
       try {
         msg = JSON.parse(line);
       } catch {
@@ -1099,7 +1122,7 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
     // _meta drops the list for any other host.
     const tabIdChanged = host === 'vps' && ctx.takeTabIdChanged ? ctx.takeTabIdChanged() : ctx.tabIdChanged;
     if (shape) return appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged);
-    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, tabIdChanged));
+    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, tabIdChanged, ctx.botId));
   };
 }
 
