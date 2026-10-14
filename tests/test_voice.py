@@ -160,6 +160,18 @@ def env(**values):
 
 
 class NoteTests(unittest.TestCase):
+    def test_user_facing_narration_uses_task_words(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("user-facing text", "workflow", "tool call", "MCP", "tab id",
+                     "I'm checking the airline's prices now"):
+            self.assertIn(rule, note)
+
+    def test_recommendations_require_facts_read_live_this_turn(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("Prices, availability and policies", "page read live this turn",
+                     "label anything else unconfirmed", "never recommend using an unconfirmed number"):
+            self.assertIn(rule, note)
+
     def turn(self, v, platform, chat_type="dm", text="hey can you check my calendar tomorrow"):
         with env(HERMES_SESSION_CHAT_TYPE=chat_type):
             return v.on_turn_start(user_message=text, platform=platform, session_id="s", sender_id="42")

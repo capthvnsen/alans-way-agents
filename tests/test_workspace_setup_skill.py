@@ -17,6 +17,23 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
+    def test_binding_explains_native_telegram_home_and_manual_fallback(self):
+        for rule in ("same primary DM becomes Hermes' Telegram home channel",
+                     "config set TELEGRAM_HOME_CHANNEL", "send `/sethome` in that DM",
+                     "loads on gateway restart", "config_env.py:515"):
+            self.assertIn(rule, self.normalized)
+
+    def test_steer_ack_choice_is_explicit_and_remembered(self):
+        for rule in ("config get display.busy_steer_ack_enabled",
+                     "skills.config.workspace-setup.busy_steer_ack_choice",
+                     "Want just my own acknowledgment when you add something while I'm working?",
+                     "config set display.busy_steer_ack_enabled false",
+                     "An explicit no records `keep-ack`",
+                     "with no answer, leave the acknowledgment setting and marker untouched",
+                     "read back the acknowledgment setting before recording `own-ack`",
+                     "gateway/run_busy.py:893"):
+            self.assertIn(rule, self.normalized)
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")

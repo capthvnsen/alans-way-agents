@@ -12,6 +12,21 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_version_questions_can_discover_the_skill_without_a_browser_task(self):
+        description = re.search(r"^description: (.*)$", self.text, re.M).group(1)
+        self.assertIn("installed versions", description)
+
+    def test_versions_include_all_components_and_observed_provenance(self):
+        for requirement in ("When asked what versions", "hermes --version",
+                            "plugin.yaml", ".install-metadata.json", "release SHA",
+                            "git -C <toolbox-checkout> describe --tags --always --dirty",
+                            "git -C <toolbox-checkout> rev-parse HEAD",
+                            "HERMES_WORKSPACE_VPS_MCP", "/opt/hermes-alans-way/browser",
+                            "cua_alans_way_status", "`version` and `build`",
+                            "A response with `host: vps`", "unavailable",
+                            "planned pin is not an observed running version"):
+            self.assertIn(requirement, self.normalized)
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")

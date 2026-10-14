@@ -73,6 +73,7 @@ setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS
                    every profile that has a Telegram bot, each with its own bot ID)
   --bind           bind proactivity to a Telegram DM route (prompted; with
                    --non-interactive, binds the --profile's route, default main)
+                   and make that DM Hermes' Telegram home for delivery
   --proactive yes|no  keep proactivity on (default) or pause it after binding
   --tone texting|default  the bot's voice on Telegram: texting (the default)
                    or Hermes' own; applies to every profile setup configures
@@ -3059,6 +3060,23 @@ for i, line in enumerate(sys.stdin, 1):
          fi
          if [ "$BOUND" = 1 ]; then
            ok "bound primary route: $SEL_AGENT"
+           # Native Hermes reads this legacy home setting for bare Telegram
+           # delivery. Use its CLI (profile scoped), never write env/config here.
+           # DM keys can carry a topic suffix: the chat id is the first DM part.
+           HOME_CHAT="${SEL_KEY#*:telegram:dm:}"
+           HOME_CHAT="${HOME_CHAT%%:*}"
+           case "$HOME_CHAT" in
+             ''|*[!0-9]*|0)
+               warn "could not set Telegram home channel: send /sethome in the primary DM";;
+             *)
+               # Clear any old forum topic before making this DM the home.
+               if hermes -p "$BIND_PROF" config set TELEGRAM_HOME_CHANNEL_THREAD_ID "" >/dev/null 2>&1 \
+                   && hermes -p "$BIND_PROF" config set TELEGRAM_HOME_CHANNEL "$HOME_CHAT" >/dev/null 2>&1; then
+                 ok "Telegram home channel uses the primary DM (loads on gateway restart)"
+               else
+                 warn "could not set Telegram home channel: send /sethome in the primary DM"
+               fi;;
+           esac
            if [ -z "$TIMEZONE" ]; then
              warn "no timezone known: the bot will ask you for it. Or set it with: hermes -p $BIND_PROF proactivity set --timezone <IANA zone>"
            elif [ "$TZ_SET" != 1 ]; then

@@ -411,6 +411,61 @@ class SkipPluginTests(unittest.TestCase):
         self.assertIn("invalid ref", result.stderr)
 
 
+class TelegramHomeBindingTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / "home"
+        (self.home / "profiles" / "delta").mkdir(parents=True)
+        (self.home / "sessions").mkdir()
+        self.routes = self.home / "sessions" / "sessions.json"
+        self.routes.write_text(json.dumps({
+            "agent:main:telegram:dm:1": {"platform": "telegram", "chat_type": "dm"},
+            "agent:delta:telegram:dm:42": {"platform": "telegram", "chat_type": "dm"},
+        }))
+        self.log = self.root / "log"
+        self.bin_dir = tooling(self.root, self.log)
+
+    def run_setup(self):
+        return run("--skip-plugin", "--profile", "delta", "--bind", "--proactive", "no",
+                   "--timezone", "Europe/Berlin", "--non-interactive", "--skip-browser",
+                   "--skip-services", "--hermes-home", str(self.home),
+                   env=env_for(self.root, self.bin_dir, self.home), check=False)
+
+    def test_binding_sets_the_selected_profiles_telegram_home_through_cli(self):
+        result = self.run_setup()
+        calls = self.log.read_text()
+        self.assertIn("bound primary route: delta", result.stdout)
+        self.assertIn("-p delta config set TELEGRAM_HOME_CHANNEL 42\n", calls)
+        self.assertIn("-p delta config set TELEGRAM_HOME_CHANNEL_THREAD_ID \n", calls)
+        self.assertNotIn("-p default config set TELEGRAM_HOME_CHANNEL", calls)
+        self.assertIn("Telegram home channel uses the primary DM", result.stdout)
+
+    def test_a_failed_bind_does_not_change_the_home_channel(self):
+        cli = self.bin_dir / "hermes"
+        cli.write_text(cli.read_text().replace(
+            'case "$1" in', '[ "$1 $2" = "proactivity bind" ] && exit 1\ncase "$1" in'))
+        result = self.run_setup()
+        self.assertIn("bind failed", result.stdout)
+        self.assertNotIn("config set TELEGRAM_HOME_CHANNEL", self.log.read_text())
+
+    def test_no_route_does_not_change_the_home_channel(self):
+        self.routes.write_text("{}")
+        result = self.run_setup()
+        self.assertIn("no Telegram DM sessions", result.stdout)
+        self.assertNotIn("config set TELEGRAM_HOME_CHANNEL", self.log.read_text())
+
+    def test_home_write_failure_is_reported_without_claiming_success(self):
+        cli = self.bin_dir / "hermes"
+        cli.write_text(cli.read_text().replace(
+            'case "$1" in', '[ "$1 $2 $3" = "config set TELEGRAM_HOME_CHANNEL" ] && exit 1\ncase "$1" in'))
+        result = self.run_setup()
+        self.assertIn("could not set Telegram home channel", result.stdout)
+        self.assertIn("send /sethome in the primary DM", result.stdout)
+        self.assertNotIn("Telegram home channel uses the primary DM", result.stdout)
+
+
 class AgentShellTests(unittest.TestCase):
     def test_runs_to_completion_without_a_controlling_terminal(self):
         with tempfile.TemporaryDirectory() as directory:

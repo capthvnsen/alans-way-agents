@@ -1,9 +1,41 @@
 ---
 name: workspace-operations
-description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
+description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
 ---
 
 # Workspace operations
+
+## Report installed versions
+
+When asked what versions are running, check all four pieces in this turn and
+give one short line for each: Hermes, plugin, Alan's Tools (the VM browser),
+and Alan's Workspace (the app on the user's computer). Say unavailable for
+anything you cannot read; a planned pin is not an observed running version.
+
+- Hermes: run `hermes --version` (include its commit if reported).
+- Plugin: read the installed `alans-way/plugin.yaml` version and this profile's
+  `plugins/.install-metadata.json` entry for `alans-way`. Report the recorded
+  revision/catalog SHA as the release SHA, identifying a catalog pin as such.
+  For a manual git install, use that installed checkout's `git rev-parse HEAD`;
+  if neither has provenance, say the SHA is unavailable. A separate setup clone
+  or the current remote tip does not prove what the installed plugin runs.
+- Alan's Tools: find the VM browser checkout from `HERMES_WORKSPACE_VPS_MCP`
+  or the managed workspace browser config's `--vps-script` (read only that
+  field), then the router's installed script candidates:
+  `/opt/hermes-alans-way/browser` or
+  `~/.local/share/hermes-alans-way/app`. Run
+  `git -C <toolbox-checkout> describe --tags --always --dirty` and
+  `git -C <toolbox-checkout> rev-parse HEAD`. For a non-git copy read its
+  `desktop/package.json` version and `desktop/build-info.json` if present;
+  label missing SHA/tag unavailable. This identifies the toolbox scripts;
+  it is separate from Hermes and the computer's app.
+- Alan's Workspace: call `cua_alans_way_status` and report its `version` and
+  `build` (commit/channel/dirty when supplied) only when the response identifies
+  the user's computer. A response with `host: vps` is the VM browser, so the
+  computer app version is unavailable while it is offline. Missing fields on
+  an older app are unavailable, not the connector's MCP protocol version.
+  The existing connector passes `/v1/status` through; no app API token, SSH
+  request, install, update or restart is needed for this check.
 
 ## Open a browser when the task needs one
 

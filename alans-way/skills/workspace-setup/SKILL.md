@@ -75,6 +75,31 @@ setup answer: never restore a mode from it or override later user changes.
 The user can explicitly revisit the choice at any time, or remove the marker
 with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
 
+**Acknowledgment while folding messages in.** When the effective busy mode is
+`steer`, read `hermes -p <profile> config get display.busy_steer_ack_enabled`
+and `hermes -p <profile> config get skills.config.workspace-setup.busy_steer_ack_choice`.
+Use effective defaults and preserve platform overrides. If the acknowledgment
+is already off, or the marker is `keep-ack` or `own-ack`, continue without asking
+or restoring a setting. Preserve unknown values and unreadable config; an absent
+marker must be a confirmed “Config key not set” result. Otherwise ask once:
+“Want just my own acknowledgment when you add something while I'm working?”
+Explain that this removes Hermes' extra status bubble for steering on every
+platform in this profile; your own short reply will acknowledge the addition,
+and you will remember the answer in this profile's config. Only after yes, run
+`hermes -p <profile> config set display.busy_steer_ack_enabled false` and
+read back the acknowledgment setting before recording `own-ack` with
+`hermes -p <profile> config set skills.config.workspace-setup.busy_steer_ack_choice own-ack`.
+An explicit no records `keep-ack` with the same marker key and preserves the
+acknowledgment setting. Report failed writes/readbacks; with no answer, leave
+the acknowledgment setting and marker untouched. General setup or busy-mode
+consent is not this answer. The user can revisit it or unset the marker via
+`hermes -p <profile> config unset skills.config.workspace-setup.busy_steer_ack_choice`.
+Hermes `6e7b83a2f1` supports this switch:
+[`gateway/display_config.py:28`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/display_config.py#L28),
+[`gateway/run_busy.py:893`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/run_busy.py#L893).
+It suppresses the bubble after the message is processed; it does not disable
+steering. Neither setup script writes this display setting or its marker.
+
 **Interim messages.** Read `hermes -p <profile> config get
 display.interim_assistant_messages`. Hermes defaults to `true` at commit
 `d97007c32d6340f7ba79ac1dfb5773cc00846448` (which includes `6e7b83a2f1`),
@@ -189,6 +214,15 @@ different bot's route silently.
    `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
    tune with `hermes proactivity set --settings '<json>'`, and check with
    `hermes proactivity status`.
+   After setup binds successfully, the same primary DM becomes Hermes' Telegram
+   home channel for scheduled and cross-platform delivery. Setup uses the
+   profile-scoped `config set TELEGRAM_HOME_CHANNEL` interface and clears an old
+   topic with `config set TELEGRAM_HOME_CHANNEL_THREAD_ID ''`; this loads on
+   gateway restart. Hermes `6e7b83a2f1` reads these settings at
+   [`config_env.py:515`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/config_env.py#L515).
+   If you bound by hand or setup reports a home-channel failure, tell the user
+   to send `/sethome` in that DM and check the confirmation before claiming
+   delivery is ready.
 
 ## Moved your agent to a new VM?
 
