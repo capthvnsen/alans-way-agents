@@ -61,7 +61,9 @@ SHORT_REPLY = ("This one wants a short answer: at most 3 sentences, the headline
                " then offer detail.")
 # A closed set of whole-message recaps and social replies. Prefixes never
 # imply short intent by themselves; unfamiliar wording is left uncapped.
-_REPLY_SEPARATOR = r"[\s,.!?;:\-\u2026\u2600-\u27bf\U0001f300-\U0001faff\ufe0f\u200d]"
+_REPLY_SEPARATOR = (r"[\s,.!?;:\-\N{HORIZONTAL ELLIPSIS}\N{VARIATION SELECTOR-16}\N{ZERO WIDTH JOINER}"
+                    r"\u2600-\u27bf"  # symbols, dingbats
+                    r"\U0001f300-\U0001faff]")  # emoji
 _GREETING = r"(?:hi|hey|hello|good morning|good afternoon|good evening)"
 _RECAP_REQUEST = re.compile(
     _REPLY_SEPARATOR + r"*(?:" + _GREETING + _REPLY_SEPARATOR + r"+)?"
