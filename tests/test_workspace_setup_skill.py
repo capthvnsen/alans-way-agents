@@ -22,7 +22,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
                            .split("```sh", 1)[0])
 
-    def test_telegram_preset_keys_are_platform_scoped_and_supported(self):
+    def test_telegram_preset_keys_are_platform_scoped_with_memory_support_gate(self):
         step = self.telegram_step()
         expected = {
             "platforms.telegram.typing_indicator": "true",
@@ -31,6 +31,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "display.platforms.telegram.notifications": "important",
             "display.platforms.telegram.long_running_notifications": "generic",
             "display.platforms.telegram.busy_steer_ack_enabled": "false",
+            "display.platforms.telegram.memory_notifications": "off",
             "cron.wrap_response": "false",
             "platforms.telegram.reactions": "true",
         }
@@ -86,6 +87,17 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "does not verify the user's goal", "cannot reply immediately while a tool is blocked"):
             self.assertIn(rule, step)
 
+    def test_upgrade_honors_legacy_steer_ack_answers_until_explicit_revisit(self):
+        step = self.telegram_step()
+        self.assertIn("config get skills.config.workspace-setup.busy_steer_ack_choice", step)
+        for answer in ("keep-ack", "own-ack"):
+            with self.subTest(answer=answer):
+                self.assertIn(f"`{answer}`", step)
+        for rule in ("legacy answer", "continue without asking or rewriting",
+                     "unless the user explicitly revisits", "Preserve unknown legacy markers",
+                     "never migrate the legacy marker automatically"):
+            self.assertIn(rule, step)
+
     def test_timezone_is_city_based_explicit_and_read_back(self):
         step = self.telegram_step()
         for rule in ("config get timezone", "empty", "MST", "EST", "PST", "CST",
@@ -93,8 +105,39 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "offer the matching IANA zone", "Preserve an existing IANA zone",
                      "config set timezone <answered-IANA-zone>", "read back `timezone`",
                      "Never change it silently", "no city or explicit zone answer",
-                     "leave timezone and the marker untouched", "--timezone"):
+                     "leave timezone untouched", "--timezone"):
             self.assertIn(rule, step)
+
+    def test_presentation_consent_is_remembered_independently_of_timezone(self):
+        step = self.telegram_step()
+        self.assertNotIn("leave timezone and the marker untouched", step)
+        for rule in ("Remember the completed presentation answer independently of timezone",
+                     "unresolved timezone or a failed timezone write/readback",
+                     "does not block the presentation marker",
+                     "perform the timezone check below even when a saved answer skips",
+                     "defer the setup invocation that requires it"):
+            self.assertIn(rule, step)
+
+    def test_legacy_tool_progress_all_wins_over_global_off_until_platform_off(self):
+        step = self.telegram_step()
+        for rule in ("config get display.tool_progress_overrides.telegram",
+                     "platform override → legacy Telegram override → global value",
+                     "global `off` plus legacy `all` still enables progress",
+                     "write `display.platforms.telegram.tool_progress off`",
+                     "Preserve the legacy key", "null legacy values inherit"):
+            self.assertIn(rule, step)
+
+    def test_memory_skill_notice_offer_is_scoped_consented_and_checks_banner_support(self):
+        step = self.telegram_step()
+        for rule in ("hide memory/skill bookkeeping notices on Telegram",
+                     "| `display.platforms.telegram.memory_notifications` | `off` |",
+                     "off|on|verbose", "background review still runs",
+                     "Self-improvement review", "run_turn_runner.py#L1289",
+                     "background_review.py#L1264", "reads only the global",
+                     "skip this leaf", "do not claim the banner is suppressed",
+                     "Read back each changed key"):
+            self.assertIn(rule, step)
+        self.assertNotIn("config set display.memory_notifications", step)
 
     def test_binding_explains_native_telegram_home_and_manual_fallback(self):
         for rule in ("same primary DM becomes Hermes' Telegram home channel",
