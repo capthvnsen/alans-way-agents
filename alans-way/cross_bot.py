@@ -4,7 +4,7 @@ The shared root is explicit, POSIX-only, and opened through checked directory
 handles. Every transaction has one bounded advisory lock; JSON replacement is
 atomic. No Hermes history, auth/config files or private host APIs are read.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -19,12 +19,10 @@ import uuid
 
 UTC = timezone.utc
 DIGEST_BYTES = 2048
-SNAPSHOT_BYTES = 32768
 MAX_PROFILES = 16
 TTL = timedelta(hours=24)
 DEDUP_TTL = timedelta(hours=48)
 MAX_DEDUP = 512
-PRESENCE_TTL = timedelta(seconds=180)
 PROFILE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 OPAQUE = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -32,16 +30,17 @@ OPAQUE = re.compile(r"[a-f0-9]{64}\Z")
 _LABEL = re.compile(
     r"(?i)\b(?:password|passwd|passphrase|secret|(?:access[ _-]?|refresh[ _-]?|api[ _-]?)?token|"
     r"api[ _-]?key|authorization|cookie|otp|one[ -]?time[ -]?(?:password|code)|"
-    r"verification[ _-]?code|private[ _-]?key)\b\s*[\"']?\s*(?::|=|\bis\b|\s+\S)")
+    r"verification[ _-]?code|your\s+code|private[ _-]?key)\b\s*[\"']?\s*(?::|=|\bis\b|\s+\S)")
 _CREDENTIAL_FIELD = re.compile(
     r"(?i)\b[a-z0-9_]{0,64}(?:password|passwd|secret|token|api_key|private_key|access_key)"
     r"[a-z0-9_]{0,64}\s*[\"']?\s*[:=]")
 _KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S)
-_URL = re.compile(r"https?://[^\s<>\"']+", re.I)
+_URL = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.I)
 _TOKEN = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"(?i:\bBearer\s+\S+)|\bAKIA[A-Z0-9]{16}|\bAIza[A-Za-z0-9_-]{35}|"
     r"\b\d{6,12}:[A-Za-z0-9_-]{30,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)")
 
 
@@ -129,7 +128,7 @@ def strict_object(pairs):
 
 
 class SharedStore:
-    def __init__(self, root, *, primary="default", clock=None, lock_timeout=0.25):
+    def __init__(self, root, *, primary="default", clock=None, lock_timeout=0.25, prune=True):
         self.root = Path(root)
         if not self.root.is_absolute() or ".." in self.root.parts or self.root == Path("/"):
             raise ValueError("cross_bot.shared_root must be an explicit absolute directory")
@@ -142,7 +141,9 @@ class SharedStore:
                 self.write(root_fd, "control.json", {"schema": 1, "primary": self.primary,
                            "enabled": False, "generation": 1})
             self.control(root_fd)
-            self.prune_locked(root_fd)
+            if prune:
+                with self.profiles(root_fd) as profiles:
+                    self.prune_locked(root_fd, profiles)
 
     @staticmethod
     def checked(fd, *, directory=False, private=True):
@@ -160,6 +161,7 @@ class SharedStore:
             raise ValueError("unsafe shared-store parent permissions")
 
     @classmethod
+    @contextmanager
     def directory(cls, parent, name, *, create=True):
         if create:
             try:
@@ -169,10 +171,9 @@ class SharedStore:
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
         try:
             cls.checked(fd, directory=True)
-        except Exception:
+            yield fd
+        finally:
             os.close(fd)
-            raise
-        return fd
 
     def open_root(self):
         if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
@@ -230,13 +231,24 @@ class SharedStore:
             self._mutex.release()
 
     @classmethod
-    def read(cls, fd, name, limit=65536):
+    def checked_file(cls, fd, name):
         try:
             handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         except FileNotFoundError:
             return None
         try:
             cls.checked(handle)
+        except Exception:
+            os.close(handle)
+            raise
+        return handle
+
+    @classmethod
+    def read(cls, fd, name, limit=65536):
+        handle = cls.checked_file(fd, name)
+        if handle is None:
+            return None
+        try:
             if os.fstat(handle).st_size > limit:
                 raise ValueError("shared-store file too large")
             with os.fdopen(handle, "rb", closefd=False) as stream:
@@ -250,21 +262,19 @@ class SharedStore:
 
     @classmethod
     def remove(cls, fd, name):
-        try:
-            handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        except FileNotFoundError:
+        handle = cls.checked_file(fd, name)
+        if handle is None:
             return
-        try:
-            cls.checked(handle)
-        finally:
-            os.close(handle)
+        os.close(handle)
         os.unlink(name, dir_fd=fd)
         os.fsync(fd)
 
     @classmethod
     def write(cls, fd, name, value):
         # Validate an existing destination before replacing; never follow it.
-        cls.read(fd, name)
+        handle = cls.checked_file(fd, name)
+        if handle is not None:
+            os.close(handle)
         temporary = ".tmp-" + uuid.uuid4().hex
         handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=fd)
@@ -293,14 +303,6 @@ class SharedStore:
             raise ValueError("cross_bot.primary differs from shared control")
         return value
 
-    @contextmanager
-    def profiles(self, root_fd):
-        fd = self.directory(root_fd, "profiles")
-        try:
-            yield fd
-        finally:
-            os.close(fd)
-
     @staticmethod
     def names(fd):
         result = []
@@ -315,20 +317,21 @@ class SharedStore:
         return sorted(result)
 
     @contextmanager
-    def profile(self, root_fd, name, *, create=False):
-        profile_id(name)
-        with self.profiles(root_fd) as profiles_fd:
-            names = self.names(profiles_fd)
-            if name not in names and create and len(names) >= MAX_PROFILES:
-                raise ValueError("too many profiles (maximum 16)")
-            fd = self.directory(profiles_fd, name, create=create)
-            try:
-                yield fd
-            finally:
-                os.close(fd)
+    def profiles(self, root_fd, *, create=None):
+        """Enumerate once and retain validated handles for the transaction."""
+        with self.directory(root_fd, "profiles") as parent, ExitStack() as stack:
+            names = self.names(parent)
+            if create is not None and profile_id(create) not in names:
+                if len(names) >= MAX_PROFILES:
+                    raise ValueError("too many profiles (maximum 16)")
+                names.append(create)
+            yield {name: stack.enter_context(self.directory(parent, name, create=name == create)) for name in names}
 
-    def validate_presence(self, value, name):
-        keys(value, "schema profile generation enabled heartbeat bound timezone active_start active_end paused_until")
+    def get_presence(self, fd, name):
+        value = self.read(fd, "presence.json", 2048)
+        if value is None:
+            return None
+        keys(value, "schema profile generation enabled heartbeat bound")
         schema(value)
         if value["profile"] != name:
             raise ValueError("wrong presence profile")
@@ -337,55 +340,47 @@ class SharedStore:
         boolean(value["bound"])
         if utc(value["heartbeat"]) > self.clock():
             raise ValueError("future presence")
-        # Reuse the existing public settings validator, including IANA zones.
-        from .proactivity import Settings, validate
-        validate(Settings(), {k: value[k] for k in ("timezone", "active_start", "active_end", "paused_until")})
         return value
 
-    def get_presence(self, fd, name):
-        value = self.read(fd, "presence.json", 2048)
-        return self.validate_presence(value, name) if value is not None else None
-
-    def presence_value(self, old, name, bound, settings):
-        from .proactivity import Settings, validate
-        s = validate(Settings(), settings or {})
+    def presence_value(self, old, name, bound):
         boolean(bound)
         return {"schema": 1, "profile": name, "generation": old["generation"] if old else 1,
                 "enabled": old["enabled"] if old else False, "heartbeat": stamp(self.clock()),
-                "bound": bound, "timezone": s.timezone, "active_start": s.active_start,
-                "active_end": s.active_end, "paused_until": s.paused_until}
+                "bound": bound}
 
-    def presence(self, name, *, bound=False, settings=None):
+    def presence(self, name, *, bound=False):
         with self.transaction() as root_fd:
             self.control(root_fd)
-            self.prune_locked(root_fd)
-            with self.profile(root_fd, name, create=True) as fd:
+            with self.profiles(root_fd, create=name) as profiles:
+                self.prune_locked(root_fd, profiles)
+                fd = profiles[name]
                 old = self.get_presence(fd, name)
-                self.write(fd, "presence.json", self.presence_value(old, name, bound, settings))
+                value = self.presence_value(old, name, bound)
+                if value != old:
+                    self.write(fd, "presence.json", value)
 
-    def set_enabled(self, name, enabled, *, bound=False, settings=None):
+    def set_enabled(self, name, enabled, *, bound=False):
         boolean(enabled)
         if enabled and not bound:
             raise ValueError("bind this profile's existing owner Telegram DM first")
         with self.transaction() as root_fd:
             control = self.control(root_fd)
-            if enabled:
-                self.prune_locked(root_fd)
-            with self.profile(root_fd, name, create=True) as fd:
+            with self.profiles(root_fd, create=name) as profiles:
+                if enabled:
+                    self.prune_locked(root_fd, profiles)
+                fd = profiles[name]
                 old = self.get_presence(fd, name)
-                value = self.presence_value(old, name, bound, settings)
+                value = self.presence_value(old, name, bound)
                 value.update(enabled=enabled, generation=value["generation"] + 1)
                 # Publish the disabling epoch before deleting text (crash-safe opt-out).
                 self.write(fd, "presence.json", value)
                 self.remove(fd, "digest.json")
                 self.remove_temps(fd)
-            control["generation"] += 1
-            with self.profiles(root_fd) as profiles_fd:
+                control["generation"] += 1
                 control["enabled"] = False
-                for other in self.names(profiles_fd):
-                    with self.profile(root_fd, other) as fd:
-                        presence = self.get_presence(fd, other)
-                        control["enabled"] |= bool(presence and presence["enabled"])
+                for other, fd in profiles.items():
+                    presence = self.get_presence(fd, other)
+                    control["enabled"] |= bool(presence and presence["enabled"])
             self.write(root_fd, "control.json", control)
             return value
 
@@ -436,36 +431,33 @@ class SharedStore:
             if type(turn["id"]) is not str or not OPAQUE.fullmatch(turn["id"]) or turn["id"] in seen or utc(turn["at"]) > self.clock():
                 raise ValueError("invalid dedup record")
             seen.add(turn["id"])
-        return [t for t in value["turns"] if utc(t["at"]) + DEDUP_TTL > self.clock()]
+        return value["turns"]
 
-    def prune_locked(self, root_fd):
+    def prune_locked(self, root_fd, profiles):
         self.remove_temps(root_fd)
-        with self.profiles(root_fd) as profiles_fd:
-            for name in self.names(profiles_fd):
-                with self.profile(root_fd, name) as fd:
-                    self.remove_temps(fd)
-                    presence = self.get_presence(fd, name)
-                    digest = self.digest(fd, name, presence)
-                    if digest:
-                        digest["exchanges"] = [e for e in digest["exchanges"] if utc(e["at"]) + TTL > self.clock()]
-                    if not digest or not digest["exchanges"]:
-                        self.remove(fd, "digest.json")
-                    else:
-                        self.write(fd, "digest.json", digest)
-                    turns = self.dedup(fd, name)
-                    if turns:
-                        self.write(fd, "dedup.json", {"schema": 1, "profile": name, "turns": turns})
-                    else:
-                        self.remove(fd, "dedup.json")
+        for name, fd in profiles.items():
+            self.remove_temps(fd)
+            presence = self.get_presence(fd, name)
+            digest = self.digest(fd, name, presence)
+            exchanges = [e for e in digest["exchanges"] if utc(e["at"]) + TTL > self.clock()] if digest else []
+            if not exchanges:
+                self.remove(fd, "digest.json")
+            elif exchanges != digest["exchanges"]:
+                digest["exchanges"] = exchanges
+                self.write(fd, "digest.json", digest)
+            old_turns = self.dedup(fd, name)
+            turns = [t for t in old_turns if utc(t["at"]) + DEDUP_TTL > self.clock()]
+            if turns and turns != old_turns:
+                self.write(fd, "dedup.json", {"schema": 1, "profile": name, "turns": turns})
+            elif not turns:
+                self.remove(fd, "dedup.json")
 
     @classmethod
     def remove_temps(cls, fd):
         # The transaction lock excludes live writers, so every matching temp is
         # an orphan. Inspect metadata only; it may hold incomplete JSON.
-        count = 0
         with os.scandir(fd) as entries:
-            for entry in entries:
-                count += 1
+            for count, entry in enumerate(entries, 1):
                 if count > 64:
                     raise ValueError("too many shared-store files")
                 if re.fullmatch(r"\.tmp-[a-f0-9]{32}", entry.name):
@@ -474,7 +466,8 @@ class SharedStore:
     def prune(self):
         with self.transaction() as fd:
             self.control(fd)
-            self.prune_locked(fd)
+            with self.profiles(fd) as profiles:
+                self.prune_locked(fd, profiles)
 
     def append(self, name, turn_id, user, assistant, *, expected_generation=None):
         if type(turn_id) is not str or not turn_id or len(turn_id) > 256:
@@ -484,8 +477,9 @@ class SharedStore:
         opaque = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
         with self.transaction() as root_fd:
             control = self.control(root_fd)
-            self.prune_locked(root_fd)
-            with self.profile(root_fd, name) as fd:
+            with self.profiles(root_fd) as profiles:
+                self.prune_locked(root_fd, profiles)
+                fd = profiles[profile_id(name)]
                 presence = self.get_presence(fd, name)
                 if not control["enabled"] or not presence or not presence["enabled"] or not presence["bound"]:
                     return False
@@ -494,11 +488,12 @@ class SharedStore:
                 turns = self.dedup(fd, name)
                 if any(t["id"] == opaque for t in turns) or len(turns) >= MAX_DEDUP:
                     return False
-                now = stamp(self.clock())
+                updated = self.clock()
+                now = stamp(updated)
                 old = self.digest(fd, name, presence)
                 exchanges = (old["exchanges"] if old else []) + [{"id": opaque, "at": now, "user": user, "assistant": assistant}]
                 value = {"schema": 1, "profile": name, "generation": presence["generation"],
-                         "updated_at": now, "expires_at": stamp(self.clock() + TTL), "exchanges": exchanges[-4:]}
+                         "updated_at": now, "expires_at": stamp(updated + TTL), "exchanges": exchanges[-4:]}
                 while value["exchanges"] and len(encode(value)) > DIGEST_BYTES:
                     value["exchanges"].pop(0)
                 if not value["exchanges"]:
@@ -509,28 +504,12 @@ class SharedStore:
                 self.write(fd, "digest.json", value)
                 return True
 
-    def snapshot(self):
-        with self.transaction() as root_fd:
-            control = self.control(root_fd)
-            self.prune_locked(root_fd)
-            result = {"schema": 1, "profiles": {}}
-            if control["enabled"]:
-                with self.profiles(root_fd) as profiles_fd:
-                    for name in self.names(profiles_fd):
-                        with self.profile(root_fd, name) as fd:
-                            presence = self.get_presence(fd, name)
-                            digest = self.digest(fd, name, presence)
-                            if digest and utc(presence["heartbeat"]) + PRESENCE_TTL > self.clock():
-                                result["profiles"][name] = digest
-            if len(encode(result)) > SNAPSHOT_BYTES:
-                raise ValueError("snapshot too large (maximum 32 KiB)")
-            return result
-
     def status(self, name):
         with self.transaction() as root_fd:
             control = self.control(root_fd)
-            self.prune_locked(root_fd)
-            with self.profile(root_fd, name) as fd:
+            with self.profiles(root_fd) as profiles:
+                self.prune_locked(root_fd, profiles)
+                fd = profiles[profile_id(name)]
                 presence = self.get_presence(fd, name)
                 digest = self.digest(fd, name, presence)
                 return {"enabled": bool(presence and presence["enabled"]), "primary": control["primary"],
@@ -545,34 +524,55 @@ class CrossBot:
         self.ctx, self.owner = ctx, owner
         self.profile = profile_id(getattr(ctx, "profile_name", None) or "default")
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.store = None
-        self.error = None
-        self.task = None
-        self.closed = False
+        self.store = self.error = self.task = None
         self._pending = {}
         self._lock = threading.RLock()
         self._bound_key = ""
-        self._settings = {}
+        self.active = self.connected = self.closed = False
+        self.on_activation = lambda: None
         self.redact_terms = ()
         self.configured = False
         try:
-            self.refresh_local()
             get_config = getattr(ctx, "get_config", lambda key, default=None: default)
-            root = get_config("cross_bot.shared_root", None)
-            if root is None:
-                return
-            self.configured = True
-            if type(root) is not str or not root:
+            self.root = get_config("cross_bot.shared_root", None)
+            self.configured = self.root is not None
+            if self.configured and (type(self.root) is not str or not self.root):
                 raise ValueError("cross_bot.shared_root must be an explicit absolute directory")
-            primary = get_config("cross_bot.primary", "default")
+            self.primary = get_config("cross_bot.primary", "default")
             self.redact_terms = get_config("cross_bot.redact_terms", [])
             if sanitize("", redact_terms=self.redact_terms) is None:
                 raise ValueError("invalid cross_bot.redact_terms")
-            store = SharedStore(root, primary=primary, clock=self.clock)
-            store.presence(self.profile, bound=bool(self._bound_key), settings=self._settings)
-            self.store = store
+            if self.configured and get_config("cross_bot.enabled", False) is True:
+                self.refresh_local()
+                self.open_store()
+                self.active = self.store.status(self.profile)["enabled"]
         except Exception as exc:
             self.error = self.error_text(exc)
+
+    def open_store(self):
+        if not self.configured:
+            raise ValueError("configure cross_bot.shared_root with the operator CLI")
+        if self.store is None:
+            # Control/purge access must survive invalid digest JSON after restart.
+            self.store = SharedStore(self.root, primary=self.primary, clock=self.clock, prune=False)
+
+    def set_enabled(self, enabled):
+        self.open_store()
+        # Persist through the public profile-scoped plugin settings API. Off
+        # stops local collection even if a later purge encounters unsafe metadata.
+        if not enabled:
+            self.active = False
+        getattr(self.ctx, "set_config", lambda *a: None)("cross_bot.enabled", enabled)
+        self.store.set_enabled(self.profile, enabled, bound=bool(self._bound_key))
+        self.active = enabled
+        self.error = None
+        self._pending.clear()
+        if not enabled and self.task is not None:
+            self.task.cancel()
+            self.task = None
+        self.on_activation()
+        if enabled and self.connected:
+            self.on_telegram_connect()
 
     @staticmethod
     def error_text(exc):
@@ -588,25 +588,24 @@ class CrossBot:
         namespace = {"default": "main", "custom": "main", "main": "main~"}.get(self.profile, self.profile)
         prefix = f"agent:{namespace}:telegram:dm:"
         self._bound_key = key if (type(key) is str and key.startswith(prefix)
-                                  and key[len(prefix):] and ":" not in key[len(prefix):]) else ""
-        s = self.owner.settings(state)
-        self._settings = {field: getattr(s, field) for field in ("timezone", "active_start", "active_end", "paused_until")}
+                                  and re.fullmatch(r"[^:\s]+(?::[^:\s]+)?", key[len(prefix):])) else ""
 
     def own_chat(self):
         from .proactivity import caller_session_key
         return bool(self._bound_key) and caller_session_key() == self._bound_key
 
     def tick(self):
-        """Startup and each 60-second supervised tick prune all shared text."""
+        """Activated profiles prune every 60 seconds, using captured scope."""
         with self._lock:
+            if not self.active or self.closed:
+                return
             self.expire_pending()
-            if self.store and not self.closed:
-                try:
-                    self.store.presence(self.profile, bound=bool(self._bound_key), settings=self._settings)
-                    self.error = None
-                except Exception as exc:
-                    self.error = self.error_text(exc)
-                    self._pending.clear()
+            try:
+                self.store.presence(self.profile, bound=bool(self._bound_key))
+                self.error = None
+            except Exception as exc:
+                self.error = self.error_text(exc)
+                self._pending.clear()
 
     def expire_pending(self):
         self._pending = {key: value for key, value in self._pending.items()
@@ -622,6 +621,8 @@ class CrossBot:
     def on_turn_start(self, user_message="", **kwargs):
         from .proactivity import MARKER, BRIEF_MARKER
         with self._lock:
+            if not self.active or self.closed:
+                return None
             try:
                 self.expire_pending()
                 correlation = self.correlation(kwargs)
@@ -629,7 +630,7 @@ class CrossBot:
                     self._pending.pop(correlation, None)
                 self.refresh_local()
                 cron = getattr(self.ctx, "current_cron_execution", lambda: None)()
-                if (self.closed or not self.store or not correlation or not self.own_chat()
+                if (not correlation or not self.own_chat()
                         or kwargs.get("platform") != "telegram" or kwargs.get("parent_session_id")
                         or kwargs.get("parent_task_id") or kwargs.get("is_child") or cron
                         or kwargs.get("imported") or kwargs.get("is_imported")
@@ -650,6 +651,8 @@ class CrossBot:
 
     def on_turn_end(self, user_message="", assistant_response="", **kwargs):
         with self._lock:
+            if not self.active or self.closed or not self._pending:
+                return None
             try:
                 self.refresh_local()
                 correlation = self.correlation(kwargs)
@@ -673,10 +676,12 @@ class CrossBot:
 
     def on_session_end(self, **kwargs):
         with self._lock:
+            if not self.active or self.closed or not self._pending:
+                return None
             pending = self._pending.pop(self.correlation(kwargs), None)
             try:
                 self.refresh_local()
-                if (self.closed or not pending or not self.store or not self.own_chat()
+                if (not pending or not self.own_chat()
                         or pending["key"] != self._bound_key
                         or kwargs.get("platform") != "telegram" or kwargs.get("completed") is not True
                         or kwargs.get("failed") is not False or kwargs.get("interrupted") is not False
@@ -712,14 +717,10 @@ class CrossBot:
                     return "Cross-bot settings can only be changed or viewed from this bot's bound owner DM."
                 action = words[0] if words else "status"
                 if action in ("on", "off"):
-                    if not self.store:
-                        return "Cross-bot export is unavailable; configure cross_bot.shared_root with the operator CLI."
-                    self._pending.clear()
-                    self.store.set_enabled(self.profile, action == "on", bound=bool(self._bound_key), settings=self._settings)
-                    self.error = None
+                    self.set_enabled(action == "on")
                 status = self.status()
                 if status["error"]:
-                    return "Cross-bot export unavailable: " + status["error"] + ". Dispatch disabled."
+                    raise ValueError(status["error"])
                 return ("Cross-bot export " + ("on" if status["enabled"] else "off") + "; "
                         + str(status.get("exchanges", 0)) + " recent exchanges. Dispatch disabled."
                         + (" Configure cross_bot.shared_root with the operator CLI." if not self.store else ""))
@@ -744,17 +745,14 @@ class CrossBot:
                 if args["cross_bot_enabled"]:
                     return json.dumps({"ok": False, "error": "Only the operator can enable cross-bot export.",
                                        "ask_user_to_send": "/proactivity cross on"})
-                if not self.store:
-                    raise ValueError("cross-bot export is not configured")
-                self._pending.clear()
-                self.store.set_enabled(self.profile, False, bound=bool(self._bound_key), settings=self._settings)
-                self.error = None
+                self.set_enabled(False)
                 return json.dumps({"ok": True, **self.status()})
             except Exception as exc:
                 return json.dumps({"ok": False, "error": self.error_text(exc)})
 
     def on_telegram_connect(self, native=None, adapter=None, **kwargs):
-        if not self.store or self.closed:
+        self.connected = True
+        if not self.active or self.closed:
             return
         with self._lock:
             self.refresh_local()

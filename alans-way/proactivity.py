@@ -577,15 +577,11 @@ SCHEMA = {
         " offset; 'stop checking in' -> paused_until 'off'; 'I'm in Tokyo' -> timezone 'Asia/Tokyo';"
         " 'not before 9am' -> active_start 9; 'stop the morning brief' -> morning_brief false. Only the"
         " user can turn the morning brief on, with /proactivity brief on. After set, confirm the change"
-        " from the returned status in plain words. Optional cross-bot export is default off and dispatch"
-        " is disabled. cross_status reads its status; set cross_bot_enabled false turns it off and purges"
-        " this bot's digest. Only the operator can turn it on with /proactivity cross on; use that setting"
-        " alone, without other check-in settings."),
+        " from the returned status in plain words."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {
-            "action": {"type": "string", "enum": ["status", "set", "cross_status"]},
-            "cross_bot_enabled": {"type": "boolean"},
+            "action": {"type": "string", "enum": ["status", "set"]},
             "level": {"type": "string", "enum": list(LEVELS)},
             "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
             "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
@@ -615,7 +611,7 @@ def cli_run(runtime, args):
         if args.action == "bind":
             runtime.bind(args.session_key or "")
         cross = getattr(runtime, "cross_bot", None)
-        if cross:
+        if cross and cross.active:
             cross.refresh_local()
             cross.tick()
         status = runtime.status() if getattr(runtime, "primary", True) else cross.status()

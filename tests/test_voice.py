@@ -510,9 +510,8 @@ class RegisterTests(unittest.TestCase):
                 self.assertNotIn(("hook", "pre_tool_call", "Voice"), calls)
                 self.assertIn(("command", "tone"), calls)
                 self.assertIn(("cli", "tone"), calls)
-                # Every profile has narrowing cross-bot controls; only the
-                # primary registers the spontaneous check-in observer.
-                self.assertIn(("tool", "proactivity"), calls)
+                # Dormant cross-bot export adds no tool to secondary profiles.
+                self.assertEqual(("tool", "proactivity") in calls, primary)
                 self.assertEqual(("hook", "pre_llm_call", "Proactivity") in calls, primary)
 
     def test_manifest_declares_the_voice_hooks(self):

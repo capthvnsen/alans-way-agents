@@ -1,6 +1,7 @@
 """Hermes plugin entry point: the Telegram texting voice, idle check-ins from the primary bot,
 plus the workspace skills."""
 from pathlib import Path
+from copy import deepcopy
 import os
 import sys
 
@@ -65,8 +66,25 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", cross.on_turn_start)
     ctx.register_hook("post_llm_call", cross.on_turn_end)
     ctx.register_hook("on_session_end", cross.on_session_end)
-    ctx.register_tool(name="proactivity", toolset="proactivity", schema=SCHEMA if primary else CROSS_SCHEMA,
-                      handler=runtime.tool if primary else cross.tool, check_fn=lambda: True)
+    tool_handle = None
+    def tools_after_activation():
+        nonlocal tool_handle
+        if tool_handle is not None:
+            tool_handle.dispose()
+            tool_handle = None
+        if not primary and not cross.active:
+            return
+        schema = SCHEMA if primary else CROSS_SCHEMA
+        if primary and cross.active:
+            schema = deepcopy(SCHEMA)
+            schema["description"] += " " + CROSS_SCHEMA["description"]
+            schema["parameters"]["properties"]["action"]["enum"].append("cross_status")
+            schema["parameters"]["properties"]["cross_bot_enabled"] = {"type": "boolean"}
+        tool_handle = ctx.register_tool(name="proactivity", toolset="proactivity", schema=schema,
+                                        handler=runtime.tool if primary else cross.tool,
+                                        check_fn=lambda: primary or cross.active)
+    cross.on_activation = tools_after_activation
+    tools_after_activation()
     if primary:
         ctx.register_hook("pre_llm_call", runtime.on_turn_start)
         ctx.register_hook("post_llm_call", runtime.on_turn_end)

@@ -39,8 +39,8 @@ Default off; `/proactivity cross on|off|status` controls each bot. Dispatch is
 disabled: no asks are sent and no other bot context enters model prompts.
 Sanitization cannot guarantee detection of every secret; digest expiry cannot
 erase existing Hermes/provider history. No historical backfill, attachment or
-tool-history export. Offline files are pruned at startup, then every 60 seconds
-while connected; expired exchanges are never read.
+tool-history export. Offline files are pruned when an explicitly activated profile starts, then every
+60 seconds while connected. Dormant profiles perform no store access.
 
 ## Reviewed scanner inventory
 
@@ -48,19 +48,14 @@ Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
 Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
-Current release baseline: `02f52a0f74f44ed7ee069ffd7cdc8093894b06bf` (includes #112).
-Paths below are relative to `alans-way/`. Six reviewed matches remain; no scanner
+Current release baseline: `9d5818b5e484f81c3a103459dea7abade746e9c5` (`release/plugin-0.21.7`; includes #115).
+Paths below are relative to `alans-way/`. Five reviewed matches remain; no scanner
 rule was changed. Stage 1 export/control code adds no findings.
 LOW findings document the loopback-only forward/check/app examples. The only
 HIGH finding (`python_os_environ` at the former
 `skills/integrations/references/mastodon.md:45`) is gone because the plugin no
 longer ships the recipe. Its environment-reading command remains visible in
 the human-run document outside the plugin.
-
-The third MEDIUM is #112's intentional Unicode/emoji separator regex in
-`voice.py`; it matches punctuation in short-reply intent classification. It
-does not decode or execute text. Its scanner match is included explicitly in
-the inventory rather than suppressed.
 
 | File:line | Rule | Severity | Matched text | Before → after |
 |---|---|---|---|---|
@@ -69,12 +64,10 @@ the inventory rather than suppressed.
 | `skills/workspace-setup/SKILL.md:408` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
 | `skills/workspace-setup/SKILL.md:414` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
 | `skills/workspace-setup/SKILL.md:417` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
-| `voice.py:64` | `unicode_escape_chain` | MEDIUM | Unicode/emoji character class in `_REPLY_SEPARATOR` | baseline 1 → stage 1 1 |
 
-Verdict: **SAFE**. Current baseline → stage 1: 0 HIGH + 3 MEDIUM + 3 LOW
-→ 0 HIGH + 3 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
-Historically, removing the Mastodon recipe changed CAUTION to SAFE; #112 later
-added the benign Unicode regex MEDIUM.
+Verdict: **SAFE**. Current baseline → stage 1: 0 HIGH + 2 MEDIUM + 3 LOW
+→ 0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
+Historically, removing the Mastodon recipe changed CAUTION to SAFE.
 
 `tests/test_plugin_scan.py` asserts exact counts by rule, severity and file,
 plus SAFE allowance, CAUTION/confirmation and DANGEROUS rejection gates. Supply

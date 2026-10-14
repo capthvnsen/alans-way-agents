@@ -119,8 +119,8 @@ exchanges from its locally bound owner Telegram DM. Groups, other chats, cron,
 check-ins, morning briefs, child turns and imported cross-bot turns are excluded.
 There is no historical backfill. Only the user message and final assistant text
 are exported; attachments, reasoning, tool history and configuration files are
-not collected. All eligible bots may participate; a hard limit of 16 profiles
-and a 32 KiB snapshot produces a clear error if exceeded.
+not collected. All eligible bots may participate; enrollment beyond 16 profiles
+produces a clear error. Snapshot aggregation is deferred to the primary-reader stage.
 
 This stage only exports digests and records presence/enrollment. **Dispatch is
 disabled**: there is no ask tool or receiver, no cross-chat injection, and no
@@ -153,7 +153,7 @@ From each bot's bound owner DM, send:
 - `/proactivity cross status` to show enrollment and exchange count, with
   “Dispatch disabled.” No message bodies or DM addresses appear in status.
 
-The model's existing `proactivity` tool can read `cross_status` or set
+After activation, the model's `proactivity` tool can read `cross_status` or set
 `cross_bot_enabled` to `false`. It can only turn this feature off; enabling,
 rebinding or expanding scope requires the operator. A refused enable returns
 `/proactivity cross on`, like other settings that would widen proactivity.
@@ -163,8 +163,9 @@ checked directory handles, symlink/ownership checks, a bounded lock and atomic
 replacement. Unsafe permissions, invalid schemas or mismatched primary settings
 make exports unavailable. Custom shared roots are supported; the plugin never
 infers one from the launch profile's environment or accesses Hermes' session DB.
-Presence contains a heartbeat, enabled/bound booleans and local hours/pause/zone;
-it contains no DM address. Snapshots exclude presence older than 180 seconds.
+Presence contains only a heartbeat, enabled/bound booleans and the profile
+identity/generation; it contains no DM address. Receiver hours/pause projection
+and primary snapshot freshness selection belong to later stages.
 
 Each digest holds at most the last **four exchanges**, at most **2 KiB serialized**,
 with a **24-hour TTL per exchange**. Sanitization runs before UTF-8 truncation;
@@ -174,9 +175,16 @@ line-omission terms using the plugin setting `cross_bot.redact_terms` (up to 32
 terms, 128 characters each). Arbitrary unlabeled secrets are not guaranteed
 detectable, so avoid sharing sensitive material even with export enabled.
 
-Pruning runs at startup, before store reads/writes and every 60 seconds through
-Hermes' supervised profile-scoped task while Telegram is connected. Expired text
-is never read; offline files can physically remain until startup. Interrupted
+Activation is persisted as `cross_bot.enabled` through Hermes' public plugin
+settings API. With no root or while off, cross-bot hooks do no state/store I/O,
+start no task and add no model tool. The primary schema and prompts stay at their
+base values. Off cancels the task, removes the extra tool surface and purges even
+an unparseable digest after restart.
+
+Pruning runs on explicitly activated startup, before store reads/writes and every
+60 seconds through Hermes' supervised profile-scoped task while Telegram is
+connected. Expired text is never exported; offline files can physically remain
+until an activated profile prunes them. Interrupted
 atomic-write temporary files are removed under the store lock. Body-free hashed
 turn IDs prevent duplicates for 48 hours (512 per profile; overflow refuses new
 exports until expiry). Counts and IDs survive restart; turning off does not

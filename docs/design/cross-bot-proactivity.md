@@ -47,7 +47,8 @@ Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes)
 - `control.json`: schema, designated primary profile, generation, enabled flag; default `default`, explicit `cross_bot.primary` operator override supports the test primary. Stage 1 only records the designation.
   Control generation is the shared settings epoch; presence/digest generation is a separate per-profile enrollment epoch, so opting one bot out does not invalidate others.
 - `profiles/<profile>/presence.json`: profile, generation, one enabled flag,
-  heartbeat, bound boolean, timezone/window/pause; no DM address exported.
+  heartbeat and bound boolean; no DM address exported. Receiver eligibility
+  fields (timezone/window/pause) are deferred to PR 2.
 - `profiles/<profile>/digest.json`: bounded exchange ring; replace on append.
 - `inbox/<target>/<uuid>.json`: pending ask (future stage only); no receipt store.
 - `profiles/<profile>/dedup.json`: body-free hashed turn IDs, 48-hour TTL, maximum 512 per profile; refuse overflow until expiry.
@@ -63,24 +64,29 @@ Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes)
  "ask":"Draft an outline for the open project","attribution":"Primary"}
 ```
 
-Reject presence older than 180 seconds from snapshots. Validate exact keys/types, UTC timestamps, enum `read_only|draft_only`, canonical profile IDs, generation and
+PR 3 adds snapshot aggregation and rejects presence older than 180 seconds. Validate exact keys/types, UTC timestamps, enum `read_only|draft_only`, canonical profile IDs, generation and
 depth; reject self/unknown targets and path separators. User/model text never supplies a file path, DM
 destination, primary identity or approval. Directories 0700, all JSON/temp/lock files 0600; reject symlinks,
 unsafe ownership and permissive roots; use exclusive temp creation, atomic replace and bounded locks.
 Per-profile digest: last **4 completed exchanges**, at most **2 KiB serialized**, **24-hour TTL per
-exchange**, no backup generations; evict oldest until within bounds. Primary snapshot at most 32 KiB, at most
-16 profiles; refuse an oversized snapshot with a clear "too many profiles" or "snapshot too large"
+exchange**, no backup generations; evict oldest until within bounds. Stage 1 caps enrollment at 16 profiles. PR 3 adds a primary snapshot at most
+32 KiB, at most 16 profiles; refuse an oversized snapshot with a clear "too many profiles" or "snapshot too large"
 status. No rotation; the current eleven-profile topology fits without a policy shortlist. Read only validated, fresh profile exports; all profiles are eligible, but old/disabled plugins
 provide no digest and status reports that gap. No historical backfill. Prune expired text every 60 seconds and
-before reads/writes; startup prunes too. Offline files may physically remain beyond TTL until startup, but are
-never read expired. Ask TTL 2 hours, at most one pending ask per target, at most 64 pending gateway-wide.
+before store reads/writes while activated; explicitly activated startup prunes too.
+Dormant profiles do no state/store I/O and start no task. Offline files may physically
+remain beyond TTL until an activated profile prunes them; expired text is never exported. Ask TTL 2 hours, at most one pending ask per target, at most 64 pending gateway-wide.
 Delete ask body on claim; keep only body-free dedup/budget records for 48 hours for the rate limits; no receipt lifecycle or receipt store.
 Counts survive restart; storage corruption disables dispatch.
 
 ## 1. Read mechanism: profile-exported digests
 
-Register collector hooks in **every** profile before P `alans-way/__init__.py:57-58`'s primary-only return.
-Keep secondary bots' spontaneous check-ins disabled. `post_llm_call` supplies `user_message`,
+Register dormant collector hooks in **every** profile before P `alans-way/__init__.py:57-58`'s primary-only return.
+Keep secondary bots' spontaneous check-ins disabled. Until explicit operator activation, collector callbacks return before state/store access;
+primary tool schema and prompts match the release base and secondary profiles gain no tool.
+`/proactivity cross on` persists `cross_bot.enabled=true` using public `ctx.set_config`;
+reload resumes only explicitly activated profiles. Off persists false, disposes the extra tool
+surface, cancels the task, bumps the shared generation and purges the digest even after corrupt JSON. `post_llm_call` supplies `user_message`,
 `assistant_response`, `conversation_history`, `platform`, session/task/turn IDs (H
 `agent/turn_finalizer.py:470-479`; documented H `website/docs/developer-guide/plugins/index.md:1276-1277`).
 Append only the first two text fields, dedup by turn ID, in the profile's bound DM; ignore tool history,
@@ -220,16 +226,17 @@ memory-provider records and model-provider retention after digest expiry.”
 ## 7. Implementation PRs, tests and live acceptance
 
 1. **Export/control only:** collector, sanitizer, private shared store, enrollment,
-   owner-DM bindings/status and opt-out; dispatch disabled, no receiver or ask tool. Tests: real hook kwargs,
+   owner-DM bindings/status and opt-out; dispatch disabled, no receiver or ask tool.
+   No snapshot reader or eligibility-hours projection in this stage. Tests: real hook kwargs,
    bound DM vs group/cron/child filtering, dedup/TTL/size/UTF-8, secret-before-truncate,
    corrupt schemas, symlink/mode/path attacks, atomic concurrent writes, off/purge and
    per-profile task scope including identical human IDs and custom roots.
-2. **Queue/receiver only:** correlated import turn, attribution, tool policy, sent-only status,
+2. **Queue/receiver only:** eligibility hours/pause projection, correlated import turn, attribution, tool policy, sent-only status,
    cancellation/lease/unload. Tests: mocked public ctx injection per profile, revoked
    permission/auth, missing binding/session/adapter, busy/expiry, scheduling without delivery claims,
    crash before/after claim, no replay, hook errors, approve/deny/timeout, no chains,
    unknown/terminal tools blocked and existing commit/CAPTCHA/ownership tests unchanged.
-3. **Primary selection/cadence:** one-use tool permit, fresh digest context, limits,
+3. **Primary selection/cadence:** bounded snapshot reader/freshness selection, one-use tool permit, fresh digest context, limits,
    manual now and disclosure. Tests: fake clock quiet hours/DST/backoff, brief exclusion,
    forged markers/IDs, concurrent double dispatch, restarts, stale/duplicate evidence,
    opted-out generation race, injected role/delimiter attacks and history persistence.
