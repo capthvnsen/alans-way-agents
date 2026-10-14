@@ -284,6 +284,34 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 - Browser: ask the bot to open a page — a tab appears in the app (host)
   while your computer is awake, on the VPS host when it isn't
 
+### Plugin security review
+
+For the reviewed release candidate, Hermes' unmodified scanner at
+`6e7b83a2f1c093e992a8d838ed77ea320fbd8e51` reports **CAUTION: 1 HIGH,
+2 MEDIUM and 3 LOW findings** in `alans-way/`. These are real capabilities
+documented in the bundled skills:
+
+- The optional Mastodon identity probe reads only `MASTODON_API_BASE_URL` and
+  `MASTODON_ACCESS_TOKEN` from its process environment, uses the token to
+  authenticate to the user's chosen HTTPS instance, and prints the account
+  handle. The user enters the token privately and explicitly grants this
+  profile's environment passthrough; it does not dump the environment.
+- Workspace setup runs two bounded, read-only local Git subprocess helpers
+  to validate the setup checkout and a file-source install's origin before
+  selecting the reviewed revision.
+- With explicit consent, the viewer handoff uses a temporary SSH forward
+  bound to computer loopback, checks the loopback URL with curl, and gives
+  that same URL to the app. The human enters the VNC password privately.
+
+A manual/file install needs review of every finding at the exact candidate
+revision and explicit confirmation of that tree. `--enable` and setup consent
+do not confirm a scanner warning. Follow the bundled
+[reviewed-install confirmation steps](alans-way/skills/workspace-setup/SKILL.md#reviewed-plugin-install-confirmation);
+`--force` can confirm CAUTION and replace an install, but cannot override
+DANGEROUS. A catalog install uses the catalog's reviewed pin; it does not
+approve a newer checkout. Changed revisions and unknown findings need a new
+review. See the [complete inventory and catalog disclosure supplement](docs/catalog/alans-way-disclosure.md).
+
 ### Upgrading
 
 The agent setup prompt pins the plugin clone to a release tag (`v` + the

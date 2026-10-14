@@ -16,15 +16,17 @@ SCANNER_AVAILABLE = bool(SCANNER_ROOT) and all(
 
 @unittest.skipUnless(SCANNER_AVAILABLE, "upstream Hermes scanner files not supplied")
 class PluginScanTests(unittest.TestCase):
-    def test_only_reviewed_local_setup_and_scoped_mastodon_capabilities_are_flagged(self):
-        code = '''from pathlib import Path
+    def test_exact_reviewed_scan_inventory(self):
+        code = '''from collections import Counter
+from pathlib import Path
 from tools.plugin_guard import scan_plugin, should_allow_plugin_install
 result = scan_plugin(Path("alans-way"))
-findings = {(f.pattern_id, f.severity, f.file) for f in result.findings}
-assert findings == {
-    ("python_os_environ", "high", "skills/integrations/references/mastodon.md"),
-    ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"),
-    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md")}, findings
+findings = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
+expected = Counter({
+    ("python_os_environ", "high", "skills/integrations/references/mastodon.md"): 1,
+    ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"): 2,
+    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3})
+assert findings == expected, (findings, expected, result.findings)
 assert result.verdict == "caution", result.verdict
 assert should_allow_plugin_install(result)[0] is None
 assert should_allow_plugin_install(result, force=True)[0] is True
