@@ -372,6 +372,15 @@ class CollectorTests(unittest.TestCase):
             self.cross.on_session_end(**{**self.kw, "turn_id": "different", "completed": True, "failed": False, "interrupted": False})
         self.assertEqual(self.cross.store.snapshot()["profiles"], {})
 
+    def test_rebinding_before_completion_drops_old_owner_dm_exchange(self):
+        self.command("cross on")
+        with patch.object(P, "caller_session_key", return_value=self.key):
+            self.cross.on_turn_start(user_message="Draft", **self.kw)
+            self.cross.on_turn_end(assistant_response="Done", **self.kw)
+            self.owner.bind("agent:specialist:telegram:dm:43")
+            self.cross.on_session_end(completed=True, failed=False, interrupted=False, **self.kw)
+        self.assertEqual(self.cross.store.snapshot()["profiles"], {})
+
     def test_identical_human_ids_are_profile_isolated_and_wrong_scope_cannot_collect(self):
         self.command("cross on")
         other_ctx = FakeCtx()

@@ -648,6 +648,7 @@ class CrossBot:
     def on_turn_end(self, user_message="", assistant_response="", **kwargs):
         with self._lock:
             try:
+                self.refresh_local()
                 correlation = self.correlation(kwargs)
                 pending = self._pending.get(correlation)
                 if not pending:
@@ -671,7 +672,9 @@ class CrossBot:
         with self._lock:
             pending = self._pending.pop(self.correlation(kwargs), None)
             try:
+                self.refresh_local()
                 if (self.closed or not pending or not self.store or not self.own_chat()
+                        or pending["key"] != self._bound_key
                         or kwargs.get("platform") != "telegram" or kwargs.get("completed") is not True
                         or kwargs.get("failed") is not False or kwargs.get("interrupted") is not False
                         or pending["assistant"] is None or pending["at"] + timedelta(hours=3) <= self.clock()):
