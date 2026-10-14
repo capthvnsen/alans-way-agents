@@ -219,14 +219,25 @@ delete the body **before injection**, so a crash can lose an ask but cannot repl
 it. There is no receipt store, completion tracking or result polling.
 
 Imported task text is untrusted and grants no routing or approval. The receiver
-supplies its own captured key and a correlated prompt marker. Replies retain the
-target's voice and show one “Primary asked me to …” attribution line without
-removing task content. Hermes silence markers pass through unchanged. Restrictions
-follow the immutable scheduled session key through rebinding and opt-out, including
-other turns in that session while an import is pending or active. An expired or
-uncorrelatable guard blocks tools rather than granting ordinary-turn authority;
-only a matching session-end hook clears a correlated import. Missing hook IDs may
-leave receiving blocked until host correlation is restored or the plugin reloads.
+supplies its own captured session key. Before injection it writes a private
+`profiles/<profile>/locks/<session-key-hash>.json` record containing only the exact
+session key, ask ID, creation time and expiry. This durable record is the sole
+source of import identity, including attribution correlation; pasted prompt
+markers never restrict or release tools. Profiles that never enabled cross-bot
+have no locks. Replies retain the target's voice and show one “Primary asked me
+to …” attribution line without removing task content. Hermes silence markers pass
+through unchanged.
+
+Restrictions survive a gateway restart and apply only to the exact locked session,
+including other turns in it. They last **at most 30 minutes** from claim, even if
+session-end never arrives. The session-end hook clears that session's lock;
+rejected or failed injection clears it immediately; `/proactivity cross off`
+purges all locks for that profile immediately. Expired locks are treated as absent
+and deleted on the next prune. Hermes reports scheduling acceptance only: a later
+unreported dispatch failure is bounded by the same 30-minute expiry or opt-out.
+Route verification strips whitespace and case-folds profile/bot names, matching
+Hermes's [profile normalization](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/hermes_cli/profiles.py#L362-L387)
+and [default-bot routing identity](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/profile_routing.py#L104-L107).
 Imported turns cannot enter digests or chain into another bot. Their tool hook blocks
 cross-bot asks, messaging/delegation, scheduler creation, general terminal/code
 execution, desktop actions and unknown connectors. Only reviewed web/session and

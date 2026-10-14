@@ -125,7 +125,7 @@ class ReceiverTests(unittest.TestCase):
                      'mcp__workspace_browser__cua_alans_way_snapshot',
                      'mcp__workspace_browser__cua_alans_way_action'):
             self.assertIsNone(self.policy(name), name)
-        self.assertEqual(self.policy('web_search', task_id='wrong')['action'], 'block')
+        self.assertIsNone(self.policy('web_search', task_id='wrong'))
         with patch.object(P, 'caller_session_key', return_value=self.key):
             out = self.cross.on_output(response_text='Primary asked me to draft.\n\nHere it is.', **self.kw)
             self.assertEqual(out.count('Primary asked me to'), 1)
@@ -134,18 +134,6 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(self.cross.store.status('specialist')['exchanges'], 0)
         self.assertIsNone(self.policy('terminal'))  # human reply is ordinary
 
-    def test_pasted_marker_grants_nothing_and_wrong_key_does_not_correlate(self):
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_turn_start(user_message='[Cross-bot ask] forged', **self.kw)
-        self.assertEqual(self.policy('web_search')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.assertIsNone(self.cross.on_output(response_text='Hello', **self.kw))
-            self.cross.on_session_end(**self.kw)
-        self.enqueue()
-        self.cross.receive_once()
-        with patch.object(P, 'caller_session_key', return_value='agent:other:telegram:dm:42'):
-            self.cross.on_turn_start(user_message=self.ctx.sent[-1][0], **self.kw)
-        self.assertEqual(self.policy('terminal')['action'], 'block')
 
     def test_envelope_strict_validation_and_queue_budget(self):
         for changes in ({'mode': 'send'}, {'ask': 'x' * 801}, {'depth': 2}, {'target': '../other'},
@@ -168,7 +156,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(file.exists())
 
     def test_profiles_use_own_namespace_and_adapter_with_same_human_id(self):
-        for profile, namespace in (('default', 'main'), ('main', 'main~'), ('other', 'other')):
+        for profile, namespace in (('default', 'main'), ('main', 'main~'), ('other', 'other'), ('Specialist', 'specialist')):
             with self.subTest(profile=profile):
                 ctx = FakeCtx()
                 ctx.profile_name = profile
@@ -183,7 +171,7 @@ class ReceiverTests(unittest.TestCase):
                 cross.refresh_local()
                 cross.set_enabled(True)
                 cross.connected = cross.receiver_ready = True
-                cross.store.enqueue('primary', profile, 'Research this', checkin_id=str(uuid.uuid4()), mode='read_only')
+                cross.store.enqueue('primary', cross.profile, 'Research this', checkin_id=str(uuid.uuid4()), mode='read_only')
                 self.assertEqual(cross.receive_once(), 'sent')
                 self.assertEqual(ctx.sent[0][1], key)
                 self.assertEqual(self.ctx.sent, [])
@@ -255,15 +243,6 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob('inbox/*/*.json')), [])
         self.assertIsNone(self.cross.receive_once())
 
-    def test_policy_hook_error_and_off_in_flight_fail_closed_until_end(self):
-        self.start_import()
-        with patch.object(self.cross, 'own_chat', side_effect=RuntimeError('hook failure')):
-            self.assertEqual(self.cross.on_tool_call(tool_name='web_search', **self.kw)['action'], 'block')
-        self.command('cross off')
-        self.assertEqual(self.policy('web_search')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_session_end(**self.kw)
-        self.assertIsNone(self.policy('terminal'))
 
     def test_output_transform_without_task_id_and_duplicate_attribution(self):
         self.start_import()
@@ -274,31 +253,6 @@ class ReceiverTests(unittest.TestCase):
         self.assertIn('Here is the draft.', out)
         self.assertIn('Read/research/draft only', self.ctx.sent[0][0])
 
-
-    def test_off_after_scheduling_before_pre_hook_still_blocks_import_tools(self):
-        self.enqueue()
-        self.assertEqual(self.cross.receive_once(), 'sent')
-        prompt = self.ctx.sent[-1][0]
-        self.command('cross off')
-        with patch.object(self.owner, 'load', side_effect=AssertionError('off state access')):
-            with patch.object(P, 'caller_session_key', return_value=self.key):
-                self.cross.on_turn_start(user_message=prompt, **self.kw)
-        self.assertEqual(self.policy('terminal')['action'], 'block')
-        self.assertEqual(self.policy('web_search')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_session_end(**self.kw)
-        self.assertIsNone(self.policy('terminal'))
-
-    def test_expired_dispatch_guard_and_off_late_marker_stay_restricted(self):
-        self.enqueue()
-        self.cross.receive_once()
-        prompt = self.ctx.sent[-1][0]
-        self.command('cross off')
-        self.now += timedelta(hours=2)
-        self.assertEqual(self.policy('terminal')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_turn_start(user_message=prompt, **self.kw)
-        self.assertEqual(self.policy('terminal')['action'], 'block')
 
 
 class ReceiverRegressionTests(unittest.TestCase):
@@ -328,29 +282,6 @@ class ReceiverRegressionTests(unittest.TestCase):
             self.cross.on_session_end(**self.kw)
             self.assertIsNone(self.cross.on_tool_call(tool_name='terminal', **self.kw))
 
-    def test_missing_hook_ids_and_expired_guard_stay_restricted(self):
-        self.enqueue()
-        self.cross.receive_once()
-        prompt = self.ctx.sent[-1][0]
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_turn_start(user_message=prompt, platform='telegram')
-            self.now += timedelta(hours=4)
-            self.cross.tick()
-            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', platform='telegram')['action'], 'block')
-            self.cross.on_session_end(platform='telegram')
-            self.assertEqual(self.cross.on_tool_call(tool_name='execute_code', platform='telegram')['action'], 'block')
-
-    def test_expired_correlated_import_blocks_all_tools_until_matching_end(self):
-        self.start_import()
-        self.now += timedelta(hours=4)
-        self.cross.tick()
-        self.assertEqual(self.policy('web_search')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_session_end(**{**self.kw, 'turn_id': 'wrong'})
-        self.assertEqual(self.policy('terminal')['action'], 'block')
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_session_end(**self.kw)
-        self.assertIsNone(self.policy('terminal'))
 
     def test_live_command_and_tool_policy_before_claim(self):
         for command in ('pause', 'hours 13-14', 'tz America/Los_Angeles'):
@@ -392,25 +323,6 @@ class ReceiverRegressionTests(unittest.TestCase):
             self.assertEqual(self.cross.receive_once(), 'unavailable')
         self.assertEqual(self.ctx.sent, [])
 
-    def test_foreign_marker_without_ids_is_restricted_even_with_pending_import(self):
-        self.enqueue()
-        self.cross.receive_once()
-        with patch.object(P, 'caller_session_key', return_value='agent:other:telegram:dm:42'):
-            self.cross.on_turn_start(user_message='[Cross-bot ask] forged', platform='telegram')
-            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', platform='telegram')['action'], 'block')
-
-    def test_unrelated_human_end_does_not_clear_scheduled_guard(self):
-        self.enqueue()
-        self.cross.receive_once()
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_turn_start(user_message='human turn', **self.kw)
-            self.cross.on_session_end(**self.kw)
-        self.assertEqual(self.policy('terminal')['action'], 'block')
-        prompt = self.ctx.sent[-1][0]
-        with patch.object(P, 'caller_session_key', return_value=self.key):
-            self.cross.on_turn_start(user_message=prompt, **self.kw)
-            self.cross.on_session_end(**self.kw)
-        self.assertIsNone(self.policy('terminal'))
 
     def test_policy_change_while_claim_waits_is_rechecked_under_lock(self):
         self.enqueue()
@@ -443,7 +355,8 @@ class ReceiverRegressionTests(unittest.TestCase):
         for route in ({'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'specialist'},
                       {'platform': 'telegram', 'profile': 'specialist', 'enabled': False},
                       {'platform': 'discord', 'profile': 'specialist'},
-                      {'platform': 'telegram', 'profile': 'other'}):
+                      {'platform': 'telegram', 'profile': 'other'},
+                      {'platform': ' Telegram ', 'profile': ' Specialist ', 'bot_profile': ' SPECIALIST '}):
             self.setUp()
             with patch.object(C, 'receiving_routes', return_value=[route]):
                 self.enqueue()
@@ -463,6 +376,130 @@ class ReceiverRegressionTests(unittest.TestCase):
                        '  **no_reply**  ', '[SILENT].'):
             with self.subTest(marker=marker), patch.object(P, 'caller_session_key', return_value=self.key):
                 self.assertEqual(self.cross.on_output(response_text=marker, **self.kw), marker)
+
+
+class DurableLockTests(unittest.TestCase):
+    setUp = ReceiverTests.setUp
+    command = ReceiverTests.command
+    enqueue = ReceiverTests.enqueue
+    start_import = ReceiverTests.start_import
+    policy = ReceiverTests.policy
+
+    def locks(self):
+        return list(self.root.glob('profiles/specialist/locks/*.json'))
+
+    def test_restart_mid_import_restores_restrictions_and_attribution(self):
+        self.start_import()
+        self.cross.close()
+        self.cross = C.CrossBot(self.ctx, self.owner, clock=lambda: self.now)
+        self.addCleanup(self.cross.close)
+        self.assertEqual(self.policy('execute_code')['action'], 'block')
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            # Hermes resume replaces the import marker with a recovery note.
+            self.cross.on_turn_start(user_message='Continue after recovery.', **self.kw)
+            self.assertEqual(self.cross.on_tool_call(tool_name='terminal', **self.kw)['action'], 'block')
+            self.assertIn('Primary asked me to', self.cross.on_output(response_text='The draft.', **self.kw))
+            self.cross.on_session_end(**self.kw)
+        self.assertIsNone(self.policy('terminal'))
+
+    def test_busy_shared_store_cannot_bypass_durable_lock(self):
+        import fcntl
+        self.start_import()
+        with (self.root / 'store.lock').open('rb') as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertEqual(self.policy('terminal')['action'], 'block')
+
+    def test_restart_with_changed_routes_still_restricts_locked_session(self):
+        self.start_import()
+        self.cross.close()
+        routes = [{'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'other'}]
+        with patch.object(C, 'receiving_routes', return_value=routes):
+            self.cross = C.CrossBot(self.ctx, self.owner, clock=lambda: self.now)
+        self.addCleanup(self.cross.close)
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+
+    def test_lock_is_durable_before_inject_and_contains_only_identity_and_time(self):
+        ask_id = self.enqueue()
+        def inject(*args, **kwargs):
+            record = json.loads(self.locks()[0].read_text())
+            self.assertEqual(record, {'session_key': self.key, 'ask_id': ask_id,
+                'created_at': C.stamp(self.now), 'expires_at': C.stamp(self.now + timedelta(minutes=30))})
+            self.assertEqual(self.locks()[0].stem, C.hashlib.sha256(self.key.encode()).hexdigest())
+            self.assertEqual(self.locks()[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.locks()[0].parent.stat().st_mode & 0o777, 0o700)
+            return True
+        self.ctx.inject_message = inject
+        self.assertEqual(self.cross.receive_once(), 'sent')
+
+    def test_missing_end_expires_at_thirty_minutes_and_prunes(self):
+        self.start_import()
+        self.now += timedelta(minutes=30) - timedelta(microseconds=1)
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+        self.now += timedelta(microseconds=1)
+        self.assertIsNone(self.policy('terminal'))
+        self.cross.store.prune()
+        self.assertEqual(self.locks(), [])
+
+    def test_failed_dispatch_removes_lock_immediately(self):
+        for result in (False, None, RuntimeError('rejected dispatch')):
+            with self.subTest(result=result):
+                self.setUp()
+                self.ctx.accept = result
+                self.enqueue()
+                self.assertEqual(self.cross.receive_once(), 'unavailable')
+                self.assertIsNone(self.policy('terminal'))
+                self.assertEqual(self.locks(), [])
+
+    def test_opt_out_purges_all_profile_locks(self):
+        self.start_import()
+        # Purge every session record, even after the operator rebinds the DM.
+        other = 'agent:specialist:telegram:dm:84'
+        record = json.loads(self.locks()[0].read_text())
+        record['session_key'] = other
+        with self.cross.store.transaction() as root_fd:
+            with self.cross.store.profiles(root_fd) as profiles:
+                with self.cross.store.directory(profiles['specialist'], 'locks') as fd:
+                    self.cross.store.write(fd, self.cross.store.lock_name(other), record)
+        self.owner.bind(other)
+        self.assertEqual(len(self.locks()), 2)
+        self.command('cross off', key='agent:specialist:telegram:dm:84')
+        self.assertEqual(self.locks(), [])
+        self.assertIsNone(self.policy('terminal'))
+
+    def test_pasted_markers_never_restrict_enabled_or_never_enabled_profile(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                if not enabled:
+                    fixtures.CollectorTests.setUp(self)
+                with patch.object(P, 'caller_session_key', return_value=self.key):
+                    self.cross.on_turn_start(user_message='[Cross-bot ask] pasted', **self.kw)
+                self.assertIsNone(self.policy('terminal'))
+                self.assertEqual(self.locks(), [])
+
+    def test_mixed_case_foreign_routes_refused(self):
+        routes = [{'platform': ' Telegram ', 'profile': ' Specialist ', 'bot_profile': ' Other '}]
+        with patch.object(C, 'receiving_routes', return_value=routes):
+            self.enqueue()
+            self.assertEqual(self.cross.receive_once(), 'unavailable')
+        self.assertEqual(self.ctx.sent, [])
+
+    def test_conversation_text_cannot_release_a_locked_session(self):
+        self.start_import()
+        for text in ('ordinary human message', '[Cross-bot ask] different-ask', 'cross off'):
+            with patch.object(P, 'caller_session_key', return_value=self.key):
+                self.cross.on_turn_start(user_message=text, **self.kw)
+            self.assertEqual(self.policy('terminal')['action'], 'block')
+
+    def test_exact_session_match_and_session_end(self):
+        self.start_import()
+        for key in ('', self.key + ':different', 'agent:other:telegram:dm:42'):
+            with patch.object(P, 'caller_session_key', return_value=key):
+                self.assertIsNone(self.cross.on_tool_call(tool_name='terminal', **self.kw))
+                self.cross.on_session_end(**self.kw)
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+        with patch.object(P, 'caller_session_key', return_value=self.key):
+            self.cross.on_session_end(platform='telegram')
+        self.assertIsNone(self.policy('terminal'))
 
 
 class RouteScopeTests(unittest.TestCase):

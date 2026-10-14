@@ -27,6 +27,7 @@ MAX_DEDUP = 512
 PROFILE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 OPAQUE = re.compile(r"[a-f0-9]{64}\Z")
 
+LOCK_TTL = timedelta(minutes=30)
 ASK_TTL = timedelta(hours=2)
 IMPORT_MARKER = "[Cross-bot ask]"
 
@@ -436,6 +437,8 @@ class SharedStore:
                 # Publish the disabling epoch before deleting text (crash-safe opt-out).
                 self.write(fd, "presence.json", value)
                 self.remove(fd, "digest.json")
+                if not enabled:
+                    self.prune_locks(fd, purge=True)
                 self.remove_temps(fd)
                 control["generation"] += 1
                 control["enabled"] = False
@@ -586,22 +589,95 @@ class SharedStore:
                     self.write(fd, value["id"] + ".json", value)
                 return value["id"]
 
-    def claim(self, target, *, bound=False, eligible=False, current_policy=None):
+    def claim(self, target, *, current_policy):
         with self.transaction() as root_fd:
             control = self.control(root_fd)
             with self.profiles(root_fd) as profiles:
                 queued, _ = self.prune_locked(root_fd, profiles)
-                if current_policy is not None:
-                    bound, eligible = current_policy()
+                bound, eligible = current_policy()
                 value = next((v for v in queued if v["to"] == target), None)
                 if value is None or not control["enabled"]:
                     return None, None
+                if bound:
+                    with self.directory(profiles[target], "locks") as locks:
+                        record = self.read(locks, self.lock_name(bound), 8192)
+                        if record and utc(self.lock_value(record)["expires_at"]) > self.clock():
+                            eligible = False
                 if bound and not eligible:
                     return "waiting", None
                 # queued() rechecked target enablement/generation under this lock.
                 with self.directory(root_fd, "inbox") as parent, self.directory(parent, target, create=False) as fd:
                     self.remove(fd, value["id"] + ".json")
+                if bound:
+                    now = self.clock()
+                    record = self.lock_value({"session_key": bound, "ask_id": value["id"],
+                                              "created_at": stamp(now), "expires_at": stamp(now + LOCK_TTL)})
+                    with self.directory(profiles[target], "locks") as locks:
+                        self.write(locks, self.lock_name(bound), record)
                 return ("claimed", value) if bound else ("unbound", None)
+
+    def lock_value(self, value):
+        keys(value, "session_key ask_id created_at expires_at")
+        key = value["session_key"]
+        if type(key) is not str or not key or len(key) > 1024:
+            raise ValueError("invalid lock session key")
+        self.uuid_value(value["ask_id"])
+        created, expires = utc(value["created_at"]), utc(value["expires_at"])
+        if created > self.clock() or expires != created + LOCK_TTL:
+            raise ValueError("invalid lock lifetime")
+        return value
+
+    @staticmethod
+    def lock_name(key):
+        return hashlib.sha256(key.encode()).hexdigest() + ".json"
+
+    @contextmanager
+    def reading(self):
+        # Atomic replacement/unlink lets hooks read without contending with a
+        # writer's advisory lock. A busy queue must never bypass a valid lock.
+        fd = self.open_root()
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+
+    def session_lock(self, name, key, *, clear=False):
+        if type(key) is not str or not key:
+            return None
+        with (self.transaction() if clear else self.reading()) as root_fd:
+            try:
+                with self.directory(root_fd, "profiles", create=False) as parent, \
+                        self.directory(parent, name, create=False) as profile, \
+                        self.directory(profile, "locks", create=False) as fd:
+                    filename = self.lock_name(key)
+                    if clear:
+                        self.remove(fd, filename)
+                        return None
+                    value = self.read(fd, filename, 8192)
+                    if value is not None:
+                        value = self.lock_value(value)
+                        if value["session_key"] == key and utc(value["expires_at"]) > self.clock():
+                            return value
+            except FileNotFoundError:
+                pass
+        return None
+
+    def prune_locks(self, profile, *, purge=False):
+        try:
+            with self.directory(profile, "locks", create=False) as fd:
+                self.remove_temps(fd)
+                for name in os.listdir(fd):
+                    if not name.endswith(".json") or not OPAQUE.fullmatch(name[:-5]):
+                        raise ValueError("invalid lock filename")
+                    if not purge:
+                        value = self.lock_value(self.read(fd, name, 8192))
+                        if name != self.lock_name(value["session_key"]):
+                            raise ValueError("wrong lock filename")
+                        if utc(value["expires_at"]) > self.clock():
+                            continue
+                    self.remove(fd, name)
+        except FileNotFoundError:
+            pass
 
     def digest(self, fd, name, presence):
         value = self.read(fd, "digest.json", DIGEST_BYTES)
@@ -660,6 +736,7 @@ class SharedStore:
         if attempts != old_attempts:
             self.write(root_fd, "limits.json", {"schema": 1, "attempts": attempts})
         for name, fd in profiles.items():
+            self.prune_locks(fd)
             self.remove_temps(fd)
             presence = self.get_presence(fd, name)
             digest = self.digest(fd, name, presence)
@@ -748,15 +825,14 @@ class CrossBot:
     """One captured profile's controls and three public collector hooks."""
     def __init__(self, ctx, owner, *, clock=None):
         self.ctx, self.owner = ctx, owner
-        self.profile = profile_id(getattr(ctx, "profile_name", None) or "default")
+        self.profile = profile_id((getattr(ctx, "profile_name", None) or "default").strip().casefold())
         self.clock = clock or (lambda: datetime.now(UTC))
         self.store = self.error = self.task = None
         self._pending = {}
         self._lock = threading.RLock()
         self._bound_key = ""
         self._settings = None
-        self._turns, self._imports = {}, {}
-        self._awaiting = None
+        self._turns = {}
         self.receiver_ready = False
         self.receiver_status = None
         self.active = self.connected = self.closed = False
@@ -774,8 +850,8 @@ class CrossBot:
             if sanitize("", redact_terms=self.redact_terms) is None:
                 raise ValueError("invalid cross_bot.redact_terms")
             if self.configured and get_config("cross_bot.enabled", False) is True:
-                self.refresh_local()
                 self.open_store()
+                self.refresh_local()
                 self.active = self.store.status(self.profile)["enabled"]
         except Exception as exc:
             self.error = self.error_text(exc)
@@ -792,7 +868,6 @@ class CrossBot:
         if not enabled:
             self.active = False
             self._pending.clear()
-            # Keep the body-free guard for already scheduled Hermes turns.
             if self.task is not None:
                 self.task.cancel()
                 self.task = None
@@ -823,16 +898,19 @@ class CrossBot:
     def refresh_local(self, *, check_routes=True):
         """Read live state only inside the owning profile's inherited task scope."""
         active = getattr(self.ctx, "profile_name", None) or "default"
-        if active != self.profile:
+        if active.strip().casefold() != self.profile.strip().casefold():
             raise ValueError("wrong profile scope")
         self._bound_key = ""  # Invalid/unknown provenance cannot leave an old binding usable.
         for route in receiving_routes() if check_routes else ():
             if type(route) is not dict:
                 raise ValueError("cross-bot receiving requires known profile routes")
             own_bot = "default" if self.profile in ("default", "custom") else self.profile
-            if (route.get("enabled", True) and str(route.get("platform", "")).lower() == "telegram"
-                    and str(route.get("profile", "")).strip() == self.profile
-                    and (route.get("bot_profile") or "default").strip() != own_bot):
+            # Hermes profiles.normalize_profile_name strips/case-folds; routing's
+            # _bot_profile_key treats an empty bot profile as default. Compare
+            # canonical identities before accepting receiving-bot provenance.
+            if (route.get("enabled", True) and str(route.get("platform", "")).strip().casefold() == "telegram"
+                    and str(route.get("profile", "")).strip().casefold() == self.profile.casefold()
+                    and ((route.get("bot_profile") or "").strip().casefold() or "default") != own_bot.casefold()):
                 raise ValueError("cross-bot receiving refuses a Telegram profile route from another bot")
         state = self.owner.load()
         self._settings = self.owner.settings(state)
@@ -857,7 +935,7 @@ class CrossBot:
                 if self._settings:
                     eligibility = {k: getattr(self._settings, k) for k in
                                    ("timezone", "active_start", "active_end", "paused_until")}
-                    eligibility["busy"] = bool(self._turns or self._imports or self._awaiting or self.owner._busy(self.clock()))
+                    eligibility["busy"] = bool(self._turns or self.imported_ask_id(self._bound_key) or self.owner._busy(self.clock()))
                 self.store.presence(self.profile, bound=bool(self._bound_key), eligibility=eligibility)
                 if receive:
                     self.receive_once()
@@ -871,6 +949,7 @@ class CrossBot:
         with self._lock, self.owner._lock:
             if not self.active or self.closed:
                 return None
+            claimed_key = None
             try:
                 def current_policy():
                     self.refresh_local()
@@ -878,86 +957,59 @@ class CrossBot:
                     self._turns = {k: t for k, t in self._turns.items() if t + timedelta(hours=3) > now}
                     eligible = bool(self.connected and self.receiver_ready and self._settings
                                     and in_window(self._settings, now) and not is_paused(self._settings, now)
-                                    and not self._turns and not self._imports and not self._awaiting
+                                    and not self._turns
                                     and not self.owner._busy(now))
-                    return bool(self._bound_key), eligible
+                    return self._bound_key, eligible
                 status, value = self.store.claim(self.profile, current_policy=current_policy)
                 if value is None:
                     self.error = None
                     return "unavailable" if status == "waiting" and not self.receiver_ready else status
-                prompt = imported_prompt(value)
-                self._awaiting = {"prompt_hash": hashlib.sha256(prompt.encode()).hexdigest(), "key": self._bound_key,
-                                  "expires": utc(value["expires_at"]), "attribution": value["attribution"], "valid": True}
-                accepted = self.ctx.inject_message(prompt, role="user", session_key=self._bound_key)
+                claimed_key = self._bound_key
+                accepted = self.ctx.inject_message(imported_prompt(value), role="user", session_key=claimed_key)
                 if accepted is True:
                     self.receiver_status = "sent"
                     self.error = None
                     return "sent"
-                # Even an unknown scheduling result may later start a turn. Keep the guard.
-                self._awaiting["valid"] = False
             except Exception as exc:
-                if self._awaiting:
-                    self._awaiting["valid"] = False
                 self.error = self.error_text(exc)
+            if claimed_key:
+                try:
+                    self.store.session_lock(self.profile, claimed_key, clear=True)
+                except Exception as exc:
+                    self.error = self.error_text(exc)
             return "unavailable"
 
-    def import_start(self, message, correlation, kwargs):
+    def imported_ask_id(self, key=None):
         from .proactivity import caller_session_key
-        key = caller_session_key()
-        marker = type(message) is str and message.lstrip().startswith(IMPORT_MARKER)
-        awaiting = self._awaiting
-        scheduled = awaiting and (key == awaiting["key"] or not key)
-        if marker or scheduled:
-            prompt_matches = bool(scheduled and key and type(message) is str and len(message) <= EXCHANGE_BYTES
-                                  and hashlib.sha256(message.encode()).hexdigest() == awaiting.get("prompt_hash"))
-            valid = bool(prompt_matches and correlation and awaiting["valid"] and awaiting["expires"] > self.clock()
-                         and kwargs.get("platform") == "telegram" and not kwargs.get("parent_session_id")
-                         and not kwargs.get("parent_task_id") and not kwargs.get("is_child"))
-            if correlation:
-                self._imports[correlation] = {**(awaiting if scheduled else {}),
-                                             "key": awaiting["key"] if scheduled else key, "valid": valid}
-                if prompt_matches:
-                    self._awaiting = None
-            elif marker and not scheduled:
-                # Missing IDs cannot grant authority, even in another DM while an
-                # ask is pending. No correlated session-end can clear this guard.
-                self._imports[("", "", key)] = {"key": key, "valid": False}
-            return
-        if correlation and self.own_chat() and kwargs.get("platform") == "telegram":
-            self._turns[correlation] = self.clock()
+        if self.store is None:
+            return None
+        try:
+            record = self.store.session_lock(self.profile, caller_session_key() if key is None else key)
+            return record["ask_id"] if record else None
+        except Exception as exc:
+            self.error = self.error_text(exc)
+            return None
 
     def on_tool_call(self, tool_name="", args=None, **kwargs):
-        from .proactivity import caller_session_key
         with self._lock:
-            try:
-                correlation, key = self.correlation(kwargs), caller_session_key()
-                match = self._imports.get(correlation)
-                guards = list(self._imports.values()) + ([self._awaiting] if self._awaiting else [])
-                # Check immutable scheduled keys before consulting the mutable owner binding.
-                restricted = match is not None or any(not key or not v["key"] or v["key"] == key for v in guards)
-                if not restricted:
-                    return None
-                if (not self.active or self.closed or not match or not match["valid"]
-                        or match["key"] != key or match["expires"] <= self.clock() or not self.own_chat()):
-                    return {"action": "block", "message": "Imported ask correlation unavailable; wait for the human."}
-                if tool_name in IMPORT_READ_TOOLS or tool_name in IMPORT_BROWSER_TOOLS:
-                    return None
-                return {"action": "block", "message": "This imported ask permits reviewed reads and drafting in chat only; no delegation or scheduled work."}
-            except Exception:
-                return {"action": "block", "message": "Imported ask policy unavailable."}
+            if self.imported_ask_id() is None:
+                return None
+            if tool_name in IMPORT_READ_TOOLS or tool_name in IMPORT_BROWSER_TOOLS:
+                return None
+            return {"action": "block", "message": "This imported ask permits reviewed reads and drafting in chat only; no delegation or scheduled work."}
 
     def on_output(self, response_text="", platform="", **kwargs):
         with self._lock:
             if platform != "telegram" or not self.own_chat() or type(response_text) is not str or not response_text.strip():
                 return None
-            # Hermes' transform carries session_id and turn_id, but no task_id.
-            match = next((v for k, v in self._imports.items()
-                          if k[0] == kwargs.get("session_id") and k[2] == kwargs.get("turn_id")), None)
-            if not match or not match["valid"]:
+            # The validated durable ask_id supplies attribution correlation after
+            # restart too; conversation text never establishes import identity.
+            ask_id = self.imported_ask_id()
+            if not ask_id:
                 return None
             if silence_marker(response_text):
                 return response_text
-            label = match["attribution"] + " asked me to"
+            label = self.primary.capitalize() + " asked me to"
             attribution = re.compile(r"^\s*[*_> ]*" + re.escape(label) + r"\b", re.IGNORECASE)
             lines = response_text.splitlines()
             standalone = re.compile(r"\s*[*_> ]*" + re.escape(label)
@@ -986,11 +1038,6 @@ class CrossBot:
     def on_turn_start(self, user_message="", **kwargs):
         from .proactivity import MARKER, BRIEF_MARKER
         with self._lock:
-            # Imported markers and scheduled sessions must be guarded before any
-            # current-binding/profile refresh or opt-out early return.
-            if (self._awaiting or self._imports or
-                    (type(user_message) is str and user_message.lstrip().startswith(IMPORT_MARKER))):
-                self.import_start(user_message, self.correlation(kwargs), kwargs)
             if not self.active or self.closed:
                 return None
             try:
@@ -999,10 +1046,11 @@ class CrossBot:
                 if correlation:
                     self._pending.pop(correlation, None)
                 self.refresh_local()
-                if correlation not in self._imports:
-                    self.import_start(user_message, correlation, kwargs)
+                imported = self.imported_ask_id() is not None
+                if not imported and correlation and self.own_chat() and kwargs.get("platform") == "telegram":
+                    self._turns[correlation] = self.clock()
                 cron = getattr(self.ctx, "current_cron_execution", lambda: None)()
-                if (correlation in self._imports or not correlation or not self.own_chat()
+                if (imported or not correlation or not self.own_chat()
                         or kwargs.get("platform") != "telegram" or kwargs.get("parent_session_id")
                         or kwargs.get("parent_task_id") or kwargs.get("is_child") or cron
                         or kwargs.get("imported") or kwargs.get("is_imported")
@@ -1056,9 +1104,11 @@ class CrossBot:
             correlation = self.correlation(kwargs)
             self._turns.pop(correlation, None)
             from .proactivity import caller_session_key
-            match = self._imports.get(correlation)
-            if match and caller_session_key() == match["key"] and kwargs.get("platform") == "telegram":
-                self._imports.pop(correlation)
+            if self.store and kwargs.get("platform") == "telegram":
+                try:
+                    self.store.session_lock(self.profile, caller_session_key(), clear=True)
+                except Exception as exc:
+                    self.error = self.error_text(exc)
             if not self.active or self.closed or not self._pending:
                 return None
             pending = self._pending.pop(correlation, None)
@@ -1165,7 +1215,6 @@ class CrossBot:
         with self._lock:
             self.closed = True
             self._pending.clear()
-            # Keep the body-free guard for already scheduled Hermes turns.
             if self.task is not None:
                 self.task.cancel()
 
