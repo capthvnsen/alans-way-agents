@@ -29,7 +29,7 @@ OPAQUE = re.compile(r"[a-f0-9]{64}\Z")
 # Conservative line omission, not a guarantee for arbitrary unlabeled secrets.
 _LABEL = re.compile(
     r"(?i)\b(?:password|passwd|passphrase|secret|(?:access[ _-]?|refresh[ _-]?|api[ _-]?)?token|"
-    r"api[ _-]?key|authorization|cookie|otp|one[ -]?time[ -]?(?:password|code)|"
+    r"api[ _-]?key|authorization|cookie|otp|pin|passcode|one[ -]?time[ -]?(?:password|code)|"
     r"verification[ _-]?code|your\s+code|private[ _-]?key)\b\s*[\"']?\s*(?::|=|\bis\b|\s+\S)")
 _CREDENTIAL_FIELD = re.compile(
     r"(?i)\b[a-z0-9_]{0,64}(?:password|passwd|secret|token|api_key|private_key|access_key)"
@@ -39,9 +39,22 @@ _KEY_BLOCK = re.compile(
 _URL = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.I)
 _TOKEN = re.compile(
     r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"sk-[A-Za-z0-9_-]{20,}|(?:sk_(?:live|test)|rk_live|pk_live)_[A-Za-z0-9]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|"
     r"(?i:\bBearer\s+\S+)|\bAKIA[A-Z0-9]{16}|\bAIza[A-Za-z0-9_-]{35}|"
     r"\b\d{6,12}:[A-Za-z0-9_-]{30,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)")
+_CARD = re.compile(r"(?<!\w)[0-9](?:[ -]?[0-9]){12,}(?!\w)")
+
+
+def valid_card(value):
+    digits = value.replace(" ", "").replace("-", "")
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        number = int(digit) * (2 if index % 2 else 1)
+        total += number - 9 if number > 9 else number
+    return total % 10 == 0
 
 
 def sanitize(text, *, max_bytes=700, redact_terms=()):
@@ -65,6 +78,7 @@ def sanitize(text, *, max_bytes=700, redact_terms=()):
         safe = []
         for line in text.splitlines():
             if (_LABEL.search(line) or _CREDENTIAL_FIELD.search(line) or _TOKEN.search(line)
+                    or any(valid_card(match.group()) for match in _CARD.finditer(line))
                     or any(term.casefold() in line.casefold() for term in redact_terms)):
                 safe.append("[redacted]")
                 continue
@@ -557,20 +571,30 @@ class CrossBot:
             self.store = SharedStore(self.root, primary=self.primary, clock=self.clock, prune=False)
 
     def set_enabled(self, enabled):
-        self.open_store()
-        # Persist through the public profile-scoped plugin settings API. Off
-        # stops local collection even if a later purge encounters unsafe metadata.
+        # Local opt-out must complete even when opening/locking the store fails.
         if not enabled:
             self.active = False
+            self._pending.clear()
+            if self.task is not None:
+                self.task.cancel()
+                self.task = None
+            self.on_activation()
+        else:
+            self.open_store()
         getattr(self.ctx, "set_config", lambda *a: None)("cross_bot.enabled", enabled)
-        self.store.set_enabled(self.profile, enabled, bound=bool(self._bound_key))
+        try:
+            self.open_store()
+            self.store.set_enabled(self.profile, enabled, bound=bool(self._bound_key))
+        except Exception as exc:
+            if not enabled:
+                raise ValueError("Local export off; shared digest purge failed: " + self.error_text(exc)
+                                 + "; retry /proactivity cross off") from exc
+            raise
         self.active = enabled
         self.error = None
         self._pending.clear()
-        if not enabled and self.task is not None:
-            self.task.cancel()
-            self.task = None
-        self.on_activation()
+        if enabled:
+            self.on_activation()
         if enabled and self.connected:
             self.on_telegram_connect()
 

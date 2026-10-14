@@ -377,6 +377,74 @@ class CollectorTests(unittest.TestCase):
                 self.assertNotIn(secret, disk)
                 self.assertIn("[redacted", disk)
 
+    def test_payment_and_other_common_secrets_never_reach_collector_disk(self):
+        self.command("cross on")
+        fixtures = [prefix + "A" * 24 for prefix in
+                    ("sk_live_", "sk_test_", "rk_live_", "pk_live_", "ghp_", "gho_", "github_pat_",
+                     "xoxa-", "xoxb-", "xoxp-", "xoxr-")]
+        fixtures += ["eyJ" + "A" * 16 + "." + "B" * 16 + "." + "C" * 16,
+                     "pin is 1234", "PIN: 1234", "passcode 0000",
+                     "SERVICE_SECRET=synthetic-sensitive-value", "SERVICE_TOKEN=synthetic-sensitive-value",
+                     "SERVICE_PASSWORD=synthetic-sensitive-value", "SERVICE_API_KEY=synthetic-sensitive-value"]
+        for kind in ("", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "):
+            fixtures.append("-----BEGIN " + kind + "PRIVATE KEY-----\nsynthetic-sensitive-value\n"
+                            + "-----END " + kind + "PRIVATE KEY-----")
+        cards = ("4000000000006", "40000000000002", "400000000000006", "4000000000000002",
+                 "40000000000000006", "400000000000000002", "4000000000000000006",
+                 "4111111111111111")
+        for card in cards:
+            fixtures += [card, " ".join(card[i:i+4] for i in range(0, len(card), 4)),
+                         "-".join(card[i:i+4] for i in range(0, len(card), 4))]
+        for number, text in enumerate(fixtures):
+            with self.subTest(shape=number):
+                self.kw["turn_id"] = str(number)
+                padding = "" if text.startswith("-----BEGIN ") else "x" * 680 + " "
+                self.exchange(message="Useful draft\n" + padding + text + "\nKeep this",
+                              response="Useful draft\n" + text + "\nKeep this")
+                disk = json.loads((self.root / "profiles/specialist/digest.json").read_text())
+                latest = disk["exchanges"][-1]
+                self.assertEqual(latest["user"], "Useful draft\n[redacted]\nKeep this")
+                self.assertEqual(latest["assistant"], "Useful draft\n[redacted]\nKeep this")
+
+    def test_non_card_numbers_survive_collector_disk(self):
+        self.command("cross on")
+        fixtures = ("Phone: 202-555-0123", "Order ID: 4000000000000003", "Date: 2026-10-14",
+                    "Order ID: 140000000000000026", "Reference: 400000000000",
+                    "Reference: 40000000000000000002")
+        for number, text in enumerate(fixtures):
+            with self.subTest(shape=number):
+                self.kw["turn_id"] = str(number)
+                self.exchange(message=text, response=text)
+                latest = json.loads((self.root / "profiles/specialist/digest.json").read_text())["exchanges"][-1]
+                self.assertEqual(latest["user"], text)
+                self.assertEqual(latest["assistant"], text)
+
+    def test_busy_store_off_stops_locally_and_reports_unpurged_digest(self):
+        import fcntl
+        self.command("cross on")
+        self.exchange()
+        task = SimpleNamespace(cancel=unittest.mock.Mock())
+        self.cross.task = task
+        self.cross.on_activation = unittest.mock.Mock()
+        self.cross._pending["staged"] = {"user": "synthetic draft"}
+        file = self.root / "profiles/specialist/digest.json"
+        with (self.root / "store.lock").open("rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = self.command("cross off")
+        self.assertFalse(self.cross.active)
+        self.assertFalse(self.ctx.get_config("cross_bot.enabled"))
+        task.cancel.assert_called_once_with()
+        self.assertIsNone(self.cross.task)
+        self.cross.on_activation.assert_called_once_with()
+        self.assertEqual(self.cross._pending, {})
+        self.assertTrue(file.exists())
+        self.assertIn("local export off", result.lower())
+        self.assertIn("purge", result.lower())
+        self.assertIn("busy", result.lower())
+        self.assertIn("cross off", result.lower())
+        self.assertIn("export off", self.command("cross off"))
+        self.assertFalse(file.exists())
+
     def test_corrupt_digest_restart_then_off_purges_and_advances_generation(self):
         for body in ("unparseable synthetic body", '{"schema":999}'):
             with self.subTest(body=body):
@@ -625,6 +693,12 @@ class RegistrationTests(unittest.TestCase):
                     self.assertIn("on", commands["proactivity"]("cross on"))
                     blocked = json.loads(tools["proactivity"]["handler"]({"action": "set", "cross_bot_enabled": True}))
                     self.assertEqual(blocked["ask_user_to_send"], "/proactivity cross on")
+                    cross = next(fn.__self__ for fn in unloads if isinstance(fn.__self__, C.CrossBot))
+                    with patch.object(cross.store, "set_enabled", side_effect=ValueError("shared store is busy")):
+                        self.assertIn("purge", commands["proactivity"]("cross off"))
+                    self.assertEqual(set(tools), {"proactivity"} if profile == "default" else set())
+                    if profile == "default":
+                        self.assertEqual(tools["proactivity"]["schema"], P.SCHEMA)
                     self.assertIn("export off", commands["proactivity"]("cross off"))
                 self.assertEqual(set(tools), {"proactivity"} if profile == "default" else set())
                 if profile == "default":
