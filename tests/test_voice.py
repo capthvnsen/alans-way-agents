@@ -1,5 +1,6 @@
 """Texting voice: the Telegram note, the send-time polish, and the on/off switch."""
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 import importlib
@@ -196,10 +197,10 @@ class NoteTests(unittest.TestCase):
             self.assertIsNone(self.turn(voice(), "telegram", text=text))
 
     def test_note_carries_the_rules(self):
-        for rule in ("1-4 sentences", "contractions", "'Certainly!', 'Great question' or 'I'd be happy to'",
+        for rule in ("1-3 short sentences", "contractions", "'Certainly!', 'Great question' or 'I'd be happy to'",
                      "never headings", "emoji only if they use them", "only when they ask for steps",
                      "never at their expense and never with bad news", "pick one and say why",
-                     "stay complete: lead with a one-line answer", "real next step",
+                     "stay complete: lead with a one-line answer", "user owns a decision",
                      "approvals, CAPTCHA handbacks and safety checks work exactly as before",
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
@@ -217,6 +218,44 @@ class NoteTests(unittest.TestCase):
         for shared in (V.TEXTING, V.PLAIN, V.FORMAT):
             self.assertIn(shared, P.VOICE)
             self.assertIn(shared, V.NOTE)
+
+
+class CorpusRuleTests(unittest.TestCase):
+    """Offline prompt fixtures, not a claim about generated replies."""
+
+    def prompts(self):
+        p = P.Proactivity(SimpleNamespace(state=FakeState()))
+        s, now = P.Settings(timezone="UTC"), datetime(2026, 10, 7, 11, tzinfo=timezone.utc)
+        return {"chat": V.note_for("hey", platform="telegram"),
+                "group": V.note_for("hey", platform="telegram", chat_type="group"),
+                "check-in": p.prompt(s, timedelta(hours=3), now),
+                "asked": p.prompt(s, timedelta(hours=3), now, asked=True),
+                "brief": p.brief_prompt(s, now)}
+
+    def assert_rules(self, *rules):
+        for name, text in self.prompts().items():
+            for rule in rules:
+                with self.subTest(prompt=name, rule=rule):
+                    self.assertIn(rule, text)
+
+    def test_status_precedes_evidence_or_caveat(self):
+        self.assert_rules("Lead with the concrete status, then evidence or a caveat")
+
+    def test_progress_uses_first_person_action_and_next_step(self):
+        self.assert_rules("For work in progress, use first-person action and say what's next")
+
+    def test_questions_name_a_user_owned_decision(self):
+        self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
+                          "Otherwise give a next step or caveat when useful, then stop")
+
+    def test_owns_limits_failures_and_side_effects(self):
+        self.assert_rules("Own limits, failures and side effects plainly")
+
+    def test_warmth_and_openers_are_sparse(self):
+        self.assert_rules("Mild warmth is fine; use a short opener sparingly")
+
+    def test_casual_chat_is_one_to_three_short_sentences(self):
+        self.assertIn("Casual replies: 1-3 short sentences", self.prompts()["chat"])
 
 
 class OutputTests(unittest.TestCase):
