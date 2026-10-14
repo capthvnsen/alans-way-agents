@@ -257,6 +257,19 @@ class CorpusRuleTests(unittest.TestCase):
     def test_casual_chat_is_one_to_three_short_sentences(self):
         self.assertIn("Casual replies: 1-3 short sentences", self.prompts()["chat"])
 
+    def test_recaps_lead_with_headlines_and_offer_detail(self):
+        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets",
+                          "Offer detail ('want the details on any of these?')")
+
+    def test_quick_daily_recap_gets_the_rule_on_the_actual_turn(self):
+        note = V.note_for("hey, quick one: what did you get done today?", platform="telegram")
+        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets", note)
+        self.assertIn("Offer detail ('want the details on any of these?')", note)
+
+    def test_internals_stay_out_of_user_text_unless_technical_detail_is_requested(self):
+        self.assert_rules("In user-facing text, use task words, never tool names, tool calls,"
+                          " file paths, scripts, job or session IDs unless they ask for technical detail")
+
 
 class OutputTests(unittest.TestCase):
     TIC = "Certainly! ## Plan\nShip it."

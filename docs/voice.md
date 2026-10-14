@@ -52,6 +52,10 @@ affected.
    - long answers (code, plans, research) kept complete, led by a one-line answer;
    - a one-line heads-up before a long multi-step task;
    - status first, followed by evidence or a caveat;
+   - recaps as 2-3 headline outcomes in 1-3 sentences, without bullets, then an
+     offer of detail;
+   - task words in user-facing text, without tool names or calls, file paths,
+     scripts, or job/session IDs unless you ask for technical detail;
    - first-person action and what's next when working;
    - plain ownership of limits, failures and side effects;
    - mild warmth and short openers used sparingly;

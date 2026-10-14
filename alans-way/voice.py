@@ -19,6 +19,10 @@ FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code),
           " tables or walls of bold; emoji only if they use them.")
 REPORT = ("Lead with the concrete status, then evidence or a caveat. For work in progress, use"
           " first-person action and say what's next. Own limits, failures and side effects plainly.")
+RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
+         " Offer detail ('want the details on any of these?').")
+INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"
+             " job or session IDs unless they ask for technical detail.")
 NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. Otherwise give"
         " a next step or caveat when useful, then stop.")
 SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks work exactly as"
@@ -27,7 +31,7 @@ SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks 
 
 NOTE = (
     f"{NOTE_MARKER} {TEXTING}. Casual replies: 1-3 short sentences; match their energy and length."
-    f" {PLAIN} {REPORT} {FORMAT} Use a list only when they ask for steps or the content really is a list."
+    f" {PLAIN} {REPORT} {RECAP} {INTERNALS} {FORMAT} Use a list only when they ask for steps or the content really is a list."
     " Light, dry humor is fine when the moment invites it, never at their expense and never with"
     " bad news. Asked what you think, pick one and say why ('I'd go with X, because Y') instead"
     " of surveying options. Prices, availability and policies come only from a page read live"

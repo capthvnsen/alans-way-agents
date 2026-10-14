@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import zlib
 
-from .voice import FORMAT, NEXT, PLAIN, REPORT, TEXTING
+from .voice import FORMAT, INTERNALS, NEXT, PLAIN, RECAP, REPORT, TEXTING
 
 LEVELS = {"less": 240, "normal": 120, "more": 60}
 MAX_WAIT = timedelta(days=7)
@@ -160,7 +160,7 @@ USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|
          "hours <start>-<end>|tz <IANA zone>|brief on|off]")
 SAFETY = (" This is not new authorization: never send external messages, spend money, change"
           " credentials or permissions, touch production, or delete anything without asking first.")
-VOICE = (f" {TEXTING}. {REPORT} {PLAIN} No bullet lists; a numbered list"
+VOICE = (f" {TEXTING}. {REPORT} {RECAP} {INTERNALS} {PLAIN} No bullet lists; a numbered list"
          f" only for decisions you need from them. {FORMAT} Never mention timers, schedules,"
          f" check-ins or being prompted. Open differently from your recent messages to them. {NEXT}")
 
