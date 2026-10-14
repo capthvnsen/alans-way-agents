@@ -857,7 +857,7 @@ class CrossBot:
                 if self._settings:
                     eligibility = {k: getattr(self._settings, k) for k in
                                    ("timezone", "active_start", "active_end", "paused_until")}
-                    eligibility["busy"] = bool(self._turns or self._awaiting or self.owner._busy(self.clock()))
+                    eligibility["busy"] = bool(self._turns or self._imports or self._awaiting or self.owner._busy(self.clock()))
                 self.store.presence(self.profile, bound=bool(self._bound_key), eligibility=eligibility)
                 if receive:
                     self.receive_once()

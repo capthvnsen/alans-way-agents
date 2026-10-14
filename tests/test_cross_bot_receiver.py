@@ -378,6 +378,12 @@ class ReceiverRegressionTests(unittest.TestCase):
         self.assertEqual(self.cross.receive_once(), 'sent')
         self.assertEqual(self.ctx.sent[-1][1], 'agent:specialist:telegram:dm:84')
 
+    def test_active_import_presence_stays_busy(self):
+        self.start_import()
+        self.cross.tick(receive=False)
+        presence = json.loads((self.root / 'profiles/specialist/presence.json').read_text())
+        self.assertTrue(presence['eligibility']['busy'])
+
     def test_custom_routes_refuse_foreign_receiving_bot(self):
         routes = [{'platform': 'telegram', 'profile': 'specialist', 'bot_profile': 'other'}]
         with patch.object(C, 'receiving_routes', return_value=routes, create=True):
