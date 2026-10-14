@@ -37,7 +37,8 @@ _KEYWORDS = re.compile(
 _PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox", "akia", "aiza",
              "sk-ant-", "sk-", "eyj", "-----begin", "bearer ")
 _USERINFO = re.compile(r"://[^\s/@:]*:[^\s/@]*@")
-_DIGITS = re.compile(r"[0-9]{12}")
+# A fixed first character class lets the engine skip non-digits in C.
+_DIGITS = re.compile(r"[0-9]" * 12)
 _LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9_+\-/=])[A-Za-z0-9_+\-/=]{32,}")
 _LETTER = re.compile(r"[A-Za-z]")
 _DIGIT = re.compile(r"[0-9]")
@@ -46,22 +47,19 @@ _NUMBER_SEPARATORS = str.maketrans("", "", " -")
 
 def secret_signal(text):
     """Linear-time signal detection; called only after the raw byte-size gate."""
-    folded = text.casefold()
-    if (_KEYWORDS.search(folded.replace("_", " ")) or any(prefix in folded for prefix in _PREFIXES)
-            or _USERINFO.search(text)):
-        return True
     digit = _DIGIT.search(text)
-    if digit is None:
-        return False
-    # No twelve-digit run can start beyond the last twelve characters.
-    if len(text) - digit.start() >= 12 and _DIGITS.search(text.translate(_NUMBER_SEPARATORS)):
-        return True
-    for match in _LONG_TOKEN.finditer(text):
-        start, end = match.span()
-        if (end > digit.start() and _LETTER.search(text, start, end)
-                and (start <= digit.start() or _DIGIT.search(text, start, end))):
+    if digit is not None:
+        # Numeric/entropy signals short-circuit before scanning keyword labels.
+        if len(text) - digit.start() >= 12 and _DIGITS.search(text.translate(_NUMBER_SEPARATORS)):
             return True
-    return False
+        for match in _LONG_TOKEN.finditer(text):
+            start, end = match.span()
+            if (end > digit.start() and _LETTER.search(text, start, end)
+                    and (start <= digit.start() or _DIGIT.search(text, start, end))):
+                return True
+    folded = text.casefold()
+    return bool(_KEYWORDS.search(folded.replace("_", " "))
+                or any(prefix in folded for prefix in _PREFIXES) or _USERINFO.search(text))
 
 
 def sanitize(text, *, max_bytes=700, redact_terms=()):
