@@ -56,7 +56,7 @@ Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
 Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
-Current release baseline: `9d5818b5e484f81c3a103459dea7abade746e9c5` (`release/plugin-0.21.7`; includes #115).
+Stage 2 base: `f6bd48069a45342dff8a42f144b49ee635d59484` (`release/plugin-0.21.7`; includes #114 export/control).
 Paths below are relative to `alans-way/`. Five reviewed matches remain; no scanner
 rule was changed. Stage 2 queue/receiver code adds no findings.
 LOW findings document the loopback-only forward/check/app examples. The only

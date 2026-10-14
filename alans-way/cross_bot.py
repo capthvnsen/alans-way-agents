@@ -835,6 +835,9 @@ class CrossBot:
             if not self.active or self.closed:
                 return None
             try:
+                if not self._bound_key:
+                    status, _ = self.store.claim(self.profile, bound=False, eligible=False)
+                    return status
                 if not self.connected or not self.receiver_ready:
                     return "unavailable"
                 now = self.clock()

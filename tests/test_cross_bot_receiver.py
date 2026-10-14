@@ -74,7 +74,6 @@ class ReceiverTests(unittest.TestCase):
         self.enqueue()
         self.cross.receiver_ready = False
         self.assertEqual(self.cross.receive_once(), 'unavailable')
-        self.cross.receiver_ready = True
         self.owner.save({})
         self.cross.refresh_local()
         self.assertEqual(self.cross.receive_once(), 'unbound')
