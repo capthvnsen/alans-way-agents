@@ -8,7 +8,13 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(os.environ.get("HERMES_SCANNER_ROOT"), "upstream Hermes scanner not supplied")
+SCANNER_ROOT = os.environ.get("HERMES_SCANNER_ROOT")
+SCANNER_FILES = ("plugin_guard.py", "plugin_guard_context.py", "skills_guard.py")
+SCANNER_AVAILABLE = bool(SCANNER_ROOT) and all(
+    (Path(SCANNER_ROOT) / "tools" / name).is_file() for name in SCANNER_FILES)
+
+
+@unittest.skipUnless(SCANNER_AVAILABLE, "upstream Hermes scanner files not supplied")
 class PluginScanTests(unittest.TestCase):
     def test_only_reviewed_local_setup_and_scoped_mastodon_capabilities_are_flagged(self):
         code = '''from pathlib import Path

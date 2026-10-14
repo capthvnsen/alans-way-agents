@@ -1875,15 +1875,32 @@ process = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL,
 try:
     sys.exit(process.wait(timeout=float(sys.argv[1])))
 except subprocess.TimeoutExpired:
+    cleanup_failed = False
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        try:
+            result = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            cleanup_failed = result.returncode != 0
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup_failed = True
+        if cleanup_failed:
+            print("Probe process-tree cleanup failed: taskkill failed or unavailable; descendants may remain.", file=sys.stderr)
+            try:
+                process.kill()
+            except OSError:
+                print("Probe direct-child termination failed.", file=sys.stderr)
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    process.wait()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("Probe process cleanup failed: child did not exit within 5 seconds.", file=sys.stderr)
+        sys.exit(125)
+    if cleanup_failed:
+        sys.exit(125)
     sys.exit(124)' "$@"
 }
 COMPUTER_API=0 _probe_rc=0

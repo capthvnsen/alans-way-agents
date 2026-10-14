@@ -166,9 +166,34 @@ the busy-mode choice and marker above are written only through the Hermes CLI
 after the user answers.
 
 ```sh
-mkdir ~/alans-way-agents || exit 1  # use a fresh directory
-git -C ~/alans-way-agents init || exit 1
-git -C ~/alans-way-agents remote add origin https://github.com/capthvnsen/alans-way-agents || exit 1
+# Prepare a new checkout, or validate and reuse the app setup prompt's clone.
+if [ ! -e ~/alans-way-agents ] && [ ! -L ~/alans-way-agents ]; then
+    mkdir ~/alans-way-agents || exit 1
+    git -C ~/alans-way-agents init || exit 1
+    git -C ~/alans-way-agents remote add origin https://github.com/capthvnsen/alans-way-agents || exit 1
+fi
+# Check the destination before any fetch, including effective insteadOf rewrites.
+python3 -c 'import os, subprocess, sys
+path = os.path.expanduser("~/alans-way-agents")
+def stop(reason):
+    sys.exit("Setup checkout unavailable: " + reason + "; preserve it and resolve before retrying.")
+def git(*args):
+    return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,
+                          capture_output=True, text=True).stdout.splitlines()
+try:
+    if not os.path.exists(os.path.join(path, ".git")) or git("rev-parse", "--is-inside-work-tree") != ["true"]:
+        stop("existing path is not a working clone")
+    raw = git("config", "--get-all", "remote.origin.url")
+    effective = git("remote", "get-url", "origin")
+    allowed = {prefix + "capthvnsen/alans-way-agents" + suffix
+               for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/")
+               for suffix in ("", ".git")}
+    if len(raw) != 1 or len(effective) != 1 or raw[0] not in allowed or effective[0] not in allowed:
+        stop("origin must have one canonical recorded and effective fetch URL")
+    if git("status", "--porcelain", "--untracked-files=all"):
+        stop("clone has local changes or untracked files")
+except (OSError, subprocess.SubprocessError):
+    stop("clone inspection failed or timed out")' || exit 1
 # The commit this install was reviewed and checked out at, from Hermes' own
 # install record (catalog pin first, then a source-validated revision).
 # Inside a profile's gateway HERMES_HOME already points at that profile's home;

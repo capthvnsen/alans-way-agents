@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -143,7 +144,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                        "config set display.busy_input_mode steer",
                        "config set display.busy_input_mode interrupt"):
             self.assertIn(phrase, self.normalized)
-        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\nmkdir"))
+        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\n# Prepare"))
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
@@ -275,20 +276,97 @@ class SetupPinProcedureTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), self.SHA)
 
     def test_unrecorded_install_fetches_and_checks_out_the_release_tag(self):
-        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                 "commit", "--allow-empty", "-qm", "fixture")
-        self.git("tag", "v0.21.5")
-        block = re.search(r"```sh\n(mkdir .*?)\n~/alans-way-agents/setup.sh",
-                          SKILL_PATH.read_text(), re.DOTALL).group(1)
-        # Substitute only fetch transport; no setup script or remote host runs.
-        block = block.replace("https://github.com/capthvnsen/alans-way-agents", self.source.as_uri(), 1)
-        result = subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root)),
-                                capture_output=True, text=True, timeout=15)
+        self.prepare_checkout()
+        (self.home / "plugins" / ".install-metadata.json").unlink()
+        result = self.procedure()
         self.assertEqual(result.returncode, 0, result.stderr)
         checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
                                    "describe", "--tags", "--exact-match"],
                                   capture_output=True, text=True, env=self.env)
         self.assertEqual(checkout.stdout.strip(), "v0.21.5")
+
+    def prepare_checkout(self, existing=False):
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "first")
+        self.git("tag", "-f", "v0.21.5")
+        self.destination = self.root / "alans-way-agents"
+        if existing:
+            subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],
+                           check=True, env=self.env)
+            subprocess.run(["git", "-C", str(self.destination), "remote", "set-url", "origin",
+                            "https://github.com/capthvnsen/alans-way-agents"], check=True, env=self.env)
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "installed")
+        self.revision = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"],
+                                                 env=self.env, text=True).strip()
+        (self.home / "plugins" / ".install-metadata.json").write_text(json.dumps({"alans-way": {
+            "source": "https://github.com/capthvnsen/alans-way-agents#alans-way",
+            "revision": self.revision}}))
+        # Only the transport is mocked: origin/config/status validation uses real Git.
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.fetch_log = self.root / "fetches"
+        real_git = shutil.which("git")
+        wrapper = self.bin / "git"
+        wrapper.write_text(f"#!{sys.executable}\n" +
+            "import os, pathlib, subprocess, sys\nargs = sys.argv[1:]\n" +
+            f"if len(args) > 2 and args[2] == 'fetch':\n    pathlib.Path({str(self.fetch_log)!r}).touch()\n" +
+            f"    args[4] = {str(self.source)!r}\n" +
+            f"sys.exit(subprocess.call([{real_git!r}, *args]))\n")
+        wrapper.chmod(0o755)
+
+    def procedure(self):
+        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n~/alans-way-agents/setup.sh",
+                          SKILL_PATH.read_text(), re.S).group(1)
+        return subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root),
+                              PATH=str(self.bin) + os.pathsep + os.environ["PATH"]),
+                              capture_output=True, text=True, timeout=15)
+
+    def test_new_checkout_rejects_effective_origin_rewrite_before_fetch(self):
+        self.prepare_checkout()
+        config = self.root / "gitconfig"
+        config.write_text('[url "' + self.source.as_uri() + '"]\n'
+                          '    insteadOf = https://github.com/capthvnsen/alans-way-agents\n')
+        self.env["GIT_CONFIG_GLOBAL"] = str(config)
+        result = self.procedure()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.fetch_log.exists())
+        self.assertIn("Setup checkout unavailable", result.stderr)
+
+    def test_clean_existing_clone_fetches_and_checks_out_installed_revision(self):
+        self.prepare_checkout(existing=True)
+        result = self.procedure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.fetch_log.exists())
+        head = subprocess.check_output(["git", "-C", str(self.destination), "rev-parse", "HEAD"], text=True)
+        self.assertEqual(head.strip(), self.revision)
+
+    def test_invalid_existing_clone_stops_with_reason_before_fetch(self):
+        for invalid in ("foreign", "multiple", "rewrite", "dirty", "plain-directory"):
+            with self.subTest(invalid=invalid):
+                # Each case has independent Git config and destination contents.
+                if hasattr(self, "destination"):
+                    shutil.rmtree(self.destination)
+                    shutil.rmtree(self.bin)
+                self.prepare_checkout(existing=True)
+                git = ["git", "-C", str(self.destination)]
+                if invalid == "foreign":
+                    subprocess.run([*git, "remote", "set-url", "origin", "https://example.invalid/foreign"], check=True)
+                elif invalid == "multiple":
+                    subprocess.run([*git, "config", "--add", "remote.origin.url", "https://github.com/capthvnsen/alans-way-agents.git"], check=True)
+                elif invalid == "rewrite":
+                    subprocess.run([*git, "config", "url.https://example.invalid/foreign.insteadOf",
+                                    "https://github.com/capthvnsen/alans-way-agents"], check=True)
+                elif invalid == "dirty":
+                    (self.destination / "untracked").write_text("preserve me")
+                else:
+                    shutil.rmtree(self.destination / ".git")
+                result = self.procedure()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.fetch_log.exists())
+                self.assertIn("Setup checkout unavailable", result.stderr)
+                if invalid == "dirty":
+                    self.assertEqual((self.destination / "untracked").read_text(), "preserve me")
 
     def test_catalog_pin_outranks_a_revision_and_missing_record_allows_tag_fallback(self):
         result = self.resolve({"source": "catalog", "catalog": {"sha": self.SHA}, "revision": "a" * 40})

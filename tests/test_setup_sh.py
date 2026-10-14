@@ -1,6 +1,8 @@
 """setup.sh CLI: verify strictness, bot-id derivation, timezone, and doc flags."""
 from pathlib import Path
 import json
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "setup.sh"
@@ -2152,6 +2155,51 @@ class ProactivityIntegrationTests(IntegrationBase, unittest.TestCase):
         calls = read_log(log)
         self.assertIn("proactivity bind --session-key agent:main:telegram:dm:1\n", calls)
         self.assertIn("proactivity set --timezone Europe/Berlin", calls)
+
+
+class WindowsProbeCleanupTests(unittest.TestCase):
+    """Exercise the exact embedded helper with Windows subprocess doubles."""
+
+    def cleanup(self, taskkill, final_wait=0):
+        code = re.search(r"run_with_timeout\(\) \{\s*python3 -c '(.*?)' \"\$@\"",
+                         SCRIPT.read_text(), re.S).group(1)
+        process = mock.Mock(pid=123)
+        process.wait.side_effect = [subprocess.TimeoutExpired("probe", 1), final_wait]
+        error = io.StringIO()
+        with mock.patch.object(os, "name", "nt"), \
+             mock.patch.object(sys, "argv", ["helper", "1", "probe"]), \
+             mock.patch.object(subprocess, "Popen", return_value=process), \
+             mock.patch.object(subprocess, "run", **({"side_effect": taskkill} if isinstance(taskkill, Exception)
+                                                       else {"return_value": taskkill})) as kill, \
+             contextlib.redirect_stderr(error):
+            with self.assertRaises(SystemExit) as result:
+                exec(compile(code, "setup.sh:run_with_timeout", "exec"), {})
+        self.assertTrue(all(call.kwargs.get("timeout") is not None
+                            for call in process.wait.call_args_list))
+        kill.assert_called_once_with(["taskkill", "/PID", "123", "/T", "/F"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return result.exception.code, error.getvalue(), process
+
+    def test_failed_missing_or_timed_out_taskkill_reports_tree_failure_and_kills_child(self):
+        for failure in (subprocess.CompletedProcess([], 1), FileNotFoundError("taskkill"),
+                        subprocess.TimeoutExpired("taskkill", 5)):
+            with self.subTest(failure=type(failure).__name__):
+                code, error, process = self.cleanup(failure)
+                self.assertEqual(code, 125)
+                self.assertIn("process-tree cleanup failed", error)
+                process.kill.assert_called_once_with()
+
+    def test_successful_tree_cleanup_returns_timeout_with_a_bounded_reap(self):
+        code, error, process = self.cleanup(subprocess.CompletedProcess([], 0))
+        self.assertEqual(code, 124)
+        self.assertEqual(error, "")
+        process.kill.assert_not_called()
+
+    def test_child_that_cannot_be_reaped_reports_cleanup_failure(self):
+        code, error, _ = self.cleanup(subprocess.CompletedProcess([], 0),
+                                      subprocess.TimeoutExpired("probe", 5))
+        self.assertEqual(code, 125)
+        self.assertIn("process cleanup failed", error)
 
 
 class ComputerProbeShimTests(unittest.TestCase):
