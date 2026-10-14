@@ -41,7 +41,7 @@ affected.
 
 1. **A style note on every Telegram-bound turn** (`pre_llm_call`). Hermes appends
    it to that turn's user message, never to the system prompt. It asks for:
-   - 1-4 sentences by default, matching your energy and length;
+   - 1-3 short sentences for casual replies, matching your energy and length;
    - contractions and plain words, with no "Certainly!", "Great question" or "I'd
      be happy to";
    - no headings or walls of bold, and lists only when you ask for steps or the
@@ -51,7 +51,15 @@ affected.
    - a real pick with a reason when you ask what it thinks;
    - long answers (code, plans, research) kept complete, led by a one-line answer;
    - a one-line heads-up before a long multi-step task;
-   - a closing question only when there's a real next step.
+   - status first, followed by evidence or a caveat;
+   - recaps as 2-3 headline outcomes in 1-3 sentences, without bullets, then an
+     offer of detail;
+   - task words in user-facing text, without tool names or calls, file paths,
+     scripts, or job/session IDs unless you ask for technical detail;
+   - first-person action and what's next when working;
+   - plain ownership of limits, failures and side effects;
+   - mild warmth and short openers used sparingly;
+   - questions only for decisions you own, naming the choice or needed detail.
 
    In groups it also keeps replies shorter and talks to whoever asked.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is

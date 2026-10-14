@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import zlib
 
-from .voice import FORMAT, PLAIN, TEXTING
+from .voice import FORMAT, INTERNALS, NEXT, PLAIN, RECAP, REPORT, TEXTING
 
 LEVELS = {"less": 240, "normal": 120, "more": 60}
 MAX_WAIT = timedelta(days=7)
@@ -160,10 +160,9 @@ USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|
          "hours <start>-<end>|tz <IANA zone>|brief on|off]")
 SAFETY = (" This is not new authorization: never send external messages, spend money, change"
           " credentials or permissions, touch production, or delete anything without asking first.")
-VOICE = (f" {TEXTING}: lead with the concrete thing. {PLAIN} No bullet lists; a numbered list"
+VOICE = (f" {TEXTING}. {REPORT} {RECAP} {INTERNALS} {PLAIN} No bullet lists; a numbered list"
          f" only for decisions you need from them. {FORMAT} Never mention timers, schedules,"
-         " check-ins or being prompted. Open differently from your recent messages to them. When"
-         " something needs their call, end with a short question or offer, such as 'Want me to ...?'")
+         f" check-ins or being prompted. Open differently from your recent messages to them. {NEXT}")
 
 
 def caller_session_key():
@@ -393,7 +392,7 @@ class Proactivity:
         return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
                 f" {self._when(s, now)} Pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then say what you did;"
-                " (b) offer one specific thing you could do for them; or (c) ask one useful question."
+                " (b) offer one specific thing you could do for them; or (c) ask about a decision they own."
                 " Build it around one specific open thread from your memory of their goals and recent"
                 " conversations, and name it." + VOICE + " Keep it to 1-3 short sentences." + SAFETY + end)
 
