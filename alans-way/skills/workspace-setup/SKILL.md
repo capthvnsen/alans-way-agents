@@ -196,7 +196,8 @@ If timezone is empty or a fixed abbreviation (MST, EST, PST, CST, UTC offsets)
 rather than an IANA zone, explain “Fixed timezones do not follow daylight-saving
 changes, so reminders can be an hour off.” In the grouped question, ask the user's
 city; don't guess, then offer the matching IANA
-zone for an explicit answer (clarify ambiguous cities). Preserve an existing IANA
+zone for an explicit answer (clarify ambiguous cities). If the presentation offer
+was skipped, ask only the separate timezone question. Preserve an existing IANA
 zone unless the user explicitly revisits it. Never change it silently. With
 no city or explicit zone answer, leave timezone untouched and
 continue the other setup work. Pass only the confirmed zone to setup's

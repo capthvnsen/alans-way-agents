@@ -115,6 +115,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "unresolved timezone or a failed timezone write/readback",
                      "does not block the presentation marker",
                      "perform the timezone check below even when a saved answer skips",
+                     "ask only the separate timezone question",
                      "defer the setup invocation that requires it"):
             self.assertIn(rule, step)
 
