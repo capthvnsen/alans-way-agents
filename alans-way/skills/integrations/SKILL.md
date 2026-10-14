@@ -24,7 +24,11 @@ If the native route is missing or incompatible, report that before proceeding.
 | X/Twitter | [Hermes xurl](references/hermes-native.md#recipe-x) |
 | OneDrive, Dropbox, WebDAV, S3 or other cloud files beyond Google | [rclone](references/rclone.md) |
 | Personal tasks with due dates and recurrence | [Taskwarrior](references/taskwarrior.md) |
-| Mastodon account | [Mastodon.py](references/mastodon.md) |
+
+Social posting isn't built into this plugin. Reuse a separately installed
+Hermes route only when it is available and authorized. For Mastodon, point the
+user to the [human-run recipe](https://github.com/capthvnsen/alans-way-agents/blob/main/docs/integrations/mastodon.md);
+it is repository documentation for the user to run, not a bot connector.
 
 For local notes/files, use Hermes' file tools or Obsidian skill; no account is
 needed. Agent execution plans stay in Hermes' todo/Kanban tools. For another

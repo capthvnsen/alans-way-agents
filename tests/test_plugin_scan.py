@@ -23,11 +23,12 @@ from tools.plugin_guard import scan_plugin, should_allow_plugin_install
 result = scan_plugin(Path("alans-way"))
 findings = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
 expected = Counter({
-    ("python_os_environ", "high", "skills/integrations/references/mastodon.md"): 1,
     ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"): 2,
     ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3})
 assert findings == expected, (findings, expected, result.findings)
-assert result.verdict == "caution", result.verdict
+assert result.verdict == "safe", result.verdict
+assert should_allow_plugin_install(result)[0] is True
+result.verdict = "caution"
 assert should_allow_plugin_install(result)[0] is None
 assert should_allow_plugin_install(result, force=True)[0] is True
 result.verdict = "dangerous"

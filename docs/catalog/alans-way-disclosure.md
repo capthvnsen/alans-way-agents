@@ -8,13 +8,13 @@ final submission commit.
 ## Disclosure text
 
 The bundled skills include optional integrations and local setup commands.
-After dependency and account consent, the Mastodon recipe runs a library
-identity probe that reads `MASTODON_API_BASE_URL` and `MASTODON_ACCESS_TOKEN`
-from its process environment and authenticates to the user's chosen HTTPS
-instance. The user enters the token privately and explicitly grants only that
-profile's token passthrough. The probe prints only the account handle; it does
-not dump the environment or print the token. Posting requires separately
-agreed scopes and fresh explicit approval.
+Social posting is not built into the plugin. The Mastodon recipe was removed
+from `alans-way/` and moved to `docs/integrations/mastodon.md` as human-run
+repository documentation. The bot no longer ships that connector or its
+identity probe, and the integration skill only points the user to the document.
+The human-run recipe still discloses its two-key environment access and account
+scopes; moving it drops a plugin capability rather than hiding an executable
+bot instruction from scanning.
 
 Workspace setup's two Git subprocess helpers perform read-only local checks
 with five-second timeouts: one validates the setup checkout's origin and
@@ -25,38 +25,43 @@ computer's loopback interface, verify the viewer URL with curl, and enter that
 URL in the app. The forward ends after 30 minutes or Ctrl-C. The human enters
 the VNC password privately.
 
-Manual/file installs of this candidate receive CAUTION from the scanner below
-and need review and explicit confirmation of the exact tree. Setup consent,
-dependency consent and `--enable` are separate. `--force` confirms CAUTION and
-can replace an install; it cannot override DANGEROUS. Catalog installs use the
-catalog's reviewed commit, which does not approve arbitrary newer revisions.
+Manual/file installs of this candidate receive SAFE from the scanner below;
+MEDIUM/LOW findings alone require no scanner confirmation. Setup and dependency
+consent remain separate. If a later revision receives CAUTION, it needs review
+and explicit confirmation of the exact tree. `--enable` does not confirm a
+scanner warning. `--force` confirms CAUTION and can replace an install; it
+cannot override DANGEROUS. Catalog installs use the catalog's reviewed commit,
+which does not approve arbitrary newer revisions.
 
 ## Reviewed scanner inventory
 
-Plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
+Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
+Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
-Paths below are relative to `alans-way/`. All six matches are true capabilities
-and are preserved; no scanner rule or matched example was changed. The HIGH
-rule's potential-environment-dump label is broader than the two-key probe,
-but its environment access is real. LOW findings document the loopback-only
-forward/check/app examples.
+Paths below are relative to `alans-way/`. The remaining five matches are true
+capabilities and their commands are preserved; no scanner rule was changed.
+LOW findings document the loopback-only forward/check/app examples. The only
+HIGH finding (`python_os_environ` at the former
+`skills/integrations/references/mastodon.md:45`) is gone because the plugin no
+longer ships the recipe. Its environment-reading command remains visible in
+the human-run document outside the plugin.
 
 | File:line | Rule | Severity | Matched text | Before → after |
 |---|---|---|---|---|
-| `skills/integrations/references/mastodon.md:45` | `python_os_environ` | HIGH | `os.environ["MASTODON_API_BASE_URL"]`, `os.environ["MASTODON_ACCESS_TOKEN"]` in the identity probe | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:181` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:236` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:340` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:346` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:349` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:180` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:235` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:339` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:345` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:348` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
 
-Verdict before and after: **CAUTION**, 1 HIGH + 2 MEDIUM + 3 LOW.
-There are no false positives to reword without hiding actual instructions.
+Verdict: **CAUTION → SAFE**. Inventory: 1 HIGH + 2 MEDIUM + 3 LOW →
+0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
+There are no remaining false positives to reword.
 
 `tests/test_plugin_scan.py` asserts exact counts by rule, severity and file,
-plus the CAUTION/confirmation and DANGEROUS rejection gates. Supply the three
-upstream files under `$HERMES_SCANNER_ROOT/tools/` to run it locally; it skips
+plus SAFE allowance, CAUTION/confirmation and DANGEROUS rejection gates. Supply
+the three upstream files under `$HERMES_SCANNER_ROOT/tools/` to run it locally; it skips
 when those files are absent. The inventory assertion requires review of any
 added or removed occurrence, even when it shares a previously allowed rule
 and file.

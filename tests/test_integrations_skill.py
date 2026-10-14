@@ -12,7 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = ROOT / "alans-way" / "skills" / "integrations"
 SKILL = SKILL_DIR / "SKILL.md"
-RECIPES = {"hermes-native.md", "rclone.md", "taskwarrior.md", "mastodon.md"}
+RECIPES = {"hermes-native.md", "rclone.md", "taskwarrior.md"}
 # Verified at Hermes 1f6c02c07c and official homeassistant a4e311e433.
 TOOLS = {"skills_list", "skill_view", "terminal", "cronjob_manage",
          "ha_list_entities", "ha_get_state"}
@@ -107,12 +107,12 @@ class IntegrationsSkillTests(unittest.TestCase):
             if path.is_file():
                 self.assertEqual(publication.inspect_text(str(path.relative_to(ROOT)), path.read_text()), [])
                 self.assertNotRegex(path.read_text(), r"\b(?:TODO|TBD|FIXME)\b|(?i:\b(?:YOUR_TOKEN|SECRET_TOKEN|changeme)\b)")
-                self.assertNotRegex(path.read_text(), r"(?m)^\s*(?:access_token|refresh_token|client_secret|HASS_TOKEN|MASTODON_ACCESS_TOKEN)\s*=\s*['\"][^'\"]+['\"]")
+                self.assertNotRegex(path.read_text(), r"(?m)^\s*(?:access_token|refresh_token|client_secret|HASS_TOKEN|[A-Z_]+_ACCESS_TOKEN)\s*=\s*['\"][^'\"]+['\"]")
 
     def test_installs_are_pinned_and_require_consent(self):
         text = self.read_all()
         self.assertIn("Ask before installing any package", text)
-        for filename, pin in (("rclone.md", "1.75.2"), ("taskwarrior.md", "3.5.0"), ("mastodon.md", "2.2.2")):
+        for filename, pin in (("rclone.md", "1.75.2"), ("taskwarrior.md", "3.5.0")):
             recipe = (SKILL_DIR / "references" / filename).read_text()
             self.assertIn(pin, recipe)
             self.assertIn("Install:", recipe)
@@ -192,13 +192,11 @@ class IntegrationsSkillTests(unittest.TestCase):
         self.assertIn("ask before installing or replacing any toolchain", text)
 
     def test_refused_commits_cannot_switch_to_api(self):
-        for path in (SKILL, SKILL_DIR / "references" / "mastodon.md"):
-            with self.subTest(path=path.name):
-                text = " ".join(path.read_text().split())
-                for outcome in ("declined", "approval_timeout", "approval_unavailable"):
-                    self.assertIn(f"`{outcome}`", text)
-                self.assertIn("never complete it through another tool", text)
-                self.assertIn("fresh explicit approval", text)
+        text = " ".join(self.read_skill().split())
+        for outcome in ("declined", "approval_timeout", "approval_unavailable"):
+            self.assertIn(f"`{outcome}`", text)
+        self.assertIn("never complete it through another tool", text)
+        self.assertIn("fresh explicit approval", text)
 
     def test_himalaya_pinned_binary_is_mit_only(self):
         text = (SKILL_DIR / "references" / "hermes-native.md").read_text()
