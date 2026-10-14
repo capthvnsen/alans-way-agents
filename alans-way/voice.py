@@ -53,7 +53,10 @@ _OPENER = re.compile(
     r"|(?:great question|good question|what a great question)[!.]) *\n?", re.IGNORECASE)
 _CORNER_QUOTES = "「」『』﹁﹂﹃﹄"
 # Every line break str.splitlines() honours except "\n": CR, VT, FF, FS, GS, RS, NEL, LS, PS.
-_OTHER_LINE_BREAKS = "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+_OTHER_LINE_BREAKS = ("\r\v\f"
+                      "\x1c\x1d"  # file separator, group separator
+                      "\x1e\x85"  # record separator, next line
+                      "\u2028\u2029")  # line separator, paragraph separator
 
 
 def _is_quote(ch):

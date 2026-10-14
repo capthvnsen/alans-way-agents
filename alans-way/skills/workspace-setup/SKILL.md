@@ -15,6 +15,39 @@ Hermes runs on may be a Linux VPS, a macOS virtual machine or a Windows PC. Host
 differ per OS: use `connect-mac.sh` on a Mac, `connect-windows.ps1` on Windows
 and `connect-linux.sh` on Linux; everything else in this skill is the same.
 
+Browser-only setup needs stock Hermes `>= 0.21.5`. Desktop control through
+`alans-way-computer` also needs `tools.computer_use.backend.ComputerUseProvider`,
+introduced in Hermes commit
+[`63f5e0ea45726c5d8d7d207d140613997730aab3`](https://github.com/NousResearch/hermes-agent/commit/63f5e0ea45726c5d8d7d207d140613997730aab3)
+and verified in `6e7b83a2f1`. A version string alone does not establish this API.
+Set `HERMES_PYTHON` to the interpreter belonging to the selected Hermes install
+(`python.exe` on Windows); setup probes that interpreter with a bounded timeout.
+“API absent” means the provider module/class is missing; “probe failed”,
+“timed out”, or “probe unavailable” means support is unknown, so check the
+interpreter/dependencies before retrying. For an absent API, offer a supported
+Hermes upgrade with the user's consent, then rerun setup and
+`hermes -p <profile> computer-use doctor`. Browser setup can finish meanwhile;
+do not claim desktop control is ready until the provider is selected and its
+doctor succeeds.
+
+## Reviewed plugin install confirmation
+
+For a manual/file install, Hermes scans the candidate tree before installing.
+--enable does not confirm a security warning; dependency consent is separate.
+If a non-interactive install stops at CAUTION, review every finding against
+its exact source revision and explain the capabilities to the user. The scoped
+Mastodon identity probe, for example, reads only its granted environment keys
+and calls the chosen instance; it prints only the account handle. The pin
+resolver starts bounded, read-only local Git commands; the SSH-forward
+examples name only loopback endpoints. Review these findings too. Obtain
+explicit consent for that reviewed tree before retrying the same identifier
+and exact `--ref <40-character SHA>` with `hermes -p <profile> plugins install
+<identifier> --ref <SHA> --enable --force`. `--force` confirms a caution verdict
+and can replace an existing install; inspect that replacement too. It cannot
+override a dangerous verdict. Stop for unknown findings or absent consent.
+Never disable scanning. Review changed revisions again; setup consent alone
+is neither scan confirmation nor dependency consent.
+
 ## Drive the other repo; don't reimplement it
 
 Fetch this page and follow it for Tailscale, the Mac app, and SSH keys. Both
@@ -23,8 +56,13 @@ against: do not substitute `main` or a newer tip. This repo's clone is pinned
 to the commit this install was reviewed and checked out at. A catalog install
 records that sha in the profile's `plugins/.install-metadata.json`; read it,
 check it out and hand it to `setup.sh` as `--repo-ref`, which hard-stops if
-the clone is not at that commit: fix the checkout, never drop the flag. Only
-when there is no catalog record (a manual or developer install) is the pin the
+the clone is not at that commit: fix the checkout, never drop the flag.
+Validated file:// and direct Git installs use the installer-recorded `revision`
+instead. For file sources, require a Git repository with exactly one recorded
+origin URL; both that URL and Git's effective fetch URL after `insteadOf` must
+identify this repository, as in the aw#156 origin rules. Foreign push URLs do
+not change fetch identity. Reject invalid records without tag fallback. Only
+when there is no installer record (an unrecorded manual install) is the pin the
 release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
@@ -128,24 +166,71 @@ the busy-mode choice and marker above are written only through the Hermes CLI
 after the user answers.
 
 ```sh
-git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents
+mkdir ~/alans-way-agents || exit 1  # use a fresh directory
+git -C ~/alans-way-agents init || exit 1
+git -C ~/alans-way-agents remote add origin https://github.com/capthvnsen/alans-way-agents || exit 1
 # The commit this install was reviewed and checked out at, from Hermes' own
-# install record (empty when the plugin was not installed from the catalog).
+# install record (catalog pin first, then a source-validated revision).
 # Inside a profile's gateway HERMES_HOME already points at that profile's home;
 # outside it, for --profile <name> read profiles/<name>/plugins/ instead.
-PIN=$(python3 -c 'import json, os, re
+PIN=$(python3 -c 'import json, os, re, subprocess, sys
+from urllib.parse import urlsplit, unquote
 home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+def stop():
+    sys.exit("Setup pin unavailable: review installer metadata/source origin; do not fall back to a tag.")
 try:
-    row = json.load(open(os.path.join(home, "plugins", ".install-metadata.json"))).get("alans-way", {})
-except Exception:
-    row = {}
-cat = row.get("catalog") if isinstance(row, dict) else {}
-sha = str((cat or {}).get("sha") or (cat or {}).get("pin") or "")
-print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
-# No catalog record: the release tag is the pin. It must exist; if the checkout
+    rows = json.load(open(os.path.join(home, "plugins", ".install-metadata.json")))
+except FileNotFoundError:
+    rows = {}
+except (OSError, ValueError):
+    stop()
+if not isinstance(rows, dict):
+    stop()
+row = rows.get("alans-way", {})
+if not isinstance(row, dict):
+    stop()
+cat = row.get("catalog")
+if isinstance(cat, dict):
+    sha = str(cat.get("sha") or cat.get("pin") or "")
+elif row.get("catalog_name"):
+    sha = str(row.get("revision") or "")
+elif row:
+    allowed = {prefix + "capthvnsen/alans-way-agents" + suffix
+               for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/")
+               for suffix in ("", ".git")}
+    source = str(row.get("source") or "")
+    base, _, fragment = source.partition("#")
+    if fragment not in ("", "alans-way"):
+        stop()
+    if base.startswith("file://"):
+        url = urlsplit(base)
+        path = unquote(url.path)
+        if url.netloc or url.query or not os.path.isabs(path) or not os.path.exists(os.path.join(path, ".git")):
+            stop()
+        def git(*args):
+            return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,
+                                  capture_output=True, text=True).stdout.splitlines()
+        try:
+            raw = git("config", "--get-all", "remote.origin.url")
+            effective = git("remote", "get-url", "origin")
+        except (OSError, subprocess.SubprocessError):
+            stop()
+        if len(raw) != 1 or len(effective) != 1 or raw[0] not in allowed or effective[0] not in allowed:
+            stop()
+    elif base not in allowed:
+        stop()
+    sha = str(row.get("revision") or "")
+else:
+    sha = ""
+if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+    stop()
+print(sha)') || exit 1
+# No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
 [ -n "$PIN" ] || PIN=v0.21.5
-git -C ~/alans-way-agents checkout "$PIN"
+case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
+git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
+git -C ~/alans-way-agents checkout "$PIN" || exit 1
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
     --desktop-ref 31ac0de9ee22307e2df03feb08a5e5217a90243b \
@@ -156,7 +241,12 @@ git -C ~/alans-way-agents checkout "$PIN"
 ```
 
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
-audit. With `--restart` it restarts the gateway last, detached, about ten
+audit with the same profile and any browser/service skip flags. `--verify`
+returns 0 for a complete local audit, 1 for failed required checks, and 2 for
+a partial install (warnings or skipped browser/services); report pending
+capabilities explicitly. A local audit does not verify computer-side viewing,
+desktop permissions or Telegram delivery. With `--restart` it restarts the
+gateway last, detached, about ten
 seconds after it prints its summary. If it asks which Telegram route is the primary, pick the bot matching
 the conversation you're in unless the user said otherwise: do not bind a
 different bot's route silently.
@@ -212,6 +302,30 @@ different bot's route silently.
    startup config that writes it). The human pastes the URL and password
    into the app's Settings (Remote desktop connection); tell them where the
    password is, do not paste its value into chat.
+   If the viewer binds **127.0.0.1 only**, that tailnet URL will fail.
+   Offer a temporary SSH forward over the already paired tailnet; obtain
+   explicit consent before starting it, and never change the listener or
+   expose a public port automatically. Have the human run this in a terminal
+   on their computer (a Linux VM with `sleep`), using their existing pinned
+   VM host key and available local port 16080:
+
+   ```sh
+   ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
+     -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
+     -L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'
+   ```
+
+   It forwards only to computer loopback and ends after 30 minutes; Ctrl-C
+   closes it sooner. If SSH/key trust is not ready, finish that human handoff
+   first. In another terminal, verify **from the user's computer**:
+   `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null`
+   (Windows: `curl.exe` and `-o NUL`). Then open that URL in the computer's
+   browser and confirm the VM desktop appears. Only after both succeed, use
+   `http://127.0.0.1:16080/vnc.html` in Remote desktop connection and let the
+   human enter the VNC password privately. If unavailable or expired, report
+   the pending handoff; do not claim preview readiness. A persistent tailnet
+   listener is a separate exposure change needing separate consent and a
+   computer-side check; this temporary forward does not change VM config.
 6. **The gateway restart ends your own session, so it comes last.** You are
    most likely running inside this gateway. `setup.sh --restart` installs,
    binds, sets the timezone and verifies first, prints its summary, and only
@@ -261,7 +375,7 @@ each other. After a move, check each one; a stale copy fails quietly:
   entry is inert until remote mode is selected.
 - **Any phone client**: the saved server URL lives only on the device; the
   user updates it there.
-- **The VM's API server binding**: `API_SERVER_HOST` in `~/.hermes/.env` or
+- **The VM's API server binding**: `API_SERVER_HOST` in the profile's private environment configuration or
   `platforms.api_server` in `config.yaml`. Pinned to the old tailnet
   address it fails to bind (`Could not bind` in `gateway.log`); `ss -tln`
   shows where it actually listens.

@@ -3,10 +3,26 @@ on: [push, pull_request]
 jobs:
   python:
     runs-on: ubuntu-latest
+    env:
+      HERMES_SCANNER_ROOT: ${{ runner.temp }}/hermes-scanner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Fetch pinned upstream Hermes scanner (no Hermes install)
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from urllib.request import urlopen
+          root = Path(os.environ["HERMES_SCANNER_ROOT"]) / "tools"
+          root.mkdir(parents=True)
+          sha = "6e7b83a2f1c093e992a8d838ed77ea320fbd8e51"
+          for name in ("plugin_guard.py", "plugin_guard_context.py", "skills_guard.py"):
+              url = f"https://raw.githubusercontent.com/NousResearch/hermes-agent/{sha}/tools/{name}"
+              with urlopen(url, timeout=30) as response:
+                  (root / name).write_bytes(response.read())
+          PY
       - run: python -m unittest discover -s tests
       - run: python scripts/check_publication.py
