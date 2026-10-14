@@ -29,7 +29,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/9bcce44224b9f478282209c32ea8eb87aba189f3/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/31ac0de9ee22307e2df03feb08a5e5217a90243b/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -37,7 +37,9 @@ The Mac app requires an Apple Silicon Mac; the Windows app requires Windows
 10/11 x64. This plugin is already installed, so do not run a `setup.sh` line
 from that page that omits `--skip-plugin`. Use this command instead.
 `--non-interactive` means you do not wait for `setup.sh` prompts; ask the
-proactivity question yourself first. Add `--profile <name>` unless the profile
+proactivity question yourself first. The bots text on Telegram in the plugin's
+texting voice by default; pass `--tone default` only when the user asked for
+Hermes' own voice (they can also send `/tone default` any time). Add `--profile <name>` unless the profile
 is `default`. Give `--mac-ssh` the computer's Tailscale name or IP; `setup.sh`
 refuses anything else.
 
@@ -58,15 +60,15 @@ sha = str((cat or {}).get("sha") or (cat or {}).get("pin") or "")
 print(sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "")')
 # No catalog record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.0
+[ -n "$PIN" ] || PIN=v0.21.5
 git -C ~/alans-way-agents checkout "$PIN"
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref 9bcce44224b9f478282209c32ea8eb87aba189f3 \
+    --desktop-ref 31ac0de9ee22307e2df03feb08a5e5217a90243b \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
-    --bind --proactive <yes|no> [--profile <name>] --restart
+    --bind --proactive <yes|no> [--tone default] [--profile <name>] --restart
 ```
 
 `setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to

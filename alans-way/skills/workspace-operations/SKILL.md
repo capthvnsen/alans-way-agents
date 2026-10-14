@@ -7,7 +7,8 @@ description: Use whenever a task needs a real browser: sites or web apps with no
 
 ## Open a browser when the task needs one
 
-Treat the workspace browser as your default surface for anything web-shaped.
+Treat the workspace browser as your default surface for anything web-shaped
+that a plain lookup cannot answer (see "Search the web" below).
 If a task lives in a site or web app and no API or CLI covers it, or driving
 the page is simply the most reliable path, open a tab and do the work there.
 Do not ask whether you may use the browser or describe a plan first; open the
@@ -54,9 +55,13 @@ booking or payment widget), a key aimed at no control or a click by position
 cannot be judged and a snapshot cannot help: act by ref or name, or pass
 `commit`. `cdp Page.addScriptToEvaluateOnNewDocument` is never allowed. A ref
 the connector has not seen on the current page is refused with
-`snapshot_required` too. A tab the human holds, or a stale epoch, is refused
-with the browser's own reason (`awaiting_human`, `human_has_control`,
-`stale_control_epoch`) before anyone is asked. Never send `approval` yourself:
+`snapshot_required` too. Awaiting-human, CAPTCHA and recording holds, the
+Take-back cooldown, and stale control epochs are refused with the browser's
+own reason (`awaiting_human`, `stale_control_epoch`, or the hold reason)
+before anyone is asked. Ordinary human control can yield to
+automatic takeover as described below; with automatic takeover off,
+`human_has_control` means wait or ask the user to hand the tab back.
+Never send `approval` yourself:
 the connector drops it and adds its own only to the call the user approved.
 The gate protects against agent mistakes and against clicks steered by
 prompt injection or a malicious website. It does not stop a deliberately
@@ -65,8 +70,15 @@ the same OS user as the router and the browser services. Full isolation (a
 separate OS account plus router-signed approvals) is planned for v0.21.6.
 Never work around the gate with any tool: a refused commit goes to the user.
 Ask the user before
-any other financial, destructive or production change. Ownership, control
-epoch, and human takeover gates remain.
+any other financial, destructive or production change. Ownership and control
+epoch gates remain. With automatic takeover enabled, a bot acting on a tab
+the human holds on the user's computer can take it back after the grace
+period: act or claim. Awaiting-human, CAPTCHA and recording holds and the
+Take-back cooldown still keep the bot out. A commit still needs fresh user
+approval; the app honors that accepted approval across the automatic
+takeover exactly once. Refused actions leave the human's focus, tab owner
+and control epoch untouched. With automatic takeover off, follow
+`human_has_control`: wait or ask the user to hand the tab back.
 
 Reach for the browser when:
 
@@ -75,6 +87,22 @@ Reach for the browser when:
 - driving the page beats synthesizing requests: the site enforces its own
   auth, validation, and side effects, so the UI path is the honest path
 - a link or site comes up in chat; open it in your own tab and look
+
+## Search the web
+
+Take the first of these that answers the question:
+
+1. A plain lookup (a fact, a price, docs, news, an address): use Hermes' own
+   `web_search`, then `web_extract` on the best URLs. Do not open a search
+   engine page in a tab for this.
+2. When you need the real page (maps, shopping, signed-in results, or a page
+   you must click through), open a tab on the user's computer: omit `host`.
+   Their real connection and session meet far fewer challenges.
+3. Use a search engine in the VM browser only while the user's computer is
+   offline, and expect a CAPTCHA there. Never pass `host:"vm"` to a search
+   engine while the computer is online.
+
+If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.
 
 ## Choose the execution host
 
@@ -191,7 +219,7 @@ as an error. It may have happened, so snapshot the VPS tab and check before
 repeating it.
 
 You do not have to wait for an error to learn a tab moved. After the move,
-every VPS result's `_meta.workspace.tabIdChanged` lists one
+the first VPS result's `_meta.workspace.tabIdChanged` lists one
 `[workspace] tab id changed: <old> -> <new>, reason: <handoff or host unreachable>`
 line per tab. Swap any Mac tab id you saved (in a plan, a note, or a
 sub-agent prompt) for its new id before you use it.
@@ -251,7 +279,8 @@ the tab stays yours to keep working.
    `wait` or `read` steps only when you need something `effect` does not
    show. For
    a multi-step browser run, write no chat text between tool calls and send
-   one short message when it is done. Put `wait` steps
+   one short message when it is done (the one exception is the CAPTCHA
+   message below). Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
    collapsed or hidden will otherwise pass the wait and fail at input. Use
@@ -287,6 +316,70 @@ the tab stays yours to keep working.
    timed-out submission as uncertain and check its effects before resubmitting.
 5. To collaborate on another bot's tab, obtain the user's explicit grant through
    Workspace's tab access dialog. Keep normal work in your own tabs.
+
+## When a site shows a CAPTCHA
+
+You never solve a CAPTCHA. Do not click, type into, drag, or screenshot a
+challenge widget to solve it, do not reach it with `eval` or `cdp`, and never
+use a solver service. The user solves it; you wait. A challenge is never
+something to approve either: do not ask the user to approve a click on one.
+
+A snapshot or action reply on a page with a challenge carries
+`challenge: {kind, blocking}`, where `kind` is `recaptcha`, `hcaptcha`,
+`turnstile`, `cloudflare`, `google_sorry` or `arkose`.
+
+- `blocking:false` is a widget inside a page that stays yours, such as a
+  reCAPTCHA box in a form. Use the rest of the page. Input that would land on
+  the widget is refused with `challenge_present`, and so is a click by
+  position, a key or page script, which may land on it: aim at the page's
+  other controls by ref or name. If you need the widget
+  solved to go on, release the tab:
+  `{action:"release", reason:"captcha", note:"Solve the CAPTCHA, then give the tab back."}`.
+- `blocking:true` (a whole-page check such as Google's "unusual traffic"
+  page or "Just a moment") is handed to the user by the app itself. The
+  reply's `tab` then has `controller:"human"` and a `handback` with
+  `state:"awaiting_human"`, `reason:"captcha"`, a `note` naming the site, and
+  on a VM tab the `viewerUrl` to solve it in. Until it comes back, calls on
+  that tab answer `awaiting_human`.
+
+Once the tab is the user's:
+
+1. Tell the user once, as one short text before your next tool call; Hermes
+   delivers it to Telegram mid-turn. Name the site and what you were doing.
+   For a tab on their computer, say it is waiting in Alan's Workspace. For a
+   VM tab, include the handback's `viewerUrl`; without one, say it is in the
+   VM viewer in Alan's Workspace, and ask them to say when they're through.
+   Never paste a viewer link that has a password, token or key in it (a
+   `password=`, `token=`, `key=` or similar query parameter, a `user:pass@`
+   part, or anything after `#`): leave the link out and point them to the
+   viewer in Alan's Workspace instead. For example: "Google wants a CAPTCHA
+   before I can search. Can you tap through it in Alan's Workspace? I'll pick
+   it back up."
+2. Wait. Check `cua_alans_way_tabs` at most once every 30 seconds (a
+   foreground `sleep 30` in the terminal between checks), for up to 30
+   minutes. Do not snapshot, act on, or claim the tab meanwhile. The app
+   hands the tab back on its own once the challenge clears. When the tab is
+   back with you (`controller` is `agent` and its handback says
+   `human_returned`), carry on without another message: the epoch moved on,
+   and the tab list you just read gave you the fresh one. A tab you released
+   yourself on the VM can stay with the human after the challenge clears, so
+   there the user saying they're done also ends the wait.
+3. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
+   message already said you will pick it back up. When the user says it's
+   done, list your tabs; if the tab is still theirs, their reply is the
+   agreement to claim it, so claim it and continue.
+
+**Back off.** When a reply's `challenge` (or the tab's `handback`) has
+`backOff:true`, its `advice` says the site has challenged twice in 10 minutes:
+stop using that site for this task. Do the same when the same site
+challenges you twice within 10 minutes across tabs (when you cannot tell the
+time, twice in this task counts). Do not wait on that tab or retry the site
+in a fresh tab. Switch to another source: `web_search`, another site with
+the same answer, or, when the challenges came on the VM, the user's computer
+once it is online. Tell the user in one line that you moved on, so they can
+ignore that CAPTCHA. This is a change of source, not a browser failure: say
+in your reply which source you used. If no other source can answer, ask the
+user how to go on.
 
 ## Hand a task between computers
 

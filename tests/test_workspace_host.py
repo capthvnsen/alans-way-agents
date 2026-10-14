@@ -63,6 +63,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
     if (m.params.name === 'cua_alans_way_tabs') {
       const tabs = [{ id: 'mac-tab-1', url: 'https://mac.example/', host: 'mac', epoch }];
       if (process.env.MAC_PROXY_VM) tabs.push({ id: 'vm-tab-1', url: 'https://vm.example/proxied', host: 'vps', epoch });
+      if (process.env.MAC_HANDBACK) tabs[0].handback = JSON.parse(process.env.MAC_HANDBACK);
       return reply(m.id, JSON.stringify({ tabs }));
     }
     if (m.params.name === 'cua_alans_way_open')
@@ -76,6 +77,8 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       // reply teaches the router nothing, so the next injected epoch is stale.
       if (a.action === 'takeover') { epoch += 1; return reply(m.id, 'human_has_control: the human took the tab.', true); }
       if (!a.tabId) return reply(m.id, 'Tab not found.', true);
+      // echo answers with exactly that text, so a test controls the reply shape.
+      if (a.echo !== undefined) return reply(m.id, a.echo, a.isError);
       if (a.epoch !== epoch) return reply(m.id, 'stale_control_epoch: read the tab state and retry after a fresh snapshot.', true);
       return reply(m.id, JSON.stringify({ ok: true, tab: { id: a.tabId, epoch } }));
     }
@@ -92,8 +95,8 @@ VM_STUB = r"""
 const fs = require('fs');
 fs.appendFileSync(process.env.VPS_LOG, 'ARGV ' + JSON.stringify(process.argv.slice(2)) + '\n');
 const mode = process.env.VM_MODE || 'ok';
-const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
-  result: { content: [{ type: 'text', text }] } }) + '\n');
+const reply = (id, text, isError) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
+  result: { ...(isError ? { isError: true } : {}), content: [{ type: 'text', text }] } }) + '\n');
 let opened = 0;
 let prevId = null;
 const closedTabs = () => (mode === 'reap' && prevId ? { closedTabs: [{ tabId: prevId, url: 'https://vm.example/reaped' }] } : {});
@@ -128,6 +131,8 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
       return reply(m.id, JSON.stringify(out));
     }
     if (m.params.name === 'cua_alans_way_action') {
+      const a = m.params.arguments || {};
+      if (a.echo !== undefined) return reply(m.id, a.echo, a.isError);
       if (mode === 'hang') return;
       if (mode === 'slow')
         return setTimeout(() => reply(m.id, 'vm-action'), Number(process.env.VM_DELAY_MS || 2000));
@@ -373,6 +378,114 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertNotIn("enum", host)
         self.assertNotIn("Ignored", host.get("description", ""))
         self.assertIn('"computer" or "vm"', host["description"])
+        # The tool list is in every turn, so open carries the search routing.
+        self.assertIn("use web_search or web_extract when you have them instead of opening a search engine page", tool["description"])
+        self.assertIn("the VM browser meets far more CAPTCHAs", tool["description"])
+        self.assertIn("Never solve a CAPTCHA: release the tab with reason captcha", tool["description"])
+
+    def assert_intact(self, call_id, text, is_error):
+        msg = self.recv()
+        self.assertEqual(msg["id"], call_id)
+        self.assertEqual(msg["result"]["content"][0], {"type": "text", "text": text})
+        self.assertEqual(bool(msg["result"].get("isError")), is_error)
+        return msg
+
+    # Reply shapes as the app sends them (capthvnsen/alans-way#138): the
+    # challenge rides top-level on snapshot and action replies, the automatic
+    # release on the reply's tab.handback, and the VM adds handback.viewerUrl.
+    SORRY_NOTE = 'Solve the Google "unusual traffic" check on www.google.com. The tab goes back to the agent once it clears.'
+    BACK_OFF = "www.google.com has challenged 2 times in 10 minutes. Stop retrying it and use another source."
+
+    def sorry_reply(self, tab_id, viewer=None, back_off=False):
+        challenge = {"kind": "google_sorry", "blocking": True}
+        handback = {"reason": "captcha", "note": self.SORRY_NOTE, "auto": True, "challenge": "google_sorry",
+                    "state": "awaiting_human", "botId": "bot1", "since": 1760000000000}
+        if back_off:
+            challenge.update(backOff=True, advice=self.BACK_OFF)
+            handback.update(backOff=True, advice=self.BACK_OFF)
+        if viewer:
+            handback["viewerUrl"] = viewer
+        return json.dumps({"effect": {"navigated": True, "url": "https://www.google.com/sorry/index?continue=x",
+                                      "title": "unusual traffic", "changed": True, "text": "Our systems have detected unusual traffic"},
+                           "challenge": challenge,
+                           "tab": {"id": tab_id, "epoch": 2, "controller": "human", "handback": handback}})
+
+    def test_challenge_fields_and_refusals_reach_the_model_intact(self):
+        # The CAPTCHA handback is driven entirely by what the app puts in its
+        # replies; the router may add _meta and notices but never rewrite them.
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://www.google.com/search?q=lamps"})
+        self.recv()
+        replies = [
+            (json.dumps({"effect": {"navigated": True, "url": "https://shop.example/checkout"},
+                         "challenge": {"kind": "recaptcha", "blocking": False},
+                         "tab": {"id": "mac-tab-1", "epoch": 1, "controller": "agent", "handback": None}}), False),
+            (self.sorry_reply("mac-tab-1"), False),
+            (self.sorry_reply("mac-tab-1", back_off=True), False),
+            ('challenge_present: this page shows a recaptcha challenge and bots never solve one. Release the tab '
+             'with reason "captcha" (control: controller "human", reason "captcha") so the person can; it comes '
+             'back to you once the challenge clears.', True),
+            ("awaiting_human: this tab was handed to the human (captcha). Wait until they give it back; "
+             "read the tab state later.", True),
+            ("human_returned: the human finished and gave this tab back. Read the tab state for its fresh epoch "
+             "and current page.", True),
+        ]
+        for text, is_error in replies:
+            with self.subTest(text=text[:40]):
+                call = self.call("cua_alans_way_action", {"action": "click", "name": "Next",
+                                                          "echo": text, "isError": is_error})
+                msg = self.assert_intact(call, text, is_error)
+                self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "mac")
+
+    def test_a_vm_tab_challenge_keeps_its_viewer_link(self):
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://www.google.com/", "host": "vm"})
+        self.recv()
+        text = self.sorry_reply("vm-tab-1", viewer="http://vm.example:6080/vnc.html?autoconnect=1")
+        call = self.call("cua_alans_way_action", {"action": "navigate", "echo": text, "isError": False})
+        msg = self.assert_intact(call, text, False)
+        self.assertEqual(msg["result"]["_meta"]["workspace"]["host"], "vm")
+
+    def test_the_merged_tab_list_keeps_a_captcha_handback(self):
+        handback = {"reason": "captcha", "note": self.SORRY_NOTE, "auto": True, "challenge": "google_sorry",
+                    "state": "awaiting_human", "botId": "bot1", "since": 1760000000000}
+        self.start(MAC_HANDBACK=json.dumps(handback))
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        listed = self.call("cua_alans_way_tabs", {})
+        msg = self.recv()
+        self.assertEqual(msg["id"], listed)
+        tabs = {tab["id"]: tab for tab in json.loads(msg["result"]["content"][0]["text"])["tabs"]}
+        self.assertEqual(set(tabs), {"mac-tab-1", "vm-tab-1"})
+        self.assertEqual(tabs["mac-tab-1"]["handback"], handback)
+
+    def test_a_challenge_page_is_never_the_resume_page(self):
+        # Failover reopens the remembered page in the VM browser, where a
+        # CAPTCHA page would only challenge again.
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        page = json.dumps({"effect": {"navigated": True, "url": "https://shop.example/lamps"},
+                           "tab": {"id": "mac-tab-1", "epoch": 1}})
+        self.call("cua_alans_way_action", {"action": "navigate", "echo": page})
+        self.recv()
+        resume = self.dir / "resume-url-bot1.json"
+        time.sleep(1.3)  # resume writes are debounced 1s
+        self.assertIn("shop.example/lamps", resume.read_text())
+        for text in [self.sorry_reply("mac-tab-1"),
+                     json.dumps({"effect": {"url": "https://shop.example/checkout"},
+                                 "challenge": {"kind": "turnstile", "blocking": False}})]:
+            self.call("cua_alans_way_action", {"action": "navigate", "echo": text})
+            self.recv()
+        time.sleep(1.3)
+        remembered = resume.read_text()
+        self.assertIn("shop.example/lamps", remembered)
+        self.assertNotIn("sorry", remembered)
+        self.assertNotIn("checkout", remembered)
 
     def test_no_duplicate_vm_backend_after_failover(self):
         self.start(mac_mode="die-on-call")
@@ -404,6 +517,79 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual(msg["id"], opened)
         self.assertIn("vm-tab-1", self.text(msg))
         self.assertEqual(len(self.vm_spawns()), 1)
+
+    def fake_browser_host(self):
+        """A local browser host: no mirror to restore, and it opens the
+        continued page as vps-tab-1."""
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def reply(self, status, body):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.reply(200, b'{"tabs":[]}')
+
+            def do_POST(self):
+                if self.path == "/v1/restore":
+                    self.reply(404, b"{}")
+                else:
+                    self.reply(200, b'{"id":"vps-tab-1","url":"https://mac.example/"}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        (self.dir / "conn.json").write_text(
+            json.dumps({"url": "http://127.0.0.1:%d" % server.server_address[1], "token": "tok"}))
+
+    def test_a_forced_handoff_reports_the_tab_id_change_once(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The snapshot is the call the Mac dies under: a read, so it is
+        # replayed and its VPS answer is the first result after the move.
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertEqual(
+            workspace["tabIdChanged"],
+            ["[workspace] tab id changed: mac-tab-1 -> vps-tab-1, reason: handoff"])
+        self.assertIn("moved to the VPS browser", self.text(moved))
+        # The change was reported once; the next VPS result does not repeat it.
+        again = self.call("cua_alans_way_tabs")
+        repeated = self.recv()
+        self.assertEqual(repeated["id"], again)
+        self.assertNotIn("tabIdChanged", repeated["result"]["_meta"]["workspace"])
+
+    def test_a_handoff_does_not_pair_the_change_with_a_vm_tab(self):
+        self.fake_browser_host()
+        self.start(mac_mode="die-on-call")
+        self.handshake()
+        self.call("cua_alans_way_open", {"url": "https://mac.example/"})
+        self.recv()
+        # The tab used last belongs to the VM backend: it is not a Mac tab the
+        # continued page stands in for, so no id pair is reported for it.
+        self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
+        moved = self.recv(timeout=20)
+        self.assertEqual(moved["id"], lost)
+        workspace = moved["result"]["_meta"]["workspace"]
+        self.assertEqual(workspace["host"], "vps")
+        self.assertNotIn("tabIdChanged", workspace)
+        self.assertIn("moved to the VPS browser", self.text(moved))
 
     def test_a_vm_page_is_not_recorded_as_the_computers_resume_page(self):
         self.start()

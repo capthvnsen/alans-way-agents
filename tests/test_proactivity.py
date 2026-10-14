@@ -894,7 +894,8 @@ class PromptTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(BriefTests.SAFETY, text)
                 for rule in ("texting them on Telegram", "lead with the concrete thing",
-                             "No headings, bullet lists or tables", "numbered list only for decisions",
+                             "plain words and contractions", "No bullet lists",
+                             "never headings, tables", "numbered list only for decisions",
                              "emoji only if they use them",
                              "Never mention timers, schedules, check-ins or being prompted",
                              "Open differently from your recent messages",
