@@ -220,6 +220,46 @@ class NoteTests(unittest.TestCase):
             self.assertIn(shared, V.NOTE)
 
 
+class RecapLengthTests(unittest.TestCase):
+    """Prompt-order regressions at the hook, not generated-reply compliance tests."""
+
+    turn = NoteTests.turn
+
+    def test_quick_recap_length_is_last_after_general_detail_and_list_guidance(self):
+        for chat in ("dm", "group"):
+            with self.subTest(chat=chat):
+                note = self.turn(voice(), "telegram", chat,
+                                 "hey, quick one: what did you get done today?")["context"]
+                start = note.index("Casual replies:")
+                for competing in ("Long answers (code, plans, research) stay complete",
+                                  "Use a list only", V.SAFE):
+                    self.assertGreater(start, note.index(competing))
+                tail = note[start:]
+                self.assertIn("at most 3 sentences total, including any offer of detail", tail)
+                self.assertIn("no lists unless asked", tail)
+                self.assertIn("without per-item evidence or history", tail)
+                self.assertIn("theirs wins", tail)
+                self.assertIn(V.RECAP, tail)
+                self.assertTrue(note.endswith("theirs wins." + (V.GROUP if chat == "group" else "")))
+
+    def test_length_default_preserves_explicit_detail_and_persona_requests(self):
+        for text in ("Give me a detailed recap with evidence for every item.",
+                     "Give me the full step-by-step plan and runnable code.",
+                     "My persona says to write detailed reports; use it for this recap."):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                tail = note[note.index("Casual replies:"):]
+                self.assertIn("their own persona or instructions ask for a different style or more detail", tail)
+                self.assertIn("theirs wins", tail)
+                self.assertIn("Long answers (code, plans, research) stay complete", note)
+
+    def test_long_recap_is_never_silently_shortened_at_output(self):
+        text = ("I checked the calendar. I compared the available options. Nothing was booked.\n\n"
+                "I checked the installed versions. The reminder is set. One check failed.\n\n"
+                "The draft is still waiting for approval. Want details?")
+        self.assertIsNone(voice().on_output(response_text=text, platform="telegram"))
+
+
 class CorpusRuleTests(unittest.TestCase):
     """Offline prompt fixtures, not a claim about generated replies."""
 
