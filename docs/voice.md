@@ -115,6 +115,11 @@ No supported Hermes hook reaches these, so the plugin does not touch them:
   only reachable through a private Hermes function, which this repo doesn't
   import). Cron runs keep the default voice until Hermes exposes it.
 
+The setup skill can offer to switch off Hermes' extra steering acknowledgment
+with `display.busy_steer_ack_enabled=false`, only after the user's explicit
+answer. The model still acknowledges additions in its own short reply; setup
+scripts do not change this setting. No Hermes message is rewritten.
+
 Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the
 model writes before a tool call as its own message

@@ -75,6 +75,48 @@ setup answer: never restore a mode from it or override later user changes.
 The user can explicitly revisit the choice at any time, or remove the marker
 with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
 
+**Acknowledgment while folding messages in.** When the effective busy mode is
+`steer`, first read `hermes -p <profile> config get display.platforms.telegram.busy_steer_ack_enabled`.
+Hermes resolves the effective Telegram setting in this order: platform override
+→ global value → Telegram default → global default (currently `true`), per
+[`gateway/display_config.py:117`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/display_config.py#L117).
+If a non-null Telegram override exists, skip the offer and leave both the global
+setting and marker untouched, even when the global value is false or the marker
+is `own-ack`. Tell the user the override remains: for `true`, Telegram's extra
+bubble remains on; for `false`, Telegram's extra bubble is already off. For an
+unknown value or unreadable config, report the unknown state and skip this choice.
+Only a confirmed “Config key not set” or `null` permits inheriting the global
+value. Then read `hermes -p <profile> config get display.busy_steer_ack_enabled`
+and `hermes -p <profile> config get skills.config.workspace-setup.busy_steer_ack_choice`.
+Use the resolver's defaults for an absent/null global value. If the acknowledgment
+is already off, or the marker is `keep-ack` or `own-ack`, continue without asking
+or restoring a setting. Preserve unknown values and unreadable config; an absent
+marker must be a confirmed “Config key not set” result. Otherwise ask once:
+“Want just my own acknowledgment when you add something while I'm working?”
+Explain that this removes Hermes' extra status bubble on Telegram and the other
+platforms that inherit the global setting. Explicit overrides on other platforms
+remain unchanged and may keep their extra bubbles. Your own short reply will
+acknowledge the addition, and you will remember the answer in this profile's
+config. Only after yes, run
+`hermes -p <profile> config set display.busy_steer_ack_enabled false` and
+read back the acknowledgment setting before recording `own-ack`:
+Re-read the Telegram override first, then the global key, resolving them in the
+same order. Only when the effective Telegram value is confirmed false and the
+global readback is false, record `own-ack` with
+`hermes -p <profile> config set skills.config.workspace-setup.busy_steer_ack_choice own-ack`.
+If an override appeared, preserve it and disclose its effect; if the effective
+value is true or unknown, report the mismatch and leave the marker untouched.
+An explicit no records `keep-ack` with the same marker key and preserves the
+acknowledgment setting. Report failed writes/readbacks; with no answer, leave
+the acknowledgment setting and marker untouched. General setup or busy-mode
+consent is not this answer. The user can revisit it or unset the marker via
+`hermes -p <profile> config unset skills.config.workspace-setup.busy_steer_ack_choice`.
+Hermes `6e7b83a2f1` supports this switch:
+[`gateway/display_config.py:28`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/display_config.py#L28),
+[`gateway/run_busy.py:893`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/run_busy.py#L893).
+It suppresses the bubble after the message is processed; it does not disable
+steering. Neither setup script writes this display setting or its marker.
+
 **Interim messages.** Read `hermes -p <profile> config get
 display.interim_assistant_messages`. Hermes defaults to `true` at commit
 `d97007c32d6340f7ba79ac1dfb5773cc00846448` (which includes `6e7b83a2f1`),
@@ -189,6 +231,15 @@ different bot's route silently.
    `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
    tune with `hermes proactivity set --settings '<json>'`, and check with
    `hermes proactivity status`.
+   After setup binds successfully, the same primary DM becomes Hermes' Telegram
+   home channel for scheduled and cross-platform delivery. Setup uses the
+   profile-scoped `config set TELEGRAM_HOME_CHANNEL` interface and clears an old
+   topic with `config set TELEGRAM_HOME_CHANNEL_THREAD_ID ''`; this loads on
+   gateway restart. Hermes `6e7b83a2f1` reads these settings at
+   [`config_env.py:515`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/config_env.py#L515).
+   If you bound by hand or setup reports a home-channel failure, tell the user
+   to send `/sethome` in that DM and check the confirmation before claiming
+   delivery is ready.
 
 ## Moved your agent to a new VM?
 

@@ -17,6 +17,57 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
+    def test_telegram_ack_override_is_checked_before_global_off_or_saved_choice(self):
+        ack = _normalized(self.text.split("**Acknowledgment while folding messages in.**", 1)[1]
+                          .split("**Interim messages.**", 1)[0])
+        # The reported bug: global=false + own-ack cannot hide Telegram=true.
+        for rule in ("config get display.platforms.telegram.busy_steer_ack_enabled",
+                     "skip the offer and leave both the global setting and marker untouched"):
+            self.assertIn(rule, ack)
+        override = ack.index("config get display.platforms.telegram.busy_steer_ack_enabled")
+        guard = ack.index("skip the offer and leave both the global setting and marker untouched")
+        skip = ack.index("is already off, or the marker")
+        self.assertLess(override, guard)
+        self.assertLess(guard, skip)
+        for rule in ("even when the global value is false or the marker is `own-ack`",
+                     "Telegram's extra bubble remains on", "Telegram's extra bubble is already off",
+                     "confirmed “Config key not set” or `null`", "report the unknown state",
+                     "platform override → global value → Telegram default → global default",
+                     "gateway/display_config.py:117"):
+            self.assertIn(rule, ack)
+
+    def test_ack_marker_requires_effective_telegram_readback_after_consent(self):
+        ack = _normalized(self.text.split("**Acknowledgment while folding messages in.**", 1)[1]
+                          .split("**Interim messages.**", 1)[0])
+        write = ack.index("config set display.busy_steer_ack_enabled false")
+        self.assertIn("Re-read the Telegram override first", ack)
+        readback = ack.index("Re-read the Telegram override first", write)
+        marker = ack.index("config set skills.config.workspace-setup.busy_steer_ack_choice own-ack")
+        self.assertLess(write, readback)
+        self.assertLess(readback, marker)
+        for rule in ("effective Telegram value is confirmed false",
+                     "leave the marker untouched", "platforms that inherit the global setting",
+                     "Explicit overrides on other platforms remain unchanged"):
+            self.assertIn(rule, ack)
+        self.assertNotIn("config set display.platforms.", ack)
+
+    def test_binding_explains_native_telegram_home_and_manual_fallback(self):
+        for rule in ("same primary DM becomes Hermes' Telegram home channel",
+                     "config set TELEGRAM_HOME_CHANNEL", "send `/sethome` in that DM",
+                     "loads on gateway restart", "config_env.py:515"):
+            self.assertIn(rule, self.normalized)
+
+    def test_steer_ack_choice_is_explicit_and_remembered(self):
+        for rule in ("config get display.busy_steer_ack_enabled",
+                     "skills.config.workspace-setup.busy_steer_ack_choice",
+                     "Want just my own acknowledgment when you add something while I'm working?",
+                     "config set display.busy_steer_ack_enabled false",
+                     "An explicit no records `keep-ack`",
+                     "with no answer, leave the acknowledgment setting and marker untouched",
+                     "read back the acknowledgment setting before recording `own-ack`",
+                     "gateway/run_busy.py:893"):
+            self.assertIn(rule, self.normalized)
+
     @classmethod
     def setUpClass(cls):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")

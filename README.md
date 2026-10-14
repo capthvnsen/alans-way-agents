@@ -79,6 +79,14 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   profile's config through the CLI, after disclosure and the answer, so reruns
   do not ask again. Silence and non-interactive runs write nothing; already
   `steer` or `queue` profiles are skipped. Later user changes are preserved.
+  For `steer`, guided setup checks Telegram's platform override first and
+  preserves it, reports whether its extra bubble remains on, and skips the offer
+  when that override exists. Otherwise it separately offers to remove Hermes' extra status
+  bubble with `display.busy_steer_ack_enabled=false`, asks for an explicit
+  answer and remembers it in `skills.config.workspace-setup.busy_steer_ack_choice`
+  only after the effective Telegram readback matches. The global change also
+  applies to other platforms that inherit it; their explicit overrides remain;
+  the bot still acknowledges additions itself. Setup scripts never write it.
   Hermes already defaults interim messages to `true`
   ([`hermes_cli/config_defaults.py:919` at `d97007c`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919));
   the skill only reports an effective `false` choice and preserves it.
@@ -167,7 +175,10 @@ The bootstrap runs every step in order and says what it did:
   pass `--keep-browser` to leave it on)
 - **Primary binding** — lists the Telegram DM routes that exist and asks which
   bot is the primary (message your bot once first if none exist yet, then
-  re-run `setup.sh --bind`)
+  re-run `setup.sh --bind`). After a successful bind, uses Hermes' profile-scoped
+  config CLI to make that DM the Telegram home for scheduled/cross-platform
+  delivery and clear any old topic ID; it loads on gateway restart. If that
+  write fails, send `/sethome` in the primary DM and check its confirmation.
 - **Verify** — prints a pass/fail summary of the whole install
 - **Gateway restart**: last, through the detected supervisor (a SIGUSR1 drain
   under supervisord, a one-shot
