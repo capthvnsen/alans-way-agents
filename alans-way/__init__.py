@@ -43,6 +43,7 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
     ctx.register_skill("web-errands", skills / "web-errands" / "SKILL.md")
+    ctx.register_skill("integrations", skills / "integrations" / "SKILL.md")
     # Every profile: each bot's voice is its own profile's plugin state, on by default.
     voice = voice_mod.Voice(ctx)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
