@@ -18,55 +18,138 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
-    def test_telegram_ack_override_is_checked_before_global_off_or_saved_choice(self):
-        ack = _normalized(self.text.split("**Acknowledgment while folding messages in.**", 1)[1]
-                          .split("**Interim messages.**", 1)[0])
-        # The reported bug: global=false + own-ack cannot hide Telegram=true.
-        for rule in ("config get display.platforms.telegram.busy_steer_ack_enabled",
-                     "skip the offer and leave both the global setting and marker untouched"):
-            self.assertIn(rule, ack)
-        override = ack.index("config get display.platforms.telegram.busy_steer_ack_enabled")
-        guard = ack.index("skip the offer and leave both the global setting and marker untouched")
-        skip = ack.index("is already off, or the marker")
-        self.assertLess(override, guard)
-        self.assertLess(guard, skip)
-        for rule in ("even when the global value is false or the marker is `own-ack`",
-                     "Telegram's extra bubble remains on", "Telegram's extra bubble is already off",
-                     "confirmed “Config key not set” or `null`", "report the unknown state",
-                     "platform override → global value → Telegram default → global default",
-                     "gateway/display_config.py:117"):
-            self.assertIn(rule, ack)
+    def telegram_step(self):
+        return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
+                           .split("```sh", 1)[0])
 
-    def test_ack_marker_requires_effective_telegram_readback_after_consent(self):
-        ack = _normalized(self.text.split("**Acknowledgment while folding messages in.**", 1)[1]
-                          .split("**Interim messages.**", 1)[0])
-        write = ack.index("config set display.busy_steer_ack_enabled false")
-        self.assertIn("Re-read the Telegram override first", ack)
-        readback = ack.index("Re-read the Telegram override first", write)
-        marker = ack.index("config set skills.config.workspace-setup.busy_steer_ack_choice own-ack")
-        self.assertLess(write, readback)
-        self.assertLess(readback, marker)
-        for rule in ("effective Telegram value is confirmed false",
-                     "leave the marker untouched", "platforms that inherit the global setting",
-                     "Explicit overrides on other platforms remain unchanged"):
-            self.assertIn(rule, ack)
-        self.assertNotIn("config set display.platforms.", ack)
+    def test_telegram_preset_uses_global_memory_notice_key(self):
+        step = self.telegram_step()
+        expected = {
+            "platforms.telegram.typing_indicator": "true",
+            "display.platforms.telegram.interim_assistant_messages": "true",
+            "display.platforms.telegram.tool_progress": "off",
+            "display.platforms.telegram.notifications": "important",
+            "display.platforms.telegram.long_running_notifications": "generic",
+            "display.platforms.telegram.busy_steer_ack_enabled": "false",
+            "display.memory_notifications": "off",
+            "cron.wrap_response": "false",
+            "platforms.telegram.reactions": "true",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                self.assertIn(f"| `{key}` | `{value}` |", step)
+        self.assertIn("hermes -p <profile> config set <key> <answered-value>", step)
+        self.assertIn("6e7b83a2f1c093e992a8d838ed77ea320fbd8e51", step)
+        for forbidden in ("config set display.busy_steer_ack_enabled",
+                          "config set display.interim_assistant_messages",
+                          "display.message_reactions"):
+            self.assertNotIn(forbidden, self.normalized)
+
+    def test_telegram_choice_reuses_answer_and_readback_gate(self):
+        step = self.telegram_step()
+        for rule in ("An absent marker means ask once", "one grouped question",
+                     "Apply only the answered choice with the supported CLI",
+                     "Never treat silence or non-interactive runs as consent",
+                     "with no answer, leave the settings and marker untouched",
+                     "General setup, proactivity or busy-mode consent does not answer this question",
+                     "Read back each changed key", "report the mismatch",
+                     "leave the marker untouched", "only after that answer and successful readbacks"):
+            self.assertIn(rule, step)
+        self.assertLess(step.index("config set <key> <answered-value>"),
+                        step.index("Read back each changed key"))
+        self.assertLess(step.index("Read back each changed key"),
+                        step.index("config set skills.config.workspace-setup.telegram_feel_choice chosen"))
+        self.assertLess(self.text.index("**Make Telegram feel right.**"),
+                        self.text.index("```sh\n# Prepare"))
+
+    def test_telegram_choice_preserves_existing_values_and_remembers_decline(self):
+        step = self.telegram_step()
+        for rule in ("config get <key>", "config get skills.config.workspace-setup.telegram_feel_choice",
+                     "platform override → global value → Telegram default → global default",
+                     "show current values that differ", "Preserve existing user values",
+                     "unless the answer explicitly includes changing them",
+                     "A recorded `keep-current` or `chosen`", "continue without asking or rewriting",
+                     "never restore settings from it or override later user changes",
+                     "confirmed “Config key not set”", "report the unknown state",
+                     "An explicit no records `keep-current`",
+                     "config unset skills.config.workspace-setup.telegram_feel_choice",
+                     "config.yaml", "remember the answer",
+                     "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", "HERMES_TELEGRAM_NOTIFICATIONS",
+                     "TELEGRAM_REACTIONS", "Environment overrides"):
+            self.assertIn(rule, step)
+
+    def test_telegram_offer_explains_defaults_scope_and_lifecycle_limits(self):
+        step = self.telegram_step()
+        for rule in ("typing", "short updates", "mechanical tool progress",
+                     "sound", "visual notifications", "plain words", "my own acknowledgment",
+                     "profile-wide", "all delivery targets", "job IDs",
+                     "👀", "👍", "👎", "cancellation clears",
+                     "does not verify the user's goal", "cannot reply immediately while a tool is blocked"):
+            self.assertIn(rule, step)
+
+    def test_upgrade_honors_legacy_steer_ack_answers_until_explicit_revisit(self):
+        step = self.telegram_step()
+        self.assertIn("config get skills.config.workspace-setup.busy_steer_ack_choice", step)
+        for answer in ("keep-ack", "own-ack"):
+            with self.subTest(answer=answer):
+                self.assertIn(f"`{answer}`", step)
+        for rule in ("legacy answer", "continue without asking or rewriting",
+                     "unless the user explicitly revisits", "Preserve unknown legacy markers",
+                     "never migrate the legacy marker automatically"):
+            self.assertIn(rule, step)
+
+    def test_timezone_is_city_based_explicit_and_read_back(self):
+        step = self.telegram_step()
+        for rule in ("config get timezone", "empty", "MST", "EST", "PST", "CST",
+                     "UTC offsets", "daylight-saving", "ask the user's city; don't guess",
+                     "offer the matching IANA zone", "Preserve an existing IANA zone",
+                     "config set timezone <answered-IANA-zone>", "read back `timezone`",
+                     "Never change it silently", "no city or explicit zone answer",
+                     "leave timezone untouched", "--timezone"):
+            self.assertIn(rule, step)
+
+    def test_presentation_consent_is_remembered_independently_of_timezone(self):
+        step = self.telegram_step()
+        self.assertNotIn("leave timezone and the marker untouched", step)
+        for rule in ("Remember the completed presentation answer independently of timezone",
+                     "unresolved timezone or a failed timezone write/readback",
+                     "does not block the presentation marker",
+                     "perform the timezone check below even when a saved answer skips",
+                     "ask only the separate timezone question",
+                     "defer the setup invocation that requires it"):
+            self.assertIn(rule, step)
+
+    def test_legacy_tool_progress_all_wins_over_global_off_until_platform_off(self):
+        step = self.telegram_step()
+        for rule in ("config get display.tool_progress_overrides.telegram",
+                     "platform override → legacy Telegram override → global value",
+                     "global `off` plus legacy `all` still enables progress",
+                     "write `display.platforms.telegram.tool_progress off`",
+                     "Preserve the legacy key", "null legacy values inherit"):
+            self.assertIn(rule, step)
+
+    def test_memory_skill_notice_offer_is_global_consented_and_read_back(self):
+        step = self.telegram_step()
+        for rule in ("hide memory/skill bookkeeping notices",
+                     "| `display.memory_notifications` | `off` |",
+                     "Hiding “💾 Memory updated / Self-improvement review” notices affects every platform this profile uses, not only Telegram",
+                     "off|on|verbose", "background review still runs",
+                     "run_turn_runner.py#L1289", "use the global `display.memory_notifications` directly",
+                     "boolean `false` means `off`",
+                     "A Telegram-only memory/skill notice switch isn't supported by Hermes yet",
+                     "`display.memory_notifications` must read back `off` (or `false`)",
+                     "report only that stored value", "not verified banner suppression",
+                     "Read back each changed key", "already-planned gateway restart"):
+            self.assertIn(rule, step)
+        for obsolete in ("display.platforms.telegram.memory_notifications",
+                         "skip this leaf", "where supported",
+                         "memory/skill notice support check"):
+            self.assertNotIn(obsolete, step)
 
     def test_binding_explains_native_telegram_home_and_manual_fallback(self):
         for rule in ("same primary DM becomes Hermes' Telegram home channel",
                      "config set TELEGRAM_HOME_CHANNEL", "send `/sethome` in that DM",
                      "loads on gateway restart", "config_env.py:515"):
-            self.assertIn(rule, self.normalized)
-
-    def test_steer_ack_choice_is_explicit_and_remembered(self):
-        for rule in ("config get display.busy_steer_ack_enabled",
-                     "skills.config.workspace-setup.busy_steer_ack_choice",
-                     "Want just my own acknowledgment when you add something while I'm working?",
-                     "config set display.busy_steer_ack_enabled false",
-                     "An explicit no records `keep-ack`",
-                     "with no answer, leave the acknowledgment setting and marker untouched",
-                     "read back the acknowledgment setting before recording `own-ack`",
-                     "gateway/run_busy.py:893"):
             self.assertIn(rule, self.normalized)
 
     @classmethod
@@ -159,7 +242,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_silence_cannot_be_overridden_by_setup(self):
         for rule in ("with no answer, leave the mode and marker untouched",
                      "General setup or proactivity consent does not answer this question",
-                     "Neither `setup.sh` nor `setup-workspace.sh` writes these two display keys"):
+                     "Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices"):
             self.assertIn(rule, self.normalized)
 
     def test_answer_and_readback_gate_marker_write(self):
@@ -170,14 +253,10 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "config unset skills.config.workspace-setup.busy_input_choice"):
             self.assertIn(rule, self.normalized)
 
-    def test_interim_default_true_requires_no_write_and_false_is_only_reported(self):
-        for rule in ("config get display.interim_assistant_messages",
-                     "hermes_cli/config_defaults.py:919", "defaults to `true`",
-                     "Only when the effective value is `false`",
-                     "report that the user's choice disables interim messages",
-                     "Write nothing for this key"):
-            self.assertIn(rule, self.normalized)
+    def test_global_interim_preference_is_preserved_by_telegram_offer(self):
         self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
+        self.assertIn("Leave other global display settings and other platforms untouched",
+                      self.telegram_step())
 
     def test_display_stack_is_guided_not_auto(self):
         self.assertIn("never auto-installed", self.normalized)

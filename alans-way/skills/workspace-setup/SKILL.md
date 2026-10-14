@@ -112,57 +112,126 @@ setup answer: never restore a mode from it or override later user changes.
 The user can explicitly revisit the choice at any time, or remove the marker
 with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
 
-**Acknowledgment while folding messages in.** When the effective busy mode is
-`steer`, first read `hermes -p <profile> config get display.platforms.telegram.busy_steer_ack_enabled`.
-Hermes resolves the effective Telegram setting in this order: platform override
-→ global value → Telegram default → global default (currently `true`), per
-[`gateway/display_config.py:117`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/display_config.py#L117).
-If a non-null Telegram override exists, skip the offer and leave both the global
-setting and marker untouched, even when the global value is false or the marker
-is `own-ack`. Tell the user the override remains: for `true`, Telegram's extra
-bubble remains on; for `false`, Telegram's extra bubble is already off. For an
-unknown value or unreadable config, report the unknown state and skip this choice.
-Only a confirmed “Config key not set” or `null` permits inheriting the global
-value. Then read `hermes -p <profile> config get display.busy_steer_ack_enabled`
-and `hermes -p <profile> config get skills.config.workspace-setup.busy_steer_ack_choice`.
-Use the resolver's defaults for an absent/null global value. If the acknowledgment
-is already off, or the marker is `keep-ack` or `own-ack`, continue without asking
-or restoring a setting. Preserve unknown values and unreadable config; an absent
-marker must be a confirmed “Config key not set” result. Otherwise ask once:
-“Want just my own acknowledgment when you add something while I'm working?”
-Explain that this removes Hermes' extra status bubble on Telegram and the other
-platforms that inherit the global setting. Explicit overrides on other platforms
-remain unchanged and may keep their extra bubbles. Your own short reply will
-acknowledge the addition, and you will remember the answer in this profile's
-config. Only after yes, run
-`hermes -p <profile> config set display.busy_steer_ack_enabled false` and
-read back the acknowledgment setting before recording `own-ack`:
-Re-read the Telegram override first, then the global key, resolving them in the
-same order. Only when the effective Telegram value is confirmed false and the
-global readback is false, record `own-ack` with
-`hermes -p <profile> config set skills.config.workspace-setup.busy_steer_ack_choice own-ack`.
-If an override appeared, preserve it and disclose its effect; if the effective
-value is true or unknown, report the mismatch and leave the marker untouched.
-An explicit no records `keep-ack` with the same marker key and preserves the
-acknowledgment setting. Report failed writes/readbacks; with no answer, leave
-the acknowledgment setting and marker untouched. General setup or busy-mode
-consent is not this answer. The user can revisit it or unset the marker via
-`hermes -p <profile> config unset skills.config.workspace-setup.busy_steer_ack_choice`.
-Hermes `6e7b83a2f1` supports this switch:
-[`gateway/display_config.py:28`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/display_config.py#L28),
-[`gateway/run_busy.py:893`](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1/gateway/run_busy.py#L893).
-It suppresses the bubble after the message is processed; it does not disable
-steering. Neither setup script writes this display setting or its marker.
+**Make Telegram feel right.** Before setup and restart, for each Telegram
+profile read `hermes -p <profile> config get <key>` for the leaves below and
+`hermes -p <profile> config get timezone`; use `-p default` for the default.
+Resolve effective platform display values in order: platform override → global value →
+Telegram default → global default; read the corresponding global keys when
+inherited. For memory/skill notices, use the global `display.memory_notifications`
+directly; boolean `false` means `off`, and absent or null values default to `on`.
+For tool progress, also read
+`hermes -p <profile> config get display.tool_progress_overrides.telegram`:
+platform override → legacy Telegram override → global value → Telegram default
+→ global default. Absent or null legacy values inherit; unreadable or unknown
+legacy values make the effective value unknown unless a valid platform override
+wins. A global `off` plus legacy `all` still enables progress; after consent to
+hide it, write `display.platforms.telegram.tool_progress off` through the CLI
+below and re-resolve after readback. Preserve the legacy key and global value.
+Preserve existing user values unless the answer explicitly includes
+changing them; show current values that differ before asking. Preserve unknown
+values and unreadable config: report the unknown state and skip that choice.
+Only a confirmed “Config key not set” result is an absent key; null display
+values inherit. Leave other global display settings and other platforms untouched.
 
-**Interim messages.** Read `hermes -p <profile> config get
-display.interim_assistant_messages`. Hermes defaults to `true` at commit
-`d97007c32d6340f7ba79ac1dfb5773cc00846448` (which includes `6e7b83a2f1`),
-[`hermes_cli/config_defaults.py:919`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919).
-Only when the effective value is `false`, report that the user's choice disables
-interim messages; preserve it and any platform override. Write nothing for this
-key. Neither `setup.sh` nor `setup-workspace.sh` writes these two display keys;
-the busy-mode choice and marker above are written only through the Hermes CLI
-after the user answers.
+Read `hermes -p <profile> config get skills.config.workspace-setup.telegram_feel_choice`.
+A recorded `keep-current` or `chosen` means continue without asking or rewriting
+presentation settings. Both presentation markers govern only that question:
+perform the timezone check below even when a saved answer skips the offer.
+Preserve unknown markers and unreadable config; report the unknown state.
+If that marker is absent, read
+`hermes -p <profile> config get skills.config.workspace-setup.busy_steer_ack_choice`.
+A legacy answer of `keep-ack` or `own-ack` means continue without asking or rewriting
+Telegram presentation settings unless the user explicitly revisits the choices.
+Preserve unknown legacy markers and unreadable config; report the unknown state
+and skip the question. These answers record consent, not desired settings:
+never migrate the legacy marker automatically or restore settings from it.
+An absent marker means ask once (only when both markers are confirmed absent),
+as one grouped question in plain words:
+“Want Telegram to show typing and my short updates, hide mechanical tool progress,
+keep routine updates quiet, use plain words when work takes a while, show just
+my own acknowledgment when you add something, send scheduled messages without
+job IDs, hide memory/skill bookkeeping notices,
+and react 👀 while working then 👍/👎 when processing succeeds/fails?
+Keep your current choices, use these recommendations, or tell me which to change.”
+Explain that typing and short updates are already on by default, mechanical
+progress is off, routine updates have no sound (`important`; visual notifications
+can still appear), and finals/approval prompts remain eligible for sound.
+Plain long-work status replaces internal tool names; my own acknowledgment
+comes at the next opportunity and cannot reply immediately while a tool is blocked.
+Hermes' extra steer notice and scheduled-message wrapper are on by default.
+Memory/skill notices default on (`off|on|verbose`); hiding them changes only
+chat presentation, and background review still runs.
+Hiding “💾 Memory updated / Self-improvement review” notices affects every platform
+this profile uses, not only Telegram.
+Reactions default off; cancellation clears 👀 and 👍 does not verify the user's goal.
+Removing the scheduled-message header, job IDs and management footer is
+**profile-wide**, across all delivery targets; timezone is also profile-wide.
+Disclose that you will remember the answer in this profile's `config.yaml`.
+
+| Key | Recommended value |
+| --- | --- |
+| `platforms.telegram.typing_indicator` | `true` |
+| `display.platforms.telegram.interim_assistant_messages` | `true` |
+| `display.platforms.telegram.tool_progress` | `off` |
+| `display.platforms.telegram.notifications` | `important` |
+| `display.platforms.telegram.long_running_notifications` | `generic` |
+| `display.platforms.telegram.busy_steer_ack_enabled` | `false` |
+| `display.memory_notifications` | `off` |
+| `cron.wrap_response` | `false` |
+| `platforms.telegram.reactions` | `true` |
+
+A Telegram-only memory/skill notice switch isn't supported by Hermes yet.
+
+If timezone is empty or a fixed abbreviation (MST, EST, PST, CST, UTC offsets)
+rather than an IANA zone, explain “Fixed timezones do not follow daylight-saving
+changes, so reminders can be an hour off.” In the grouped question, ask the user's
+city; don't guess, then offer the matching IANA
+zone for an explicit answer (clarify ambiguous cities). If the presentation offer
+was skipped, ask only the separate timezone question. Preserve an existing IANA
+zone unless the user explicitly revisits it. Never change it silently. With
+no city or explicit zone answer, leave timezone untouched and
+continue the other setup work. Pass only the confirmed zone to setup's
+`--timezone`; if timezone is unresolved, defer the setup invocation that requires
+it rather than using a guessed value.
+
+Apply only the answered choice with the supported CLI:
+`hermes -p <profile> config set <key> <answered-value>` for each chosen leaf,
+writing only leaves whose effective value differs from the answered choice,
+and `hermes -p <profile> config set timezone <answered-IANA-zone>` only after
+that separate zone answer. Read back each changed key with `config get <key>`
+and read back `timezone` if changed; re-resolve effective Telegram display values.
+When hiding notices, `display.memory_notifications` must read back `off` (or
+`false`); report only that stored value, not verified banner suppression.
+If a presentation write fails or its readback differs, report the mismatch and
+leave the marker untouched; do not claim success or undo user choices.
+Remember the completed presentation answer independently of timezone: an
+unresolved timezone or a failed timezone write/readback does not block the
+presentation marker. Report timezone failures separately and defer setup until
+its zone requirement is met. Environment overrides
+(`HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED`, `HERMES_TELEGRAM_NOTIFICATIONS`,
+`TELEGRAM_REACTIONS`) can defeat YAML: disclose known conflicts without reading
+secret/auth files or altering the environment; a CLI readback proves storage,
+not live delivery. Remember `chosen` only after that answer and successful readbacks:
+`hermes -p <profile> config set skills.config.workspace-setup.telegram_feel_choice chosen`.
+An explicit no records `keep-current` with the same marker key and preserves
+all settings. Read back the marker too and report failed writes/readbacks.
+Never treat silence or non-interactive runs as consent; with no answer, leave
+the settings and marker untouched and continue the other setup work.
+General setup, proactivity or busy-mode consent does not answer this question.
+This marker records only the setup answer: never restore settings from it or
+override later user changes. The user can revisit the choice or run
+`hermes -p <profile> config unset skills.config.workspace-setup.telegram_feel_choice`.
+Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices.
+
+Verified against stock Hermes `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`:
+[display defaults/resolver](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/display_config.py#L51),
+[typing](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/config.py#L472),
+[reactions/notifications](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/plugins/platforms/telegram/adapter.py#L7109),
+[steer notice](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/run_busy.py#L893),
+[memory/skill notices](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/gateway/run_turn_runner.py#L1289),
+[cron wrapper](https://github.com/NousResearch/hermes-agent/blob/6e7b83a2f1c093e992a8d838ed77ea320fbd8e51/cron/scheduler_delivery.py#L2011).
+Use the keys on that build or newer; suppressing the steer notice preserves
+steering. Load changes at the already-planned gateway restart.
 
 ```sh
 # Prepare a new checkout, or validate and reuse the app setup prompt's clone.
