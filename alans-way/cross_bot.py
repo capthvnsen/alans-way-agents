@@ -26,45 +26,45 @@ MAX_DEDUP = 512
 PROFILE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 OPAQUE = re.compile(r"[a-f0-9]{64}\Z")
 
-# Conservative line omission, not a guarantee for arbitrary unlabeled secrets.
-_LABEL = re.compile(
-    r"(?i)\b(?:password|passwd|passphrase|secret|(?:access[ _-]?|refresh[ _-]?|api[ _-]?)?token|"
-    r"api[ _-]?key|authorization|cookie|otp|pin|passcode|one[ -]?time[ -]?(?:password|code)|"
-    r"verification[ _-]?code|your\s+code|private[ _-]?key)\b\s*[\"']?\s*(?::|=|\bis\b|\s+\S)")
-_CREDENTIAL_FIELD = re.compile(
-    r"(?i)\b[a-z0-9_]{0,64}(?:password|passwd|secret|token|api_key|private_key|access_key)"
-    r"[a-z0-9_]{0,64}\s*[\"']?\s*[:=]")
-_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S)
-_URL = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.I)
-_TOKEN = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"sk-[A-Za-z0-9_-]{20,}|(?:sk_(?:live|test)|rk_live|pk_live)_[A-Za-z0-9]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|"
-    r"(?i:\bBearer\s+\S+)|\bAKIA[A-Z0-9]{16}|\bAIza[A-Za-z0-9_-]{35}|"
-    r"\b\d{6,12}:[A-Za-z0-9_-]{30,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)")
-_CARD = re.compile(r"(?<!\w)[0-9](?:[ -]?[0-9]){12,}(?!\w)")
+EXCHANGE_BYTES = 8192
+# Fixed alternatives and single character-class quantifiers: no overlapping or
+# nested repetitions. Each search consumes O(n); the fixed number of searches
+# and disjoint token matches keep the entire signal check linear in input size.
+_KEYWORDS = re.compile(
+    r"\b(?:pin|passcode|cvv|cvc|password|passwd|secret|token|api key|private key|otp|"
+    r"verification code|2fa|ssn|routing number|account number|passphrase|authorization|"
+    r"cookie|your code|clientsecret|access key)\b")
+_PREFIXES = re.compile(r"sk_|rk_|pk_live|ghp_|gho_|github_pat_|xox|akia|aiza|sk-ant-|sk-|eyj|-----begin|bearer ")
+_USERINFO = re.compile(r"://[^\s/@:]*:[^\s/@]*@")
+_DIGITS = re.compile(r"[0-9]{12}")
+_LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9_+\-/=])[A-Za-z0-9_+\-/=]{32,}")
+_LETTER = re.compile(r"[A-Za-z]")
+_DIGIT = re.compile(r"[0-9]")
+_NUMBER_SEPARATORS = str.maketrans("", "", " -")
 
 
-def valid_card(value):
-    digits = value.replace(" ", "").replace("-", "")
-    if not 13 <= len(digits) <= 19:
-        return False
-    total = 0
-    for index, digit in enumerate(reversed(digits)):
-        number = int(digit) * (2 if index % 2 else 1)
-        total += number - 9 if number > 9 else number
-    return total % 10 == 0
+def secret_signal(text):
+    """Linear-time signal detection; called only after the raw byte-size gate."""
+    folded = text.casefold()
+    if (_KEYWORDS.search(folded.replace("_", " ")) or _PREFIXES.search(folded)
+            or _USERINFO.search(text) or _DIGITS.search(text.translate(_NUMBER_SEPARATORS))):
+        return True
+    return any(_LETTER.search(match.group()) and _DIGIT.search(match.group())
+               for match in _LONG_TOKEN.finditer(text))
 
 
 def sanitize(text, *, max_bytes=700, redact_terms=()):
-    """Redact the entire bounded input before UTF-8 truncation; failure drops it.
+    """Skip signal-bearing text entirely; truncate unchanged safe text afterwards.
 
-    Only text is accepted, never attachments/history/tool dumps. Operator-supplied
-    over-redaction terms are literals, avoiding arbitrary regular expressions.
+    Only bounded text is accepted, never attachments/history/tool dumps.
+    Operator terms remain bounded literals and now also drop the whole exchange.
+    Normalization is detection-only: kept excerpts preserve the original text.
     """
     try:
-        if type(text) is not str or len(text) > 65536:
+        if type(text) is not str or len(text) > EXCHANGE_BYTES:
+            return None
+        raw = text.encode("utf-8")
+        if len(raw) > EXCHANGE_BYTES:
             return None
         if type(max_bytes) is not int or not 1 <= max_bytes <= 1024:
             return None
@@ -72,19 +72,11 @@ def sanitize(text, *, max_bytes=700, redact_terms=()):
             return None
         if any(type(term) is not str or not 1 <= len(term) <= 128 for term in redact_terms):
             return None
-        text = unicodedata.normalize("NFKC", text)
-        text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-        text = _KEY_BLOCK.sub("[redacted]", text)
-        safe = []
-        for line in text.splitlines():
-            if (_LABEL.search(line) or _CREDENTIAL_FIELD.search(line) or _TOKEN.search(line)
-                    or any(valid_card(match.group()) for match in _CARD.finditer(line))
-                    or any(term.casefold() in line.casefold() for term in redact_terms)):
-                safe.append("[redacted]")
-                continue
-            line = _URL.sub(lambda m: "[redacted URL]" if ("@" in m.group() or "?" in m.group()) else m.group(), line)
-            safe.append(line)
-        return "\n".join(safe).encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+        check = unicodedata.normalize("NFKC", text)
+        check = "".join(ch for ch in check if unicodedata.category(ch) != "Cf")
+        if secret_signal(check) or any(term.casefold() in check.casefold() for term in redact_terms):
+            return None
+        return raw[:max_bytes].decode("utf-8", errors="ignore")
     except Exception:
         return None
 
@@ -659,7 +651,7 @@ class CrossBot:
                         or kwargs.get("parent_task_id") or kwargs.get("is_child") or cron
                         or kwargs.get("imported") or kwargs.get("is_imported")
                         or kwargs.get("origin") in ("cross_bot", "cron", "child", "checkin", "brief")
-                        or type(user_message) is not str
+                        or type(user_message) is not str or len(user_message) > EXCHANGE_BYTES
                         or user_message.lstrip().startswith((MARKER, BRIEF_MARKER, "[Cross-bot ask]"))):
                     return None
                 status = self.store.status(self.profile)
@@ -668,7 +660,8 @@ class CrossBot:
                 user = sanitize(user_message, redact_terms=self.redact_terms)
                 if user is not None:
                     self._pending[correlation] = {"at": self.clock(), "key": self._bound_key,
-                        "generation": status["generation"], "user": user, "assistant": None}
+                        "generation": status["generation"], "user": user, "assistant": None,
+                        "bytes": len(user_message.encode("utf-8"))}
             except Exception as exc:
                 self.error = self.error_text(exc)
         return None
@@ -688,6 +681,10 @@ class CrossBot:
                     self._pending.pop(correlation, None)
                     return None
                 # Only the original pre-hook text is retained, never history/context.
+                if (type(assistant_response) is not str or len(assistant_response) > EXCHANGE_BYTES
+                        or pending["bytes"] + len(assistant_response.encode("utf-8")) > EXCHANGE_BYTES):
+                    self._pending.pop(correlation, None)
+                    return None
                 assistant = sanitize(assistant_response, redact_terms=self.redact_terms)
                 if assistant is None:
                     self._pending.pop(correlation, None)

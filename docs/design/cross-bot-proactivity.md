@@ -183,14 +183,34 @@ digests, and never recursively dispatch results. Human replies are ordinary targ
 
 ## 5. Privacy, secrets and operator controls
 
-No config/auth/vault files or tool dumps enter exports. Redact **before** truncating, writing or prompting:
-omit credential-bearing fields/lines, private-key blocks, token/password/OTP patterns and credential URLs,
-plus configurable over-redaction. Existing voice/proactivity has no reusable text redactor. Hermes has forced
-egress redaction (H `agent/redact.py:1158-1170`) but no documented plugin text-redaction facade;
-`ctx.register_redaction_patterns` only registers patterns (H `hermes_cli/plugins.py:876-887`). Use a small
-plugin-owned conservative sanitizer with synthetic regression fixtures; no private redactor import. Failure
-drops the exchange. Arbitrary unlabeled secrets cannot be guaranteed detectable: do not market “no secrets
-ever”; a supported Hermes scrub facade would improve coverage later.
+No config/auth/vault files or tool dumps enter exports. A digest is optional context:
+**drop the entire exchange on any secret signal**, never write a partially redacted version.
+Reject raw user-plus-assistant text over **8 KiB** (UTF-8 bytes) before signal detection;
+retain only the user byte count alongside its bounded excerpt until the assistant arrives.
+Scan each bounded message in linear time with fixed keyword/prefix alternatives, single
+character-class repetitions and no nested or adjacent quantifiers. Disjoint long-token
+matches start only at token boundaries, preventing repeated near-match work. The fixed
+number of linear searches is O(n); direct 1 MiB timing regressions exercise the detector,
+not just the size gate, with a 50 ms budget.
+
+Skip runs of at least 12 digits after removing spaces/dashes; word-bounded PIN, passcode,
+CVV/CVC, password/passwd, secret, token, API key, private key, OTP, verification code,
+2FA, SSN, routing number and account number labels (case-insensitive); known credential
+prefixes (`sk_`, `rk_`, `pk_live`, `ghp_`, `gho_`, `github_pat_`, `xox`, `AKIA`, `AIza`,
+`sk-ant-`, `sk-`, `eyJ`, `-----BEGIN`, `Bearer `); URLs with userinfo; and tokens of at
+least 32 ASCII letters/digits/underscore/dash/plus/slash/equals mixing letters and digits.
+Existing credential-field aliases and bounded operator `cross_bot.redact_terms` literals
+also skip the exchange. Normalize Unicode and remove format characters for detection only;
+otherwise keep text as-is, then truncate to digest bounds. Failure also drops the exchange.
+This intentionally loses some order IDs and ordinary keyword mentions; synthetic review
+fixtures keep 19/30 ordinary messages unchanged and export zero signal-bearing exchanges.
+
+Existing voice/proactivity has no reusable text sanitizer. Hermes has forced egress
+redaction (H `agent/redact.py:1158-1170`) but no documented plugin text-redaction facade;
+`ctx.register_redaction_patterns` only registers patterns (H `hermes_cli/plugins.py:876-887`).
+Use the plugin-owned conservative detector with synthetic regression fixtures; no private
+redactor import. Arbitrary unlabeled secrets cannot be guaranteed detectable: do not market
+“no secrets ever”; a supported Hermes scrub facade would improve coverage later.
 
 Digest TTL limits this store, not downstream history. Primary hook context persists in API-content sidecars (H
 `agent/turn_context.py:933-977,1243-1248,1298-1305`). Honcho/provider sync can receive full messages, and
@@ -209,7 +229,8 @@ enabled, all enrolled profiles are eligible without a read shortlist. Global off
 For PR 1, catalog description and supplement disclose only shipped behavior: “Optional cross-bot
 export stores bounded, sanitized recent owner-DM excerpts from enabled profiles for up to 24 hours in a
 private shared plugin-owned directory. Default off; /proactivity cross on|off|status controls each bot.
-Dispatch is disabled: no asks are sent and no other bot context enters model prompts. Sanitization cannot
+Dispatch is disabled: no asks are sent and no other bot context enters model prompts. Exchanges that look
+like they contain credentials or payment details are skipped entirely. Sanitization cannot
 guarantee detection of every secret; digest expiry cannot erase existing Hermes/provider history.”
 
 For the completed feature, use this disclosure (do not claim it ships in PR 1):
@@ -217,7 +238,8 @@ For the completed feature, use this disclosure (do not claim it ships in PR 1):
 Append these sentences to `alans-way/plugin.yaml:3`'s catalog description and the catalog disclosure
 supplement (P `docs/catalog/alans-way-disclosure.md:3-6`): “Optional cross-bot proactivity reads bounded
 recent owner-DM excerpts exported by all enabled profiles on one gateway. It stores sanitized digests for 24
-hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files), and may
+hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files). Exchanges that
+look like they contain credentials or payment details are skipped entirely. It may
 automatically inject one read-only or draft-only ask per primary check-in into another bot's bound Telegram
 DM. Results appear there with primary attribution. Existing approvals still govern consequential actions.
 Disable cross-bot proactivity per bot with /proactivity cross off; copied context may remain in Hermes history,

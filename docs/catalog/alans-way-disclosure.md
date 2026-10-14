@@ -37,6 +37,7 @@ Optional cross-bot export stores bounded, sanitized recent owner-DM excerpts fro
 enabled profiles for up to 24 hours in a private shared plugin-owned directory.
 Default off; `/proactivity cross on|off|status` controls each bot. Dispatch is
 disabled: no asks are sent and no other bot context enters model prompts.
+Exchanges that look like they contain credentials or payment details are skipped entirely.
 Sanitization cannot guarantee detection of every secret; digest expiry cannot
 erase existing Hermes/provider history. No historical backfill, attachment or
 tool-history export. Offline files are pruned when an explicitly activated profile starts, then every

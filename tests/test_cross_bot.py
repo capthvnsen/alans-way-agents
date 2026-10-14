@@ -19,34 +19,114 @@ C = importlib.import_module(P.__package__ + ".cross_bot")
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
 
 
-class SanitizerTests(unittest.TestCase):
-    def test_redaction_precedes_truncation_and_synthetic_secret_fixtures(self):
-        secret = "synthetic-sensitive-value"
-        private = "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-key\n-----END " + "PRIVATE KEY-----"
-        cases = ["password: " + secret, '{"access_token": "' + secret + '"}',
-                 "DATABASE_PASSWORD=" + secret, "AWS_SECRET_ACCESS_KEY=" + secret,
-                 '{"clientSecret": "' + secret + '"}',
-                 "Authorization: Bearer " + secret, "OTP is 123456", "Cookie: session=" + secret,
-                 "https://user:" + secret + "@example.invalid/page",
-                 "https://example.invalid/?api_key=" + secret,
-                 private, "token=" + "A" * 6000,
-                 "ghp_" + "x" * 30, "sk-" + "x" * 40]
-        for text in cases:
-            with self.subTest(text=text[:16]):
-                result = C.sanitize("Useful draft\n" + text + "\nKeep this", max_bytes=64)
-                self.assertIn("Useful draft", result)
-                self.assertNotIn(secret, result)
-                self.assertNotIn("synthetic-key", result)
-                self.assertNotIn("123456", result)
-                self.assertNotIn("A" * 20, result)
-                self.assertNotIn("x" * 20, result)
+# Synthetic X2R2/X2R3 reproductions and the review's ordinary-message corpus.
+SECRET_EXAMPLES = [
+    "Card: 4111 1111 1111 1111 12-29", "4111 1111 1111 1111 123",
+    "Card: 4111111111111111 12 29", "sk_live_" + "A" * 24, "pin is 1234",
+    "password: synthetic-sensitive-value", '{"access_token": "synthetic-value"}',
+    "DATABASE_PASSWORD=synthetic-value", "AWS_SECRET_ACCESS_KEY=synthetic-value",
+    '{"clientSecret": "synthetic-value"}', "Cookie: session=synthetic-value",
+    "Your code is 123456", "SERVICE_SECRET=synthetic-value", "SERVICE_TOKEN=synthetic-value",
+    "SERVICE_PASSWORD=synthetic-value", "SERVICE_API_KEY=synthetic-value",
+    "1 2--3 4 5 6 7 8 9 0 1 2", "123456789012", "12345678901234567890",
+    "https://user:synthetic-value@example.invalid/page",
+    "postgresql://user:synthetic-value@example.invalid/db",
+    "custom+db://user:synthetic-value@example.invalid/db",
+    "https://example.invalid/?api_key=synthetic-value",
+    "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-key\n-----END " + "PRIVATE KEY-----",
+    "A" * 31 + "1", "1" + "z" * 31, "A1_-/+=" * 5,
+]
+SECRET_KEYWORDS = ("pin", "passcode", "cvv", "cvc", "password", "passwd", "secret", "token",
+                   "api key", "api_key", "private key", "otp", "verification code", "2fa", "ssn",
+                   "routing number", "account number")
+SECRET_PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox", "AKIA",
+                   "AIza", "sk-ant-", "sk-", "eyJ", "-----BEGIN", "Bearer ")
+SECRET_EXAMPLES += ["Before " + word.upper() + " after" for word in SECRET_KEYWORDS]
+SECRET_EXAMPLES += [prefix + "synthetic-value" for prefix in SECRET_PREFIXES]
+ORDINARY_MESSAGES = [
+    'Call me at 202-555-0123.',
+    'Phone +1 (303) 555-0198 is the office.',
+    'Use +44 20 7946 0958 for the contact.',
+    'Order ID: 4000000000000003',
+    'Order 140000000000000026 ships tomorrow.',
+    'Track order ORD-20261014-739201.',
+    'The meeting is 2026-10-14.',
+    'Our trip runs 10/14/2026 to 10/20/2026.',
+    'Deadline: October 14, 2026 at 12:30.',
+    'The price is $1,234.56.',
+    'Lunch costs $12.99 plus a $3.50 tip.',
+    'Budget: USD 25000.00 for the project.',
+    'Flight UA1234 leaves at 14:05.',
+    'AA 114 lands on 10/14.',
+    'Flight BA249 is delayed 35 minutes.',
+    'Send the parcel to ZIP 80202.',
+    'Postal code 10001-1234 is correct.',
+    'ZIP codes 90210, 94105, and 60601 are covered.',
+    'Meet at 123 Main Street, Denver, CO 80202.',
+    'Ship to 456 Elm Ave Apt 7B, Springfield, IL 62701.',
+    'The venue is 789 Broadway, New York, NY 10003.',
+    'Order ID 4111111111111111 was assigned by the test order system.',
+    'Pin the delivery address to the map.',
+    'Please pin this order receipt for tomorrow.',
+    'Drop a pin at 123 Main Street.',
+    'The map pin is at 456 Elm Avenue.',
+    'Use the red pushpin for the route.',
+    'The invoice is 1234567890123456.',
+    'The tracking reference is 9876543210987654321.',
+    'Our pickup is at 09:30 on 2026-10-15 and costs $25.',
+]
 
-    def test_utf8_and_failure_drop_and_configurable_over_redaction(self):
+
+class SanitizerTests(unittest.TestCase):
+    def test_secret_signals_drop_entire_text_before_truncation(self):
+        for number, text in enumerate(SECRET_EXAMPLES):
+            with self.subTest(shape=number):
+                self.assertIsNone(C.sanitize("Useful draft\n" + "x" * 680 + " " + text + "\nKeep this",
+                                             max_bytes=64))
+
+    def test_utf8_raw_bounds_failure_and_literal_operator_terms(self):
         self.assertEqual(C.sanitize("é" * 100, max_bytes=7), "ééé")
+        self.assertEqual(C.sanitize("Ａ draft\n\nKeep\u200b this"), "Ａ draft\n\nKeep\u200b this")
         self.assertIsNone(C.sanitize("bad\ud800"))
-        self.assertIsNone(C.sanitize("x" * 65537))
+        self.assertIsNone(C.sanitize("x" * 8193))
+        self.assertIsNone(C.sanitize("é" * 4097))
+        self.assertEqual(C.sanitize("é" * 4096, max_bytes=8), "é" * 4)
         self.assertIsNone(C.sanitize({"text": "attachment"}))
-        self.assertNotIn("private project", C.sanitize("Private Project: draft", redact_terms=["private project"]))
+        self.assertIsNone(C.sanitize("Private Project: draft", redact_terms=["private project"]))
+        self.assertIsNone(C.sanitize("ＰＩＮ: 1234"))
+        self.assertIsNone(C.sanitize("pass\u200bword: synthetic-value"))
+        for terms in ("bad", [""], ["x" * 129], ["x"] * 33):
+            self.assertIsNone(C.sanitize("Draft", redact_terms=terms))
+
+    def test_word_boundaries_and_short_tokens_keep_text(self):
+        for text in ("spinning pushpin secretive tokens", "A" * 32, "Ab1" * 10,
+                     "https://example.invalid/page?view=draft", "202-555-0123"):
+            with self.subTest(text=text):
+                self.assertEqual(C.sanitize(text), text)
+
+    def test_direct_signal_scan_one_mib_under_fifty_ms(self):
+        size = 1024 * 1024
+        probes = (("pin" + " " * (size - 3), True), ("passcode" + " " * (size - 8), True),
+                  ("q" * size, False), (" " * size, False), ("4" + "0" * (size - 1), True),
+                  ("4 " + "0 " * (size // 2 - 1), True), ("a" * (size - 1) + "1", True),
+                  (("A" * 31 + " ") * (size // 32), False),
+                  (("draft. " * (size // 7 + 1))[:size], False))
+        for text, expected in probes:
+            with self.subTest(prefix=text[:8]):
+                timings = []
+                for _ in range(3):
+                    start = time.perf_counter()
+                    result = C.secret_signal(text)
+                    timings.append(time.perf_counter() - start)
+                    self.assertEqual(bool(result), expected)
+                self.assertLess(min(timings), 0.050, timings)
+
+    def test_one_mib_pin_whitespace_is_bounded(self):
+        import subprocess
+        code = "from test_cross_bot import C; assert C.sanitize('pin' + ' ' * (1024*1024)) is None"
+        result = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).parent,
+                                capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class StoreTests(unittest.TestCase):
@@ -349,75 +429,49 @@ class CollectorTests(unittest.TestCase):
             self.assertFalse(result["enabled"])
         self.assertFalse((self.root / "profiles/specialist/digest.json").exists())
 
-    def test_secret_sanitization_and_failed_sanitizer_never_write_raw_exchange(self):
+    def test_secret_signals_in_either_field_never_write_exchange(self):
         self.command("cross on")
-        self.exchange(message="Draft\npassword: synthetic-private-value", response="Plan\nOTP: 123456")
-        text = (self.root / "profiles/specialist/digest.json").read_text()
-        self.assertNotIn("synthetic-private-value", text)
-        self.assertNotIn("123456", text)
-        self.assertNotIn("not exported", text)
-        self.kw["turn_id"] = "turn-two"
-        self.exchange(response="bad\ud800")
+        for number, text in enumerate(SECRET_EXAMPLES + ["pin" + " " * 65533, "bad\ud800"]):
+            for side in ("message", "response", "both"):
+                with self.subTest(shape=number, side=side):
+                    self.kw["turn_id"] = str(number) + side
+                    self.exchange(message=text if side != "response" else "Useful draft",
+                                  response=text if side != "message" else "Done")
+                    self.assertEqual(self.cross.status()["exchanges"], 0)
+                    self.assertEqual(self.cross._pending, {})
+                    self.assertFalse((self.root / "profiles/specialist/digest.json").exists())
+                    self.assertFalse((self.root / "profiles/specialist/dedup.json").exists())
+        self.kw["turn_id"] = "safe-after-drop"
+        self.exchange()
         self.assertEqual(self.cross.status()["exchanges"], 1)
 
-    def test_recognizable_secrets_are_redacted_before_collector_writes_disk(self):
+    def test_combined_raw_exchange_byte_limit_before_digest_truncation(self):
         self.command("cross on")
-        fixtures = [("Bearer synthetic-bearer-value", "synthetic-bearer-value"),
-                    ("AKIA" + "A" * 16, "AKIA"), ("AIza" + "B" * 35, "AIza"),
-                    ("Your code is 123456", "123456"),
-                    ("verification code: 654321", "654321")]
-        fixtures += [(scheme + "://user:synthetic-url-password@example.invalid/db", "synthetic-url-password")
-                     for scheme in ("https", "postgresql", "custom+db")]
-        for number, (text, secret) in enumerate(fixtures):
-            with self.subTest(shape=number):
-                self.kw["turn_id"] = str(number)
-                # Put the credential across the truncation boundary, on both sides.
-                self.exchange(message="x" * 680 + " " + text, response=text)
-                disk = (self.root / "profiles/specialist/digest.json").read_text()
-                self.assertNotIn(secret, disk)
-                self.assertIn("[redacted", disk)
+        for number, (user, assistant) in enumerate((("x" * 4096, "y" * 4097),
+                                                    ("é" * 2048, "字" * 1366))):
+            self.kw["turn_id"] = str(number)
+            self.exchange(message=user, response=assistant)
+            self.assertEqual(self.cross.status()["exchanges"], 0)
+            self.assertFalse((self.root / "profiles/specialist/digest.json").exists())
+        self.kw["turn_id"] = "at-limit"
+        self.exchange(message="x" * 4096, response="y" * 4096)
+        self.assertEqual(self.cross.status()["exchanges"], 1)
 
-    def test_payment_and_other_common_secrets_never_reach_collector_disk(self):
+    def test_x2r3_ordinary_corpus_keeps_most_messages_unchanged(self):
         self.command("cross on")
-        fixtures = [prefix + "A" * 24 for prefix in
-                    ("sk_live_", "sk_test_", "rk_live_", "pk_live_", "ghp_", "gho_", "github_pat_",
-                     "xoxa-", "xoxb-", "xoxp-", "xoxr-")]
-        fixtures += ["eyJ" + "A" * 16 + "." + "B" * 16 + "." + "C" * 16,
-                     "pin is 1234", "PIN: 1234", "passcode 0000",
-                     "SERVICE_SECRET=synthetic-sensitive-value", "SERVICE_TOKEN=synthetic-sensitive-value",
-                     "SERVICE_PASSWORD=synthetic-sensitive-value", "SERVICE_API_KEY=synthetic-sensitive-value"]
-        for kind in ("", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "):
-            fixtures.append("-----BEGIN " + kind + "PRIVATE KEY-----\nsynthetic-sensitive-value\n"
-                            + "-----END " + kind + "PRIVATE KEY-----")
-        cards = ("4000000000006", "40000000000002", "400000000000006", "4000000000000002",
-                 "40000000000000006", "400000000000000002", "4000000000000000006",
-                 "4111111111111111")
-        for card in cards:
-            fixtures += [card, " ".join(card[i:i+4] for i in range(0, len(card), 4)),
-                         "-".join(card[i:i+4] for i in range(0, len(card), 4))]
-        for number, text in enumerate(fixtures):
-            with self.subTest(shape=number):
-                self.kw["turn_id"] = str(number)
-                padding = "" if text.startswith("-----BEGIN ") else "x" * 680 + " "
-                self.exchange(message="Useful draft\n" + padding + text + "\nKeep this",
-                              response="Useful draft\n" + text + "\nKeep this")
-                disk = json.loads((self.root / "profiles/specialist/digest.json").read_text())
-                latest = disk["exchanges"][-1]
-                self.assertEqual(latest["user"], "Useful draft\n[redacted]\nKeep this")
-                self.assertEqual(latest["assistant"], "Useful draft\n[redacted]\nKeep this")
-
-    def test_non_card_numbers_survive_collector_disk(self):
-        self.command("cross on")
-        fixtures = ("Phone: 202-555-0123", "Order ID: 4000000000000003", "Date: 2026-10-14",
-                    "Order ID: 140000000000000026", "Reference: 400000000000",
-                    "Reference: 40000000000000000002")
-        for number, text in enumerate(fixtures):
-            with self.subTest(shape=number):
-                self.kw["turn_id"] = str(number)
-                self.exchange(message=text, response=text)
-                latest = json.loads((self.root / "profiles/specialist/digest.json").read_text())["exchanges"][-1]
-                self.assertEqual(latest["user"], text)
-                self.assertEqual(latest["assistant"], text)
+        kept = 0
+        for number, text in enumerate(ORDINARY_MESSAGES):
+            self.command("cross off")
+            self.command("cross on")
+            self.kw["turn_id"] = str(number)
+            self.exchange(message=text, response=text)
+            file = self.root / "profiles/specialist/digest.json"
+            if file.exists():
+                entry = json.loads(file.read_text())["exchanges"][-1]
+                self.assertEqual((entry["user"], entry["assistant"]), (text, text))
+                kept += 1
+        self.assertGreater(kept, len(ORDINARY_MESSAGES) // 2)
+        self.assertEqual(kept, 19)
 
     def test_busy_store_off_stops_locally_and_reports_unpurged_digest(self):
         import fcntl
