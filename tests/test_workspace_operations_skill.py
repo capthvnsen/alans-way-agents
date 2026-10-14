@@ -12,6 +12,26 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_finished_tabs_are_closed_only_with_live_ownership_and_control(self):
+        section = re.search(r"## Tab hygiene(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section, "finished tasks need a tab cleanup policy")
+        policy = _normalized(section.group(1))
+        for rule in (
+            "When a task finishes, close the tabs you opened for it",
+            "say which tabs you kept and why",
+            "`requestingBotId`", "`botId` matches `requestingBotId`",
+            "`allowedBots` is a grant, not ownership",
+            "`controller` is `agent`", "fresh `epoch`",
+            "Never close another bot's or the user's tabs",
+            "At the tab limit, close your own confirmed finished tabs first",
+            "retry opening once", "after `/new` or compaction",
+            "do not infer that a tab is finished from its age or URL",
+            "If ownership or task status is uncertain, leave the tab alone",
+            "Do not claim a tab just to close it",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
     def test_real_decisions_use_native_clarify_with_text_and_no_approvals(self):
         self.assertIn("Hermes's `clarify` buttons for real decisions the user owns", self.normalized)
         self.assertIn("keep Other/free text possible and never use them for approvals", self.normalized)

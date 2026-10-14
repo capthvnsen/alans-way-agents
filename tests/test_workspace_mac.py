@@ -52,6 +52,38 @@ ROUTER_DRIVER = (
 
 @unittest.skipUnless(NODE, "node is required for router tests")
 class RouterNoticeTests(MacStateEnvTest):
+    def test_tab_list_identifies_requester_after_a_fresh_connection(self):
+        tabs = [
+            {"id": "own", "botId": "bot-a", "controller": "agent", "epoch": 3, "host": "computer"},
+            {"id": "granted", "botId": "bot-b", "allowedBots": ["bot-a"], "epoch": 2},
+            {"id": "human", "botId": "bot-a", "controller": "human", "epoch": 4,
+             "handback": {"state": "awaiting_human", "reason": "captcha"}},
+            {"id": "vm", "botId": "bot-a", "host": "vm", "epoch": 1},
+        ]
+        reply = {"jsonrpc": "2.0", "id": 7, "result": {"content": [
+            {"type": "text", "text": json.dumps({"tabs": tabs, "requestingBotId": "untrusted"})}]}}
+        for host in ("mac", "vps"):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                [line], _ = self.annotate(directory, [{"line": json.dumps(reply)}],
+                                          host=host, mac_configured=False, bot="bot-a")
+                data = json.loads(json.loads(line)["result"]["content"][0]["text"])
+                self.assertEqual(data["requestingBotId"], "bot-a")
+                self.assertEqual(data["tabs"], tabs)
+
+    def test_large_tab_list_still_identifies_requester(self):
+        tabs = [{"id": "own", "botId": "bot-a", "title": "x" * 100100}]
+        for sdk_order in (False, True):
+            content = [{"type": "text", "text": json.dumps({"tabs": tabs})}]
+            reply = ({"result": {"content": content}, "jsonrpc": "2.0", "id": 8}
+                     if sdk_order else
+                     {"jsonrpc": "2.0", "id": 8, "result": {"content": content}})
+            with self.subTest(sdk_order=sdk_order), tempfile.TemporaryDirectory() as directory:
+                [line], _ = self.annotate(directory, [{"line": json.dumps(reply, separators=(",", ":"))}],
+                                          mac_configured=False, bot="bot-a")
+                data = json.loads(json.loads(line)["result"]["content"][0]["text"])
+                self.assertEqual(data.get("requestingBotId"), "bot-a")
+                self.assertEqual(data["tabs"], tabs)
+
     def annotate(self, directory, ops, host="vps", mac_configured=True, bot=""):
         proc = subprocess.run(
             [NODE, "-e", ROUTER_DRIVER, str(ROUTER), host,
