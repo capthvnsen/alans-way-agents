@@ -4,7 +4,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     env:
-      HERMES_SCANNER_ROOT: ${{ runner.temp }}/hermes-scanner
+      HERMES_SCANNER_ROOT: ${{ github.workspace }}/../hermes-scanner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
