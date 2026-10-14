@@ -2782,10 +2782,7 @@ workspace_for_profile() {
   if [ -n "$PROFILE" ]; then set -- "$@" --profile "$PROFILE"
   elif [ -n "$CONFIG" ]; then set -- "$@" --config "$CONFIG"
   else set -- "$@" --config "$HERMES_HOME/config.yaml"; fi
-  # A timed-out interpreter probe is not retried by the offline YAML editor.
-  _progress_python="${HERMES_PYTHON:-}"
-  [ "$_probe_rc" != 124 ] || _progress_python=""
-  if ALANS_WAY_TELEGRAM_PROGRESS=1 HERMES_PYTHON="$_progress_python" sh "$REPO_DIR/setup-workspace.sh" "$@"; then
+  if sh "$REPO_DIR/setup-workspace.sh" "$@"; then
     ok "workspace_browser configured${PROFILE:+ for profile $PROFILE}"
     WORKSPACE_CONFIGURED=1
     if [ "$COMPUTER_READY" = 1 ]; then

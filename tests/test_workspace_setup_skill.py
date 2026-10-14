@@ -86,6 +86,35 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)
 
+    def test_busy_mode_uses_effective_value_and_skips_steer_queue_or_remembered_interrupt(self):
+        for rule in ("effective value", "config get display.busy_input_mode",
+                     "already `steer` or `queue`", "A recorded `keep-interrupt`",
+                     "An absent marker means ask once", "report the unknown state"):
+            self.assertIn(rule, self.normalized)
+
+    def test_silence_cannot_be_overridden_by_setup(self):
+        for rule in ("with no answer, leave the mode and marker untouched",
+                     "General setup or proactivity consent does not answer this question",
+                     "Neither `setup.sh` nor `setup-workspace.sh` writes these two display keys"):
+            self.assertIn(rule, self.normalized)
+
+    def test_answer_and_readback_gate_marker_write(self):
+        for rule in ("Apply only the answered choice with the supported CLI",
+                     "Read back that key and report a failure before continuing",
+                     "only after that answer and a successful mode readback",
+                     "never restore a mode from it or override later user changes",
+                     "config unset skills.config.workspace-setup.busy_input_choice"):
+            self.assertIn(rule, self.normalized)
+
+    def test_interim_default_true_requires_no_write_and_false_is_only_reported(self):
+        for rule in ("config get display.interim_assistant_messages",
+                     "hermes_cli/config_defaults.py:919", "defaults to `true`",
+                     "Only when the effective value is `false`",
+                     "report that the user's choice disables interim messages",
+                     "Write nothing for this key"):
+            self.assertIn(rule, self.normalized)
+        self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
+
     def test_display_stack_is_guided_not_auto(self):
         self.assertIn("never auto-installed", self.normalized)
 

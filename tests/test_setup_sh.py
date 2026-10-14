@@ -2351,71 +2351,48 @@ class AllProfilesHarness(IntegrationBase):
         return result, home, read_log(log)
 
 
-class TelegramProgressTests(AllProfilesHarness, unittest.TestCase):
-    def run_all(self, *args, **kwargs):
-        return super().run_all(*args, hermes_python=sys.executable, **kwargs)
+class SetupDisplayConsentTests(AllProfilesHarness, unittest.TestCase):
+    def test_unanswered_non_interactive_setup_never_writes_display_choices(self):
+        # A working interpreter reproduces the old silent-write path; this
+        # must also hold when Hermes is installed by a package manager.
+        result, home, _ = self.run_all(hermes_python=sys.executable)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        configs = [home / "config.yaml", *sorted((home / "profiles").glob("*/config.yaml"))]
+        for config in configs:
+            self.assertNotIn("busy_input_mode", config.read_text(), str(config))
+            self.assertNotIn("interim_assistant_messages", config.read_text(), str(config))
+            self.assertNotIn("busy_input_choice", config.read_text(), str(config))
+        before = {config: config.read_bytes() for config in configs}
+        result = run("--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(home), env=self.env, check=False, script=self.script)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({config: config.read_bytes() for config in configs}, before)
+        self.assertFalse(any("config set display." in call or "busy_input_choice" in call
+                             for call in read_log(self.root / "log")))
 
-    def test_setup_defaults_live_progress_for_every_telegram_profile(self):
-        result, home, _ = self.run_all()
-        for name in (None, "alpha", "beta", "gamma", "quoted"):
-            cfg = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
-            text = cfg.read_text()
-            self.assertIn("display:\n  busy_input_mode: steer\n  interim_assistant_messages: true\n", text, name)
-        self.assertNotIn("display:", (home / "profiles" / "botless" / "config.yaml").read_text())
-        self.assertIn("busy mode applies to every platform in this profile", result.stdout)
+    def test_existing_display_choices_and_partial_values_are_preserved(self):
+        displays = {
+            None: "display: # mine\n  busy_input_mode: interrupt\n  interim_assistant_messages: false\n",
+            "alpha": "display:\n  busy_input_mode: steer\n",
+            "beta": "display:\n  busy_input_mode: queue\n  interim_assistant_messages: true\n",
+            "gamma": "display:\n  interim_assistant_messages: false\n  platforms:\n    telegram:\n      interim_assistant_messages: false\n",
+        }
 
-    def test_rerun_is_idempotent_and_keeps_a_later_user_choice(self):
-        _, home, _ = self.run_all()
-        config = home / "config.yaml"
-        before = config.read_bytes()
-        args = ("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home))
-        run(*args, env=self.env, check=False, script=self.script)
-        self.assertEqual(config.read_bytes(), before)
-        config.write_text(config.read_text().replace("busy_input_mode: steer", "busy_input_mode: queue"))
-        run(*args, env=self.env, check=False, script=self.script)
-        self.assertIn("busy_input_mode: queue", config.read_text())
-        self.assertNotIn("busy_input_mode: steer", config.read_text())
-
-    def test_existing_display_choices_are_preserved_with_comments_and_indent(self):
         def layout(home):
             self.layout(home)
-            (home / "config.yaml").write_text(
-                "display: # mine\n    'busy_input_mode': interrupt # deliberate\n"
-                "    interim_assistant_messages: false\n    tool_progress: false\n"
-                "    platforms:\n        telegram:\n            interim_assistant_messages: false\n")
-        _, home, _ = self.run_all(layout=layout)
-        self.assertIn("display: # mine\n    'busy_input_mode': interrupt # deliberate\n"
-                      "    interim_assistant_messages: false\n    tool_progress: false\n"
-                      "    platforms:\n        telegram:\n            interim_assistant_messages: false\n",
-                      (home / "config.yaml").read_text())
-        self.assertNotIn("busy_input_mode: steer", (home / "config.yaml").read_text())
+            for name, display in displays.items():
+                config = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+                with config.open("a") as stream:
+                    stream.write(display)
 
-    def test_partial_display_adds_only_missing_default_and_keeps_platform_override(self):
-        def layout(home):
-            self.layout(home)
-            (home / "config.yaml").write_text(
-                "display:\n    busy_input_mode: queue\n    platforms:\n        telegram:\n"
-                "            interim_assistant_messages: false\n")
-        _, home, _ = self.run_all(layout=layout)
-        text = (home / "config.yaml").read_text()
-        self.assertIn("display:\n  busy_input_mode: queue\n", text)
-        self.assertIn("  interim_assistant_messages: true\n", text)
-        self.assertIn("      interim_assistant_messages: false\n", text)
-
-    def test_empty_inline_display_becomes_block_and_complex_display_is_left_alone(self):
-        for value in ("{} # mine", "{busy_input_mode: interrupt}", "&defaults"):
-            with self.subTest(value=value):
-                def layout(home):
-                    self.layout(home)
-                    (home / "config.yaml").write_text("display: " + value + "\n")
-                result, home, _ = self.run_all(layout=layout)
-                text = (home / "config.yaml").read_text()
-                if value.startswith("{}"):
-                    self.assertRegex(text, r"display:\s+# mine\n\s+busy_input_mode: steer\n")
-                else:
-                    self.assertIn("display: " + value + "\n", text)
-                    self.assertIn("warn live progress left unchanged", result.stdout)
-                    self.assertNotIn("busy_input_mode: steer", text)
+        result, home, _ = self.run_all(layout=layout, hermes_python=sys.executable)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, display in displays.items():
+            config = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+            text = config.read_text()
+            self.assertIn(display, text)
+            for key in ("busy_input_mode", "interim_assistant_messages"):
+                self.assertEqual(text.count(key), display.count(key))
 
 
 class AllProfilesTests(AllProfilesHarness, unittest.TestCase):

@@ -45,8 +45,9 @@ refuses anything else.
 
 **Messages while working (before setup and the gateway restart).** For each
 Telegram profile using this plugin, read `hermes -p <profile> config get
-display.busy_input_mode` (use `-p default` for the default profile). If it is
-already `steer`, continue without asking. Preserve `queue`, unknown values and
+display.busy_input_mode` (use `-p default` for the default profile). Use the
+effective value, including Hermes's defaults when no key is stored. If it is
+already `steer` or `queue`, continue without asking. Preserve unknown values and
 unreadable config. If it is `interrupt`, first read `hermes -p <profile> config
 get skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
 means the user already chose to keep it; continue without asking or rewriting
@@ -73,6 +74,16 @@ be remembered; never invent a successful choice. This marker records only the
 setup answer: never restore a mode from it or override later user changes.
 The user can explicitly revisit the choice at any time, or remove the marker
 with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
+
+**Interim messages.** Read `hermes -p <profile> config get
+display.interim_assistant_messages`. Hermes defaults to `true` at commit
+`d97007c32d6340f7ba79ac1dfb5773cc00846448` (which includes `6e7b83a2f1`),
+[`hermes_cli/config_defaults.py:919`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919).
+Only when the effective value is `false`, report that the user's choice disables
+interim messages; preserve it and any platform override. Write nothing for this
+key. Neither `setup.sh` nor `setup-workspace.sh` writes these two display keys;
+the busy-mode choice and marker above are written only through the Hermes CLI
+after the user answers.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents ~/alans-way-agents

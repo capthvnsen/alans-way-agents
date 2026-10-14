@@ -334,7 +334,7 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 MARK_BEGIN="$MARK_BEGIN" MARK_END="$MARK_END" BLOCK="$(block)" python3 - "$CONFIG" <<'PY'
-import os, re, shutil, subprocess, sys, time
+import os, re, shutil, sys, time
 path, mark_b, mark_e, block = sys.argv[1], os.environ["MARK_BEGIN"], os.environ["MARK_END"], os.environ["BLOCK"]
 original = open(path, encoding="utf-8", newline="").read()
 nl = "\r\n" if "\r\n" in original else "\n"
@@ -487,81 +487,6 @@ if not has_managed and not inserted:
     out.append(nl + "mcp_servers:" + nl + block + nl)
 result = "".join(out)
 
-# config get includes merged defaults (even with --raw), so it cannot identify
-# missing stored keys. Use Hermes' interpreter and its public YAML dependency
-# for this offline fallback; the managed block and defaults still share one backup.
-if os.environ.get("ALANS_WAY_TELEGRAM_PROGRESS") == "1":
-    editor = r'''import io, sys
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
-from ruamel.yaml.resolver import VersionedResolver
-
-class Yaml11Resolver(VersionedResolver):
-    @property
-    def processing_version(self):
-        return (1, 1)
-
-yaml = YAML(typ="rt")
-yaml.Resolver = Yaml11Resolver
-yaml.preserve_quotes = True
-yaml.width = 2**31 - 1
-original_source = sys.stdin.buffer.read().decode("utf-8")
-source = original_source.replace("\r\n", "\n")
-data = yaml.load(source)
-# A null value discards its anchor during construction; inspect the parsed
-# nodes as well so even an anchored empty display is left alone.
-root = yaml.compose(source)
-if root is not None:
-    for key, value in root.value:
-        if key.value == "display" and value.anchor:
-            raise ValueError("anchored display mapping")
-if data is None:
-    data = CommentedMap()
-if not isinstance(data, CommentedMap) or data.anchor.value or data.merge or data.fa.flow_style():
-    raise ValueError("ambiguous root mapping")
-display = data.get("display")
-if display is None:
-    display = CommentedMap()
-elif (not isinstance(display, CommentedMap) or display.anchor.value or display.merge
-      or (display and display.fa.flow_style())):
-    raise ValueError("complex display mapping")
-defaults = {"busy_input_mode": "steer", "interim_assistant_messages": True}
-missing = {key: value for key, value in defaults.items() if key not in display}
-if not missing:
-    sys.stdout.buffer.write(original_source.encode("utf-8"))
-else:
-    display.update(missing)
-    display.fa.set_block_style()
-    data["display"] = display
-    yaml.indent(mapping=2, sequence=4, offset=2)
-    yaml.line_break = "\n"
-    output = io.StringIO()
-    yaml.dump(data, output)
-    rendered = output.getvalue()
-    if "\r\n" in original_source:
-        rendered = rendered.replace("\n", "\r\n")
-    # Validate the emitted YAML too; a duplicate or type error leaves it unwritten.
-    check = YAML(typ="safe")
-    check.version = (1, 1)
-    if check.load(rendered) != data:
-        raise ValueError("YAML round-trip changed values")
-    sys.stdout.buffer.write(rendered.encode("utf-8"))
-'''
-    interpreter = os.environ.get("HERMES_PYTHON")
-    try:
-        if not interpreter:
-            raise RuntimeError("Hermes interpreter unavailable")
-        edited = subprocess.run([interpreter, "-c", editor], input=result.encode("utf-8"),
-                                capture_output=True, timeout=30)
-        if edited.returncode or not edited.stdout:
-            raise RuntimeError("YAML editor unavailable or mapping ambiguous")
-        result = edited.stdout.decode("utf-8")
-        print("setup-workspace: live progress defaults: steer + interim messages; explicit values kept; "
-              "busy mode applies to every platform in this profile")
-    except (OSError, RuntimeError, subprocess.TimeoutExpired):
-        # Do not print parser errors: they can contain the user's config values.
-        print("setup-workspace: warn live progress left unchanged (Hermes YAML parser unavailable "
-              "or ambiguous/complex mapping); set missing display keys with hermes config")
 for what in removed:
     print("setup-workspace: removed " + what)
 if result != original:

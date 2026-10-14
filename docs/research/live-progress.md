@@ -8,7 +8,13 @@ Research on 2026-10-13 from fresh scratch clones, without inspecting or changing
 
 **Busy mode is per profile, not per platform.** The supported key is `display.busy_input_mode`; setting `display.platforms.telegram.busy_input_mode` does not configure it. The loader reads the profile's top-level display mapping and snapshots independently routed profile policies. Interim commentary does support `display.platforms.telegram.interim_assistant_messages`; precedence is platform override, global `display` value, platform default, global default. Telegram's current built-in default keeps interim messages on and tool progress off. [Hermes `gateway/run_config_loaders.py:256-267,323-359`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/gateway/run_config_loaders.py#L256), [Hermes `gateway/display_config.py:16-54,98-128`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/gateway/display_config.py#L98)
 
-Hermes's generated defaults already include `busy_input_mode: interrupt`. The reader receives only a value, with no provenance distinguishing a generated default from a deliberate user choice. Preserving every existing value therefore leaves such installations in interrupt mode until the user chooses `/busy steer` or updates the profile's config. Setup must disclose this limitation; an absent-key default cannot promise that all existing users switch automatically. Explicit global `interim_assistant_messages: false`, and explicit Telegram overrides, must likewise remain effective. [Hermes `hermes_cli/config_defaults.py:830`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L830), [Hermes `gateway/run_config_loaders.py:258-267`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/gateway/run_config_loaders.py#L258)
+Hermes's effective defaults are `busy_input_mode: interrupt` and
+`interim_assistant_messages: true`. `config get` includes those defaults even
+when no key is stored, so guided setup asks an effective interrupt-mode user
+for an explicit choice. Interim messages need no setup write; the skill only
+reports an effective `false` choice and preserves it and platform overrides.
+Neither setup script writes either display key.
+[Hermes `hermes_cli/config_defaults.py:830,919`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919)
 
 ## Busy input semantics and acknowledgments
 
@@ -55,20 +61,19 @@ The CLI therefore cannot establish which stored keys are missing.
 [Hermes `hermes_cli/config.py:2067-2070,3577-3708,3714-3752`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config.py#L3714),
 [Hermes `tests/hermes_cli/test_config_yaml_comment_preservation.py:72-86`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/tests/hermes_cli/test_config_yaml_comment_preservation.py#L72)
 
-For missing-key defaults, setup uses the allowed offline fallback: Hermes's
-selected `HERMES_PYTHON` and its public `ruamel.yaml` dependency decode keys
-and round-trip comments/quotes, using Hermes's YAML 1.1 policy and long-line
-emission width. This adds only missing display keys inside the existing
-workspace-browser backup/write. Nonempty flow, anchored and merged display
-maps, ambiguous roots and unavailable interpreters/parsers are skipped with a
-warning. YAML errors are not printed because they may contain config values.
-An actual changed file can have indentation or key spelling normalized by the
-YAML writer; comments, quoting and values are preserved. Reruns are byte-identical.
-[Hermes `hermes_yaml.py:15-38,89-99`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_yaml.py#L89)
+The follow-up review of `2f4a544` showed that the offline defaults editor
+could not find Hermes's package-manager interpreter on a fresh install, and
+could write `steer` after an unanswered skill question. That editor and its
+interpreter plumbing have been removed. Setup no longer writes either display
+key; the skill alone applies an answered busy-mode choice through the CLI.
+Hermes's interim-message default is already `true` at `d97007c` (an ancestor
+check confirms this commit includes `6e7b83a2f1`), so no interim setting is
+written or offered automatically.
+[Hermes `hermes_cli/config_defaults.py:919`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919)
 
-Guided setup asks an existing `interrupt` profile the explicit busy-mode
+Guided setup asks an effective `interrupt` profile with no choice marker the explicit busy-mode
 question before setup/restart. Only an answered choice is applied through the
-profile-scoped CLI. Already-`steer` profiles are stateless. An explicit choice to
+profile-scoped CLI. Already-`steer` or `queue` profiles are skipped. An explicit choice to
 keep `interrupt` records `skills.config.workspace-setup.busy_input_choice:
 keep-interrupt` through that CLI, after disclosure, to avoid re-asking on later
 runs. Silence and non-interactive runs leave mode and marker untouched. The
@@ -76,11 +81,12 @@ marker never restores a mode over a later user change. Fixture CLI set/get
 confirmed this custom skill-config key round-trips (Hermes warns it is not a
 runtime config key; the setup skill is its consumer).
 
-The follow-up evidence is retained in the `next-G3F-work` scratch folder:
-`verify-cli.py` and `cli-verification.log` exercise the actual profile-scoped
-CLI against fixture homes; the YAML regressions reproduce duplicate-key errors
-on `1acf14c` and then verify preservation, one backup and byte-identical reruns.
-No real Hermes configuration or gateway was used.
+Historical CLI/comment-preservation evidence remains in `next-G3F-work`.
+The simplification evidence is in `next-G3F2-work`: the unanswered setup
+regression fails on `2f4a544`, then passes after removing the editor. Direct
+workspace tests cover fresh config, reruns and existing or partial values;
+skill-text tests cover effective-mode checks, answers, silence, readback and
+the ask-once marker. No real Hermes configuration or gateway was used.
 
 ## Isolated scripted transport demo
 
