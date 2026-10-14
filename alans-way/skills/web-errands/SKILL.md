@@ -127,7 +127,8 @@ accounts rate-limited or suspended — and back off when a check fails.
 Give the job a self-contained prompt with the URL, constraints and stop
 conditions: stop on success, and stop after three consecutive failures;
 report either way. Cron scheduling tools are disabled within cron runs by
-default; arrange the pause/remove with the operator or an explicitly
-enabled scheduler toolset, rather than assuming a job can stop itself.
+default; arrange the pause/remove with the operator unless they have
+enabled `cron.allow_agent_scheduling: true`. A job must not assume it can
+stop itself.
 A cron run has no one to answer an approval, so a watch that hits its
 target stages the result and asks the user to finish it.

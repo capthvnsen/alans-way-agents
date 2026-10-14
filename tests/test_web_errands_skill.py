@@ -263,6 +263,9 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
         self.assertIn("back off", self.normalized)
         self.assertIn("stop on success", self.normalized)
         self.assertIn("A cron run has no one to answer an approval", self.normalized)
+        self.assertIn("self-contained prompt", self.normalized)
+        self.assertIn("three consecutive failures", self.normalized)
+        self.assertIn("`cron.allow_agent_scheduling: true`", self.normalized)
 
     def test_host_choice_follows_the_users_session(self):
         self.assertIn("`host:\"vm\"`", self.normalized)
