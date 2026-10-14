@@ -131,8 +131,8 @@ An operator configures each profile through Hermes' CLI. Use the **same explicit
 absolute directory and primary designation** in every participating profile:
 
 ```sh
-hermes -p <profile> config set plugins.entries.alans-way.settings.cross_bot.shared_root /absolute/gateway/companion/alans-way-cross-bot/v1
 hermes -p <profile> config set plugins.entries.alans-way.settings.cross_bot.primary <primary-profile>
+hermes -p <profile> config set plugins.entries.alans-way.settings.cross_bot.shared_root /absolute/gateway/companion/alans-way-cross-bot/v1
 hermes -p <profile> proactivity bind --session-key 'agent:<profile>:telegram:dm:<owner-chat-id>'
 hermes -p <profile> tools enable proactivity --platform telegram
 ```
@@ -140,8 +140,10 @@ hermes -p <profile> tools enable proactivity --platform telegram
 Select an existing owner DM route for that profile; `default`/`custom` uses
 `agent:main`, and a profile literally named `main` uses `agent:main~`. Collector
 checks use the exact bound session key, never just the human's ID. Shared-root
-and primary changes take effect on plugin reload under the normal operator
-update/drain procedure. No installer changes or automatic enrollment are added.
+changes take effect on plugin reload under the normal operator update/drain
+procedure. Set the primary before the root when creating a store; all profiles
+must match its recorded designation. Stage 1 requires a fresh shared root to
+change an existing store's designation. No installer changes or automatic enrollment are added.
 The approved future live test uses `alansway` as primary and `utd` as target.
 
 From each bot's bound owner DM, send:
