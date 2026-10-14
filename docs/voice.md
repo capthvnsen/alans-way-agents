@@ -62,6 +62,13 @@ affected.
    - questions only for decisions you own, naming the choice or needed detail.
 
    In groups it also keeps replies shorter and talks to whoever asked.
+   The casual/recap length rule comes after the general detail and list
+   guidance: at most three sentences total, including any offer of detail,
+   with no lists unless asked. Recaps keep headline outcomes and leave out
+   per-item evidence and history. Your own persona or request for a different
+   style or more detail still wins; code, plans and research stay complete.
+   This is model guidance, not an enforced output limit: long replies are
+   never truncated or silently rewritten to meet the cap.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
    deterministic, with no model call, and does exactly one thing: it drops a
    known assistant opener ("Certainly!", "Absolutely!", "Of course!", "Sure
