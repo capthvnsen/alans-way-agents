@@ -36,13 +36,14 @@ SECRET_EXAMPLES = [
     "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-key\n-----END " + "PRIVATE KEY-----",
     "A" * 31 + "1", "1" + "z" * 31, "A1_-/+=" * 5,
 ]
-SECRET_KEYWORDS = ("pin", "passcode", "cvv", "cvc", "password", "passwd", "secret", "token",
+SECRET_KEYWORDS = ("passcode", "cvv", "cvc", "password", "passwd", "secret", "token",
                    "api key", "api_key", "private key", "otp", "verification code", "2fa", "ssn",
                    "routing number", "account number")
 SECRET_PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox", "AKIA",
                    "AIza", "sk-ant-", "sk-", "eyJ", "-----BEGIN", "Bearer ")
 SECRET_EXAMPLES += ["Before " + word.upper() + " after" for word in SECRET_KEYWORDS]
 SECRET_EXAMPLES += [prefix + "synthetic-value" for prefix in SECRET_PREFIXES]
+SECRET_EXAMPLES += ["PIN: 9876", "my pin is 1234", "Pin 0000 for the door"]
 ORDINARY_MESSAGES = [
     'Call me at 202-555-0123.',
     'Phone +1 (303) 555-0198 is the office.',
@@ -100,13 +101,14 @@ class SanitizerTests(unittest.TestCase):
 
     def test_word_boundaries_and_short_tokens_keep_text(self):
         for text in ("spinning pushpin secretive tokens", "A" * 32, "Ab1" * 10,
+                     "Drop a pin at 123 Main Street.", "The map pin is at 456 Elm Avenue.",
                      "https://example.invalid/page?view=draft", "202-555-0123"):
             with self.subTest(text=text):
                 self.assertEqual(C.sanitize(text), text)
 
     def test_direct_signal_scan_one_mib_under_fifty_ms(self):
         size = 1024 * 1024
-        probes = (("pin" + " " * (size - 3), True), ("passcode" + " " * (size - 8), True),
+        probes = (("pin" + " " * (size - 3), False), ("pin is 1234" + " " * (size - 11), True), ("passcode" + " " * (size - 8), True),
                   ("q" * size, False), (" " * size, False), ("4" + "0" * (size - 1), True),
                   ("4 " + "0 " * (size // 2 - 1), True), ("a" * (size - 1) + "1", True), ("1" + "a" * (size - 1), True),
                   (("A" * 31 + " ") * (size // 32), False),
@@ -472,7 +474,7 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual((entry["user"], entry["assistant"]), (text, text))
                 kept += 1
         self.assertGreater(kept, len(ORDINARY_MESSAGES) // 2)
-        self.assertEqual(kept, 19)
+        self.assertEqual(kept, 23)
 
     def test_busy_store_off_stops_locally_and_reports_unpurged_digest(self):
         import fcntl

@@ -31,11 +31,14 @@ EXCHANGE_BYTES = 8192
 # nested repetitions. Each search consumes O(n); the fixed number of searches
 # and disjoint token matches keep the entire signal check linear in input size.
 _KEYWORDS = re.compile(
-    r"\b(?:pin|passcode|cvv|cvc|password|passwd|secret|token|api key|private key|otp|"
+    r"\b(?:passcode|cvv|cvc|password|passwd|secret|token|api key|private key|otp|"
     r"verification code|2fa|ssn|routing number|account number|passphrase|authorization|"
     r"cookie|your code|clientsecret|access key)\b")
 _PREFIXES = ("sk_", "rk_", "pk_live", "ghp_", "gho_", "github_pat_", "xox", "akia", "aiza",
              "sk-ant-", "sk-", "eyj", "-----begin", "bearer ")
+# "pin" is everyday map/pinning language; only a PIN followed closely by digits is a signal.
+# Bounded {0,3} gaps (no open-ended quantifiers) keep this linear.
+_PIN = re.compile(r"\bpin\b[ \t]{0,3}(?:is|code|number|no|#|:|=)?[ \t:.#]{0,3}\d{4,8}\b")
 _USERINFO = re.compile(r"://[^\s/@:]*:[^\s/@]*@")
 # A fixed first character class lets the engine skip non-digits in C.
 _DIGITS = re.compile(r"[0-9]" * 12)
@@ -58,7 +61,7 @@ def secret_signal(text):
                     and (start <= digit.start() or _DIGIT.search(text, start, end))):
                 return True
     folded = text.casefold()
-    return bool(_KEYWORDS.search(folded.replace("_", " "))
+    return bool(_KEYWORDS.search(folded.replace("_", " ")) or _PIN.search(folded)
                 or any(prefix in folded for prefix in _PREFIXES) or _USERINFO.search(text))
 
 
