@@ -278,12 +278,14 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.recv()
         listing = self.call("cua_alans_way_tabs")
         merged = json.loads(self.text(self.recv()))
+        self.assertEqual(merged["requestingBotId"], "bot1")
         self.assertEqual(
             [(t["id"], t["host"]) for t in merged["tabs"]],
             [("mac-tab-1", "computer"), ("vm-tab-1", "vm")])
         self.assertIn('"wsr-tabs-%d"' % listing, self.log("vm.log"))
         solo = self.call("cua_alans_way_tabs", {"host": "computer"})
         only = json.loads(self.text(self.recv()))
+        self.assertEqual(only["requestingBotId"], "bot1")
         self.assertEqual([t["id"] for t in only["tabs"]], ["mac-tab-1"])
 
     def test_a_large_vm_tab_list_is_merged_not_leaked(self):

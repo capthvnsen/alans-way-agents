@@ -26,7 +26,22 @@ holds what your agents need to think and act:
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
   Telegram and choose what to always allow. Needs a Hermes build with the
-  pluggable computer-use API (on main after 0.21.5).
+  pluggable computer-use API described below.
+
+Browser-only setup needs stock Hermes `>= 0.21.5`. Desktop control through
+`alans-way-computer` also needs `tools.computer_use.backend.ComputerUseProvider`,
+introduced in Hermes commit
+[`63f5e0ea45726c5d8d7d207d140613997730aab3`](https://github.com/NousResearch/hermes-agent/commit/63f5e0ea45726c5d8d7d207d140613997730aab3)
+and verified in `6e7b83a2f1`. A version string alone does not establish this API.
+Set `HERMES_PYTHON` to the interpreter belonging to the selected Hermes install
+(`python.exe` on Windows); setup probes that interpreter with a bounded timeout.
+“API absent” means the provider module/class is missing; “probe failed”,
+“timed out”, or “probe unavailable” means support is unknown, so check the
+interpreter/dependencies before retrying. For an absent API, offer a supported
+Hermes upgrade with the user's consent, then rerun setup and
+`hermes -p <profile> computer-use doctor`. Browser setup can finish meanwhile;
+do not claim desktop control is ready until the provider is selected and its
+doctor succeeds.
 
 Works with stock Hermes `>= 0.21.5`. No Hermes source is patched: your existing
 Telegram gateway keeps owning the conversation exactly as before — the plugin
@@ -79,17 +94,7 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   profile's config through the CLI, after disclosure and the answer, so reruns
   do not ask again. Silence and non-interactive runs write nothing; already
   `steer` or `queue` profiles are skipped. Later user changes are preserved.
-  For `steer`, guided setup checks Telegram's platform override first and
-  preserves it, reports whether its extra bubble remains on, and skips the offer
-  when that override exists. Otherwise it separately offers to remove Hermes' extra status
-  bubble with `display.busy_steer_ack_enabled=false`, asks for an explicit
-  answer and remembers it in `skills.config.workspace-setup.busy_steer_ack_choice`
-  only after the effective Telegram readback matches. The global change also
-  applies to other platforms that inherit it; their explicit overrides remain;
-  the bot still acknowledges additions itself. Setup scripts never write it.
-  Hermes already defaults interim messages to `true`
-  ([`hermes_cli/config_defaults.py:919` at `d97007c`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919));
-  the skill only reports an effective `false` choice and preserves it.
+  Guided setup offers one consented “Make Telegram feel right” choice for typing, updates, quiet delivery, its own steer acknowledgment, reactions, profile-wide cron wrapping and a city-confirmed IANA timezone; existing preferences and silence are preserved, choices remembered, and each CLI write read back.
   To change an existing `interrupt` choice, run
   `hermes -p NAME config set display.busy_input_mode steer`; to enable interim
   texts, set `display.interim_assistant_messages true` the same way (and check
@@ -98,8 +103,9 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
 - **Connect your stuff from Telegram.** The [integrations skill](alans-way/skills/integrations/SKILL.md)
   checks account access before promising a task, reuses Hermes' Google,
   Himalaya, Home Assistant, Honcho and X routes, and offers pinned rclone,
-  Taskwarrior and Mastodon.py recipes. Package installs on the VM require your
-  agreement; account authorization stays private, with secure handback when
+  Taskwarrior recipes. Social posting is not built in; the
+  [Mastodon recipe](docs/integrations/mastodon.md) is separate human-run
+  documentation. Package installs on the VM require your agreement; account authorization stays private, with secure handback when
   phone-only auth cannot finish. Installing the plugin connects no accounts
   and starts no integration services.
 
@@ -199,7 +205,11 @@ Useful flags:
 
 - `--profile NAME`: configure only one Hermes profile.
 - `--host-os windows|linux`: the user's computer is not a Mac.
-- `--verify`: audit without changing anything.
+- `--verify`: audit without changing anything. Exit 0 means a complete local
+  audit, 1 means failed required checks, and 2 means partial (warnings or
+  skipped browser/services). Repeat the install's skip flags when auditing.
+  Computer-side preview/control and Telegram delivery still need their human
+  handoffs and end-to-end checks.
 - `--non-interactive`: scripted runs.
 - `--skip-browser`: proactivity-only installs.
 - `--skip-plugin`: leave an already installed plugin as it is (catalog installs).
@@ -264,6 +274,32 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 - Telegram: `hermes proactivity status` → route bound, check-ins on
 - Browser: ask the bot to open a page — a tab appears in the app (host)
   while your computer is awake, on the VPS host when it isn't
+
+### Plugin security review
+
+For the reviewed release candidate, Hermes' unmodified scanner at
+`6e7b83a2f1c093e992a8d838ed77ea320fbd8e51` reports **SAFE: 0 HIGH,
+2 MEDIUM and 3 LOW findings** in `alans-way/`. These are real capabilities
+documented in the bundled skills:
+
+- Workspace setup runs two bounded, read-only local Git subprocess helpers
+  to validate the setup checkout and a file-source install's origin before
+  selecting the reviewed revision.
+- With explicit consent, the viewer handoff uses a temporary SSH forward
+  bound to computer loopback, checks the loopback URL with curl, and gives
+  that same URL to the app. The human enters the VNC password privately.
+
+The Mastodon recipe now lives in [human-run repository documentation](docs/integrations/mastodon.md)
+outside `alans-way/`; the plugin no longer ships its connector or identity probe.
+The scanner and remaining matched commands are unchanged. MEDIUM/LOW findings
+alone produce SAFE, which requires no scanner confirmation. If a later revision
+receives CAUTION, review every finding and explicitly confirm the exact tree:
+`--enable` and setup consent do not confirm a scanner warning. Follow the bundled
+[reviewed-install confirmation steps](alans-way/skills/workspace-setup/SKILL.md#reviewed-plugin-install-confirmation);
+`--force` can confirm CAUTION and replace an install, but cannot override
+DANGEROUS. A catalog install uses the catalog's reviewed pin; it does not
+approve a newer checkout. Changed revisions and unknown findings need a new
+review. See the [complete inventory and catalog disclosure supplement](docs/catalog/alans-way-disclosure.md).
 
 ### Upgrading
 

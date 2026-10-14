@@ -57,6 +57,31 @@ There is no handoff, assignment, or grant step for your own tabs: `cua_alans_way
 requires the human. The tab is scoped to your bot id and runs in the
 background; it never moves the human's cursor or touches their tabs.
 
+## Tab hygiene
+
+When a task finishes, close the tabs you opened for it with
+`cua_alans_way_close`, unless the user may want them: keep a result they need
+to inspect, a draft, an unfinished task, or a sign-in/CAPTCHA handback;
+say which tabs you kept and why. Keep the task's tab ids in working context,
+never durable memory.
+
+Before cleanup, read a fresh `cua_alans_way_tabs` reply. Its `requestingBotId`
+is this connector's bot identity, including after `/new` or compaction;
+a tab is yours only when its `botId` matches `requestingBotId`.
+`allowedBots` is a grant, not ownership; an overseer can see other bots' tabs.
+The host-wide tab count is not your tab list. Never close another bot's or
+the user's tabs, even if you can access them. Close only a confirmed finished
+tab whose `controller` is `agent`, with no pending handback or recording
+hold, passing its explicit `tabId` and fresh `epoch` from that reply.
+Do not claim a tab just to close it, and respect every refusal.
+
+At the tab limit, close your own confirmed finished tabs first on the host
+that is full, then retry opening once. Reacquire the live list after a reset;
+do not infer that a tab is finished from its age or URL. If ownership or task
+status is uncertain, leave the tab alone and report that you need the user
+to free space. Establish eligibility before saying you are closing a tab,
+and report it closed only after the close call succeeds.
+
 ## Browser authorization policy
 
 Ordinary actions in a bot-owned in-app browser tab are preauthorized and require
@@ -182,7 +207,7 @@ exist. When they are not in your tool list, Hermes has deferred them: call
 them through `tool_call` with the full name, with no `tool_search` first.
 `workspace_browser` alone is not a tool.
 
-Skip status and tabs unless a call fails: every
+Skip status and tabs unless a call fails or you are checking tabs for cleanup: every
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
@@ -324,7 +349,7 @@ the tab stays yours to keep working.
    action's own updates, so each chunk answers in one call, and you add
    `wait` or `read` steps only when you need something `effect` does not
    show. Before each multi-step chunk, send one short plain sentence saying
-   what you are doing now and what comes next. Before a noticeable step
+   the current action and the next step. Before a noticeable step
    (email sent, form submitted, or page the user must act on), say what is
    about to happen; report side effects and mistakes right away, plainly.
    Keep progress to at most one update per roughly two actions, except for
@@ -332,6 +357,7 @@ the tab stays yours to keep working.
    no tool names, headings or step counters. When a new message arrives
    mid-task, acknowledge it in one line and fold it into the running task;
    do not restart. Finish with one short result message.
+   Use Hermes's `clarify` buttons for real decisions the user owns; keep Other/free text possible and never use them for approvals.
    The CAPTCHA message below keeps its own handback rules. Put `wait` steps
    between actions that change the page so later steps land on a ready page
    instead of racing it. Prefer `visible:true`: an element that exists but is
