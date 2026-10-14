@@ -1,5 +1,6 @@
 """Queue and imported-turn safety using synthetic profiles and public context mocks."""
 import json
+import os
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
@@ -387,6 +388,153 @@ class DurableLockTests(unittest.TestCase):
 
     def locks(self):
         return list(self.root.glob('profiles/specialist/locks/*.json'))
+
+    def damage_lock(self, variant):
+        path = self.locks()[0]
+        if variant == 'symlink':
+            target = self.root / 'untouched-target'
+            target.write_text('private synthetic target')
+            path.unlink()
+            path.symlink_to(target)
+        elif variant == 'permissions':
+            path.chmod(0o644)
+        else:
+            value = json.loads(path.read_text())
+            bodies = {'corrupt': '{', 'empty': '',
+                      'duplicate': json.dumps(value)[:-1] + ',"ask_id":"duplicate"}',
+                      'lifetime': json.dumps({**value, 'expires_at': 'invalid'}),
+                      'wrong-session': json.dumps({**value, 'session_key': 'another-session'})}
+            path.write_text(bodies[variant])
+        os.utime(path, (self.now.timestamp(), self.now.timestamp()), follow_symlinks=False)
+        return path
+
+    def test_damaged_locks_restrict_by_presence_and_age_across_restart(self):
+        for variant in ('corrupt', 'empty', 'duplicate', 'lifetime', 'wrong-session', 'symlink', 'permissions'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                self.start_import()
+                path = self.damage_lock(variant)
+                self.assertEqual(self.policy('terminal')['action'], 'block')
+                self.cross.close()
+                self.cross = C.CrossBot(self.ctx, self.owner, clock=lambda: self.now)
+                self.addCleanup(self.cross.close)
+                self.assertEqual(self.policy('terminal')['action'], 'block')
+                with patch.object(P, 'caller_session_key', return_value=self.key):
+                    self.assertEqual(self.cross.on_output(response_text='The draft.', **self.kw),
+                                     'Primary asked me to help with this.\n\nThe draft.')
+                self.now += timedelta(minutes=31)
+                self.assertIsNone(self.policy('terminal'))
+                self.cross.store.prune()
+                self.assertFalse(path.is_symlink() or path.exists())
+                if variant == 'symlink':
+                    self.assertEqual((self.root / 'untouched-target').read_text(), 'private synthetic target')
+
+    def test_one_unlink_failure_cannot_stop_other_entries_or_profile_heartbeat(self):
+        self.start_import()
+        stale = self.damage_lock('corrupt')
+        blocked = stale.parent / 'unremovable-directory'
+        blocked.mkdir(mode=0o700)
+        os.utime(blocked, (self.now.timestamp(), self.now.timestamp()))
+        primary_locks = self.root / 'profiles/primary/locks'
+        primary_locks.mkdir(mode=0o700)
+        other = primary_locks / 'empty-lock'
+        other.touch(mode=0o600)
+        os.utime(other, (self.now.timestamp(), self.now.timestamp()))
+        self.now += timedelta(minutes=31)
+        self.cross.store.presence('primary', bound=True)
+        self.assertFalse(stale.exists())
+        self.assertFalse(other.exists())
+        heartbeat = json.loads((primary_locks.parent / 'presence.json').read_text())
+        self.assertEqual(heartbeat['heartbeat'], C.stamp(self.now))
+        self.assertTrue(blocked.is_dir())
+
+    def test_damaged_locks_purge_on_opt_out_and_session_end(self):
+        for variant in ('corrupt', 'empty', 'symlink', 'permissions'):
+            for cleanup in ('opt-out', 'session-end'):
+                with self.subTest(variant=variant, cleanup=cleanup):
+                    self.setUp()
+                    self.start_import()
+                    path = self.damage_lock(variant)
+                    if cleanup == 'opt-out':
+                        self.assertIn('export off', self.command('cross off'))
+                    else:
+                        with patch.object(P, 'caller_session_key', return_value=self.key):
+                            self.cross.on_session_end(platform='telegram')
+                    self.assertFalse(path.is_symlink() or path.exists())
+                    self.assertIsNone(self.policy('terminal'))
+                    if variant == 'symlink':
+                        self.assertEqual((self.root / 'untouched-target').read_text(), 'private synthetic target')
+
+    def test_failed_dispatch_unlinks_even_if_lock_was_damaged_during_injection(self):
+        for variant in ('corrupt', 'empty', 'symlink', 'permissions'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                paths = []
+                def inject(*args, **kwargs):
+                    paths.append(self.damage_lock(variant))
+                    return False
+                self.ctx.inject_message = inject
+                self.enqueue()
+                self.assertEqual(self.cross.receive_once(), 'unavailable')
+                self.assertFalse(paths[0].is_symlink() or paths[0].exists())
+                self.assertIsNone(self.policy('terminal'))
+
+    def test_unsafe_lock_directory_refuses_dispatch_reports_status_and_keeps_restriction(self):
+        for variant in ('permissions', 'unsearchable', 'symlink', 'ownership'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                self.start_import()
+                locks = self.locks()[0].parent
+                if variant == 'permissions':
+                    locks.chmod(0o755)
+                elif variant == 'unsearchable':
+                    locks.chmod(0o000)
+                    self.addCleanup(locks.chmod, 0o700)
+                elif variant == 'symlink':
+                    target = locks.with_name('unsafe-locks-target')
+                    locks.rename(target)
+                    locks.symlink_to(target, target_is_directory=True)
+                original_fstat = os.fstat
+                def fstat(fd):
+                    info = original_fstat(fd)
+                    if variant == 'ownership' and info.st_ino == locks.stat().st_ino:
+                        values = list(info)
+                        values[4] = os.geteuid() + 1
+                        return os.stat_result(values)
+                    return info
+                with patch.object(C.os, 'fstat', side_effect=fstat):
+                    self.assertEqual(self.policy('terminal')['action'], 'block')
+                    self.assertTrue(self.cross.status()['error'])
+                    self.cross.store.presence('primary', bound=True)
+                    self.assertIsNone(self.cross.store.status('primary')['lock_error'])
+                    self.now += timedelta(minutes=61)
+                    self.enqueue()
+                    self.assertEqual(self.cross.receive_once(), 'unavailable')
+                    self.assertEqual(len(self.ctx.sent), 1)
+                    self.assertEqual(len(list(self.root.glob('inbox/*/*.json'))), 1)
+
+    def test_symlink_lock_age_uses_link_mtime_not_target_mtime(self):
+        self.start_import()
+        path = self.damage_lock('symlink')
+        target = path.resolve()
+        ancient = (self.now - timedelta(hours=2)).timestamp()
+        os.utime(target, (ancient, ancient))
+        self.assertEqual(self.policy('terminal')['action'], 'block')
+        self.now += timedelta(minutes=31)
+        os.utime(target, (self.now.timestamp(), self.now.timestamp()))
+        self.assertIsNone(self.policy('terminal'))
+        self.cross.store.prune()
+        self.assertFalse(path.is_symlink())
+        self.assertTrue(target.exists())
+
+    def test_live_corrupt_lock_waits_without_consuming_next_ask(self):
+        self.start_import()
+        self.now += timedelta(minutes=61)
+        self.damage_lock('empty')
+        self.enqueue()
+        self.assertEqual(self.cross.receive_once(), 'waiting')
+        self.assertEqual(len(self.ctx.sent), 1)
+        self.assertEqual(len(list(self.root.glob('inbox/*/*.json'))), 1)
 
     def test_restart_mid_import_restores_restrictions_and_attribution(self):
         self.start_import()

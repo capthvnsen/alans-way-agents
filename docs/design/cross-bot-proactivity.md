@@ -143,6 +143,14 @@ session/adapter or authorization can fail later. Operator ask status is **sent**
 completion. Do not track started/completed/interrupted/unknown receipts or resend automatically. Busy targets
 wait only until expiry; operator status shows body-free scheduling metadata, not results. The primary finishes without polling; replies stay in the target DM.
 
+Before injection, persist `profiles/<profile>/locks/<sha256(session_key)>.json`.
+Restrictions depend only on the entry's presence and `lstat` mtime, for 30 minutes;
+lock contents never grant or release tools. Corrupt files and symlinks still restrict,
+with generic attribution. Session-end, failed injection and opt-out unlink by name;
+expiry pruning checks age without reading or following the entry. Prune failures are
+isolated per entry and profile. Unsafe lock directories refuse new dispatch and appear
+in status; restriction checks continue, failing closed if presence/age is inaccessible.
+
 `message_agent` loses here: it is gated to managed canonical “Bot Chat”, not an ordinary Telegram DM (H
 `tools/bot_mode_dm.py:123-134,212-217`; `website/docs/user-guide/bot-mode.md:199-219`). Local delivery
 launches/resumes that chat (H `tools/bot_mode_dm.py:294-295`, `tools/bot_relay.py:85-87`); relay depends on

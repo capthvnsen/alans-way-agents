@@ -190,6 +190,7 @@ class SharedStore:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.lock_timeout = min(max(lock_timeout, 0.0), 1.0)
         self._mutex = threading.RLock()
+        self.lock_errors = {}
         with self.transaction() as root_fd:
             if self.read(root_fd, "control.json") is None:
                 self.write(root_fd, "control.json", {"schema": 1, "primary": self.primary,
@@ -324,7 +325,7 @@ class SharedStore:
         os.fsync(fd)
 
     @classmethod
-    def write(cls, fd, name, value):
+    def write(cls, fd, name, value, *, mtime=None):
         # Validate an existing destination before replacing; never follow it.
         handle = cls.checked_file(fd, name)
         if handle is not None:
@@ -337,6 +338,8 @@ class SharedStore:
                 cls.checked(stream.fileno())
                 stream.write(encode(value))
                 stream.flush()
+                if mtime is not None:
+                    os.utime(stream.fileno(), (mtime, mtime))
                 os.fsync(stream.fileno())
             os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
             os.fsync(fd)
@@ -600,8 +603,7 @@ class SharedStore:
                     return None, None
                 if bound:
                     with self.directory(profiles[target], "locks") as locks:
-                        record = self.read(locks, self.lock_name(bound), 8192)
-                        if record and utc(self.lock_value(record)["expires_at"]) > self.clock():
+                        if self.lock_active(locks, self.lock_name(bound)):
                             eligible = False
                 if bound and not eligible:
                     return "waiting", None
@@ -610,22 +612,27 @@ class SharedStore:
                     self.remove(fd, value["id"] + ".json")
                 if bound:
                     now = self.clock()
-                    record = self.lock_value({"session_key": bound, "ask_id": value["id"],
-                                              "created_at": stamp(now), "expires_at": stamp(now + LOCK_TTL)})
+                    record = {"session_key": bound, "ask_id": value["id"],
+                              "created_at": stamp(now), "expires_at": stamp(now + LOCK_TTL)}
                     with self.directory(profiles[target], "locks") as locks:
-                        self.write(locks, self.lock_name(bound), record)
+                        self.write(locks, self.lock_name(bound), record, mtime=now.timestamp())
                 return ("claimed", value) if bound else ("unbound", None)
 
-    def lock_value(self, value):
-        keys(value, "session_key ask_id created_at expires_at")
-        key = value["session_key"]
-        if type(key) is not str or not key or len(key) > 1024:
-            raise ValueError("invalid lock session key")
-        self.uuid_value(value["ask_id"])
-        created, expires = utc(value["created_at"]), utc(value["expires_at"])
-        if created > self.clock() or expires != created + LOCK_TTL:
-            raise ValueError("invalid lock lifetime")
-        return value
+    def lock_active(self, fd, path):
+        try:
+            info = os.lstat(path, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+        return info.st_mtime + LOCK_TTL.total_seconds() > self.clock().timestamp()
+
+    @staticmethod
+    def unlink_lock(fd, name):
+        try:
+            os.lstat(name, dir_fd=fd)
+            os.unlink(name, dir_fd=fd)
+            os.fsync(fd)
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def lock_name(key):
@@ -643,39 +650,35 @@ class SharedStore:
 
     def session_lock(self, name, key, *, clear=False):
         if type(key) is not str or not key:
-            return None
+            return False
         with (self.transaction() if clear else self.reading()) as root_fd:
             try:
                 with self.directory(root_fd, "profiles", create=False) as parent, \
-                        self.directory(parent, name, create=False) as profile, \
-                        self.directory(profile, "locks", create=False) as fd:
+                        self.directory(parent, name, create=False) as profile:
                     filename = self.lock_name(key)
                     if clear:
-                        self.remove(fd, filename)
-                        return None
-                    value = self.read(fd, filename, 8192)
-                    if value is not None:
-                        value = self.lock_value(value)
-                        if value["session_key"] == key and utc(value["expires_at"]) > self.clock():
-                            return value
+                        with self.directory(profile, "locks", create=False) as fd:
+                            self.unlink_lock(fd, filename)
+                        return False
+                    # Inspect only the named entry, even if locks/ is unsafe for
+                    # writes. Dispatch still requires a validated directory.
+                    return self.lock_active(profile, "locks/" + filename)
             except FileNotFoundError:
                 pass
-        return None
+        return False
 
     def prune_locks(self, profile, *, purge=False):
         try:
             with self.directory(profile, "locks", create=False) as fd:
-                self.remove_temps(fd)
+                error = None
                 for name in os.listdir(fd):
-                    if not name.endswith(".json") or not OPAQUE.fullmatch(name[:-5]):
-                        raise ValueError("invalid lock filename")
-                    if not purge:
-                        value = self.lock_value(self.read(fd, name, 8192))
-                        if name != self.lock_name(value["session_key"]):
-                            raise ValueError("wrong lock filename")
-                        if utc(value["expires_at"]) > self.clock():
-                            continue
-                    self.remove(fd, name)
+                    try:
+                        if purge or not self.lock_active(fd, name):
+                            self.unlink_lock(fd, name)
+                    except (OSError, ValueError) as exc:
+                        error = exc
+                if error:
+                    raise error
         except FileNotFoundError:
             pass
 
@@ -736,7 +739,11 @@ class SharedStore:
         if attempts != old_attempts:
             self.write(root_fd, "limits.json", {"schema": 1, "attempts": attempts})
         for name, fd in profiles.items():
-            self.prune_locks(fd)
+            try:
+                self.prune_locks(fd)
+                self.lock_errors.pop(name, None)
+            except (OSError, ValueError) as exc:
+                self.lock_errors[name] = str(exc) if type(exc) is ValueError else type(exc).__name__
             self.remove_temps(fd)
             presence = self.get_presence(fd, name)
             digest = self.digest(fd, name, presence)
@@ -818,6 +825,7 @@ class SharedStore:
                 return {"enabled": bool(presence and presence["enabled"]), "primary": control["primary"],
                         "generation": presence["generation"] if presence else 0,
                         "bound": bool(presence and presence["bound"]), "dispatch_enabled": False,
+                        "lock_error": self.lock_errors.get(name),
                         "exchanges": len(digest["exchanges"]) if digest else 0}
 
 
@@ -935,7 +943,7 @@ class CrossBot:
                 if self._settings:
                     eligibility = {k: getattr(self._settings, k) for k in
                                    ("timezone", "active_start", "active_end", "paused_until")}
-                    eligibility["busy"] = bool(self._turns or self.imported_ask_id(self._bound_key) or self.owner._busy(self.clock()))
+                    eligibility["busy"] = bool(self._turns or self.is_imported(self._bound_key) or self.owner._busy(self.clock()))
                 self.store.presence(self.profile, bound=bool(self._bound_key), eligibility=eligibility)
                 if receive:
                     self.receive_once()
@@ -979,20 +987,20 @@ class CrossBot:
                     self.error = self.error_text(exc)
             return "unavailable"
 
-    def imported_ask_id(self, key=None):
+    def is_imported(self, key=None):
         from .proactivity import caller_session_key
         if self.store is None:
-            return None
+            return False
         try:
-            record = self.store.session_lock(self.profile, caller_session_key() if key is None else key)
-            return record["ask_id"] if record else None
+            return self.store.session_lock(self.profile, caller_session_key() if key is None else key)
         except Exception as exc:
             self.error = self.error_text(exc)
-            return None
+            # An inaccessible path cannot establish absence or expiry safely.
+            return True
 
     def on_tool_call(self, tool_name="", args=None, **kwargs):
         with self._lock:
-            if self.imported_ask_id() is None:
+            if not self.is_imported():
                 return None
             if tool_name in IMPORT_READ_TOOLS or tool_name in IMPORT_BROWSER_TOOLS:
                 return None
@@ -1002,10 +1010,9 @@ class CrossBot:
         with self._lock:
             if platform != "telegram" or not self.own_chat() or type(response_text) is not str or not response_text.strip():
                 return None
-            # The validated durable ask_id supplies attribution correlation after
-            # restart too; conversation text never establishes import identity.
-            ask_id = self.imported_ask_id()
-            if not ask_id:
+            # Presence supplies restart-safe identity; optional lock contents are
+            # never needed for this generic attribution line.
+            if not self.is_imported():
                 return None
             if silence_marker(response_text):
                 return response_text
@@ -1046,7 +1053,7 @@ class CrossBot:
                 if correlation:
                     self._pending.pop(correlation, None)
                 self.refresh_local()
-                imported = self.imported_ask_id() is not None
+                imported = self.is_imported()
                 if not imported and correlation and self.own_chat() and kwargs.get("platform") == "telegram":
                     self._turns[correlation] = self.clock()
                 cron = getattr(self.ctx, "current_cron_execution", lambda: None)()
@@ -1132,6 +1139,8 @@ class CrossBot:
         if self.store:
             try:
                 result.update(self.store.status(self.profile))
+                if result.get("lock_error"):
+                    self.error = result["lock_error"]
             except Exception as exc:
                 self.error = self.error_text(exc)
         result["receiver_status"] = self.receiver_status
