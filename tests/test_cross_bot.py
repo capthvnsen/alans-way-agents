@@ -24,6 +24,8 @@ class SanitizerTests(unittest.TestCase):
         secret = "synthetic-sensitive-value"
         private = "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-key\n-----END " + "PRIVATE KEY-----"
         cases = ["password: " + secret, '{"access_token": "' + secret + '"}',
+                 "DATABASE_PASSWORD=" + secret, "AWS_SECRET_ACCESS_KEY=" + secret,
+                 '{"clientSecret": "' + secret + '"}',
                  "Authorization: Bearer " + secret, "OTP is 123456", "Cookie: session=" + secret,
                  "https://user:" + secret + "@example.invalid/page",
                  "https://example.invalid/?api_key=" + secret,

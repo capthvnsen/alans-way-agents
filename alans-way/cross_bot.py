@@ -33,6 +33,9 @@ _LABEL = re.compile(
     r"(?i)\b(?:password|passwd|passphrase|secret|(?:access[ _-]?|refresh[ _-]?|api[ _-]?)?token|"
     r"api[ _-]?key|authorization|cookie|otp|one[ -]?time[ -]?(?:password|code)|"
     r"verification[ _-]?code|private[ _-]?key)\b\s*[\"']?\s*(?::|=|\bis\b|\s+\S)")
+_CREDENTIAL_FIELD = re.compile(
+    r"(?i)\b[a-z0-9_]{0,64}(?:password|passwd|secret|token|api_key|private_key|access_key)"
+    r"[a-z0-9_]{0,64}\s*[\"']?\s*[:=]")
 _KEY_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S)
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
@@ -62,7 +65,7 @@ def sanitize(text, *, max_bytes=700, redact_terms=()):
         text = _KEY_BLOCK.sub("[redacted]", text)
         safe = []
         for line in text.splitlines():
-            if (_LABEL.search(line) or _TOKEN.search(line)
+            if (_LABEL.search(line) or _CREDENTIAL_FIELD.search(line) or _TOKEN.search(line)
                     or any(term.casefold() in line.casefold() for term in redact_terms)):
                 safe.append("[redacted]")
                 continue
