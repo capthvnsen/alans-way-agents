@@ -272,7 +272,7 @@ class ShortReplyIntentTests(unittest.TestCase):
 
     def test_short_reply_requests_get_one_reminder_at_the_very_end(self):
         for text in ("hey, quick one: what did you get done today?",
-                     "Quick question: is it ready?", "TL;DR: what's the status?",
+                     "Quick question: recap?", "TL;DR: what's the status?",
                      "What did you get done today?", "Recap today's work.",
                      "Can you give me a recap?", "How’s it going?", "how's it going",
                      "hi", "Hey!", "Good morning!", "thanks", "Thank you!",
@@ -282,6 +282,62 @@ class ShortReplyIntentTests(unittest.TestCase):
                     note = self.turn(voice(), "telegram", chat, text)["context"]
                     self.assertEqual(note.count(self.reminder), 1)
                     self.assertTrue(note.endswith("\n" + self.reminder))
+
+    def test_reviewer_corpus_at_decided_expectations(self):
+        # Whole-message recap/social intent only: generic status questions and
+        # "send me a recap" are left uncapped under the lead's conservative rule.
+        cases = json.loads(Path(__file__).with_name("voice_short_reply_corpus.json").read_text())
+        self.assertEqual(len(cases), 72)
+        for case in cases:
+            text, expected = case["text"], case["expected"]
+            with self.subTest(text=text):
+                self.assertEqual(V.wants_short_reply(text), expected)
+            for chat in ("dm", "group", "forum", "channel"):
+                with self.subTest(text=text, chat=chat):
+                    note = self.turn(voice(), "telegram", chat, text)["context"]
+                    base = V.NOTE + (V.GROUP if chat != "dm" else "")
+                    self.assertEqual(note, base + ("\n" + self.reminder if expected else ""))
+
+    def test_standalone_recaps_social_replies_and_acknowledgments(self):
+        for text in ("recap", "tl;dr", "Hi 👋, quick question: recap?",
+                     "Hey! What did you get done?", "Hello, how’s it going today?",
+                     "Thanks! That's helpful 😊", "ok", "Okay 👍", "Got it!",
+                     "Understood.", "Sounds good!", "Hey, thanks 🙏"):
+            with self.subTest(text=text):
+                note = self.turn(voice(), "telegram", text=text)["context"]
+                self.assertTrue(note.endswith("\n" + self.reminder))
+
+    def test_any_second_request_or_task_object_prevents_the_cap(self):
+        for opener in ("recap", "tl;dr", "what did you get done today?",
+                       "how's it going?", "Hi 👋", "Thanks, that's helpful", "Got it!"):
+            for task in ("book a flight", "find flights", "send the report", "fix this bug",
+                         "write a script", "explain OAuth", "compare these options"):
+                for separator in (". ", "; ", "\n", " and ", " 😊 "):
+                    text = opener + separator + task
+                    with self.subTest(text=text):
+                        self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+        for text in ("quick one", "quick question", "Quick question: is it ready?",
+                     "Quick one: find flights", "Recap how to book a flight",
+                     "Recap and send it", "TL;DR: fix the bug", "hi <= fix the bug",
+                     "What did you get done today? Also recap the meeting."):
+            with self.subTest(text=text):
+                self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+
+    def test_detail_words_anywhere_prevent_the_cap(self):
+        for word in ("long", "extensive", "extensively", "everything", "all of it", "full", "complete",
+                     "detail", "detailed", "details", "thoroughly", "comprehensive"):
+            for text in (f"{word}: recap", f"recap {word}", f"Hi, {word}, how's it going?"):
+                with self.subTest(text=text):
+                    self.assertEqual(self.turn(voice(), "telegram", text=text)["context"], V.NOTE)
+
+    def test_raw_input_limit_does_not_truncate_or_normalize_away_tasks(self):
+        at_limit = "recap" + " " * 195
+        self.assertEqual(len(at_limit), 200)
+        self.assertTrue(V.wants_short_reply(at_limit))
+        for text in (at_limit + " ", at_limit + "fix this bug", " " * 196 + "recap",
+                     "recap" + "." * 1000000, "hey" + " 👋" * 100000):
+            with self.subTest(length=len(text)):
+                self.assertFalse(V.wants_short_reply(text))
 
     def test_detail_requests_override_short_reply_cues(self):
         for text in ("Quick question: explain in detail how this works.",
@@ -300,7 +356,7 @@ class ShortReplyIntentTests(unittest.TestCase):
 
     def test_unmatched_turns_add_no_reminder_and_do_not_inherit_previous_intent(self):
         v = voice()
-        self.turn(v, "telegram", text="quick one: is it ready?")
+        self.turn(v, "telegram", text="quick one: recap?")
         for text in ("Explain the architecture.", "Write the implementation plan.",
                      "Check my calendar tomorrow.", "hey can you check my calendar tomorrow",
                      "Thanks! Please write the migration script.",
@@ -317,10 +373,10 @@ class ShortReplyIntentTests(unittest.TestCase):
 
     def test_short_intent_respects_existing_platform_mode_and_injected_turn_exclusions(self):
         for platform in ("cli", "cron", "discord", "", None):
-            self.assertIsNone(self.turn(voice(), platform, text="quick question: ready?"))
-        self.assertIsNone(self.turn(voice("default"), "telegram", text="quick question: ready?"))
+            self.assertIsNone(self.turn(voice(), platform, text="quick question: recap?"))
+        self.assertIsNone(self.turn(voice("default"), "telegram", text="quick question: recap?"))
         for marker in (P.MARKER, P.BRIEF_MARKER):
-            self.assertIsNone(self.turn(voice(), "telegram", text=marker + " quick question: ready?"))
+            self.assertIsNone(self.turn(voice(), "telegram", text=marker + " quick question: recap?"))
 
 
 class CorpusRuleTests(unittest.TestCase):

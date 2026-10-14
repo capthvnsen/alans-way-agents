@@ -68,12 +68,18 @@ affected.
    with no lists unless asked. Recaps keep headline outcomes and leave out
    per-item evidence and history. Your own persona or request for a different
    style or more detail still wins; code, plans and research stay complete.
-   Direct quick questions, recaps, "how's it going", and standalone greetings
-   or thanks also get one short reminder at the very end of the turn's note,
-   after any group guidance. Explicit detail requests (including "explain in
-   detail" or "walk me through") suppress this extra reminder. Detection uses
-   local text patterns on the current message, with no model call; unmatched
-   turns add no reminder tokens.
+   A whole-message recap request (such as "what did you get done today?",
+   "recap", "tl;dr", or "how's it going") or standalone greeting, thanks or
+   acknowledgment also gets one short reminder at the very end of the turn's
+   note, after any group guidance. Recaps can follow a greeting or "quick
+   one/question:" prefix; social replies can include punctuation, emoji or
+   "that's helpful". A prefix alone, another request, or an action such as
+   booking, finding, sending or fixing gets no extra reminder. Explicit detail
+   requests (including "long", "extensively", "everything", "all of it",
+   "full", "complete", "explain in detail" or "walk me through") also suppress
+   it. Local patterns check the whole current message, with no model call;
+   messages over 200 characters are skipped before normalization, never
+   truncated. Unmatched turns add no reminder tokens.
    This is model guidance, not an enforced output limit: long replies are
    never truncated or silently rewritten to meet the cap.
 2. **A send-time polish** (`transform_llm_output` on the final reply). It is
