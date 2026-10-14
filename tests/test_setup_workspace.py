@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -620,6 +621,28 @@ class WindowsGuestTests(unittest.TestCase):
         env["SYSTEMROOT"] = str(self.root / "Windows")
         run("--verify", "--mac-ssh", "me@mac", env=env, check=False)
         self.assertIn("native", (self.root / "ssh.log").read_text())
+
+
+class SetupDisplayConsentTests(unittest.TestCase):
+    def test_setup_never_writes_display_choices_even_with_old_opt_in(self):
+        for display in ("", "display:\n  busy_input_mode: interrupt\n",
+                        "display:\n  interim_assistant_messages: false\n",
+                        "display:\n  busy_input_mode: queue\n  interim_assistant_messages: true\n"):
+            with self.subTest(display=display), tempfile.TemporaryDirectory() as directory:
+                config = Path(directory) / "config.yaml"
+                config.write_text("model: test\n" + display)
+                # Obsolete feature env vars must not enable config writes.
+                env = dict(os.environ, ALANS_WAY_TELEGRAM_PROGRESS="1", HERMES_PYTHON=sys.executable)
+                run("--bot-id", "bot123", "--config", str(config), env=env)
+                text = config.read_text()
+                self.assertIn(display, text)
+                for key in ("busy_input_mode", "interim_assistant_messages"):
+                    self.assertEqual(text.count(key), display.count(key))
+                before = config.read_bytes()
+                backups = set(config.parent.glob("*.bak-*"))
+                run("--bot-id", "bot123", "--config", str(config), env=env)
+                self.assertEqual(config.read_bytes(), before)
+                self.assertEqual(set(config.parent.glob("*.bak-*")), backups)
 
 
 if __name__ == "__main__":

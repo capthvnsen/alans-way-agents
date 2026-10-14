@@ -2330,7 +2330,7 @@ class AllProfilesHarness(IntegrationBase):
         config = (home / "profiles" / name / "config.yaml") if name else home / "config.yaml"
         return re.findall(r'- --bot-id\n\s+- "(\d+)"', config.read_text(encoding="utf-8"))
 
-    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra="", python_ok=True):
+    def run_all(self, *flags, layout=None, listed='echo alans-way', hermes_extra="", python_ok=True, hermes_python=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -2343,12 +2343,56 @@ class AllProfilesHarness(IntegrationBase):
              '  --version) echo "hermes 0.21.5";;\n  plugins) [ "$2" = list ] && { %s; };\n'
              '    [ "$2" = install ] && [ "$P" != default ] && case "$*" in *file://*) case "$*" in *--force*) ;; *) echo BLOCKED community source >&2; exit 1;; esac;; esac;;\n%s\nesac\nexit 0\n' % (log, listed, hermes_extra))
         fake(bin_dir, "hermes-python", "exit %d\n" % (0 if python_ok else 1))
-        env = env_for(root, bin_dir, home, HERMES_PYTHON=str(bin_dir / "hermes-python"))
+        env = env_for(root, bin_dir, home, HERMES_PYTHON=hermes_python or str(bin_dir / "hermes-python"))
         self.env, self.root = env, root
         self.script = repo_with_computer_plugin(root)
         result = run("--skip-browser", "--skip-services", "--non-interactive", "--hermes-home", str(home), *flags,
                      env=env, check=False, script=self.script)
         return result, home, read_log(log)
+
+
+class SetupDisplayConsentTests(AllProfilesHarness, unittest.TestCase):
+    def test_unanswered_non_interactive_setup_never_writes_display_choices(self):
+        # A working interpreter reproduces the old silent-write path; this
+        # must also hold when Hermes is installed by a package manager.
+        result, home, _ = self.run_all(hermes_python=sys.executable)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        configs = [home / "config.yaml", *sorted((home / "profiles").glob("*/config.yaml"))]
+        for config in configs:
+            self.assertNotIn("busy_input_mode", config.read_text(), str(config))
+            self.assertNotIn("interim_assistant_messages", config.read_text(), str(config))
+            self.assertNotIn("busy_input_choice", config.read_text(), str(config))
+        before = {config: config.read_bytes() for config in configs}
+        result = run("--skip-browser", "--skip-services", "--non-interactive",
+                     "--hermes-home", str(home), env=self.env, check=False, script=self.script)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({config: config.read_bytes() for config in configs}, before)
+        self.assertFalse(any("config set display." in call or "busy_input_choice" in call
+                             for call in read_log(self.root / "log")))
+
+    def test_existing_display_choices_and_partial_values_are_preserved(self):
+        displays = {
+            None: "display: # mine\n  busy_input_mode: interrupt\n  interim_assistant_messages: false\n",
+            "alpha": "display:\n  busy_input_mode: steer\n",
+            "beta": "display:\n  busy_input_mode: queue\n  interim_assistant_messages: true\n",
+            "gamma": "display:\n  interim_assistant_messages: false\n  platforms:\n    telegram:\n      interim_assistant_messages: false\n",
+        }
+
+        def layout(home):
+            self.layout(home)
+            for name, display in displays.items():
+                config = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+                with config.open("a") as stream:
+                    stream.write(display)
+
+        result, home, _ = self.run_all(layout=layout, hermes_python=sys.executable)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, display in displays.items():
+            config = home / "config.yaml" if name is None else home / "profiles" / name / "config.yaml"
+            text = config.read_text()
+            self.assertIn(display, text)
+            for key in ("busy_input_mode", "interim_assistant_messages"):
+                self.assertEqual(text.count(key), display.count(key))
 
 
 class AllProfilesTests(AllProfilesHarness, unittest.TestCase):

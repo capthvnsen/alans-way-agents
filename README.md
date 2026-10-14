@@ -66,6 +66,27 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   Hermes messages (approval cards, errors, progress) and cron reports are not
   changed. It layers on top of your SOUL.md and `agent.system_prompt` and never
   edits them. `/tone default` turns it off for that bot. Details in [docs/voice.md](docs/voice.md).
+- **Progress while working.** Multi-step Telegram tasks get short updates about
+  what is happening and what comes next, including side effects and mistakes;
+  mid-task messages can be folded into the running task with `steer`.
+  Neither setup script writes `display.busy_input_mode` or
+  `display.interim_assistant_messages`. Guided setup asks once when the
+  profile's effective busy mode is `interrupt` and no remembered choice exists.
+  Only an explicit answer lets the setup skill set busy mode through
+  `hermes -p NAME config set`; the choice applies to all platforms in that
+  profile and is read back afterwards. Keeping interrupt also records
+  `skills.config.workspace-setup.busy_input_choice: keep-interrupt` in that
+  profile's config through the CLI, after disclosure and the answer, so reruns
+  do not ask again. Silence and non-interactive runs write nothing; already
+  `steer` or `queue` profiles are skipped. Later user changes are preserved.
+  Hermes already defaults interim messages to `true`
+  ([`hermes_cli/config_defaults.py:919` at `d97007c`](https://github.com/NousResearch/hermes-agent/blob/d97007c32d6340f7ba79ac1dfb5773cc00846448/hermes_cli/config_defaults.py#L919));
+  the skill only reports an effective `false` choice and preserves it.
+  To change an existing `interrupt` choice, run
+  `hermes -p NAME config set display.busy_input_mode steer`; to enable interim
+  texts, set `display.interim_assistant_messages true` the same way (and check
+  `display.platforms.telegram.interim_assistant_messages` for an override).
+  Restart the gateway through its supervisor to load the changes.
 - **No bundled account connections.** Email, calendar, Notion and similar
   connectors exist for an agent only if you install and authorize them
   separately in Hermes; this plugin provisions none of them.

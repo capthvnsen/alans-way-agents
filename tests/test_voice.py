@@ -192,6 +192,15 @@ class NoteTests(unittest.TestCase):
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
 
+    def test_live_progress_note_reaches_the_telegram_turn(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("Before each multi-step chunk", "what you're doing now and what comes next",
+                     "email sent, form submitted, or page they must act on", "side effects and mistakes",
+                     "at most one update per roughly two actions", "one quick action",
+                     "no tool names", "acknowledge it in one line and fold it into the running task",
+                     "don't restart"):
+            self.assertIn(rule, note)
+
     def test_check_ins_share_the_same_rules(self):
         for shared in (V.TEXTING, V.PLAIN, V.FORMAT):
             self.assertIn(shared, P.VOICE)
