@@ -486,7 +486,6 @@ out.extend(blanks)
 if not has_managed and not inserted:
     out.append(nl + "mcp_servers:" + nl + block + nl)
 result = "".join(out)
-
 for what in removed:
     print("setup-workspace: removed " + what)
 if result != original:
