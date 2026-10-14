@@ -1,6 +1,6 @@
 name: alans-way
 version: "0.21.6"
-description: "Idle check-ins from your primary Hermes bot, plus workspace browser skills and integrations: consented account setup through native Hermes routes or pinned VM toolbox recipes for email, calendar, contacts, files, tasks, home and social. Includes web-errands for gated shopping, booking, applications and filings. Alan's Workspace is a separate desktop app."
+description: "Idle check-ins from your primary Hermes bot, plus workspace browser skills and integrations: consented account setup through native Hermes routes or pinned VM toolbox recipes for email, calendar, contacts, files, tasks, home and social. Includes web-errands for gated shopping, booking, applications and filings. Alan's Workspace is a separate desktop app. Optional cross-bot export stores bounded sanitized recent owner-DM excerpts for up to 24 hours in a private shared directory; default off, controlled per bot with /proactivity cross on|off|status. Dispatch is disabled. Exchanges that look like they contain credentials or payment details are skipped entirely. Sanitization cannot detect every secret; expiry does not erase existing Hermes/provider history."
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"
@@ -14,4 +14,5 @@ provides_tools:
 provides_hooks:
   - pre_llm_call
   - post_llm_call
+  - on_session_end
   - transform_llm_output
