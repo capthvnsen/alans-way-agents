@@ -197,28 +197,34 @@ class Proactivity:
     def save(self, state):
         self.ctx.state.set(STATE_KEY, state)
 
-    def settings(self, state):
+    def settings(self, state, *, resolve_timezone=True):
         try:
             out = validate(Settings(), state.get("settings") or {}, min_base=1)
             if self.error == "corrupt settings: using defaults":
                 self.error = None
-            return out
         except Exception:
             # ponytail: a corrupt blob must not silently revive check-ins, so an
             # individually valid paused_until still applies on top of defaults.
             self.error = "corrupt settings: using defaults"
             blob = state.get("settings")
             try:
-                return Settings(paused_until=validate(
+                out = Settings(paused_until=validate(
                     Settings(), {"paused_until": blob.get("paused_until") if type(blob) is dict
                                  else None}).paused_until)
             except ValueError:
-                return Settings()
+                out = Settings()
+        if resolve_timezone and not out.timezone:
+            # Plugins can't read the profile's top-level Hermes timezone through a
+            # supported API; an unset zone runs on UTC until set with /proactivity tz.
+            out = replace(out, timezone="UTC")
+        return out
 
     def update(self, changes, *, min_base=15):
         with self._lock:
             state = self.load()
-            state["settings"] = asdict(validate(self.settings(state), changes, min_base=min_base))
+            # Persist explicit overrides only, so an unset zone keeps reading as UTC.
+            state["settings"] = asdict(validate(self.settings(state, resolve_timezone=False),
+                                               changes, min_base=min_base))
             self.save(state)
 
     def bind(self, session_key):
@@ -407,13 +413,22 @@ class Proactivity:
         choice = ("; (c) ask about a decision they own; or (d) if a fresh observation "
                   "from another bot clearly calls for it, use cross_bot_ask "
                   "for one read-only or draft-only task in that bot's own chat."
+                  " After dispatch, tell the user in one line what you asked and which bot"
+                  " (e.g. 'I asked the meetup bot to draft the run-of-show checklist;"
+                  " it'll show up in that chat.')."
                   if cross and cross.active and cross.profile == cross.primary
                   else "; or (c) ask about a decision they own.")
+        priority = (" Check fresh digest observations first. If an observation shows another bot's user"
+                    " has a concrete, unmet need that the other bot can research or draft without"
+                    " sending, posting, buying or changing anything, prefer (d): one cross_bot_ask"
+                    " to that bot, citing the evidence IDs. Otherwise pick (a)-(c)."
+                    if cross and cross.active and cross.profile == cross.primary else "")
+        thread = " For (a)-(c), build it around" if priority else " Build it around"
         return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
-                f" {self._when(s, now)} Pick exactly one:"
+                f" {self._when(s, now)}" + priority + " Pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then say what you did;"
                 " (b) offer one specific thing you could do for them" + choice +
-                " Build it around one specific open thread from your memory of their goals and recent"
+                thread + " one specific open thread from your memory of their goals and recent"
                 " conversations, and name it." + VOICE + " Keep it to 1-3 short sentences." + SAFETY + end)
 
     def brief_prompt(self, s, now):
