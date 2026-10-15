@@ -550,6 +550,32 @@ class DurableLockTests(unittest.TestCase):
             self.cross.on_session_end(**self.kw)
         self.assertIsNone(self.policy('terminal'))
 
+    def test_store_open_failure_after_restart_still_restricts_locked_session(self):
+        # X3R4 P1: a store that fails to open after restart must not lift a live lock.
+        for variant in ('root-0755', 'root-0000', 'store-lock-0644', 'corrupt-control'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                self.start_import()
+                self.cross.close()
+                if variant == 'root-0755':
+                    self.root.chmod(0o755)
+                elif variant == 'root-0000':
+                    self.root.chmod(0o000)
+                    self.addCleanup(self.root.chmod, 0o700)
+                elif variant == 'store-lock-0644':
+                    (self.root / 'store.lock').chmod(0o644)
+                else:
+                    (self.root / 'control.json').write_text('{')
+                self.cross = C.CrossBot(self.ctx, self.owner, clock=lambda: self.now)
+                self.addCleanup(self.cross.close)
+                self.assertIsNone(self.cross.store)
+                for tool in ('terminal', 'execute_code', 'message_agent', 'cronjob'):
+                    self.assertEqual(self.policy(tool)['action'], 'block', (variant, tool))
+                if variant == 'root-0000':
+                    continue
+                self.now += timedelta(minutes=31)
+                self.assertIsNone(self.policy('terminal'))
+
     def test_busy_shared_store_cannot_bypass_durable_lock(self):
         import fcntl
         self.start_import()

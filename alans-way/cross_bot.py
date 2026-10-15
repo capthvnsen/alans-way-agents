@@ -987,12 +987,30 @@ class CrossBot:
                     self.error = self.error_text(exc)
             return "unavailable"
 
+    def raw_lock_active(self, key):
+        if type(key) is not str or not key:
+            return False
+        if type(self.root) is not str or not os.path.isabs(self.root):
+            return True
+        path = os.path.join(self.root, "profiles", self.profile, "locks", SharedStore.lock_name(key))
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return info.st_mtime + LOCK_TTL.total_seconds() > self.clock().timestamp()
+
     def is_imported(self, key=None):
         from .proactivity import caller_session_key
+        key = caller_session_key() if key is None else key
         if self.store is None:
-            return False
+            # Never configured: inert. Configured but the store failed to open (bad
+            # mode, corrupt control file): a lock written before a restart must still
+            # restrict, so look at the exact lock path directly and fail closed.
+            return self.configured and self.raw_lock_active(key)
         try:
-            return self.store.session_lock(self.profile, caller_session_key() if key is None else key)
+            return self.store.session_lock(self.profile, key)
         except Exception as exc:
             self.error = self.error_text(exc)
             # An inaccessible path cannot establish absence or expiry safely.
