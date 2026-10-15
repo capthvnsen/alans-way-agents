@@ -13,6 +13,8 @@ talk of timers or check-ins. If nothing is worth saying it stays silent.
   days, 2.6 days, 5.3 days, 10.6 days, then roughly weekly. Replying resets it.
 - Only between **8:00 and 22:00 in your timezone**, not the server's. Setup reads
   your timezone from your computer; if it can't, the bot asks you.
+  An unset check-in timezone follows the profile's Hermes timezone, falling back
+  to UTC if that is also missing or invalid. An explicit check-in timezone wins.
 - Never mid-conversation or while the bot is working in the bound chat.
 
 It never sends external messages, spends money, changes credentials or
@@ -124,6 +126,10 @@ produces a clear error. Only the designated primary reads other profiles’ fres
 
 The primary can automatically choose one useful read-only or draft-only task for
 another enabled bot during an existing check-in, including `/proactivity now`.
+It checks fresh digest observations first and prefers a concrete, unmet need the
+other bot can research or draft without external changes, citing the evidence
+IDs. After dispatch it tells you which bot it asked and what it asked for in one
+line; the result will appear in that bot's chat.
 Ordinary messages, morning briefs, cron, child and imported turns receive no
 cross-bot context or dispatch permit. Secondary bots still do not run spontaneous
 check-ins. Results stay in the target's own existing bound Telegram DM with

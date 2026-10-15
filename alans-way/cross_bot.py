@@ -980,8 +980,9 @@ class SharedStore:
                        and (self.get_presence(fd, name) or {}).get("enabled")}
             recent = [r for r in attempts if utc(r["at"]) + TTL > self.clock()]
             last = max(attempts, key=lambda r: utc(r["at"])) if attempts else None
-            today = self.clock().astimezone(ZoneInfo(timezone_name)).date()
-            today_count = sum(utc(r["at"]).astimezone(ZoneInfo(timezone_name)).date() == today for r in attempts)
+            zone = ZoneInfo(timezone_name or "UTC")
+            today = self.clock().astimezone(zone).date()
+            today_count = sum(utc(r["at"]).astimezone(zone).date() == today for r in attempts)
             return {"profiles": enabled, "asks_24h": len(recent), "asks_today": today_count,
                     "last_ask": {"target": last["target"], "at": last["at"]} if last else None}
 
