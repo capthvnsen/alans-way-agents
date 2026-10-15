@@ -214,15 +214,9 @@ class Proactivity:
             except ValueError:
                 out = Settings()
         if resolve_timezone and not out.timezone:
-            try:
-                # ctx.get_config is plugin-relative; this public accessor reads
-                # the owning profile's Hermes timezone in the current scope.
-                from hermes_cli.config import load_config_readonly
-                name = load_config_readonly().get("timezone")
-                ZoneInfo(name)
-            except Exception:
-                name = "UTC"
-            out = replace(out, timezone=name)
+            # Plugins can't read the profile's top-level Hermes timezone through a
+            # supported API; an unset zone runs on UTC until set with /proactivity tz.
+            out = replace(out, timezone="UTC")
         return out
 
     def update(self, changes, *, min_base=15):

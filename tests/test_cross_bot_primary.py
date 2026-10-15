@@ -317,7 +317,7 @@ class PrimaryTests(unittest.TestCase):
         self.ask()
         self.assertEqual(self.store.primary_status('')['asks_today'], 1)
 
-    def test_primary_status_and_target_tick_use_profile_timezone_when_unset(self):
+    def test_primary_status_and_target_tick_use_utc_when_timezone_unset(self):
         import sys
         from types import SimpleNamespace
         self.start()
@@ -331,13 +331,13 @@ class PrimaryTests(unittest.TestCase):
             state = owner.load()
             state['settings'] = {'timezone': ''}
             owner.save(state)
-            config = SimpleNamespace(load_config_readonly=lambda: {'timezone': 'America/Denver'})
-            with patch.dict(sys.modules, {'hermes_cli.config': config}):
-                cross.refresh_local()
-                cross.set_enabled(True)
-                cross.tick(receive=False)
-                self.assertIsNone(cross.status()['error'])
-        self.assertEqual(self.cross.status()['asks_today'], 1)
+            # An empty proactivity timezone falls back to UTC instead of raising.
+            cross.refresh_local()
+            cross.set_enabled(True)
+            cross.tick(receive=False)
+            self.assertIsNone(cross.status()['error'])
+        # 01:00 UTC the next day: yesterday's ask no longer counts as today in UTC.
+        self.assertEqual(self.cross.status()['asks_today'], 0)
 
     def test_status_metadata_has_no_body_and_off_revokes_permit(self):
         self.start()

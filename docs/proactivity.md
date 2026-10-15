@@ -13,8 +13,8 @@ talk of timers or check-ins. If nothing is worth saying it stays silent.
   days, 2.6 days, 5.3 days, 10.6 days, then roughly weekly. Replying resets it.
 - Only between **8:00 and 22:00 in your timezone**, not the server's. Setup reads
   your timezone from your computer; if it can't, the bot asks you.
-  An unset check-in timezone follows the profile's Hermes timezone, falling back
-  to UTC if that is also missing or invalid. An explicit check-in timezone wins.
+  An unset check-in timezone runs on UTC (plugins can't read the profile's Hermes
+  timezone through a supported API); set yours with `/proactivity tz Area/City`.
 - Never mid-conversation or while the bot is working in the bound chat.
 
 It never sends external messages, spends money, changes credentials or

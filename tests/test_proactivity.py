@@ -222,38 +222,30 @@ def write_legacy(home, policy):
 
 
 class StateTests(unittest.TestCase):
-    def test_unset_timezone_keeps_following_profile_after_other_settings_change(self):
+    def test_unset_timezone_stays_unset_and_reads_as_utc(self):
         p = P.Proactivity(FakeCtx())
-        config = {"timezone": "Asia/Tokyo"}
-        accessor = SimpleNamespace(load_config_readonly=lambda: config)
-        with patch.dict(sys.modules, {"hermes_cli.config": accessor}):
-            p.update({"level": "less"})
-            config["timezone"] = "Europe/Berlin"
-            self.assertEqual(p.status()["settings"]["timezone"], "Europe/Berlin")
-            self.assertEqual(p.load()["settings"]["timezone"], "")
+        p.update({"level": "less"})
+        self.assertEqual(p.status()["settings"]["timezone"], "UTC")
+        self.assertEqual(p.load()["settings"]["timezone"], "")
 
-    def test_empty_timezone_uses_profile_config_then_utc_for_status_and_tick(self):
-        for config, expected in (({"timezone": "Asia/Tokyo"}, "Asia/Tokyo"),
-                                 ({}, "UTC"), ({"timezone": ""}, "UTC"),
-                                 ({"timezone": None}, "UTC"), ({"timezone": "Mars/Base"}, "UTC")):
-            for settings in ({}, {"timezone": ""}, {"timezone": "Europe/Berlin"}):
-                with self.subTest(config=config, settings=settings):
-                    ctx = FakeCtx()
-                    clock = SimpleNamespace(now=at("2026-10-07T00:00"))
-                    p = P.Proactivity(ctx, clock=lambda: clock.now)
-                    p.gateway = True
-                    p.bind(KEY)
-                    state = p.load()
-                    state["settings"] = settings
-                    p.save(state)
-                    accessor = SimpleNamespace(load_config_readonly=lambda: config)
-                    with patch.dict(sys.modules, {"hermes_cli.config": accessor}):
-                        zone = settings.get("timezone") or expected
-                        self.assertEqual(p.status()["settings"]["timezone"], zone)
-                        # 02:00 UTC is 11:00 Tokyo, but outside UTC/Berlin waking hours.
-                        clock.now = at("2026-10-07T02:00")
-                        self.assertEqual(p.tick(), True if zone == "Asia/Tokyo" else None)
-                    self.assertEqual(p.load()["settings"], settings)
+    def test_empty_timezone_uses_utc_for_status_and_tick_without_raising(self):
+        # No supported plugin API reads the profile's Hermes timezone, so unset means UTC.
+        for settings in ({}, {"timezone": ""}, {"timezone": "Asia/Tokyo"}):
+            with self.subTest(settings=settings):
+                ctx = FakeCtx()
+                clock = SimpleNamespace(now=at("2026-10-07T00:00"))
+                p = P.Proactivity(ctx, clock=lambda: clock.now)
+                p.gateway = True
+                p.bind(KEY)
+                state = p.load()
+                state["settings"] = settings
+                p.save(state)
+                zone = settings.get("timezone") or "UTC"
+                self.assertEqual(p.status()["settings"]["timezone"], zone)
+                # 02:00 UTC is 11:00 Tokyo, but outside UTC waking hours.
+                clock.now = at("2026-10-07T02:00")
+                self.assertEqual(p.tick(), True if zone == "Asia/Tokyo" else None)
+                self.assertEqual(p.load()["settings"], settings)
 
     def test_bind_takes_only_a_telegram_dm_key(self):
         p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
