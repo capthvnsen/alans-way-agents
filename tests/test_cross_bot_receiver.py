@@ -576,6 +576,16 @@ class DurableLockTests(unittest.TestCase):
                 self.now += timedelta(minutes=31)
                 self.assertIsNone(self.policy('terminal'))
 
+    def test_invalid_configured_root_fails_closed_without_store(self):
+        # X3R5 P2: roots SharedStore refuses ("/", "..", relative) cannot prove a lock absent.
+        for root in ('/', '/tmp/x/../y', 'relative/root', 5):
+            with self.subTest(root=root):
+                self.cross.store, self.cross.configured, self.cross.root = None, True, root
+                for tool in ('terminal', 'execute_code', 'message_agent', 'cronjob'):
+                    self.assertEqual(self.policy(tool)['action'], 'block', (root, tool))
+        self.cross.configured = False
+        self.assertIsNone(self.policy('terminal'))
+
     def test_busy_shared_store_cannot_bypass_durable_lock(self):
         import fcntl
         self.start_import()

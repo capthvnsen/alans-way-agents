@@ -990,7 +990,9 @@ class CrossBot:
     def raw_lock_active(self, key):
         if type(key) is not str or not key:
             return False
-        if type(self.root) is not str or not os.path.isabs(self.root):
+        # Same root rules as SharedStore: a root it would refuse cannot prove a lock absent.
+        root = Path(self.root) if type(self.root) is str else None
+        if root is None or not root.is_absolute() or ".." in root.parts or root == Path("/"):
             return True
         path = os.path.join(self.root, "profiles", self.profile, "locks", SharedStore.lock_name(key))
         try:
