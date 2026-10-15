@@ -185,6 +185,8 @@ class Proactivity:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self.worker = None
+        self.scoped_worker = None
+        self._scoped_scheduler = None
 
     def load(self):
         state = self.ctx.state.get(STATE_KEY)
@@ -355,11 +357,16 @@ class Proactivity:
             # the injected turn's hooks on another thread, so it must run unlocked.
             self.save(state)
             session_key = state["session_key"]
+        cross = getattr(self, "cross_bot", None)
         try:
+            if cross and not brief:
+                text = cross.prepare_checkin(text, session_key)
             accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
             result = "accepted" if accepted is True else "refused"
         except Exception as exc:
             accepted, result = False, f"failed: {type(exc).__name__}"
+        if cross and not brief and accepted is not True:
+            cross.cancel_checkin()
         with self._lock:
             state = self.load()
             state["last_result"] = result
@@ -376,10 +383,17 @@ class Proactivity:
                 return "I'm mid-reply; send /proactivity now again once I'm done."
             text = self.prompt(s, now - self._anchor(state), now, asked=True)
             session_key = state["session_key"]
+        cross = getattr(self, "cross_bot", None)
         try:
+            if cross:
+                text = cross.prepare_checkin(text, session_key)
             accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
         except Exception as exc:
+            if cross:
+                cross.cancel_checkin()
             return f"Couldn't start a check-in: {type(exc).__name__}."
+        if cross and accepted is not True:
+            cross.cancel_checkin()
         return "Checking in now." if accepted is True else "Couldn't start a check-in: Hermes refused it."
 
     def prompt(self, s, elapsed, now, *, asked=False):
@@ -389,10 +403,16 @@ class Proactivity:
         lead = "The user just asked you to check in now. " if asked else ""
         end = (" They asked, so reply with one of these; don't answer [SILENT]." if asked else
                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
+        cross = getattr(self, "cross_bot", None)
+        choice = ("; (c) ask about a decision they own; or (d) if a fresh observation "
+                  "from another bot clearly calls for it, use cross_bot_ask "
+                  "for one read-only or draft-only task in that bot's own chat."
+                  if cross and cross.active and cross.profile == cross.primary
+                  else "; or (c) ask about a decision they own.")
         return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
                 f" {self._when(s, now)} Pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then say what you did;"
-                " (b) offer one specific thing you could do for them; or (c) ask about a decision they own."
+                " (b) offer one specific thing you could do for them" + choice +
                 " Build it around one specific open thread from your memory of their goals and recent"
                 " conversations, and name it." + VOICE + " Keep it to 1-3 short sentences." + SAFETY + end)
 
@@ -542,7 +562,30 @@ class Proactivity:
         """register_platform_handler factory. Hermes calls it only when the gateway
         connects Telegram, so CLI, doctor and TUI loads never start the loop."""
         self.gateway = True
-        self.start()
+        if self._scoped_scheduler is None:
+            cross = getattr(self, "cross_bot", None)
+            self._scoped_scheduler = bool(cross and cross.active)
+        if self._scoped_scheduler:
+            # Preserve the owning profile's context under multiplex, including a named primary.
+            import asyncio
+            if self.scoped_worker is not None and not self.scoped_worker.done():
+                return
+            async def run():
+                while not self._stop.is_set():
+                    await asyncio.sleep(60)
+                    self.error = None
+                    try:
+                        await asyncio.to_thread(self.tick)
+                    except Exception as exc:
+                        self.error = type(exc).__name__
+            coro = run()
+            try:
+                self.scoped_worker = self.ctx.spawn_task(coro, name="alans-way-idle-nudge")
+            except Exception:
+                coro.close()
+                raise
+        else:
+            self.start()
 
     def start(self, interval=60.0):
         def run():
@@ -560,6 +603,8 @@ class Proactivity:
 
     def close(self):
         self._stop.set()
+        if self.scoped_worker is not None:
+            self.scoped_worker.cancel()
 
 
 SCHEMA = {

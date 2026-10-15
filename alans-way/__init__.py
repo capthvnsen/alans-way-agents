@@ -7,7 +7,7 @@ import sys
 
 from . import voice as voice_mod
 from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
-from .cross_bot import CrossBot, CROSS_SCHEMA
+from .cross_bot import CrossBot, CROSS_SCHEMA, ASK_SCHEMA
 
 
 def _owning_home() -> Path:
@@ -59,6 +59,9 @@ def register(ctx, *, legacy_home=None, background=True):
     runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)
     runtime.primary = primary
     cross = CrossBot(ctx, runtime)
+    if cross.active:
+        primary = cross.profile == cross.primary
+        runtime.primary = primary
     runtime.cross_bot = cross
     # First transform returning text wins; attribution must precede voice polish.
     ctx.register_hook("transform_llm_output", cross.on_output)
@@ -69,9 +72,12 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", cross.on_turn_start)
     ctx.register_hook("post_llm_call", cross.on_turn_end)
     ctx.register_hook("on_session_end", cross.on_session_end)
-    tool_handle = None
+    tool_handle = ask_handle = None
     def tools_after_activation():
-        nonlocal tool_handle
+        nonlocal tool_handle, ask_handle
+        if ask_handle is not None:
+            ask_handle.dispose()
+            ask_handle = None
         if tool_handle is not None:
             tool_handle.dispose()
             tool_handle = None
@@ -83,6 +89,9 @@ def register(ctx, *, legacy_home=None, background=True):
             schema["description"] += " " + CROSS_SCHEMA["description"]
             schema["parameters"]["properties"]["action"]["enum"].append("cross_status")
             schema["parameters"]["properties"]["cross_bot_enabled"] = {"type": "boolean"}
+        if primary and cross.active and cross.profile == cross.primary:
+            ask_handle = ctx.register_tool(name="cross_bot_ask", toolset="proactivity", schema=ASK_SCHEMA,
+                                           handler=cross.ask, check_fn=lambda: cross.active and not cross.closed)
         tool_handle = ctx.register_tool(name="proactivity", toolset="proactivity", schema=schema,
                                         handler=runtime.tool if primary else cross.tool,
                                         check_fn=lambda: primary or cross.active)
@@ -92,7 +101,7 @@ def register(ctx, *, legacy_home=None, background=True):
         ctx.register_hook("pre_llm_call", runtime.on_turn_start)
         ctx.register_hook("post_llm_call", runtime.on_turn_end)
     ctx.register_command("proactivity", runtime.command if primary else cross.command,
-                         description="Check-ins and cross-bot export/receiver: cross on|off|status (primary dispatch disabled)",
+                         description="Check-ins and cross-bot export/receiver: cross on|off|status",
                          args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief|cross on|off|status]")
     if background:
         def connect(native=None, adapter=None, **kwargs):
