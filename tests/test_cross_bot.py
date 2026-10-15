@@ -366,6 +366,9 @@ class StoreTests(unittest.TestCase):
 
 class CollectorTests(unittest.TestCase):
     def setUp(self):
+        routes = patch.object(C, "receiving_routes", return_value=[])
+        routes.start()
+        self.addCleanup(routes.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve() / "shared"
@@ -628,6 +631,11 @@ class CollectorTests(unittest.TestCase):
 
 
 class ScopedTaskTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        routes = patch.object(C, "receiving_routes", return_value=[])
+        routes.start()
+        self.addCleanup(routes.stop)
+
     async def test_timer_is_supervised_idempotent_and_unload_cancels(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = FakeCtx()
@@ -701,6 +709,11 @@ class ScopedTaskTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def setUp(self):
+        routes = patch.object(C, "receiving_routes", return_value=[])
+        routes.start()
+        self.addCleanup(routes.stop)
+
     def test_off_primary_and_secondary_match_base_without_cross_state_or_store_io(self):
         # Base 9d5818b: canonical schema (including model-facing description),
         # check-in prompt and brief prompt are pinned byte for byte.

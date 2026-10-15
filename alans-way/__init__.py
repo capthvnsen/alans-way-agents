@@ -49,7 +49,6 @@ def register(ctx, *, legacy_home=None, background=True):
     # Every profile: each bot's voice is its own profile's plugin state, on by default.
     voice = voice_mod.Voice(ctx)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
-    ctx.register_hook("transform_llm_output", voice.on_output)
     ctx.register_command("tone", voice.command,
                          description="Telegram voice: texting (default) or Hermes' default voice",
                          args_hint="[texting|default|status]")
@@ -61,6 +60,10 @@ def register(ctx, *, legacy_home=None, background=True):
     runtime.primary = primary
     cross = CrossBot(ctx, runtime)
     runtime.cross_bot = cross
+    # First transform returning text wins; attribution must precede voice polish.
+    ctx.register_hook("transform_llm_output", cross.on_output)
+    ctx.register_hook("transform_llm_output", voice.on_output)
+    ctx.register_hook("pre_tool_call", cross.on_tool_call)
     # Collector and narrowing controls belong to every profile, before the
     # primary scheduler gate. Secondary bots still get no spontaneous check-ins.
     ctx.register_hook("pre_llm_call", cross.on_turn_start)
@@ -89,7 +92,7 @@ def register(ctx, *, legacy_home=None, background=True):
         ctx.register_hook("pre_llm_call", runtime.on_turn_start)
         ctx.register_hook("post_llm_call", runtime.on_turn_end)
     ctx.register_command("proactivity", runtime.command if primary else cross.command,
-                         description="Check-ins and cross-bot export: cross on|off|status (dispatch disabled)",
+                         description="Check-ins and cross-bot export/receiver: cross on|off|status (primary dispatch disabled)",
                          args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief|cross on|off|status]")
     if background:
         def connect(native=None, adapter=None, **kwargs):
