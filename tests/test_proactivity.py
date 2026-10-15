@@ -949,7 +949,7 @@ class RegisterTests(unittest.TestCase):
 
     def test_manifest_declares_what_register_registers(self):
         text = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
-        for name in ("proactivity", "pre_llm_call", "post_llm_call"):
+        for name in ("proactivity", "cross_bot_ask", "pre_llm_call", "post_llm_call"):
             self.assertIn(f"- {name}", text)
         self.assertNotIn("proactive_control", text)
 

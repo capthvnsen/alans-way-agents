@@ -1,6 +1,6 @@
 # Cross-bot proactivity — staged design
 
-Status: approved with lead trims; PR 1 implements export/control only, with dispatch disabled. No deployment. Scope: one multiplexed
+Status: approved with lead trims; PRs 1–3 implement export/control, receiver and permitted primary dispatch. No deployment. Scope: one multiplexed
 gateway, all its bot profiles eligible, one primary; automatic read/research/draft asks; results in the
 target's own Telegram DM. Consequential actions retain human approval. No task reassignment or second agent
 loop.

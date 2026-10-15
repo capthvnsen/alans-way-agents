@@ -112,7 +112,7 @@ State lives in Hermes' plugin state (`ctx.state`).
 Upgrading from 0.6 keeps your bound chat, timezone and pause. Watches, sweeps
 and `/watch` are gone.
 
-## Cross-bot export and receiver (stage 2)
+## Cross-bot proactivity
 
 Optional and **off by default**. Each enrolled profile exports only completed
 exchanges from its locally bound owner Telegram DM. Groups, other chats, cron,
@@ -120,15 +120,16 @@ check-ins, morning briefs, child turns and imported cross-bot turns are excluded
 There is no historical backfill. Only the user message and final assistant text
 are exported; attachments, reasoning, tool history and configuration files are
 not collected. All eligible bots may participate; enrollment beyond 16 profiles
-produces a clear error. Snapshot aggregation is deferred to the primary-reader stage.
+produces a clear error. Only the designated primary reads other profiles’ fresh digests during a permitted check-in; its own digest is excluded.
 
-This stage adds the target queue and receiver, with an internal/test enqueue
-helper. **Primary dispatch is disabled**: there is no model ask tool, snapshot
-reader or automatic primary selection. Secondary bots still do not run spontaneous
-check-ins. An enabled receiver can schedule a queued read/research/draft request
-in its own existing bound Telegram DM through public Hermes injection. The target
-needs operator-configured `allow_gateway_injection: true`; missing routes or
-permission can prevent delivery even after scheduling.
+The primary can automatically choose one useful read-only or draft-only task for
+another enabled bot during an existing check-in, including `/proactivity now`.
+Ordinary messages, morning briefs, cron, child and imported turns receive no
+cross-bot context or dispatch permit. Secondary bots still do not run spontaneous
+check-ins. Results stay in the target's own existing bound Telegram DM with
+primary attribution; the primary does not poll for them. The target needs
+operator-configured `allow_gateway_injection: true`; missing routes or permission
+can prevent delivery even after scheduling.
 
 An operator configures each profile through Hermes' CLI. Use the **same explicit
 absolute directory and primary designation** in every participating profile:
@@ -161,9 +162,12 @@ From each bot's bound owner DM, send:
 
 - `/proactivity cross on` to enable that bot's exports and receiver.
 - `/proactivity cross off` to disable sharing/receiving, cancel its receiver and delete its digest and pending asks.
-- `/proactivity cross status` to show enrollment and exchange count, with
-  “Primary dispatch disabled.” A body-free `sent` status means injection was
-  scheduled, never proof of delivery or completion. No message bodies or DM addresses appear in status.
+- `/proactivity cross status` to show local enrollment and exchange count. On the
+  enabled primary it lists other enabled profiles and digest freshness without
+  content, today’s ask count in the primary’s timezone, the rolling 24-hour count
+  and the last ask's target/time. A body-free
+  `sent` status on a target means injection was scheduled, never proof of delivery
+  or completion. No message bodies or DM addresses appear in status.
 
 After activation, the model's `proactivity` tool can read `cross_status` or set
 `cross_bot_enabled` to `false`. It can only turn this feature off; enabling,
@@ -181,8 +185,7 @@ Before every claim, the scoped receiver rereads its owning profile's live bindin
 and pause/timezone/hours settings under the owner and shared-store locks. Commands,
 tools and CLI changes apply to the next claim without reconnect/reload. A timer
 outside its inherited owning scope refuses to claim; it never reads another
-profile's state. Primary
-snapshot freshness selection belongs to stage 3.
+profile's state. The designated primary scheduler also uses a supervised task in its owning profile scope when a shared root is configured.
 
 Each digest holds at most the last **four exchanges**, at most **2 KiB serialized**,
 with a **24-hour TTL per exchange**. Sanitization runs before UTF-8 truncation;
@@ -210,13 +213,38 @@ generation change, so a turn staged before off cannot publish after re-enabling.
 
 Queued asks contain at most 800 characters, expire after **two hours**, have depth
 one and mode `read_only` or `draft_only`. At most one is pending per target and 64
-across the gateway. The internal helper spends body-free attempt/check-in hashes
+across the gateway. The validated queue path spends body-free attempt/check-in hashes
 before enqueue: four attempts per rolling day gateway-wide, two per target, with
 60-minute target spacing. These records survive restart for 48 hours. Receivers
 wait for busy, paused or out-of-hours targets until expiry; an unbound target drops
 the ask. Claims recheck enrollment/generation under the store lock and durably
 delete the body **before injection**, so a crash can lose an ask but cannot replay
 it. There is no receipt store, completion tracking or result polling.
+
+Before injecting a primary check-in, the plugin writes a private, one-use
+`profiles/<primary>/permit.json` with a random check-in ID, hashes of the exact
+prompt and bound session, enrollment generation and a **30-minute expiry**. The
+pre-LLM hook binds the matching prompt to the host's session/task/turn IDs. Text
+markers and model-supplied IDs grant no authority. The pre-tool hook records those
+host IDs and an argument hash durably because Hermes tool handlers receive only
+session/task IDs. The queue path consumes this grant under the shared-store lock
+before attempting dispatch. Session-end, failed injection, expiry and primary
+opt-out revoke it; reload cannot revive a spent permit. Failed authorized attempts
+count toward the limits, including invalid evidence and pending-target failures;
+budget-refused attempts cannot enqueue. `/now` skips only the primary's existing
+wait/pause/hours checks, leaving target policy and dispatch limits intact.
+
+Digest context is JSON-escaped under a fixed untrusted-data framing, at most
+**32 KiB / 16 profiles**. It rejects profile heartbeats older than **180 seconds**
+and uses only enabled, bound exports with matching generations and unexpired
+exchanges. `cross_bot_ask` accepts a target, `read_only|draft_only`, an ask of at
+most 800 characters and nonempty, unique evidence IDs from that target's fresh
+digest; stale, unknown or disabled evidence cannot dispatch. This validation does
+not turn observations into instructions, verified facts or human consent. The
+framing says “Don't save other bots' excerpts to memory.” That is **model policy**,
+not deletion enforcement. Context may persist in Hermes API-content sidecars,
+compaction, memory-provider records and model-provider retention after digest
+expiry or opt-out; the plugin performs no memory-provider writes.
 
 Imported task text is untrusted and grants no routing or approval. The receiver
 supplies its own captured session key. Before injection it writes a private

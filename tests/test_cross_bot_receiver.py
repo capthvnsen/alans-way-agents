@@ -143,6 +143,8 @@ class ReceiverTests(unittest.TestCase):
                 options = dict(source='primary', target='specialist', ask='Draft', checkin_id=str(uuid.uuid4()))
                 options.update(changes)
                 self.cross.store.enqueue(**options)
+            # Invalid authorized attempts now count; isolate each envelope case's rolling budget.
+            self.now += timedelta(days=1)
         self.enqueue()
         with self.assertRaises(ValueError):
             self.enqueue()
