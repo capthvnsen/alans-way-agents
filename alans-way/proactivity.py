@@ -186,6 +186,7 @@ class Proactivity:
         self._stop = threading.Event()
         self.worker = None
         self.scoped_worker = None
+        self._scoped_scheduler = None
 
     def load(self):
         state = self.ctx.state.get(STATE_KEY)
@@ -403,13 +404,15 @@ class Proactivity:
         end = (" They asked, so reply with one of these; don't answer [SILENT]." if asked else
                " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
         cross = getattr(self, "cross_bot", None)
-        choice = (" or, if a fresh observation from another bot clearly calls for it, use cross_bot_ask "
+        choice = ("; (c) ask about a decision they own; or (d) if a fresh observation "
+                  "from another bot clearly calls for it, use cross_bot_ask "
                   "for one read-only or draft-only task in that bot's own chat."
-                  if cross and cross.active and cross.profile == cross.primary else "")
+                  if cross and cross.active and cross.profile == cross.primary
+                  else "; or (c) ask about a decision they own.")
         return (f"{MARKER} {lead}It has been {ago} since your last exchange with the user;"
                 f" {self._when(s, now)} Pick exactly one:"
                 " (a) do one safe, reversible thing that moves their goals forward, then say what you did;"
-                " (b) offer one specific thing you could do for them; or (c) ask about a decision they own." + choice +
+                " (b) offer one specific thing you could do for them" + choice +
                 " Build it around one specific open thread from your memory of their goals and recent"
                 " conversations, and name it." + VOICE + " Keep it to 1-3 short sentences." + SAFETY + end)
 
@@ -559,7 +562,10 @@ class Proactivity:
         """register_platform_handler factory. Hermes calls it only when the gateway
         connects Telegram, so CLI, doctor and TUI loads never start the loop."""
         self.gateway = True
-        if getattr(self, "cross_bot", None) and self.cross_bot.configured:
+        if self._scoped_scheduler is None:
+            cross = getattr(self, "cross_bot", None)
+            self._scoped_scheduler = bool(cross and cross.active)
+        if self._scoped_scheduler:
             # Preserve the owning profile's context under multiplex, including a named primary.
             import asyncio
             if self.scoped_worker is not None and not self.scoped_worker.done():
@@ -567,6 +573,7 @@ class Proactivity:
             async def run():
                 while not self._stop.is_set():
                     await asyncio.sleep(60)
+                    self.error = None
                     try:
                         await asyncio.to_thread(self.tick)
                     except Exception as exc:

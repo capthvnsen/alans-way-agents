@@ -59,7 +59,7 @@ def register(ctx, *, legacy_home=None, background=True):
     runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)
     runtime.primary = primary
     cross = CrossBot(ctx, runtime)
-    if cross.configured:
+    if cross.active:
         primary = cross.profile == cross.primary
         runtime.primary = primary
     runtime.cross_bot = cross

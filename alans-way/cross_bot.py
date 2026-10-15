@@ -1048,13 +1048,14 @@ class CrossBot:
                 raise ValueError("Local export off; shared digest purge failed: " + self.error_text(exc)
                                  + "; retry /proactivity cross off") from exc
             raise
-        self.active = enabled
         self.error = None
+        if enabled and self.connected:
+            # Registration owns roles/tools; a running gateway applies enrollment on restart.
+            return
+        self.active = enabled
         self._pending.clear()
         if enabled:
             self.on_activation()
-        if enabled and self.connected:
-            self.on_telegram_connect()
 
     @staticmethod
     def error_text(exc):
@@ -1401,6 +1402,8 @@ class CrossBot:
                     return "Cross-bot settings can only be changed or viewed from this bot's bound owner DM."
                 if action in ("on", "off"):
                     self.set_enabled(action == "on")
+                    if action == "on" and self.connected:
+                        return "Cross-bot setting saved; takes effect after the next gateway restart."
                 status = self.status()
                 if status["error"]:
                     raise ValueError(status["error"])

@@ -54,7 +54,9 @@ class PrimaryTests(unittest.TestCase):
         self.assertIn('untrusted observations from other chats', context)
         self.assertIn("Don't save other bots' excerpts to memory.", context)
         self.assertIn(self.evidence, context)
-        self.assertIn('use cross_bot_ask for one read-only or draft-only task', prompt)
+        self.assertIn('; (c) ask about a decision they own; or (d) if a fresh observation '
+                      'from another bot clearly calls for it, use cross_bot_ask for one read-only '
+                      "or draft-only task in that bot's own chat.", prompt)
         self.assertEqual(self.ask(), 'Ask queued (scheduling is not delivery).')
         self.assertIn('permit', self.ask().lower())
         self.assertEqual(len(list(self.root.glob('inbox/*/*.json'))), 1)
@@ -309,45 +311,99 @@ class PrimaryTests(unittest.TestCase):
         self.assertIn('off', self.ask().lower())
 
 
-class PrimaryRegistrationTests(unittest.TestCase):
-    def test_designated_primary_only_and_off_schema_unchanged(self):
+class PrimaryRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_on_waits_for_restart_and_off_keeps_roles_until_restart(self):
+        import asyncio
         import sys
         import tempfile
         from pathlib import Path
         from types import SimpleNamespace
         from test_proactivity import FakeCtx
-        with tempfile.TemporaryDirectory() as tmp, patch.object(C, 'receiving_routes', return_value=[]):
-            for profile in ('default', 'primary', 'specialist'):
+        for profile in ('default', 'primary', 'specialist'):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(C, 'receiving_routes', return_value=[]):
                 ctx = FakeCtx()
                 ctx.profile_name = profile
-                config = {'cross_bot.shared_root': str(Path(tmp).resolve() / 'shared'), 'cross_bot.primary': 'primary'}
+                config = {'cross_bot.shared_root': str(Path(tmp).resolve() / 'shared'),
+                          'cross_bot.primary': 'primary', 'cross_bot.enabled': False}
                 ctx.get_config = lambda key, default=None: config.get(key, default)
                 ctx.set_config = lambda key, value: config.__setitem__(key, value)
-                tools, hooks, unloads = {}, {}, []
-                def register_tool(**kw):
-                    tools[kw['name']] = kw
-                    return SimpleNamespace(dispose=lambda: tools.pop(kw['name'], None))
-                ctx.register_tool = register_tool
-                ctx.register_hook = lambda name, fn: hooks.setdefault(name, []).append(fn)
-                ctx.register_skill = ctx.register_command = ctx.register_cli_command = lambda *a, **kw: None
-                ctx.on_unload = unloads.append
-                runtime = sys.modules[P.__package__].register(ctx, background=False, legacy_home=tmp)
-                cross = next(fn.__self__ for fn in unloads if isinstance(fn.__self__, C.CrossBot))
-                self.assertEqual(runtime is not None, profile == 'primary')
-                self.assertEqual(set(tools), {'proactivity'} if profile == 'primary' else set())
-                if runtime:
-                    self.assertEqual(json.dumps(tools['proactivity']['schema']), json.dumps(P.SCHEMA))
+                ctx.spawn_task = lambda coro, **kw: asyncio.create_task(coro, **kw)
+                def register():
+                    tools, hooks, factories, unloads = {}, {}, {}, []
+                    def register_tool(**kw):
+                        tools[kw['name']] = kw
+                        return SimpleNamespace(dispose=lambda: tools.pop(kw['name'], None))
+                    ctx.register_tool = register_tool
+                    ctx.register_hook = lambda name, fn: hooks.setdefault(name, []).append(fn)
+                    ctx.register_platform_handler = lambda name, fn: factories.__setitem__(name, fn)
+                    ctx.register_skill = ctx.register_command = ctx.register_cli_command = lambda *a, **kw: None
+                    ctx.on_unload = unloads.append
+                    runtime = sys.modules[P.__package__].register(ctx, legacy_home=tmp)
+                    cross = next(fn.__self__ for fn in unloads if isinstance(fn.__self__, C.CrossBot))
+                    def close():
+                        for fn in unloads:
+                            fn()
+                        if cross.owner.worker:
+                            cross.owner.worker.join(2)
+                    self.addCleanup(close)
+                    return runtime, cross, tools, factories['telegram'], close
+
+                runtime, cross, tools, connect, close = register()
                 key = 'agent:' + ('main' if profile == 'default' else profile) + ':telegram:dm:42'
                 cross.owner.bind(key)
+                cross.owner.update({'timezone': 'UTC'})
+                connect()
+                base_worker = cross.owner.worker
                 with patch.object(P, 'caller_session_key', return_value=key):
-                    cross.command('cross on')
-                    self.assertEqual('cross_bot_ask' in tools, profile == 'primary')
-                    cross.command('cross off')
-                self.assertNotIn('cross_bot_ask', tools)
+                    reply = cross.owner.command('cross on')
+                self.assertIn('takes effect after the next gateway restart', reply)
+                self.assertTrue(config['cross_bot.enabled'])
+                self.assertFalse(cross.active)
+                self.assertEqual(runtime is not None, profile == 'default')
+                self.assertEqual(set(tools), {'proactivity'} if profile == 'default' else set())
                 if runtime:
-                    self.assertEqual(json.dumps(tools['proactivity']['schema']), json.dumps(P.SCHEMA))
-                for fn in unloads:
-                    fn()
+                    self.assertEqual(tools['proactivity']['schema'], P.SCHEMA)
+                connect()  # Reconnect must not apply pending enrollment or swap the base worker.
+                self.assertIs(cross.owner.worker, base_worker)
+                self.assertIsNone(cross.owner.scoped_worker)
+                self.assertIsNone(cross.task)
+                close()
+
+                runtime, cross, tools, connect, close = register()
+                self.assertTrue(cross.active)
+                self.assertEqual(runtime is not None, profile == 'primary')
+                self.assertEqual('cross_bot_ask' in tools, profile == 'primary')
+                self.assertEqual(cross.owner.primary, profile == 'primary')
+                connect()
+                await asyncio.sleep(0)
+                scoped_worker, export_task = cross.owner.scoped_worker, cross.task
+                self.assertEqual(scoped_worker is not None, profile == 'primary')
+                self.assertIsNone(cross.owner.worker)
+                with patch.object(P, 'caller_session_key', return_value=key):
+                    self.assertIn('export off', cross.owner.command('cross off'))
+                await asyncio.sleep(0)
+                self.assertFalse(config['cross_bot.enabled'])
+                self.assertFalse(cross.active)
+                self.assertTrue(export_task.cancelled())
+                self.assertEqual(cross.owner.primary, profile == 'primary')
+                self.assertEqual(set(tools), {'proactivity'} if profile == 'primary' else set())
+                if runtime:
+                    self.assertEqual(tools['proactivity']['schema'], P.SCHEMA)
+                connect()
+                self.assertIs(cross.owner.scoped_worker, scoped_worker)
+                self.assertIsNone(cross.owner.worker)
+                close()
+                await asyncio.sleep(0)
+
+                runtime, cross, tools, connect, close = register()
+                self.assertFalse(cross.active)
+                self.assertEqual(runtime is not None, profile == 'default')
+                self.assertEqual(set(tools), {'proactivity'} if profile == 'default' else set())
+                connect()
+                self.assertEqual(cross.owner.worker is not None, profile == 'default')
+                self.assertIsNone(cross.owner.scoped_worker)
+                close()
 
 
 class PrimaryScopedSchedulerTests(unittest.IsolatedAsyncioTestCase):
@@ -363,7 +419,7 @@ class PrimaryScopedSchedulerTests(unittest.IsolatedAsyncioTestCase):
             return task
         ctx.spawn_task = spawn
         owner = P.Proactivity(ctx)
-        owner.cross_bot = SimpleNamespace(configured=True)
+        owner.cross_bot = SimpleNamespace(configured=True, active=True)
         owner.on_telegram_connect()
         owner.on_telegram_connect()
         await asyncio.sleep(0)
@@ -372,3 +428,64 @@ class PrimaryScopedSchedulerTests(unittest.IsolatedAsyncioTestCase):
         owner.close()
         await asyncio.sleep(0)
         self.assertTrue(tasks[0].cancelled())
+
+    async def test_off_scheduler_uses_base_thread_and_clears_transient_error(self):
+        from types import SimpleNamespace
+        from test_proactivity import FakeCtx
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                ctx = FakeCtx()
+                ctx.spawn_task = unittest.mock.Mock(side_effect=AssertionError("off must use base thread"))
+                owner = P.Proactivity(ctx)
+                owner.cross_bot = SimpleNamespace(configured=configured, active=False)
+                self.addCleanup(owner.close)
+                errors = []
+                def tick():
+                    errors.append(owner.status()['last_error'])
+                    if len(errors) == 1:
+                        raise RuntimeError('synthetic transient error')
+                owner.tick = tick
+                with patch.object(owner._stop, 'wait', side_effect=[False, False, True]):
+                    owner.on_telegram_connect()
+                    owner.worker.join(2)
+                self.assertFalse(owner.worker.is_alive())
+                self.assertEqual(errors, [None, None])
+                self.assertIsNone(owner.status()['last_error'])
+                ctx.spawn_task.assert_not_called()
+
+    async def test_enabled_scheduler_clears_transient_error_and_keeps_scope_after_off(self):
+        import asyncio
+        from types import SimpleNamespace
+        from test_proactivity import FakeCtx
+        ctx = FakeCtx()
+        tasks = []
+        def spawn(coro, **kw):
+            task = asyncio.create_task(coro, **kw)
+            tasks.append(task)
+            return task
+        ctx.spawn_task = spawn
+        owner = P.Proactivity(ctx)
+        owner.cross_bot = SimpleNamespace(configured=True, active=True)
+        self.addCleanup(owner.close)
+        errors = []
+        sleeps = 0
+        async def sleep(_):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps == 3:
+                raise asyncio.CancelledError
+        def tick():
+            errors.append(owner.status()['last_error'])
+            if len(errors) == 1:
+                raise RuntimeError('synthetic transient error')
+            owner.cross_bot.active = False
+            owner.on_telegram_connect()  # Opt-out must not change scheduler on reconnect.
+        owner.tick = tick
+        with patch.object(asyncio, 'sleep', sleep):
+            owner.on_telegram_connect()
+            with self.assertRaises(asyncio.CancelledError):
+                await tasks[0]
+        self.assertEqual(errors, [None, None])
+        self.assertIsNone(owner.status()['last_error'])
+        self.assertIsNone(owner.worker)
+        self.assertEqual(len(tasks), 1)

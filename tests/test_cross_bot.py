@@ -718,13 +718,16 @@ class RegistrationTests(unittest.TestCase):
         # Base 9d5818b: canonical schema (including model-facing description),
         # check-in prompt and brief prompt are pinned byte for byte.
         schema_sha = "94a082ce76756e20d76a4f9701c1a9cf3ed3eadf007efc1094d17da351f2d622"
-        for profile in ("default", "specialist"):
+        for profile in ("default", "primary", "specialist"):
             for configured in (False, True):
                 with self.subTest(profile=profile, configured=configured), tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp).resolve() / "shared"
                     ctx = FakeCtx()
                     ctx.profile_name = profile
-                    ctx.get_config = lambda key, default=None: str(root) if configured and key == "cross_bot.shared_root" else default
+                    config = {"cross_bot.primary": "primary", "cross_bot.enabled": False}
+                    if configured:
+                        config["cross_bot.shared_root"] = str(root)
+                    ctx.get_config = lambda key, default=None: config.get(key, default)
                     hooks, tools, unloads = {}, {}, []
                     ctx.register_hook = lambda name, fn: hooks.setdefault(name, []).append(fn)
                     ctx.register_tool = lambda **kw: tools.__setitem__(kw["name"], kw)
@@ -741,6 +744,9 @@ class RegistrationTests(unittest.TestCase):
                         self.assertIsNone(cross.error)
                         self.assertIsNone(cross.task)
                         self.assertFalse(root.exists())
+                    self.assertEqual(runtime is not None, profile == "default")
+                    self.assertEqual(any(isinstance(fn.__self__, P.Proactivity) for fn in hooks["pre_llm_call"]),
+                                     profile == "default")
                     if profile == "default":
                         self.assertEqual(C.hashlib.sha256(json.dumps(tools["proactivity"]["schema"], sort_keys=True).encode()).hexdigest(), schema_sha)
                         s = P.Settings(timezone="UTC")

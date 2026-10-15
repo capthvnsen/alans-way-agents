@@ -160,8 +160,12 @@ The approved future live test uses `alansway` as primary and `utd` as target.
 
 From each bot's bound owner DM, send:
 
-- `/proactivity cross on` to enable that bot's exports and receiver.
-- `/proactivity cross off` to disable sharing/receiving, cancel its receiver and delete its digest and pending asks.
+- `/proactivity cross on` to save enrollment for that bot's exports and receiver.
+  In a running gateway, it **takes effect after the next gateway restart**.
+  Reconnecting Telegram does not activate it or swap the scheduler.
+- `/proactivity cross off` to stop sharing, receiving and dispatch immediately,
+  cancel its receiver and delete its digest, check-in permit and pending asks.
+  Primary roles and the scheduler revert to base at the next gateway restart.
 - `/proactivity cross status` to show local enrollment and exchange count. On the
   enabled primary it lists other enabled profiles and digest freshness without
   content, today’s ask count in the primary’s timezone, the rolling 24-hour count
@@ -185,7 +189,12 @@ Before every claim, the scoped receiver rereads its owning profile's live bindin
 and pause/timezone/hours settings under the owner and shared-store locks. Commands,
 tools and CLI changes apply to the next claim without reconnect/reload. A timer
 outside its inherited owning scope refuses to claim; it never reads another
-profile's state. The designated primary scheduler also uses a supervised task in its owning profile scope when a shared root is configured.
+profile's state. When cross-bot mode is enabled at registration/Telegram
+connect, the designated primary scheduler uses a supervised task in its owning
+profile scope. When disabled, the default/launch profile keeps the base thread
+scheduler, tools and prompts, even with a shared root and named primary configured.
+Roles are selected at registration and the scheduler at the first connection;
+these selections remain fixed until the gateway restarts.
 
 Each digest holds at most the last **four exchanges**, at most **2 KiB serialized**,
 with a **24-hour TTL per exchange**. Sanitization runs before UTF-8 truncation;
@@ -198,7 +207,7 @@ detectable, so avoid sharing sensitive material even with export enabled.
 Activation is persisted as `cross_bot.enabled` through Hermes' public plugin
 settings API. With no root or while off, cross-bot hooks do no state/store I/O,
 start no task and add no model tool. The primary schema and prompts stay at their
-base values. Off cancels the task, removes the extra tool surface and purges even
+base values. Off cancels the cross-bot task, removes the extra tool surface and purges even
 an unparseable digest or queued ask after restart.
 
 Pruning runs on explicitly activated startup, before store reads/writes and every
