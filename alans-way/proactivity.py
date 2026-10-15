@@ -222,7 +222,7 @@ class Proactivity:
     def update(self, changes, *, min_base=15):
         with self._lock:
             state = self.load()
-            # Persist explicit overrides, so an unset zone keeps following Hermes.
+            # Persist explicit overrides only, so an unset zone keeps reading as UTC.
             state["settings"] = asdict(validate(self.settings(state, resolve_timezone=False),
                                                changes, min_base=min_base))
             self.save(state)
