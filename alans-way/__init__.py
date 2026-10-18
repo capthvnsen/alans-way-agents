@@ -49,10 +49,10 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
     ctx.register_hook("transform_llm_output", voice.on_output)
     ctx.register_command("tone", voice.command,
-                         description="Telegram voice: texting (default) or Hermes' default voice",
+                         description="Chat voice: texting (default) or Hermes' default voice",
                          args_hint="[texting|default|status]")
     if hasattr(ctx, "register_cli_command"):
-        ctx.register_cli_command("tone", "The Telegram texting voice: status, texting or default",
+        ctx.register_cli_command("tone", "The texting voice: status, texting or default",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
     if not _primary_profile(ctx):
         return None

@@ -12,6 +12,53 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_connector_recovery_separates_reads_from_uncertain_mutations(self):
+        section = re.search(r"## The connector layer self-heals; never operate on it(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("If a browser tool call errors or the tools seem missing", policy)
+        for rule in ("Retry a read-only call once", "uncertain action or control change",
+                     "do not repeat", "`cua_alans_way_tabs`", "controller and epoch",
+                     "fresh snapshot", "confirmed pre-dispatch missing tab",
+                     "approval-bearing calls", "fresh review"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_offline_continuation_keeps_uncertainty_and_approval_review(self):
+        section = re.search(r"## When the Mac goes away mid-task(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        for rule in ("confirmed pre-dispatch missing tab", "approval-bearing call",
+                     "fresh review", "uncertain", "do not repeat",
+                     "controller and epoch", "fresh snapshot"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+        self.assertNotIn("A snapshot, screenshot, or action aimed at the Mac tab is carried onto that VPS tab", policy)
+        self.assertNotIn("Open the same URL with `cua_alans_way_open` and keep acting", policy)
+
+    def test_cross_host_handoff_preserves_required_human_review(self):
+        section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("Do not wait for a human review of the page", policy)
+        for rule in ("`review_required`", "wait for human review",
+                     "approval-bearing call", "fresh review", "uncertain", "do not repeat"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_read_optimization_keeps_local_recovery_exceptions(self):
+        for title in ("Operate a browser tab", "Spend tokens on structure, not screenshots"):
+            with self.subTest(section=title):
+                section = re.search(r"## " + re.escape(title) + r"(.*?)## ", self.text, re.S)
+                self.assertIsNotNone(section)
+                policy = _normalized(section.group(1))
+                self.assertIn("successful", policy)
+                self.assertIn("Recovery", policy)
+                self.assertIn("uncertain", policy)
+                self.assertIn("fresh", policy)
+                self.assertNotIn("Every action reply carries", policy)
+                self.assertNotIn("Do not snapshot or re-read the page after acting", policy)
+
     def test_finished_tabs_are_closed_only_with_live_ownership_and_control(self):
         section = re.search(r"## Tab hygiene(.*?)## ", self.text, re.S)
         self.assertIsNotNone(section, "finished tasks need a tab cleanup policy")
@@ -157,7 +204,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("{unchanged:true}", self.normalized)
         self.assertIn("since=", self.normalized)
         self.assertIn("approval gate is the only desktop-input path", self.normalized)
-        self.assertIn("it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
+        self.assertIn("a successful reply says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("workspace_computer_screenshot", self.normalized)
         self.assertIn("capture` with `app` returns one app's numbered element list", self.normalized)
         self.assertIn("A stale element number comes back `stale_ref`", self.normalized)
@@ -173,7 +220,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("A control whose text lives in aria-labelledby uses that text as its name, so do not screenshot it to read the label.", self.normalized)
         self.assertIn("A pressed toggle's name ends in on or off, so do not screenshot it to see the state.", self.normalized)
         self.assertIn("An action or batch result also includes elements for up to 40 controls; use those refs.", self.normalized)
-        self.assertIn("When it says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
+        self.assertIn("When a successful reply says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("`set_value` replaces a field's text", self.normalized)
         self.assertIn("Skip the focused window, Keychain, and password fields.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
@@ -268,14 +315,14 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
-        self.assertIn("Open the same URL with `cua_alans_way_open`", self.normalized)
-        self.assertIn("If the `[workspace]` line names a page, open that URL.", self.normalized)
-        self.assertIn("If the `[workspace]` line says the page was continued, keep working in that tab.", self.normalized)
-        self.assertIn("A snapshot, screenshot, or action aimed at the Mac tab is carried onto that VPS tab. Use the tab id in the result.", self.normalized)
-        self.assertIn("The continued page may still be loading. Snapshot that tab before acting.", self.normalized)
-        self.assertIn("If an action still fails, the error names the VPS tab. Use that tab.", self.normalized)
-        self.assertIn("If that error lists controls, use one of those refs.", self.normalized)
-        self.assertIn("The connector opens the last page there when the Mac drops.", self.normalized)
+        self.assertIn("use `cua_alans_way_open` to open a new page for inspection", self.normalized)
+        self.assertIn("If the result reports a continued tab, use its returned id and take a fresh snapshot before acting.", self.normalized)
+        self.assertIn("If the continued page is still loading, read it again before acting.", self.normalized)
+        self.assertIn("confirmed pre-dispatch missing tab", self.normalized)
+        self.assertIn("An approval-bearing call cannot continue under its old review on another tab.", self.normalized)
+        self.assertIn("For an uncertain action or control change, do not repeat it", self.normalized)
+        self.assertIn("read `cua_alans_way_tabs` for the controller and epoch", self.normalized)
+        self.assertIn("follow the error's recovery instructions", self.normalized)
         self.assertIn("the first VPS result's `_meta.workspace.tabIdChanged` lists one", self.normalized)
         self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", self.normalized)
         self.assertIn("A closed laptop does not stop them.", self.normalized)
@@ -294,8 +341,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
     def test_one_turn_rules_replaced_the_extra_round_trips(self):
         # The action reply's effect is the observation, so a turn ends with
         # the action instead of a snapshot-and-check.
-        self.assertIn("Every action reply carries `effect`, the page's new state: `effect.text` is its new visible text.", self.normalized)
-        self.assertIn("Do not snapshot or re-read the page after acting", self.normalized)
+        self.assertIn("Use a successful action reply's `effect` as the current page state", self.normalized)
+        self.assertIn("When that reply supplies the state you need, skip an extra confirmation read.", self.normalized)
+        self.assertIn("Recovery is an exception", self.normalized)
         self.assertIn("Do ordinary multi-step work in short chunks", self.normalized)
         self.assertIn("End the chunk before any noticeable step", self.normalized)
         self.assertIn("read the returned errors and side effects before continuing", self.normalized)
@@ -449,8 +497,8 @@ class ConnectorSelfHealSkillTests(unittest.TestCase):
     def test_self_heal_section_present(self):
         self.assertIn("connector layer self-heals", self.normalized.lower())
 
-    def test_retry_once_then_report(self):
-        self.assertIn("retry once", self.normalized)
+    def test_retry_read_once_then_report(self):
+        self.assertIn("Retry a read-only call once", self.normalized)
         self.assertIn("report the failure in one line and stop", self.normalized)
         self.assertIn("exits after the current call", self.normalized)
 
@@ -573,7 +621,8 @@ class DesktopAppsSkillTests(unittest.TestCase):
         self.assertIn("A native app is `computer_use` work", self.normalized)
         self.assertIn("`vps` is the VM desktop", self.normalized)
         self.assertIn("ask the user instead of working around it", self.normalized)
-        self.assertIn("so do not capture again just to read the result", self.normalized)
+        self.assertIn("use that observation instead of capturing it again", self.normalized)
+        self.assertIn("Recovery from an uncertain action or missing current state needs a fresh capture", self.normalized)
 
     def test_a_permission_error_names_the_app_and_both_switches(self):
         self.assertIn("Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp)", self.normalized)

@@ -1,6 +1,6 @@
 # Texting voice
 
-Your bot's replies on Telegram should read like a text from a sharp, warm
+Your bot's replies in its chats should read like a text from a sharp, warm
 friend who happens to be very capable: short by default, plain words, an
 opinion when you ask for one, and complete when the job needs detail. The
 plugin does this for every profile it is enabled in, which with `setup.sh` is
@@ -36,10 +36,12 @@ selected; this voice adds to whatever you already have instead.
 
 ## What it changes
 
-Only messages bound for Telegram. CLI, desktop and other platforms are not
-affected.
+Only chat surfaces: the Telegram bot and the desktop app's remote Hermes chats
+(the `serve` backend reports those sessions as `desktop`, `tui` or `bot_room`;
+the same note and polish reach all of them, so a chat reads the same on the
+phone and on the desktop). Cron, API, webhook and CLI turns are not affected.
 
-1. **A style note on every Telegram-bound turn** (`pre_llm_call`). Hermes appends
+1. **A style note on every chat turn** (`pre_llm_call`). Hermes appends
    it to that turn's user message, never to the system prompt. It asks for:
    - 1-3 short sentences for casual replies, matching your energy and length;
    - contractions and plain words, with no "Certainly!", "Great question" or "I'd
@@ -50,15 +52,26 @@ affected.
    - dry humor only when it fits, never at your expense, never with bad news;
    - a real pick with a reason when you ask what it thinks;
    - long answers (code, plans, research) kept complete, led by a one-line answer;
-   - a one-line heads-up before a long multi-step task;
+   - **quiet by default while a task runs**: no play-by-play for routine reads,
+     navigation, saving, retries that succeed or step transitions — the working
+     indicator already shows it. The bot speaks mid-task only for a decision,
+     approval or handback that is yours, a blocker or failed step, information it
+     can't safely guess (it never invents it), or a side effect or scope bigger
+     than you asked — then one short line, and at the end one concise verified
+     result with any real caveat, not a step-by-step log. It narrates its steps
+     only if you ask for live updates;
    - status first, followed by evidence or a caveat;
    - recaps as 2-3 headline outcomes in 1-3 sentences, without bullets, then an
      offer of detail;
    - task words in user-facing text, without tool names or calls, file paths,
      scripts, or job/session IDs unless you ask for technical detail;
-   - first-person action and what's next when working, narrating only actions in
-     your world, never loading skills, instructions, memory or tools;
-   - plain ownership of limits, failures and side effects;
+   - plain ownership of limits, failures and side effects, reported right away —
+     it uses the tools it is given before saying it can't, claims a blocker
+     only when one actually happened, and never invents tool errors or output;
+   - exact claims only on exact evidence: line numbers and other marks in read
+     output are display decoration, not the file's bytes, and a write's
+     "verified" confirmation means the text it sent landed, not that it matched
+     your source;
    - mild warmth and short openers used sparingly;
    - questions only for decisions you own, naming the choice or needed detail.
 
@@ -116,13 +129,18 @@ It never changes:
 - safety checks;
 - honesty about failures (the note says so explicitly).
 
-## Every path to Telegram
+## Every path to the chat surfaces
 
-Checked against the Hermes source this release targets.
+Checked against the Hermes source this release targets. A `serve` session's
+`source` (what hooks see as `platform`) is `desktop` under `HERMES_DESKTOP=1`,
+`tui` otherwise, `bot_room` for a hosted room, or an explicit value a caller
+sets; all four get the same note and polish, so remote desktop Hermes and the
+Telegram bot share one quiet default.
 
 | Path | What applies |
 |---|---|
 | The bot's reply in a DM, group, forum topic or channel, including groups with several bots | note + polish |
+| A chat turn on desktop, TUI or a hosted bot room | note + polish |
 | Check-ins and the morning brief (injected turns) | their own prompt (same rules) + polish |
 | Agent-notify / async-completion turns | note + polish |
 | Cron jobs, including ones that deliver only to Telegram | nothing for now (see below) |
@@ -208,3 +226,17 @@ installed. The rubric shares vocabulary with the note, so read the scores as a
 regression check, not proof. The `claude` backend runs inside Claude Code, which
 can still slip the local account's name or email into a reply even with the
 eval's fictional user in memory; use the SDK backend for runs you publish.
+
+`scripts/voice_steps_eval.py` measures the quiet-workflow policy on whole turns:
+each scenario drives a simulated multi-step task where the model emits one JSON
+step at a time (`say` = an interim chat bubble, `calls` = fake tool calls answered
+by scripted results, `done` = the final reply), and mid-run user messages land
+between steps. It records every interim bubble and the final verbatim against
+scenarios for routine work, retries, approvals, missing input, failures,
+surprises, partial completion, status questions and explicit narration requests —
+run with `--plugin-dir` pointed at a frozen copy of any plugin version to compare
+policies on the same scenarios. Local only, like the single-shot eval:
+
+```sh
+python3 scripts/voice_steps_eval.py --plugin-dir alans-way --out steps.json
+```

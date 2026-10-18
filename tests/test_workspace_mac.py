@@ -108,7 +108,7 @@ class RouterNoticeTests(MacStateEnvTest):
             notice = msg["result"]["content"][1]["text"]
             self.assertIn("[workspace] Mac unreachable since 2026-02-01T10:00:00Z", notice)
             self.assertIn("VPS browser", notice)
-            self.assertIn("Reopen the same URL and continue.", notice)
+            self.assertIn("Use a current VPS tab, or open the last known page if needed.", notice)
             self.assertIn("API, MCP, and connector calls that do not run on the Mac keep going.", notice)
 
     def test_last_mac_page_is_named_after_the_mac_drops(self):
@@ -123,7 +123,7 @@ class RouterNoticeTests(MacStateEnvTest):
                 {"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT},
             ])
             notice = json.loads(line)["result"]["content"][1]["text"]
-            self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
+            self.assertIn("Last observed page: https://docs.example/d/abc.", notice)
 
     def test_a_tab_list_does_not_replace_the_page_being_worked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -148,7 +148,7 @@ class RouterNoticeTests(MacStateEnvTest):
                 {"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT},
             ])
             notice = json.loads(line)["result"]["content"][1]["text"]
-            self.assertIn("Reopen https://docs.example/d/abc and continue.", notice)
+            self.assertIn("Last observed page: https://docs.example/d/abc.", notice)
             self.assertNotIn("other.example", notice)
             self.assertNotIn("password", notice)
 
@@ -162,7 +162,7 @@ class RouterNoticeTests(MacStateEnvTest):
             ])
             notice = json.loads(line)["result"]["content"][1]["text"]
             self.assertIn("Continued https://docs.example/d/abc in the VPS browser as tab tab-9.", notice)
-            self.assertIn("Keep working in that tab.", notice)
+            self.assertIn("Use that destination after the recovery checks below.", notice)
             self.assertIn("A login does not copy", notice)
             self.assertNotIn("Reopen", notice)
 
@@ -257,7 +257,8 @@ process.stdout.write(JSON.stringify({ good, secret, bad }));
             ])
             contents = [json.loads(line)["result"]["content"] for line in lines]
             self.assertIn("Mac is back online as of 2026-02-01T10:05:00Z", contents[0][1]["text"])
-            self.assertIn("can resume", contents[0][1]["text"])
+            self.assertIn("Check current Mac-local resources before resuming", contents[0][1]["text"])
+            self.assertIn("Existing VPS tabs stay in their current workspace", contents[0][1]["text"])
             self.assertEqual(len(contents[1]), 1)
             self.assertIn("Mac unreachable since 2026-02-01T10:20:00Z", contents[2][1]["text"])
             self.assertIn("Mac is back online as of 2026-02-01T10:40:00Z", contents[3][1]["text"])
@@ -1250,11 +1251,11 @@ process.stdout.write(JSON.stringify(out));
             [line], _ = RouterNoticeTests.annotate(
                 self.annotator, directory,
                 [{"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT}], bot="bot-b")
-            self.assertIn("Reopen the same URL and continue.", json.loads(line)["result"]["content"][1]["text"])
+            self.assertIn("Use a current VPS tab, or open the last known page if needed.", json.loads(line)["result"]["content"][1]["text"])
             [line], _ = RouterNoticeTests.annotate(
                 self.annotator, directory,
                 [{"state": {"state": "offline", "since": "2026-02-01T10:05:00Z"}, "line": TOOL_RESULT}], bot="bot-a")
-            self.assertIn("Reopen https://docs.example/d/abc and continue.", json.loads(line)["result"]["content"][1]["text"])
+            self.assertIn("Last observed page: https://docs.example/d/abc.", json.loads(line)["result"]["content"][1]["text"])
 
     def test_a_large_result_is_annotated_without_parsing_it(self):
         # Both key orders: {"jsonrpc","id","result"} and what the MCP SDK
@@ -1387,22 +1388,27 @@ process.stdout.write(JSON.stringify([
 ]));
 """)
         mirrored, continued, bare, pending, down = json.loads(out)
+        for text in (mirrored, continued, bare, pending):
+            self.assertIn("controller/epoch", text)
+            self.assertIn("snapshot", text)
+            self.assertNotIn("Keep working in that tab", text)
+            self.assertNotIn("should still be signed in", text)
         self.assertIn("Restored 2 tabs", mirrored)
         self.assertIn("h-1 -> v-1, h-2 -> v-2", mirrored)
-        self.assertIn("Cookies were restored for tabs that had them", mirrored)
+        self.assertIn("A tab map does not confirm current sign-in or available drafts.", mirrored)
         self.assertNotIn("logins carried over", mirrored)
         self.assertIn("Look at these before acting", mirrored)
         self.assertIn("v-2", mirrored.split("Look at these")[1])
         self.assertIn("Continued https://docs.example/d/abc as VPS tab v-9", continued)
         self.assertIn("Logins did not carry over", continued)
         self.assertIn("Windows host browser did not answer in time", bare)
-        self.assertIn("No tabs were mirrored", bare)
+        self.assertIn("No restored tabs are confirmed.", bare)
         self.assertIn("Logins did not carry over", bare)
         self.assertIn("tell the user", bare)
         self.assertIn("still restoring", pending)
-        self.assertNotIn("No tabs were mirrored", pending)
+        self.assertNotIn("No restored tabs are confirmed.", pending)
         self.assertIn("VPS browser is not responding", down)
-        self.assertNotIn("No tabs were mirrored", down)
+        self.assertNotIn("No restored tabs are confirmed.", down)
         for text in (mirrored, continued, bare, pending, down):
             self.assertNotIn("—", text)
 
@@ -1846,7 +1852,7 @@ class HostFailoverTests(unittest.TestCase):
         self.assertTrue(lost["result"]["isError"])
         self.assertIn("NOT retried", self.text(lost))
         self.assertIn("VPS browser is not responding", self.text(lost))
-        self.assertNotIn("No tabs were mirrored", self.text(lost))
+        self.assertNotIn("No restored tabs are confirmed.", self.text(lost))
         self.assertNotIn('"tools/call"', self.vps_log())
 
     def test_both_hosts_down_is_not_reported_as_an_empty_mirror(self):
@@ -1856,7 +1862,7 @@ class HostFailoverTests(unittest.TestCase):
         self.call()
         self.assertEqual(self.served_by(self.recv()), "mac")
         self.call()
-        self.assertIn("No tabs were mirrored", self.text(self.recv()))
+        self.assertIn("No restored tabs are confirmed.", self.text(self.recv()))
 
     def test_two_unavailable_errors_in_a_row_fail_over(self):
         self.start("unavailable")

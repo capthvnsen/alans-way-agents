@@ -74,7 +74,7 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   hands the tab back to you with a reason instead of working past it, and
   after each commit the bot reads the confirmation, captures the reference
   number and sends a Telegram receipt.
-- **Telegram replies read like texts.** In every profile the plugin is enabled
+- **Chat replies get a texting-style note.** In every profile the plugin is enabled
   in, the bot's Telegram replies use a short, warm texting voice. A minimal
   send-time polish only drops a leading "Certainly!"-style opener, and only
   from a message with no indented line, backtick or quotation mark. Fixed
