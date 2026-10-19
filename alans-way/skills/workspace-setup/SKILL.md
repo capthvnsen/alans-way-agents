@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/a82f5010248455600acfe275010e3e725355a2a8/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/b9f571d7d8ef762f0a243989e3aa096171300c5e/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -326,7 +326,7 @@ git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref a82f5010248455600acfe275010e3e725355a2a8 \
+    --desktop-ref b9f571d7d8ef762f0a243989e3aa096171300c5e \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
