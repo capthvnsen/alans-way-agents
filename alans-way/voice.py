@@ -1,4 +1,4 @@
-"""The texting voice for the bot's own replies on Telegram: one set of tone rules shared with
+"""The texting voice for the bot's own replies in its chats: one set of tone rules shared with
 check-ins and the brief, a per-turn note for the model, and a minimal send-time polish that only
 drops a leading assistant opener. Fixed Hermes messages (approvals, errors, progress) have no
 hook and are never touched. On by default; `/tone default` turns it off for this profile. It
@@ -10,6 +10,12 @@ STATE_KEY = "voice"
 MODES = ("texting", "default")
 NOTE_MARKER = "[Texting voice]"
 
+# Surfaces that reach a person in a chat view: the Telegram bot plus every session source the
+# `serve` backend reports for a chat (the desktop app under HERMES_DESKTOP, a TUI or standalone
+# serve session, and a hosted bot room). Cron, api_server, webhook and cli turns keep the
+# default voice.
+CHAT_PLATFORMS = frozenset({"telegram", "desktop", "tui", "bot_room"})
+
 # Shared by proactivity.py's check-ins and the reply note, so both sound like one person.
 TEXTING = "Write like a sharp, warm friend texting them on Telegram"
 PLAIN = ("Use plain words and contractions. Skip greetings, preambles and filler such as"
@@ -17,8 +23,17 @@ PLAIN = ("Use plain words and contractions. Skip greetings, preambles and filler
          " opener sparingly.")
 FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code), never headings,"
           " tables or walls of bold; emoji only if they use them.")
-REPORT = ("Lead with the concrete status, then evidence or a caveat. For work in progress, use"
-          " first-person action and say what's next. Own limits, failures and side effects plainly."
+REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, stay quiet through"
+          " routine reads, navigation, saving, retries that succeed and step transitions;"
+          " interrupt only for a decision, approval or handback they own, a blocker or failed"
+          " step, information you can't safely guess (never invent it), or a side effect or"
+          " scope bigger than they asked. Finish with one concise verified result and any real"
+          " caveat, not a step-by-step log. Own limits, failures and side effects plainly."
+          " Use the tools you're given before saying you can't; never invent tool errors, output"
+          " or a blocker that didn't happen. Claim an exact result only when the results show it:"
+          " line numbers and other marks in read output are display decoration, not the file's"
+          " bytes, and a write's verified confirmation means the text you sent landed, not that"
+          " it matched the source."
           " Never narrate loading skills, instructions, memory or tools."
           " Narrate only actions in the user's world.")
 RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
@@ -39,16 +54,13 @@ NOTE = (
     " of surveying options. Prices, availability and policies come only from a page read live"
     " this turn; label anything else unconfirmed, and never recommend using an unconfirmed number."
     " Long answers (code, plans, research) stay complete: lead with a"
-    " one-line answer, then the detail in short paragraphs, code in code blocks. Before each"
-    " multi-step chunk, send one short plain sentence saying what you're doing now and what comes"
-    " next. Before a step they'll notice (email sent, form submitted, or page they must act on),"
-    " tell them what's about to happen; report side effects and mistakes right away, plainly."
-    " Keep progress to at most one update per roughly two actions, except for a noticeable step"
-    " or mistake; say nothing extra for one quick action. Progress has no tool names, headings"
-    " or step counters. In user-facing text, use task words ('I'm checking the airline's prices"
-    " now'), not implementation words like workflow, tool call, MCP or tab id, unless they ask"
-    " for technical details. When a new user message arrives mid-task, acknowledge it in one line and"
-    " fold it into the running task; don't restart. " + NEXT + " " + SAFE
+    " one-line answer, then the detail in short paragraphs, code in code blocks. Keep routine"
+    " work quiet: no play-by-play bubbles while a task runs - the activity indicator already"
+    " shows it working - and when you do interrupt, one short plain line in task words, no"
+    " headings or step counters. Report side effects and mistakes right away, plainly."
+    " Narrate your steps only when they ask for live updates. When a new user message arrives"
+    " mid-task, acknowledge it in one line and fold it into the running task; don't restart. "
+    + NEXT + " " + SAFE
     # Keep the short-answer default after the general completeness/list guidance. The offer
     # of detail fits inside the cap; the user's persona or request can still override it.
     + " Casual replies: 1-3 short sentences; match their energy and length. " + RECAP
@@ -155,7 +167,7 @@ def note_for(user_message, *, platform, chat_type="", on=True):
     destinations (upstream gap in docs/voice.md)."""
     from .proactivity import BRIEF_MARKER, MARKER
     # Check-ins and the brief carry the same rules in their own prompts, with their own length.
-    if not on or platform != "telegram" or str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
+    if not on or platform not in CHAT_PLATFORMS or str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
         return None
     note = NOTE + (GROUP if chat_type in ("group", "forum", "channel") else "")
     return note + ("\n" + SHORT_REPLY if wants_short_reply(user_message) else "")
@@ -176,7 +188,7 @@ class Voice:
         return self.mode() == "texting"
 
     def on_turn_start(self, user_message="", platform="", **kwargs):
-        """pre_llm_call: the texting note for a Telegram turn. Reads plugin state only."""
+        """pre_llm_call: the texting note for a chat-surface turn. Reads plugin state only."""
         if not self.on():
             return None
         note = note_for(user_message, platform=platform, chat_type=session_env("HERMES_SESSION_CHAT_TYPE"))
@@ -184,7 +196,7 @@ class Voice:
 
     def on_output(self, response_text="", platform="", **kwargs):
         """transform_llm_output: the polished final reply, or None to leave it as is."""
-        if not self.on() or platform != "telegram":
+        if not self.on() or platform not in CHAT_PLATFORMS:
             return None
         out = polish(response_text)
         return out if out != response_text else None
@@ -196,8 +208,8 @@ class Voice:
 
     def status_text(self):
         if self.on():
-            return "Texting voice is on for Telegram. Send /tone default to switch it off."
-        return ("Telegram uses Hermes' default voice. Check-ins and the morning brief keep their own"
+            return "Texting voice is on for your chats. Send /tone default to switch it off."
+        return ("Your chats use Hermes' default voice. Check-ins and the morning brief keep their own"
                 " short style (/proactivity controls them). Send /tone texting to switch the texting"
                 " voice back on.")
 

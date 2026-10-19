@@ -21,7 +21,7 @@ holds what your agents need to think and act:
 - **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations`,
   `web-errands` and `integrations` skills ship inside the plugin so agents know
   how to use the tools correctly.
-- **`alans-way-computer/`**: a second plugin (v0.21.6): a computer-use provider
+- **`alans-way-computer/`**: a second plugin (v0.21.7): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
@@ -81,7 +81,7 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   hands the tab back to you with a reason instead of working past it, and
   after each commit the bot reads the confirmation, captures the reference
   number and sends a Telegram receipt.
-- **Telegram replies read like texts.** In every profile the plugin is enabled
+- **Chat replies get a texting-style note.** In every profile the plugin is enabled
   in, the bot's Telegram replies use a short, warm texting voice. A minimal
   send-time polish only drops a leading "Certainly!"-style opener, and only
   from a message with no indented line, backtick or quotation mark. Fixed
@@ -341,7 +341,7 @@ one ordinary Telegram reply and one bounded browser action before relying on it.
 | mac-watch | optional watcher probes the user's computer every 10s (systemd unit in `deploy/`; setup.sh installs a LaunchAgent on a macOS guest) and publishes a JSON state file the router reads |
 | Texting voice + `/tone` + `hermes tone` CLI | on Telegram turns, `pre_llm_call` adds the voice note and `transform_llm_output` polishes the final reply; every profile, on by default. Fixed Hermes messages (approvals, errors, progress) are not changed; see [docs/voice.md](docs/voice.md) |
 
-**Commit gate limit.** The commit gate protects against agent mistakes and against clicks steered by prompt injection or a malicious website. It does not stop a deliberately hostile agent that also has terminal or file tools: that agent runs as the same OS user as the router and the browser services, so it can reach them directly. Full isolation (a separate OS account plus router-signed approvals) is planned for v0.21.6.
+**Commit gate limit.** The commit gate protects against agent mistakes and against clicks steered by prompt injection or a malicious website. It does not stop a deliberately hostile agent that also has terminal or file tools: that agent runs as the same OS user as the router and the browser services, so it can reach them directly. Full isolation (a separate OS account plus router-signed approvals) remains planned.
 
 ## Orgo / fresh Linux hosts
 

@@ -715,8 +715,9 @@ class RegistrationTests(unittest.TestCase):
         self.addCleanup(routes.stop)
 
     def test_off_primary_and_secondary_match_base_without_cross_state_or_store_io(self):
-        # Base 9d5818b: canonical schema (including model-facing description),
-        # check-in prompt and brief prompt are pinned byte for byte.
+        # Schema stays pinned to base 9d5818b. Prompts stay pinned byte for byte
+        # to ebcac96, which intentionally quieted the shared voice before this
+        # branch merged cross-bot support. Cross-bot off must preserve both.
         schema_sha = "94a082ce76756e20d76a4f9701c1a9cf3ed3eadf007efc1094d17da351f2d622"
         for profile in ("default", "primary", "specialist"):
             for configured in (False, True):
@@ -750,8 +751,8 @@ class RegistrationTests(unittest.TestCase):
                     if profile == "default":
                         self.assertEqual(C.hashlib.sha256(json.dumps(tools["proactivity"]["schema"], sort_keys=True).encode()).hexdigest(), schema_sha)
                         s = P.Settings(timezone="UTC")
-                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "e9eeea77ae829a4d454021b6745d0f92a00263c0157fb78c0d43ad7f45483261"),
-                                               (runtime.brief_prompt(s, NOW), "fedceabbc6f520b18637f9fdd527abf0e6cf314806edfb16a8af7ff1f9b218a4")):
+                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "5c5983f881f6bc46c847d7383f04625811bafcf07977c50c9d412bf2a2c84913"),
+                                               (runtime.brief_prompt(s, NOW), "f4e16a0a589cf14a6fb80b7506d3e2a71ad77ec6e268af8b839366aa40f54b1f")):
                             self.assertEqual(C.hashlib.sha256(text.encode()).hexdigest(), expected)
                     else:
                         self.assertEqual(tools, {})
