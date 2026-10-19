@@ -222,6 +222,31 @@ def write_legacy(home, policy):
 
 
 class StateTests(unittest.TestCase):
+    def test_unset_timezone_stays_unset_and_reads_as_utc(self):
+        p = P.Proactivity(FakeCtx())
+        p.update({"level": "less"})
+        self.assertEqual(p.status()["settings"]["timezone"], "UTC")
+        self.assertEqual(p.load()["settings"]["timezone"], "")
+
+    def test_empty_timezone_uses_utc_for_status_and_tick_without_raising(self):
+        # No supported plugin API reads the profile's Hermes timezone, so unset means UTC.
+        for settings in ({}, {"timezone": ""}, {"timezone": "Asia/Tokyo"}):
+            with self.subTest(settings=settings):
+                ctx = FakeCtx()
+                clock = SimpleNamespace(now=at("2026-10-07T00:00"))
+                p = P.Proactivity(ctx, clock=lambda: clock.now)
+                p.gateway = True
+                p.bind(KEY)
+                state = p.load()
+                state["settings"] = settings
+                p.save(state)
+                zone = settings.get("timezone") or "UTC"
+                self.assertEqual(p.status()["settings"]["timezone"], zone)
+                # 02:00 UTC is 11:00 Tokyo, but outside UTC waking hours.
+                clock.now = at("2026-10-07T02:00")
+                self.assertEqual(p.tick(), True if zone == "Asia/Tokyo" else None)
+                self.assertEqual(p.load()["settings"], settings)
+
     def test_bind_takes_only_a_telegram_dm_key(self):
         p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
         for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1",
@@ -259,18 +284,18 @@ class StateTests(unittest.TestCase):
                 state = p.load()
                 state["settings"] = corrupt
                 p.save(state)
-                self.assertEqual(p.settings(p.load()), P.Settings())
+                self.assertEqual(p.settings(p.load()), P.Settings(timezone="UTC"))
 
     def test_corrupt_settings_still_honour_a_valid_pause(self):
         p = P.Proactivity(FakeCtx())
         state = p.load()
         state["settings"] = {"active_start": {}, "paused_until": "off"}
         p.save(state)
-        self.assertEqual(p.settings(p.load()), P.Settings(paused_until="off"))
+        self.assertEqual(p.settings(p.load()), P.Settings(timezone="UTC", paused_until="off"))
         self.assertEqual(p.error, "corrupt settings: using defaults")
         state["settings"] = {"active_start": {}, "paused_until": "never"}
         p.save(state)
-        self.assertEqual(p.settings(p.load()), P.Settings())
+        self.assertEqual(p.settings(p.load()), P.Settings(timezone="UTC"))
 
     def test_the_corrupt_settings_error_clears_once_settings_validate(self):
         p = P.Proactivity(FakeCtx())
@@ -949,7 +974,7 @@ class RegisterTests(unittest.TestCase):
 
     def test_manifest_declares_what_register_registers(self):
         text = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
-        for name in ("proactivity", "pre_llm_call", "post_llm_call"):
+        for name in ("proactivity", "cross_bot_ask", "pre_llm_call", "post_llm_call"):
             self.assertIn(f"- {name}", text)
         self.assertNotIn("proactive_control", text)
 

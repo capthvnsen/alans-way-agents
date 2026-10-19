@@ -16,6 +16,7 @@ from test_workspace_host import FAKE_SSH, ROUTER, VM_STUB  # noqa: E402
 
 NODE = shutil.which("node")
 SH = shutil.which("sh")
+CONTRACT_FIXTURES = json.loads(Path(__file__).with_name("commit_pattern_fixtures.json").read_text())
 
 # The user's computer: a checkout page (one commit button, a card field, two
 # ordinary controls, an icon-only button) and, in a second tab, a search page with no commit control.
@@ -46,6 +47,8 @@ const pages = {
     { ref: 'e1', role: 'button', name: 'Place order' },
   ] },
 };
+if (process.env.MAC_COMMIT_ELEMENTS)
+  pages['mac-tab-1'].elements = JSON.parse(process.env.MAC_COMMIT_ELEMENTS);
 // Each tab's control epoch; a claim starts a new one.
 const epochs = {};
 const ep = (id) => epochs[id] || 1;
@@ -53,7 +56,14 @@ const navs = {};
 const tabFor = (url) => (/search/.test(url) ? 'mac-tab-2' : /catalog/.test(url) ? 'mac-tab-3'
   : /handed/.test(url) ? 'mac-tab-4' : 'mac-tab-1');
 const reply = (id, text) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id,
-  result: { content: [{ type: 'text', text }] } }) + '\n');
+  result: { content: [{ type: 'text', text: (() => {
+    if (process.env.MAC_OLD_APPROVAL === '1') return text;
+    let value; try { value = JSON.parse(text); } catch { return text; }
+    const page = value.url ? value : value.effect?.url ? { url: value.effect.url } : null;
+    if (page) value.approvalContext = { version: 1, documentId: 'a'.repeat(32), url: page.url };
+    for (const list of [value.elements, value.changed]) for (const el of list || []) el.approvalTarget ||= ('b'.repeat(24) + el.ref.slice(1).padStart(8, '0'));
+    return JSON.stringify(value);
+  })() }] } }) + '\n');
 require('readline').createInterface({ input: process.stdin }).on('line', (line) => {
   fs.appendFileSync(process.env.MAC_LOG, 'LINE ' + line + '\n');
   const m = JSON.parse(line);
@@ -183,8 +193,8 @@ class CommitGateTests(unittest.TestCase):
     def text(self, msg):
         return " ".join(part["text"] for part in msg["result"]["content"] if part["type"] == "text")
 
-    def handshake(self, elicitation=True):
-        self.send("initialize", protocolVersion="2025-06-18",
+    def handshake(self, elicitation=True, protocol_version="2025-06-18"):
+        self.send("initialize", protocolVersion=protocol_version,
                   capabilities={"elicitation": {}} if elicitation else {},
                   clientInfo={"name": "test", "version": "0"})
         self.recv()
@@ -247,7 +257,7 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(ask["method"], "elicitation/create")
         self.assertEqual(ask["params"]["message"],
                          "Alan wants to buy: One brass desk lamp · 40.00 EUR · Lamp Shop on https://shop.example"
-                         ' (clicks "Place order")')
+                         ' (clicks "Place order"). Review page: https://shop.example/checkout?step=2.')
         schema = ask["params"]["requestedSchema"]
         self.assertEqual(schema["properties"]["approve"]["type"], "boolean")
         self.assertIn("Place order", schema["properties"]["approve"]["description"])
@@ -320,6 +330,62 @@ class CommitGateTests(unittest.TestCase):
         self.assertFalse(done["result"].get("isError"))
         self.assertEqual([a["ref"] for a in self.actions()], ["e2"])
         self.assertEqual(self.decisions()[-1]["decision"], "commit_required")
+
+    def check_contract_controls(self, elicitation, protocol_version):
+        # These are real snapshot refs sent through the running Node router,
+        # not just calls to its exported regex helper. Links retain their URL
+        # check even when their exact label is a non-commit exception.
+        fixtures = CONTRACT_FIXTURES["names"] + CONTRACT_FIXTURES["links"]
+        elements = [{"ref": f"e{i + 101}", "role": "link" if "href" in f else "button",
+                     "name": f["name"], **({"href": f["href"]} if "href" in f else {})}
+                    for i, f in enumerate(fixtures)]
+        self.start(MAC_COMMIT_ELEMENTS=json.dumps(elements))
+        self.handshake(elicitation, protocol_version)
+        self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/"})
+        self.recv()
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={})
+        self.recv()
+        allowed = []
+        for fixture, element in zip(fixtures, elements):
+            if not fixture["commit"]:
+                allowed.append(element["ref"])
+            with self.subTest(fixture=fixture, protocol=protocol_version):
+                call = self.act(action="click", ref=element["ref"])
+                msg = self.recv()
+                self.assertEqual(msg["id"], call)
+                if fixture["commit"]:
+                    self.assertTrue(msg["result"].get("isError"), msg)
+                    self.assertIn("commit_required", self.text(msg))
+                    self.assertIn("It did not run", self.text(msg))
+                    self.assertIn("commit: {kind, summary", self.text(msg))
+                else:
+                    self.assertFalse(msg["result"].get("isError"), msg)
+        self.assertEqual([a["ref"] for a in self.actions()], allowed)
+
+        # An old client without elicitation fails closed, rather than silently
+        # downgrading approval. A current client still approves exactly once.
+        approved_fixture, approved_element = next((f, e) for f, e in zip(fixtures, elements) if f["commit"])
+        approved_ref = approved_element["ref"]
+        call = self.act(action="click", ref=approved_ref, commit=PURCHASE)
+        if not elicitation:
+            self.refused(call, "approval_unavailable")
+            self.assertEqual([a["ref"] for a in self.actions()], allowed)
+        else:
+            ask = self.recv()
+            self.assertEqual(ask["method"], "elicitation/create")
+            self.assertIn(f'clicks "{approved_fixture["name"]}"', ask["params"]["message"])
+            self.assertEqual([a["ref"] for a in self.actions()], allowed)
+            self.answer(ask, "accept", {})
+            self.ran(call)
+            self.assertEqual([a["ref"] for a in self.actions()], allowed + [approved_ref])
+            self.assertIn("approval", self.actions()[-1])
+            self.assertNotIn("commit", self.actions()[-1])
+
+    def test_contract_controls_through_mcp(self):
+        self.check_contract_controls(True, "2025-06-18")
+
+    def test_contract_controls_with_a_pre_elicitation_client(self):
+        self.check_contract_controls(False, "2024-11-05")
 
     def open_search(self):
         self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://shop.example/search"})
@@ -954,8 +1020,14 @@ class CommitGateTests(unittest.TestCase):
 
     def test_an_approved_vm_commit_that_times_out_is_not_called_retryable(self):
         self.env = {"VM_MODE": "slow", "VM_DELAY_MS": "3000", "HERMES_ROUTER_CALL_HARD_MS": "1000"}
+        vm_file = self.dir / "vm-stub.cjs"
+        vm_file.write_text(VM_STUB.replace("generation:1,url:'https://vm.example/'",
+            "generation:1,approvalContext:{version:1,documentId:'c'.repeat(32),url:'https://vm.example/'},url:'https://vm.example/'")
+            .replace("name:'Next'", "name:'Buy now',approvalTarget:'d'.repeat(32)"))
         self.open_checkout()
         self.send("tools/call", name="cua_alans_way_open", arguments={"url": "https://vm.example/", "host": "vm"})
+        self.recv()
+        self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "vm-tab-1"})
         self.recv()
         call = self.act(tabId="vm-tab-1", action="click", name="Buy now", commit=PURCHASE)
         self.answer(self.recv(), "accept", {})
@@ -1046,6 +1118,11 @@ class CommitNameTests(unittest.TestCase):
 
     def test_look_alikes_do_not_match(self):
         self.assertEqual([n for n, hit in self.judge(self.NOT_COMMITS).items() if hit], [])
+
+    def test_exception_boundaries_and_consequential_variants(self):
+        fixtures = CONTRACT_FIXTURES["names"]
+        self.assertEqual(self.judge([f["name"] for f in fixtures]),
+                         {f["name"]: f["commit"] for f in fixtures})
 
     def test_selectors_are_read_as_words(self):
         self.assertEqual(self.judge(["#placeOrderBtn", "[data-test=place-order]", "#buy_now",

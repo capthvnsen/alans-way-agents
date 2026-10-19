@@ -132,7 +132,7 @@ The gate protects against agent mistakes and against clicks steered by
 prompt injection or a malicious website. It does not stop a deliberately
 hostile agent that also has terminal or file tools, because that agent runs as
 the same OS user as the router and the browser services. Full isolation (a
-separate OS account plus router-signed approvals) is planned for v0.21.6.
+separate OS account plus router-signed approvals) remains planned.
 Never work around the gate with any tool: a refused commit goes to the user.
 Ask the user before
 any other financial, destructive or production change. Ownership and control
@@ -237,12 +237,16 @@ for that boundary. Do not use an external computer-use driver.
 
 `cua_alans_way_*` tools are served by a routing connector that probes the
 Mac at spawn and re-routes automatically when Mac availability flips. A slow
-first response is warmup, not a failure. If a browser tool call errors
-or the tools seem missing (and are not merely deferred; see `tool_call`
-above), retry once: a dead connector is respawned fresh
-and re-probes on its own. A connector whose script on disk is newer exits
-after the current call so the next call loads it. That exit is normal. If it
-still fails, report the failure in one line and stop.
+first response can be warmup. If tools seem missing, check deferred discovery
+with `tool_call` above. Retry a read-only call once after a tool error or
+connector restart; if it still fails, report the failure in one line and stop.
+For an uncertain action or control change, do not repeat it: use
+`cua_alans_way_tabs` to inspect the controller and epoch, take a fresh snapshot,
+and follow the error's recovery instructions before deciding how to continue.
+Ordinary calls can continue only after a confirmed pre-dispatch missing tab;
+approval-bearing calls need fresh review in the destination tab. A connector
+whose script on disk is newer exits after the current call so the next call
+loads it. That exit is normal and does not prove the previous action failed.
 
 Never repair the connector layer yourself: do not kill connector/router
 processes, run `hermes mcp test` loops, read or edit router scripts, ssh to
@@ -256,32 +260,31 @@ your shell.
 
 Every `cua_alans_way_*` result carries the serving `host` and the Mac's
 last seen state, and tool results add a `[workspace] ...` notice line while
-the Mac is down or when it comes back online. If the laptop closes or a Mac
-browser call fails because the Mac is offline, continue the task on the VPS.
-Do not stop, and do not mark the card blocked, only because the Mac left.
+the Mac is down or when it comes back online. When status confirms the Mac
+is offline, continue the task on the VPS within the recovery conditions
+below. The host change alone does not prove what happened to an earlier call.
 
-Web work (Google Docs, Notion, a CRM, or any other site) continues in the
-VPS browser. The connector opens the last page there when the Mac drops. If
-the `[workspace]` line says the page was continued, keep working in that
-tab. A snapshot, screenshot, or action aimed at the Mac tab is carried onto
-that VPS tab. Use the tab id in the result. The continued page may still be
-loading. Snapshot that tab before acting. If an action still fails, the
-error names the VPS tab. Use that tab. If that error lists controls, use one
-of those refs. Open the same URL with `cua_alans_way_open` and keep acting
-when that line only names a URL. If the `[workspace]` line names a page,
-open that URL. The connector is already on that machine. A login wall means
-the VPS browser needs that site's login once; tell the user rather than
-working past it. Do not retry the Mac until status shows it online.
+Ordinary missing-tab continuation requires a confirmed pre-dispatch missing tab.
+If the result reports a continued tab, use its returned id and take a fresh
+snapshot before acting. If the continued page is still loading, read it again
+before acting. If it reports only a URL, use `cua_alans_way_open` to open a new
+page for inspection; that does not prove an earlier action failed. A login wall means
+the VPS browser needs that site's login; tell the user rather than working past
+it. Do not retry the Mac until status shows it online.
 
-The Mac can also drop in the middle of a call. The connector then moves the
-session to the VPS within about ten seconds, and the `[workspace]` notice
-says so. When it lists restored tabs, those tabs have the Mac tabs' cookies
-(where the Mac had any), scroll, and drafts: keep working in them by the VPS
-tab ids it names, and look at any it flags before acting. If it says the
-restore is still running, list tabs again in a few seconds. An action that
-was in flight when the Mac dropped is never retried for you and comes back
-as an error. It may have happened, so snapshot the VPS tab and check before
-repeating it.
+An approval-bearing call cannot continue under its old review on another tab.
+Take a fresh snapshot of the intended destination and obtain fresh review of
+the current target before a new action. For `review_required`, wait for human
+review. For an uncertain action or control change, do not repeat it: read
+`cua_alans_way_tabs` for the controller and epoch, take a fresh snapshot, and
+follow the error's recovery instructions. Check any completed batch results.
+If the available state cannot establish whether the earlier mutation completed,
+report that uncertainty; a newly opened or restored page cannot settle it.
+
+When the connector reports restored tabs, inspect the destination, login and
+available drafts rather than assuming all source state transferred. If restore
+is still running, list tabs again in a few seconds. No recovery timer or host
+change authorizes replaying an in-flight action.
 
 You do not have to wait for an error to learn a tab moved. After the move,
 the first VPS result's `_meta.workspace.tabIdChanged` lists one
@@ -314,10 +317,11 @@ the tab stays yours to keep working.
    grants matter only for a tab another bot owns. Sign-ins are shared live
    within each host's browser profile; Mac and VPS profiles have independent
    authentication.
-2. Act straight from the replies. Every action reply carries `effect`, the
-   page's new state: `effect.text` is its new visible text. Do not snapshot
-   or re-read the page after acting, and do not ask for one more
-   confirmation round trip; `effect` already is the observation. Call
+2. Use a successful action reply's `effect` as the current page state;
+   `effect.text` is its visible text. When that reply supplies the state you
+   need, skip an extra confirmation read. Recovery is an exception: after an
+   uncertain result, stale state or a continued destination, take the fresh
+   snapshot required by the recovery instructions before new input. Call
    `cua_alans_way_snapshot` only when you need element refs or page text
    that no reply gave you, and keep it tightly bounded with `maxChars`,
    `maxElements`, and `since`. A snapshot defaults to 2000
@@ -328,11 +332,12 @@ the tab stays yours to keep working.
    the question; `cua_alans_way_screenshot` accepts `format`
    (`jpeg`|`png`|`webp`), `quality`, and `maxWidth`; jpeg quality 50
    at 960px is the default. Use the snapshot's refs for the next action;
-   after a tab's first reply, omit `tabId` and `epoch` from action and
+   after a successful current-tab reply, omit `tabId` and `epoch` from action and
    snapshot calls: they default to the tab you last used. An action or batch
    result also includes elements for up to 40 controls; use those refs. When
-   it says unchanged, the controls you already have are still valid, so do
-   not snapshot again.
+   a successful reply says unchanged, the controls you already have are still
+   valid, so do not snapshot again. Recovery or a changed destination takes
+   priority over this same-tab optimization.
 3. Do ordinary multi-step work in short chunks, usually about two actions.
    `action=batch` can run up to 25 steps in order, stopping at the first error;
    that is a limit, not a target. End the chunk before any noticeable step
@@ -466,14 +471,18 @@ the Mac. The VPS agent can drive it through the private connector while the
 Mac is available; the human can take over in Workspace.
 
 A closed laptop is not this handoff. Continue that web task on the VPS
-browser as described above. Do not wait for a human review of the page.
+browser under the recovery conditions above. For `review_required`, wait for
+human review of the destination. An approval-bearing call needs a fresh
+snapshot and fresh review there; an uncertain earlier action or control change
+is not a failed action to replay, so do not repeat it without establishing its
+outcome and following its recovery instructions.
 
 The app supplies local Mac tabs and a single VPS desktop viewer; cross-host
 handoff controls are not exposed in its UI. Use an installed Companion
 handoff capability only when it advertises support; read its checkpoint
 context, wait for authorized agent control, and verify the destination page
 and login before continuing. `review_required` means the page needs human
-review. Cookies for agent tabs carry over to the VM over Tailscale;
+review. Available cookies may carry over when the connector reports a restore;
 passwords, uploads and in-memory state stay on the source host. Keep
 Chromium profiles with their running browser.
 
@@ -490,9 +499,11 @@ once the user agrees.
 This is the cheap path, and it is the same for every Hermes model. Do not
 switch strategy because of which model you are.
 
-Web work uses `cua_alans_way_*` only. Action replies carry `effect`, so a
-snapshot is for element refs a reply did not give you, and a screenshot is
-only for a canvas, a chart, or a page the snapshot says it could not read.
+Web work uses `cua_alans_way_*` only. Reuse a successful reply's current
+`effect`; snapshot for element refs or page state it did not give you.
+Recovery after an uncertain result, stale state or a changed destination
+takes priority: acquire the fresh state required by the recovery instructions.
+A screenshot is only for a canvas, a chart, or a page the snapshot says it could not read.
 Never screenshot a page you can already read as text.
 
 Desktop apps, on the Mac and on the Linux machine, are driven by the
@@ -504,8 +515,10 @@ screenshot only when its named controls leave most of the window unexplained
 (`mode="vision"` asks for one);
 `click`, `double_click`, `right_click`, `drag`, `scroll`, `key`,
 `set_value` and `focus_app` act on element numbers or coordinates. Each
-action's reply lists what changed, so do not capture again just to read
-the result; on Linux (the VM desktop or a Linux computer), capture before acting by number again. `set_value` replaces a field's text; free typing with no target
+successful action reply lists current changes or unchanged state, so use that
+observation instead of capturing it again. Recovery from an uncertain action
+or missing current state needs a fresh capture before deciding on more input;
+on Linux (the VM desktop or a Linux computer), capture before acting by number again. `set_value` replaces a field's text; free typing with no target
 element is not available because nothing takes focus. A stale element
 number comes back `stale_ref`, and a switch between the computer and the VM
 comes back `host_changed`: `list_apps` and `capture` again. To look without

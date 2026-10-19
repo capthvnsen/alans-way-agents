@@ -33,14 +33,30 @@ scanner warning. `--force` confirms CAUTION and can replace an install; it
 cannot override DANGEROUS. Catalog installs use the catalog's reviewed commit,
 which does not approve arbitrary newer revisions.
 
+Optional cross-bot proactivity reads bounded recent owner-DM excerpts exported by all enabled profiles on one gateway. It stores sanitized digests for 24 hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files). Exchanges that look like they contain credentials or payment details are skipped entirely. It may automatically inject one read-only or draft-only ask per primary check-in into another bot's bound Telegram DM. Results appear there with primary attribution. Existing approvals still govern consequential actions. Disable cross-bot proactivity per bot with /proactivity cross off; copied context may remain in Hermes history, memory-provider records and model-provider retention after digest expiry.
+
+Default off; `/proactivity cross on|off|status` controls each bot. Sanitization
+cannot guarantee detection of every secret. No historical backfill, attachment
+or tool-history export. Context is supplied only to permitted primary check-ins;
+other profiles' exports are JSON-escaped as untrusted observations. The instruction
+not to save excerpts to memory is model policy, not enforced deletion. Normal
+Hermes/provider history, sidecars and compaction can retain copied context.
+`sent` means scheduled, not delivered or completed; no replay or receipt store.
+Imported turns allow reviewed reads/drafting and existing gated browser calls;
+terminal/code, delegation, scheduling and unknown connectors are blocked. Existing
+browser approval/CAPTCHA/ownership gates remain. This is not universal read-only
+enforcement. Offline files are pruned when an explicitly activated profile starts,
+then every 60 seconds while connected. Dormant profiles perform no store access.
+
 ## Reviewed scanner inventory
 
 Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
 Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
-Paths below are relative to `alans-way/`. The remaining five matches are true
-capabilities and their commands are preserved; no scanner rule was changed.
+Stage 2 base: `f6bd48069a45342dff8a42f144b49ee635d59484` (`release/plugin-0.21.7`; includes #114 export/control).
+Paths below are relative to `alans-way/`. Five reviewed matches remain; no scanner
+rule was changed. Queue/receiver and primary check-in dispatch code add no findings.
 LOW findings document the loopback-only forward/check/app examples. The only
 HIGH finding (`python_os_environ` at the former
 `skills/integrations/references/mastodon.md:45`) is gone because the plugin no
@@ -49,15 +65,15 @@ the human-run document outside the plugin.
 
 | File:line | Rule | Severity | Matched text | Before → after |
 |---|---|---|---|---|
-| `skills/workspace-setup/SKILL.md:180` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:235` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:339` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:345` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
-| `skills/workspace-setup/SKILL.md:348` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:249` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:304` | `python_subprocess` | MEDIUM | `return subprocess.run(["git", "-C", path, *args], check=True, timeout=5,` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:408` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:414` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
+| `skills/workspace-setup/SKILL.md:417` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
 
-Verdict: **CAUTION → SAFE**. Inventory: 1 HIGH + 2 MEDIUM + 3 LOW →
-0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
-There are no remaining false positives to reword.
+Verdict: **SAFE**. Current baseline → completed cross-bot proactivity: 0 HIGH + 2 MEDIUM + 3 LOW
+→ 0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
+Historically, removing the Mastodon recipe changed CAUTION to SAFE.
 
 `tests/test_plugin_scan.py` asserts exact counts by rule, severity and file,
 plus SAFE allowance, CAUTION/confirmation and DANGEROUS rejection gates. Supply
