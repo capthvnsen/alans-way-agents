@@ -320,7 +320,7 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.6
+[ -n "$PIN" ] || PIN=v0.21.7
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1

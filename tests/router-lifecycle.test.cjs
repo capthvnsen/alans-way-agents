@@ -196,11 +196,11 @@ test('missing required bot config exits nonzero without spawning a connector',as
 test('unavailable connector script exits nonzero without an orphan',async t=>{
   const c=new Client(t,{missingScript:true});await c.started;c.eof();await c.exited(1,1,{natural:false});assert.match(c.stderr,/MODULE_NOT_FOUND/);
 });
-test('malformed explicit connection returns a public error and closes normally',{skip:!realConnector},async t=>{
+test('malformed explicit connection returns a public error and closes normally',{skip:realConnector?false:'Set HERMES_EOF_CONNECTOR to a frozen real connector'},async t=>{
   const c=new Client(t,{real:true,malformedConnection:true});await c.ready();const m=await c.recv(c.read());assert.equal(m.result.isError,true);c.eof();await c.exited();assert.equal(c.http.length,0);
 });
 
-test('real pending read that never answers is honestly cancelled and its connector reaped',{skip:!realConnector},async t=>{
+test('real pending read that never answers is honestly cancelled and its connector reaped',{skip:realConnector?false:'Set HERMES_EOF_CONNECTOR to a frozen real connector'},async t=>{
   const c=new Client(t,{real:true});await c.ready();c.httpDelay='hang';const id=c.read();await until(()=>c.http.length===1,'read reached owned HTTP endpoint');c.eof();
   const m=await c.recv(id);assert.equal(m.result.isError,true);assert.match(m.result.content[0].text,/cancel|closed/i);
   await c.exited(1,1,{natural:false});assert.equal(c.http.length,1);assert.equal(c.messages.filter(m=>m.id===id).length,1);
@@ -228,7 +228,7 @@ for(const phase of ['restore','tabs'])test('EOF stops continuation after pending
   assert.equal(c.requests().filter(e=>e.m?.method==='initialize').length,1);
 });
 
-test('real active and lazy VM connectors both receive EOF and exit without a respawn',{skip:!realConnector},async t=>{
+test('real active and lazy VM connectors both receive EOF and exit without a respawn',{skip:realConnector?false:'Set HERMES_EOF_CONNECTOR to a frozen real connector'},async t=>{
   const c=new Client(t,{dual:true,real:true});await c.ready();await c.recv(c.read());await c.recv(c.read({host:'vm'}));
   c.eof();await c.exited(0,2);assert.equal(c.http.length,2);assert.ok(c.http.every(e=>e.method==='GET'&&e.path==='/v1/status'));
 });

@@ -247,6 +247,72 @@ class NoteTests(unittest.TestCase):
             self.assertIn(shared, V.NOTE)
 
 
+class TelegramConversationTests(unittest.TestCase):
+    """Exercise the registered hook across a conversation, without a model or connector."""
+
+    def register(self, profile):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        hooks, commands = {}, {}
+        ctx = SimpleNamespace(
+            profile_name=profile, state=FakeState(),
+            register_tool=lambda **kw: None,
+            register_hook=lambda name, fn: hooks.setdefault(name, []).append(fn),
+            register_skill=lambda *a: None,
+            register_command=lambda name, fn, **kw: commands.update({name: fn}),
+            on_unload=self.addCleanup)
+        with patch.dict(os.environ, {"HERMES_HOME": home.name}):
+            sys.modules["alans_way_idle_test"].register(ctx, legacy_home=home.name, background=False)
+        return hooks, commands
+
+    def test_registered_note_covers_first_followup_and_async_turns_on_every_bot(self):
+        for profile in ("default", "secondary"):
+            for chat in ("dm", "group", "forum", "channel"):
+                hooks, _ = self.register(profile)
+                history = []
+                turns = (
+                    "Compare the two reports and save a summary.",
+                    "Use the revised report too.",
+                    "How far along are you?",
+                    "Approved, continue.",
+                    "[Agent notification] The background comparison finished.",
+                    "",  # Media-only turn; the hook must not require typed text.
+                )
+                with env(HERMES_SESSION_CHAT_TYPE=chat):
+                    for index, text in enumerate(turns):
+                        with self.subTest(profile=profile, chat=chat, turn=index):
+                            results = [fn(user_message=text, platform="telegram", session_id="same-chat",
+                                          sender_id="42", turn_id=str(index), is_first_turn=(index == 0),
+                                          conversation_history=list(history))
+                                       for fn in hooks["pre_llm_call"]]
+                            notes = [r["context"] for r in results
+                                     if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
+                            self.assertEqual(len(notes), 1)
+                            self.assertIn(V.REPORT, notes[0])
+                            self.assertIn("no play-by-play bubbles while a task runs", notes[0])
+                            self.assertIn("acknowledge it in one line and fold it into the running task", notes[0])
+                            self.assertEqual("group chat" in notes[0], chat != "dm")
+                        history.extend([
+                            {"role": "user", "content": text},
+                            {"role": "assistant", "content": "", "tool_calls": [{"id": str(index)}]},
+                            {"role": "tool", "tool_call_id": str(index), "content": "Read completed."},
+                            {"role": "assistant", "content": "Saved the comparison."},
+                        ])
+
+    def test_tone_command_disables_and_restores_note_in_the_same_conversation(self):
+        hooks, commands = self.register("secondary")
+        with env(HERMES_SESSION_CHAT_TYPE="dm"):
+            for mode in ("default", "texting", "default"):
+                commands["tone"](mode)
+                for first in (True, False):
+                    with self.subTest(mode=mode, first=first):
+                        results = [fn(user_message="Keep going.", platform="telegram", session_id="same-chat",
+                                      is_first_turn=first) for fn in hooks["pre_llm_call"]]
+                        notes = [r["context"] for r in results
+                                 if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
+                        self.assertEqual(len(notes), int(mode == "texting"))
+
+
 class RecapLengthTests(unittest.TestCase):
     """Prompt-order regressions at the hook, not generated-reply compliance tests."""
 

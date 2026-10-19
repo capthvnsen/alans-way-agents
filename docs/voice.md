@@ -139,13 +139,46 @@ Telegram bot share one quiet default.
 
 | Path | What applies |
 |---|---|
-| The bot's reply in a DM, group, forum topic or channel, including groups with several bots | note + polish |
+| First message and every later model turn in a Telegram DM, group, forum topic or channel, including groups with several bots | note + polish |
+| Mid-task follow-up, status question, approval continuation or media-only Telegram turn | note + polish; no first-turn or nonempty-message requirement |
 | A chat turn on desktop, TUI or a hosted bot room | note + polish |
 | Check-ins and the morning brief (injected turns) | their own prompt (same rules) + polish |
 | Agent-notify / async-completion turns | note + polish |
 | Cron jobs, including ones that deliver only to Telegram | nothing for now (see below) |
 | Interim lines the model writes alongside tool calls (how a CAPTCHA or handback ping usually goes out mid-task) | the turn's note shapes them; the polish can't reach them |
 | Streaming (off by default) | early chunks show raw text; the final edit shows the polished reply |
+
+`tests/test_voice.py` exercises the registered hook across repeated turns with
+tool history in the same session, on both primary and secondary bot profiles,
+in all four Telegram chat types. It covers the first request, mid-task
+additions, status questions, approval continuations, async notifications and
+empty text, plus turning `/tone default` off and back on in that conversation.
+These are offline hook tests, not generated-message or Telegram transport tests.
+
+Hermes calls `pre_llm_call` at the start of a conversational turn and retains
+its injected context for the model's subsequent calls in that turn. A tool
+result or an interim assistant line is not a separate turn that needs a new
+note. A busy-mode steer joins the current run with its existing note; a
+follow-up that starts a new run receives a fresh note. Interim lines therefore
+have the quiet policy in model context, but only the final reply gets the
+deterministic polish. Alongside source inspection, a local disposable-Hermes
+contract check exercised the actual hook collector and API request builder:
+the quiet note survived nine requests across three turns, tool results and
+synthetic steering text. It also checked raw interim delivery and the internal
+hook bypass below. Those three checks passed without a real model or Telegram
+connection; they are separate from the repository's offline hook harness.
+[Hermes turn context](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/agent/turn_context.py),
+[Hermes interim delivery](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/agent/stream_delivery.py)
+
+The Telegram model turns without the added note are check-ins and morning
+briefs, which already embed the shared quiet rules. `/tone default` disables
+the added note on ordinary chat turns. Cron uses platform `cron` even when
+delivering to Telegram, so it receives neither the note nor the polish.
+Hermes also bypasses this hook for persistence-disabled internal agents, such
+as background self-improvement review; those are not ordinary chat replies.
+Fixed gateway messages and direct sends are outside the model-turn path.
+[Hermes hook dispatch](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/agent/turn_context.py),
+[Hermes background review](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/agent/background_review.py)
 
 ### Not covered
 
@@ -161,11 +194,6 @@ No supported Hermes hook reaches these, so the plugin does not touch them:
   only reachable through a private Hermes function, which this repo doesn't
   import). Cron runs keep the default voice until Hermes exposes it.
 
-The setup skill can offer to switch off Hermes' extra steering acknowledgment
-with `display.busy_steer_ack_enabled=false`, only after the user's explicit
-answer. The model still acknowledges additions in its own short reply; setup
-scripts do not change this setting. No Hermes message is rewritten.
-
 Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the
 model writes before a tool call as its own message
@@ -173,6 +201,46 @@ model writes before a tool call as its own message
 relies on both and fakes nothing. Hermes can't split one final reply into
 several messages except at Telegram's 4096-character limit, so neither can
 the voice.
+
+### Fewer Hermes messages in Telegram
+
+The guided setup skill's **Make Telegram feel right** option in
+[`workspace-setup/SKILL.md`](../alans-way/skills/workspace-setup/SKILL.md)
+offers these presentation choices together. It reads current effective values,
+preserves existing choices and applies only the user's answered choices through
+the profile-scoped Hermes CLI, with readback. Nothing in this voice feature
+changes those settings or a profile automatically.
+
+| Setting offered by guided setup | Effect and messages that remain |
+|---|---|
+| `display.platforms.telegram.tool_progress: off` | Hides mechanical tool-start breadcrumbs, including tool names and argument previews. This is already Telegram's built-in default; an existing override can enable them. It does not hide model-written interim lines, long-work reminders, approval prompts or failures. |
+| `display.platforms.telegram.interim_assistant_messages: true` | Keeps the model's mid-task messages visible, including a needed question, blocker, approval or handback. The quiet note asks the model to omit routine narration; this setting does not enforce that request. |
+| `display.platforms.telegram.long_running_notifications: generic` | Keeps Hermes's periodic long-work status, using plain wording without internal tool details. It does not reduce the heartbeat cadence or silence it. For fewer messages, an explicitly chosen `display.platforms.telegram.long_running_notifications: off` disables these reminders; the interval can also disable them when set to zero. Guided setup recommends `generic`, not `off`. |
+| `display.platforms.telegram.busy_steer_ack_enabled: false` | Hides Hermes's separate steer acknowledgment when new guidance joins an active task. The model can still acknowledge the addition in its own next short line. This does not change busy-input mode or other fixed notices. |
+| `display.memory_notifications: off` | Hides memory-update and self-improvement review bookkeeping across every platform in that profile. Background review still runs. |
+| `display.platforms.telegram.notifications: important` | Makes routine updates silent while finals and approval prompts remain eligible for sound. It changes notification sound, not the number of visible messages; visual notifications can still appear. |
+| `platforms.telegram.typing_indicator: true` and `platforms.telegram.reactions: true` | Show activity and processing success/failure without a narration bubble. A success reaction does not verify the user's goal. |
+| `cron.wrap_response: false` | Removes the scheduled-message header, job IDs and management footer across all delivery targets in the profile. The scheduled result or failure itself still arrives. |
+
+For tool progress, the effective value resolves in this order: Telegram
+platform override, legacy `display.tool_progress_overrides.telegram`, global
+`display.tool_progress`, Telegram default, global default. A global `off`
+does not override a legacy Telegram `all`. Guided setup writes the explicit
+`display.platforms.telegram.tool_progress off` after consent and checks the
+effective result while preserving the older keys. Other platform display
+settings resolve without that legacy tool-progress fallback.
+[Hermes display resolver](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/gateway/display_config.py)
+
+With those recommendations, model-written essential interruptions and the
+final reply remain, as do generic long-work reminders. Hermes's fixed approval
+cards, MCP elicitation, CAPTCHA handbacks, errors, failure notices and command
+responses also remain when triggered. `tool_progress: off` is not a global
+mute: failure notices have a separate path, and `generic` still sends or edits
+a heartbeat. The plugin cannot rewrite these messages. This documentation
+records the existing controls; it changes no defaults or profiles.
+[Hermes progress and failure delivery](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/gateway/run_turn_runner.py),
+[Hermes long-work reminders](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/gateway/run_turn.py),
+[Hermes steer acknowledgment](https://github.com/NousResearch/hermes-agent/blob/1fd18277267152893a8a24792b79213e7ca3f899/gateway/run_busy.py)
 
 ## Upstream gaps (Hermes)
 

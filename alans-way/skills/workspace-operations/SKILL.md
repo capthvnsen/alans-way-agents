@@ -132,7 +132,7 @@ The gate protects against agent mistakes and against clicks steered by
 prompt injection or a malicious website. It does not stop a deliberately
 hostile agent that also has terminal or file tools, because that agent runs as
 the same OS user as the router and the browser services. Full isolation (a
-separate OS account plus router-signed approvals) is planned for v0.21.6.
+separate OS account plus router-signed approvals) remains planned.
 Never work around the gate with any tool: a refused commit goes to the user.
 Ask the user before
 any other financial, destructive or production change. Ownership and control
