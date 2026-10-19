@@ -552,7 +552,9 @@ class RegisterTests(unittest.TestCase):
                 self.assertNotIn(("hook", "pre_tool_call", "Voice"), calls)
                 self.assertIn(("command", "tone"), calls)
                 self.assertIn(("cli", "tone"), calls)
+                # Dormant cross-bot export adds no tool to secondary profiles.
                 self.assertEqual(("tool", "proactivity") in calls, primary)
+                self.assertEqual(("hook", "pre_llm_call", "Proactivity") in calls, primary)
 
     def test_manifest_declares_the_voice_hooks(self):
         text = (Path(V.__file__).parent / "plugin.yaml").read_text(encoding="utf-8")

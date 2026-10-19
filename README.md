@@ -64,6 +64,13 @@ adds tools and a small check-in loop inside it, it is not a second gateway.
   sending external messages or posts, purchases, credential or permission
   changes, production changes, destructive operations — always ask first.
   Details in [docs/proactivity.md](docs/proactivity.md).
+- **Optional cross-bot proactivity.** Default off, enabled per bot. The primary
+  reads bounded fresh exports from other enabled bots during check-ins and may
+  dispatch one read-only or draft-only ask with fresh evidence. Results stay in
+  the target's bound Telegram DM with primary attribution and existing approval
+  gates. Durable permits and gateway-wide limits prevent replay and chains.
+  Digests expire after 24 hours, queued asks after two; copied context can remain
+  in Hermes/provider history. See [setup and privacy limits](docs/proactivity.md#cross-bot-proactivity).
 - **Web errands stop at your Approve tap.** The `web-errands` skill drives
   the research → stage → commit → verify → report loop for shopping, cart
   comparison, booking and travel, job applications, form and civic-portal
