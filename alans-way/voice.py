@@ -40,8 +40,8 @@ RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
          " Offer detail ('want the details on any of these?').")
 INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"
              " job or session IDs unless they ask for technical detail.")
-NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. Otherwise give"
-        " a next step or caveat when useful, then stop.")
+NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. After completing"
+        " the requested work, give a next step or caveat when useful, then stop.")
 SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks work exactly as"
         " before, and say plainly when something failed. Where their own persona or instructions"
         " ask for a different style, theirs wins.")
