@@ -629,6 +629,7 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertIn("After 30 minutes, or if you cannot keep waiting in this turn, stop.", self.captcha)
         # A VM release holds the tab too; a chat reply cannot bypass the hold.
         self.assertIn("the user saying they're done also ends the wait", self.captcha)
+        self.assertIn("Keep the host, tab id and fresh epoch together from the same reply", self.captcha)
         self.assertIn("The VM tab is held too", self.captcha)
         self.assertIn("press Give back", self.captcha)
         self.assertIn("if the claim is refused with `awaiting_human`, ask them to press Give back", self.captcha)

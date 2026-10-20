@@ -451,7 +451,8 @@ Once the tab is the user's:
    the user saying they're done also ends the wait.
 3. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
    message already said you will pick it back up. When the user says it's
-   done, list your tabs; if the tab is still theirs, try to claim it once.
+   done, list your tabs. Keep the host, tab id and fresh epoch together from the same reply.
+   If the tab is still theirs, try to claim it once.
    Continue if it succeeds; if the claim is refused with `awaiting_human`, ask them to press Give back
    in Alan's Workspace and wait for the return. Respect any other refusal.
 
