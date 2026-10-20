@@ -969,7 +969,9 @@ class RegisterTests(unittest.TestCase):
                                      "Verify each goal and mark it done", "without waiting for 'keep going'",
                                      "independent authorized work", "login or CAPTCHA, approval or decision",
                                      "information only they have", "cannot safely recover",
-                                     "what is done, what remains and exactly what is needed to resume"):
+                                     "what is done, what remains and exactly what is needed to resume",
+                                     "check it against each thing they explicitly asked for",
+                                     "trying the source's own page before saying a fact isn't available"):
                             self.assertIn(rule, result["context"])
 
     def test_register_wires_public_surfaces_only(self):
