@@ -12,6 +12,39 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_promised_follow_ups_are_saved_jobs_in_this_chat(self):
+        section = re.search(r"## Promised follow-ups(.*?)(?:## |\Z)", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        for rule in ("cronjob_manage", "`action` create", "`schedule`", "`prompt`",
+                     "when to stop", "`attach_to_session` true", "no `deliver`",
+                     "Confirm with the local time in one line",
+                     "Never promise a later message without a saved job",
+                     '"not yet"', "offer one more at a specific time",
+                     "don't schedule repeats they didn't ask for",
+                     "Remove the job when its reason goes away"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_move_is_described_truthfully(self):
+        section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("handoff controls are not exposed in its UI", policy)
+        for rule in ("Move button", "page address and scroll position",
+                     "drafts when they choose", "only when the app reports a restore",
+                     "passwords, uploads and in-memory state stay behind",
+                     "You have no move tool", "check the destination page and login"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_browser_scrolling_uses_the_scroll_action(self):
+        section = re.search(r"## Operate a browser tab(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertIn("use the scroll action", policy)
+        self.assertIn("scripts and reloads are refused on pages that show payment or donate buttons", policy)
+
     def test_connector_recovery_separates_reads_from_uncertain_mutations(self):
         section = re.search(r"## The connector layer self-heals; never operate on it(.*?)## ", self.text, re.S)
         self.assertIsNotNone(section)
