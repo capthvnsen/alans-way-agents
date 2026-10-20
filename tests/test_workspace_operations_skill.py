@@ -359,11 +359,14 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
 
     def test_progress_is_bounded_and_mid_task_messages_are_folded_in(self):
         for rule in ("email sent, form submitted, or page the user must act on",
-                     "side effects and mistakes right away", "Give progress updates only when the user asks",
+                     "side effects and mistakes right away",
+                     "For multi-step work, send one short start line",
+                     "then a one-line update only at a real milestone, a failed step you route around, or a noticeable wait",
                      "Keep routine reads, actions and step transitions quiet",
                      "one quick action", "no tool names, headings or step counters",
                      "acknowledge it in one line and fold it into the running task", "do not restart"):
             self.assertIn(rule, self.normalized)
+        self.assertNotIn("Give progress updates only when the user asks for them", self.normalized)
 
     def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
         # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
