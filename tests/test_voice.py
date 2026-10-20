@@ -506,7 +506,7 @@ class CorpusRuleTests(unittest.TestCase):
 
     def test_questions_name_a_user_owned_decision(self):
         self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
-                          "Otherwise give a next step or caveat when useful, then stop")
+                          "After completing the requested work, give a next step or caveat when useful, then stop")
 
     def test_owns_limits_failures_and_side_effects(self):
         self.assert_rules("Own limits, failures and side effects plainly")

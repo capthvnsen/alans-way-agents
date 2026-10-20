@@ -352,14 +352,15 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
         self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)
-        self.assertIn("Before each multi-step chunk", self.normalized)
-        self.assertIn("the current action and the next step", self.normalized)
+        self.assertIn("Continue into the next chunk until the task is done or blocked", self.normalized)
+        self.assertNotIn("Before each multi-step chunk", self.normalized)
         self.assertNotIn("write no chat text between tool calls", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
 
     def test_progress_is_bounded_and_mid_task_messages_are_folded_in(self):
         for rule in ("email sent, form submitted, or page the user must act on",
-                     "side effects and mistakes right away", "at most one update per roughly two actions",
+                     "side effects and mistakes right away", "Give progress updates only when the user asks",
+                     "Keep routine reads, actions and step transitions quiet",
                      "one quick action", "no tool names, headings or step counters",
                      "acknowledge it in one line and fold it into the running task", "do not restart"):
             self.assertIn(rule, self.normalized)
