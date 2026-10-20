@@ -439,9 +439,11 @@ different bot's route silently.
    must be running for computer control even when the PC is reachable.
    Follow the steps in the app's `docs/setup-prompt.md`. Never use
    `StrictHostKeyChecking=accept-new` or ask for a password.
-4. **A Windows guest runs `setup.sh` from Git Bash.** Hermes' terminal tool
-   already uses Git Bash on native Windows, so run the same command there (WSL2
-   counts as Linux). It needs Node 22+, Python 3 (or `HERMES_PYTHON` pointing at
+4. **A Windows guest needs a human handoff.** Give the pinned setup command
+   above to the user and ask the human to run it in an external Git Bash shell,
+   outside the gateway. Never run setup through Hermes's terminal, even if it
+   uses Git Bash. WSL2 counts as Linux and uses the app handoff above.
+   Native Windows needs Node 22+, Python 3 (or `HERMES_PYTHON` pointing at
    a `python.exe`), Tailscale and Chrome or Edge. It registers Scheduled Tasks
    instead of systemd units, which start at logon, so tell the user to keep the PC
    awake and turn on automatic sign-in (`netplwiz`). Relay the OpenSSH Server lines

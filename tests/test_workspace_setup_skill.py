@@ -340,6 +340,14 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             self.assertIn(instruction, self.normalized)
         self.assertNotIn("most likely running inside this gateway. `setup.sh --restart`", self.normalized)
 
+    def test_windows_setup_is_a_human_handoff_outside_the_gateway(self):
+        step = self.normalized.split("4. **A Windows guest", 1)[1].split("5. **", 1)[0]
+        for rule in ("ask the human", "external Git Bash shell", "outside the gateway",
+                     "Never run setup through Hermes's terminal", "pinned setup command",
+                     "WSL2 counts as Linux"):
+            self.assertIn(rule, step)
+        self.assertNotIn("so run the same command there", step)
+
     def test_linux_hosts_and_validated_key_flags_are_covered(self):
         self.assertIn("--host-os <mac|windows|linux>", self.normalized)
         self.assertIn("--mac-key", self.normalized)
