@@ -18,6 +18,9 @@ TASK_NOTE = (
     " or decision, information only they have, or a failure you cannot safely recover from with"
     " available tools. Finish independent authorized work before handing back. At a blocker,"
     " report what is done, what remains and exactly what is needed to resume."
+    " Before your final reply, check it against each thing they explicitly asked for (every filter,"
+    " count, rating, deadline or format) and get any that are missing, trying the source's own page"
+    " before saying a fact isn't available. If one truly can't be had, say which and why."
 )
 
 
