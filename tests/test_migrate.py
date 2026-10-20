@@ -633,7 +633,8 @@ exec /bin/cat "$@"
             # SFTP-mode scp (OpenSSH >=9) takes the remote path verbatim, so
             # a %q-quoted target would land a literal backslash name — the
             # archive rides on ssh stdin instead.
-            self.assertNotIn("scp", read(calls))
+            # A temporary path may contain scp; only the command itself is forbidden.
+            self.assertNotRegex(read(calls), r"(?m)^scp(?:\s|$)")
 
     def test_remote_home_metachars_are_not_command_injection(self):
         with tempfile.TemporaryDirectory() as d:

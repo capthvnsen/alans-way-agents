@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/a82f5010248455600acfe275010e3e725355a2a8/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/b9f571d7d8ef762f0a243989e3aa096171300c5e/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -85,37 +85,71 @@ Hermes' own voice (they can also send `/tone default` any time). Add `--profile 
 is `default`. Give `--mac-ssh` the computer's Tailscale name or IP; `setup.sh`
 refuses anything else.
 
-**Messages while working (before setup and the gateway restart).** For each
+**Working on its own (before setup and the gateway restart).** For each
 Telegram profile using this plugin, read `hermes -p <profile> config get
-display.busy_input_mode` (use `-p default` for the default profile). Use the
-effective value, including Hermes's defaults when no key is stored. If it is
-already `steer` or `queue`, continue without asking. Preserve unknown values and
-unreadable config. If it is `interrupt`, first read `hermes -p <profile> config
-get skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
-means the user already chose to keep it; continue without asking or rewriting
-busy mode. An absent marker means ask once in plain words:
-“When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?”
-Explain that the choice applies to every platform in that profile and takes
-effect after the current step finishes; guidance waits for the current tool
-batch to return. Apply only the answered choice with the supported CLI:
-`hermes -p <profile> config set display.busy_input_mode steer` for folding it
-in, or `hermes -p <profile> config set display.busy_input_mode interrupt` for
-stopping and starting over. Read back that key and report a failure before
-continuing. Never treat silence or non-interactive runs as consent; with no
-answer, leave the mode and marker untouched and continue the other setup work.
+skills.config.workspace-setup.autonomy_choice` (use `-p default` for the default
+profile). A recorded `keep-current` or `chosen` means continue without asking or
+rewriting these settings unless the user explicitly revisits this choice.
+Only a confirmed “Config key not set” result means the marker is absent.
+Preserve unknown markers and unreadable config; report the unknown state and
+skip this offer. If absent, read `hermes -p <profile> config get
+skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
+skips only `display.busy_input_mode`; still offer the other two keys. Preserve
+that legacy marker. If it is unknown or unreadable, skip the busy key and
+report the unknown state, while still checking the other two keys.
+
+Read each effective value, including Hermes's defaults when no key is stored:
+`hermes -p <profile> config get display.busy_input_mode`,
+`hermes -p <profile> config get agent.intent_ack_continuation`, and
+`hermes -p <profile> config get agent.verify_on_stop`.
+
+| Key | Stock default | Recommended value |
+| --- | --- | --- |
+| `display.busy_input_mode` | `interrupt` | `steer` |
+| `agent.intent_ack_continuation` | `auto` | `true` |
+| `agent.verify_on_stop` | `false` | `true` |
+
+Preserve and show every other existing value, including busy mode already set
+to `steer` or `queue` and `agent.intent_ack_continuation: false`. Preserve unknown
+values and unreadable config; report them and skip those keys. If the user
+deliberately chose a stock value, preserve it too, including `interrupt` and
+`agent.verify_on_stop: false`. `config get` returns the merged value and cannot
+distinguish a stock default from a deliberate choice of that same value.
+Show current values and proposed changes; in the same consent exchange, invite
+the user to identify any stock-looking values they chose deliberately, and
+exclude those keys from the offer. If none remain eligible, continue without
+asking or writing a marker.
+
+With eligible keys, ask once with this exact copy:
+"Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, double-check code changes before calling them done, and fold in anything you send while I'm working. (Recommended. Say no to keep things as they are.)"
+Explain that this applies to every platform in that profile, takes effect
+after the current step finishes, and guidance waits for the current tool batch
+to return. Disclose that you will remember the answer in this profile's
+`config.yaml`. Never treat silence or non-interactive runs as consent; with no
+answer, leave the settings and marker untouched and continue the other setup work.
 General setup or proactivity consent does not answer this question.
 
-Use no marker for `steer`: the value itself makes this check stateless. To avoid
-re-asking a user who explicitly keeps `interrupt` on every setup rerun, disclose
-that you will remember that answer in this profile's `config.yaml`, then run
-`hermes -p <profile> config set skills.config.workspace-setup.busy_input_choice keep-interrupt`
-only after that answer and a successful mode readback. If the marker cannot be
-read except for a confirmed “Config key not set” result, skip the question and
-report the unknown state. If its write fails, report that the answer could not
-be remembered; never invent a successful choice. This marker records only the
-setup answer: never restore a mode from it or override later user changes.
-The user can explicitly revisit the choice at any time, or remove the marker
-with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
+Apply only the answered choice with the supported CLI. After yes, recheck each
+eligible key and write only when its effective value is the stock default and
+it was not deliberately chosen:
+`hermes -p <profile> config set display.busy_input_mode steer`,
+`hermes -p <profile> config set agent.intent_ack_continuation true`, and
+`hermes -p <profile> config set agent.verify_on_stop true`.
+An explicit no preserves all three settings. Read back all three keys with the
+same `config get` commands, including unchanged keys, and report the actual values.
+If any write fails or a readback is unreadable or differs from the expected
+changed or preserved value, report the mismatch and leave the marker untouched.
+Write the marker last, only after that answer and successful readbacks:
+`hermes -p <profile> config set skills.config.workspace-setup.autonomy_choice chosen`
+for yes, or
+`hermes -p <profile> config set skills.config.workspace-setup.autonomy_choice keep-current`
+for no. Read back the marker too with `hermes -p <profile> config get
+skills.config.workspace-setup.autonomy_choice` and report failed writes/readbacks.
+This marker records only the setup answer: never restore settings from it or
+override later user changes. The user can revisit the choice or remove the marker
+with `hermes -p <profile> config unset skills.config.workspace-setup.autonomy_choice`.
+After setup, say once in the final message before the planned restart:
+"For a big job, start your message with /goal and I'll keep at it until it's verified done."
 
 **Make Telegram feel right.** Before setup and restart, for each Telegram
 profile read `hermes -p <profile> config get <key>` for the leaves below and
@@ -325,7 +359,7 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.6
+[ -n "$PIN" ] || PIN=v0.21.7
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
@@ -339,7 +373,7 @@ not run this command through your terminal. Use the resolved checkout commit
 (`git -C ~/alans-way-agents rev-parse HEAD`), not a tag name, for `repoRef`:
 
 ```json
-{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"a82f5010248455600acfe275010e3e725355a2a8","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
+{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"b9f571d7d8ef762f0a243989e3aa096171300c5e","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
 ```
 
 Include `--profile` and its name unless default. Add public `--mac-key` and
@@ -356,7 +390,7 @@ For an external shell only (also the command the app constructs):
 ```sh
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref a82f5010248455600acfe275010e3e725355a2a8 \
+    --desktop-ref b9f571d7d8ef762f0a243989e3aa096171300c5e \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \

@@ -163,8 +163,8 @@ def env(**values):
 class NoteTests(unittest.TestCase):
     def test_user_facing_narration_uses_task_words(self):
         note = self.turn(voice(), "telegram")["context"]
-        for rule in ("user-facing text", "workflow", "tool call", "MCP", "tab id",
-                     "I'm checking the airline's prices now"):
+        for rule in ("user-facing text", "tool names", "tool calls", "file paths",
+                     "unless they ask for technical detail"):
             self.assertIn(rule, note)
 
     def test_recommendations_require_facts_read_live_this_turn(self):
@@ -205,19 +205,123 @@ class NoteTests(unittest.TestCase):
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
 
-    def test_live_progress_note_reaches_the_telegram_turn(self):
+    def test_progress_policy_is_sparse_and_confirms_steers(self):
         note = self.turn(voice(), "telegram")["context"]
-        for rule in ("Before each multi-step chunk", "what you're doing now and what comes next",
-                     "email sent, form submitted, or page they must act on", "side effects and mistakes",
-                     "at most one update per roughly two actions", "one quick action",
-                     "no tool names", "acknowledge it in one line and fold it into the running task",
+        for rule in ("Mid-task, apart from the start line and milestone updates, stay quiet"
+                     " through routine steps",
+                     "interrupt for a decision, approval or handback they own, a blocker or"
+                     " failed step",
+                     "information you can't safely guess (never invent it)",
+                     "one concise verified result and any real caveat, not a step-by-step log",
+                     "start with one short line saying what you're doing",
+                     "only at a real milestone, when a step fails and you change course, or"
+                     " when a wait will be noticeable",
+                     "add nothing for one quick action",
+                     "side effects and mistakes right away",
+                     "confirm the change in one line in their words",
+                     "then fold it into the running task",
                      "don't restart"):
             self.assertIn(rule, note)
+        for dropped in ("Before each multi-step chunk", "one update per roughly two actions",
+                        "first-person action and say what's next",
+                        "Narrate your steps only when they ask for live updates",
+                        "no play-by-play bubbles",
+                        "Give progress updates only when the user asks for them"):
+            self.assertNotIn(dropped, note)
+
+    def test_one_step_question_keeps_the_no_start_line_rule(self):
+        note = self.turn(voice(), "telegram", text="what time is it in Tokyo?")["context"]
+        self.assertIn("When a task takes more than one quick step, start with one short line", note)
+        self.assertIn("add nothing for one quick action", note)
+
+    def test_truth_rules_for_tools_and_exact_claims(self):
+        note = self.turn(voice(), "telegram")["context"]
+        for rule in ("Use the tools you're given before saying you can't",
+                     "never invent tool errors, output or a blocker that didn't happen",
+                     "Claim an exact result only when the results show it",
+                     "display decoration, not the file's bytes",
+                     "a write's verified confirmation means the text you sent landed, not that"
+                     " it matched the source"):
+            self.assertIn(rule, note)
+
+    def test_same_note_on_every_chat_surface(self):
+        notes = {p: self.turn(voice(), p)["context"] for p in ("telegram", "desktop", "tui", "bot_room")}
+        self.assertEqual(len(set(notes.values())), 1)
+        for platform in ("cli", "discord", "slack", "cron", "api_server", "webhook",
+                         "subagent", "", None):
+            self.assertIsNone(self.turn(voice(), platform))
 
     def test_check_ins_share_the_same_rules(self):
         for shared in (V.TEXTING, V.PLAIN, V.FORMAT):
             self.assertIn(shared, P.VOICE)
             self.assertIn(shared, V.NOTE)
+
+
+class TelegramConversationTests(unittest.TestCase):
+    """Exercise the registered hook across a conversation, without a model or connector."""
+
+    def register(self, profile):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        hooks, commands = {}, {}
+        ctx = SimpleNamespace(
+            profile_name=profile, state=FakeState(),
+            register_tool=lambda **kw: None,
+            register_hook=lambda name, fn: hooks.setdefault(name, []).append(fn),
+            register_skill=lambda *a: None,
+            register_command=lambda name, fn, **kw: commands.update({name: fn}),
+            on_unload=self.addCleanup)
+        with patch.dict(os.environ, {"HERMES_HOME": home.name}):
+            sys.modules["alans_way_idle_test"].register(ctx, legacy_home=home.name, background=False)
+        return hooks, commands
+
+    def test_registered_note_covers_first_followup_and_async_turns_on_every_bot(self):
+        for profile in ("default", "secondary"):
+            for chat in ("dm", "group", "forum", "channel"):
+                hooks, _ = self.register(profile)
+                history = []
+                turns = (
+                    "Compare the two reports and save a summary.",
+                    "Use the revised report too.",
+                    "How far along are you?",
+                    "Approved, continue.",
+                    "[Agent notification] The background comparison finished.",
+                    "",  # Media-only turn; the hook must not require typed text.
+                )
+                with env(HERMES_SESSION_CHAT_TYPE=chat):
+                    for index, text in enumerate(turns):
+                        with self.subTest(profile=profile, chat=chat, turn=index):
+                            results = [fn(user_message=text, platform="telegram", session_id="same-chat",
+                                          sender_id="42", turn_id=str(index), is_first_turn=(index == 0),
+                                          conversation_history=list(history))
+                                       for fn in hooks["pre_llm_call"]]
+                            notes = [r["context"] for r in results
+                                     if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
+                            self.assertEqual(len(notes), 1)
+                            self.assertIn(V.REPORT, notes[0])
+                            self.assertIn("start with one short line saying what you're doing", notes[0])
+                            self.assertIn("confirm the change in one line in their words", notes[0])
+                            self.assertIn("then fold it into the running task; don't restart", notes[0])
+                            self.assertEqual("group chat" in notes[0], chat != "dm")
+                        history.extend([
+                            {"role": "user", "content": text},
+                            {"role": "assistant", "content": "", "tool_calls": [{"id": str(index)}]},
+                            {"role": "tool", "tool_call_id": str(index), "content": "Read completed."},
+                            {"role": "assistant", "content": "Saved the comparison."},
+                        ])
+
+    def test_tone_command_disables_and_restores_note_in_the_same_conversation(self):
+        hooks, commands = self.register("secondary")
+        with env(HERMES_SESSION_CHAT_TYPE="dm"):
+            for mode in ("default", "texting", "default"):
+                commands["tone"](mode)
+                for first in (True, False):
+                    with self.subTest(mode=mode, first=first):
+                        results = [fn(user_message="Keep going.", platform="telegram", session_id="same-chat",
+                                      is_first_turn=first) for fn in hooks["pre_llm_call"]]
+                        notes = [r["context"] for r in results
+                                 if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
+                        self.assertEqual(len(notes), int(mode == "texting"))
 
 
 class RecapLengthTests(unittest.TestCase):
@@ -400,8 +504,12 @@ class CorpusRuleTests(unittest.TestCase):
     def test_status_precedes_evidence_or_caveat(self):
         self.assert_rules("Lead with the concrete status, then evidence or a caveat")
 
-    def test_progress_uses_first_person_action_and_next_step(self):
-        self.assert_rules("For work in progress, use first-person action and say what's next")
+    def test_progress_is_quiet_and_interrupts_only_for_theirs(self):
+        self.assert_rules("Mid-task, apart from the start line and milestone updates, stay quiet"
+                          " through routine steps",
+                          "interrupt for a decision, approval or handback they own",
+                          "never invent it",
+                          "one concise verified result and any real caveat, not a step-by-step log")
 
     def test_narrates_only_user_world_actions_not_internal_loading(self):
         self.assert_rules("Never narrate loading skills, instructions, memory or tools",
@@ -409,10 +517,16 @@ class CorpusRuleTests(unittest.TestCase):
 
     def test_questions_name_a_user_owned_decision(self):
         self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
-                          "Otherwise give a next step or caveat when useful, then stop")
+                          "After completing the requested work, give a next step or caveat when useful, then stop")
 
     def test_owns_limits_failures_and_side_effects(self):
         self.assert_rules("Own limits, failures and side effects plainly")
+
+    def test_exact_claims_need_exact_evidence_in_every_prompt(self):
+        self.assert_rules("never invent tool errors, output or a blocker that didn't happen",
+                          "Claim an exact result only when the results show it",
+                          "a write's verified confirmation means the text you sent landed, not"
+                          " that it matched the source")
 
     def test_warmth_and_openers_are_sparse(self):
         self.assert_rules("Mild warmth is fine; use a short opener sparingly")
@@ -437,9 +551,14 @@ class CorpusRuleTests(unittest.TestCase):
 class OutputTests(unittest.TestCase):
     TIC = "Certainly! ## Plan\nShip it."
 
-    def test_polishes_the_final_telegram_reply_only(self):
-        self.assertEqual(voice().on_output(response_text=self.TIC, platform="telegram"), "## Plan\nShip it.")
-        self.assertIsNone(voice().on_output(response_text=self.TIC, platform="discord"))
+    def test_polishes_the_final_reply_on_chat_surfaces_only(self):
+        for platform in ("telegram", "desktop", "tui", "bot_room"):
+            with self.subTest(platform=platform):
+                self.assertEqual(voice().on_output(response_text=self.TIC, platform=platform),
+                                 "## Plan\nShip it.")
+        for platform in ("discord", "cli", "cron", "api_server"):
+            with self.subTest(platform=platform):
+                self.assertIsNone(voice().on_output(response_text=self.TIC, platform=platform))
         self.assertIsNone(voice("default").on_output(response_text=self.TIC, platform="telegram"))
         self.assertIsNone(voice().on_output(response_text="All good.", platform="telegram"))
 

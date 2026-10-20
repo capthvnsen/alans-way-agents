@@ -10,6 +10,24 @@ from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
 from .cross_bot import CrossBot, CROSS_SCHEMA, ASK_SCHEMA
 
 
+TASK_NOTE = (
+    "[Task completion] Work until every requested outcome is verified done or genuinely blocked."
+    " For multi-step tasks, keep a short checklist of mini goals in Hermes's native todo tool"
+    " when available, otherwise in working context. Verify each goal and mark it done, then continue to the next"
+    " without waiting for 'keep going'. Real blockers require a user's login or CAPTCHA, approval"
+    " or decision, information only they have, or a failure you cannot safely recover from with"
+    " available tools. Finish independent authorized work before handing back. At a blocker,"
+    " report what is done, what remains and exactly what is needed to resume."
+    " Before your final reply, check it against each thing they explicitly asked for (every filter,"
+    " count, rating, deadline or format) and get any that are missing, trying the source's own page"
+    " before saying a fact isn't available. If one truly can't be had, say which and why."
+)
+
+
+def task_context(**kwargs):
+    return {"context": TASK_NOTE}
+
+
 def _owning_home() -> Path:
     """The home Hermes bound for this plugin load, never the launch env.
 
@@ -41,6 +59,7 @@ def _primary_profile(ctx) -> bool:
 
 
 def register(ctx, *, legacy_home=None, background=True):
+    ctx.register_hook("pre_llm_call", task_context)
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
@@ -50,10 +69,10 @@ def register(ctx, *, legacy_home=None, background=True):
     voice = voice_mod.Voice(ctx)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
     ctx.register_command("tone", voice.command,
-                         description="Telegram voice: texting (default) or Hermes' default voice",
+                         description="Chat voice: texting (default) or Hermes' default voice",
                          args_hint="[texting|default|status]")
     if hasattr(ctx, "register_cli_command"):
-        ctx.register_cli_command("tone", "The Telegram texting voice: status, texting or default",
+        ctx.register_cli_command("tone", "The texting voice: status, texting or default",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
     primary = _primary_profile(ctx)
     runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)

@@ -715,8 +715,8 @@ class RegistrationTests(unittest.TestCase):
         self.addCleanup(routes.stop)
 
     def test_off_primary_and_secondary_match_base_without_cross_state_or_store_io(self):
-        # Base 9d5818b: canonical schema (including model-facing description),
-        # check-in prompt and brief prompt are pinned byte for byte.
+        # Cross-bot off preserves the base schema and shared voice, including
+        # the task-completion wording; only explicit voice changes update these hashes.
         schema_sha = "94a082ce76756e20d76a4f9701c1a9cf3ed3eadf007efc1094d17da351f2d622"
         for profile in ("default", "primary", "specialist"):
             for configured in (False, True):
@@ -745,13 +745,14 @@ class RegistrationTests(unittest.TestCase):
                         self.assertIsNone(cross.task)
                         self.assertFalse(root.exists())
                     self.assertEqual(runtime is not None, profile == "default")
-                    self.assertEqual(any(isinstance(fn.__self__, P.Proactivity) for fn in hooks["pre_llm_call"]),
+                    self.assertEqual(any(isinstance(getattr(fn, "__self__", None), P.Proactivity)
+                                         for fn in hooks["pre_llm_call"]),
                                      profile == "default")
                     if profile == "default":
                         self.assertEqual(C.hashlib.sha256(json.dumps(tools["proactivity"]["schema"], sort_keys=True).encode()).hexdigest(), schema_sha)
                         s = P.Settings(timezone="UTC")
-                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "e9eeea77ae829a4d454021b6745d0f92a00263c0157fb78c0d43ad7f45483261"),
-                                               (runtime.brief_prompt(s, NOW), "fedceabbc6f520b18637f9fdd527abf0e6cf314806edfb16a8af7ff1f9b218a4")):
+                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "2dadb69a59def9e1b6da1c299c4056eb23af120afd3a668967c9b4dc945e8579"),
+                                               (runtime.brief_prompt(s, NOW), "548718b14190917f86eedb3c039e157f01d954a3a71f35012eec2f661e2709a2")):
                             self.assertEqual(C.hashlib.sha256(text.encode()).hexdigest(), expected)
                     else:
                         self.assertEqual(tools, {})
@@ -778,7 +779,8 @@ class RegistrationTests(unittest.TestCase):
                 runtime = sys.modules[P.__package__].register(ctx, background=False, legacy_home=tmp)
                 self.addCleanup(lambda callbacks=unloads: [fn() for fn in callbacks])
                 for name in ("pre_llm_call", "post_llm_call", "on_session_end"):
-                    self.assertTrue(any(isinstance(fn.__self__, C.CrossBot) for fn in hooks[name]))
+                    self.assertTrue(any(isinstance(getattr(fn, "__self__", None), C.CrossBot)
+                                        for fn in hooks[name]))
                 self.assertEqual(set(tools), {"proactivity"} if profile == "default" else set())
                 key = f"agent:{'main' if profile == 'default' else profile}:telegram:dm:42"
                 args = SimpleNamespace(action="bind", session_key=key, settings=None, timezone=None)

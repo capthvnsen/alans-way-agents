@@ -51,7 +51,37 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const readline = require('node:readline');
+const { StringDecoder } = require('node:string_decoder');
+
+// MCP stdio frames end at LF (optionally preceded by CR). readline also
+// splits literal Unicode line/paragraph separators inside valid JSON strings.
+// Decode incrementally so a UTF-8 codepoint split across chunks stays intact.
+function readJsonLines(input, onLine) {
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+  const accept = (text) => {
+    pending += text;
+    let start = 0;
+    let end;
+    while ((end = pending.indexOf('\n', start)) !== -1) {
+      const line = pending.slice(start, end).replace(/\r$/, '');
+      start = end + 1;
+      if (/[^ \t\r]/.test(line)) onLine(line);
+    }
+    pending = pending.slice(start);
+  };
+  input.on('data', chunk => accept(typeof chunk === 'string' ? chunk : decoder.write(chunk)));
+  input.on('end', () => {
+    accept(decoder.end());
+    if (/[^ \t\r]/.test(pending)) onLine(pending.replace(/\r$/, ''));
+    pending = '';
+  });
+}
+
+// Keep older readline-based connectors and public clients compatible. This
+// normalization is only at our transport writes; JSON.parse restores the
+// original characters, including in IDs, names, response text and approvals.
+const jsonLine = (line) => line.replace(/[\u2028\u2029]/g, c => c === '\u2028' ? '\\u2028' : '\\u2029') + '\n';
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -779,15 +809,15 @@ function workspaceNotice(host, mac, resumeUrl, continued, label = 'Mac', pageNot
   if (mac.state === 'online') {
     return (
       `[workspace] ${label} is back online as of ${mac.since || 'unknown'}: ` +
-      `tasks waiting on ${label}-local resources can resume. New web work goes to the in-app host browser.`
+      `Check current ${label}-local resources before resuming work that needed them. Existing VPS tabs stay in their current workspace; inspect current tabs, controller/epoch and a snapshot before dependent work after a host/tab change or uncertain earlier action.`
     );
   }
   const page = pageNote ? ` ${pageNote}` : continued && continued.url && continued.tabId
-    ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Keep working in that tab. A login does not copy; if the page asks you to sign in, tell the user rather than working past it.`
-    : resumeUrl ? ` Reopen ${resumeUrl} and continue.` : ' Reopen the same URL and continue.';
+    ? ` Continued ${continued.url} in the VPS browser as tab ${continued.tabId}. Use that destination after the recovery checks below. A login does not copy; if the page asks you to sign in, tell the user rather than working past it.`
+    : resumeUrl ? ` Last observed page: ${resumeUrl}. Use its current VPS destination, or open it if none exists.` : ' Use a current VPS tab, or open the last known page if needed.';
   return (
     `[workspace] ${label} unreachable since ${mac.since || 'unknown'}: ` +
-    `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the ${label} keep going. ${label}-local files are unavailable.`
+    `routed to VPS browser.${page} API, MCP, and connector calls that do not run on the ${label} keep going. ${label}-local files are unavailable. After a host/tab change or uncertain input, inspect current tabs/controller/epoch and snapshot before dependent work; do not blindly repeat input.`
   );
 }
 
@@ -802,13 +832,13 @@ function continuationDetail(c, label = 'Mac') {
     return (
       `Restored ${tabs.length} tab${tabs.length === 1 ? '' : 's'} (${label} tab to VPS tab): ` +
       `${tabs.map(([a, b]) => `${a} -> ${b}`).join(', ')}. ` +
-      'Work in the VPS tabs from now on. Cookies were restored for tabs that had them, so a signed-in site should still be signed in; ' +
-      'if a page shows a sign-in wall, tell the user rather than working past it. A restored tab may still be loading, so snapshot it before acting.' +
+      'Use the VPS destination ids. A tab map does not confirm current sign-in or available drafts. After a host/tab change or uncertain input, inspect current tabs/controller/epoch and snapshot before dependent work; do not blindly repeat input. ' +
+      'Check the page and available drafts; if a page shows a sign-in wall, tell the user rather than working past it.' +
       (review.length ? ` Look at these before acting, their scroll or drafts were not confirmed: ${review.join(', ')}.` : '')
     );
   }
   if (c && c.status === 'pending') {
-    return 'The VPS browser is still restoring the tabs. List tabs again in a few seconds and work in the tab ids it shows. ' +
+    return 'The VPS browser is still restoring the tabs. List tabs again in a few seconds; once available, use the current destination ids and inspect controller/epoch and a fresh snapshot before dependent work. Do not blindly repeat uncertain earlier input. ' +
       'A login may not have carried over; if a page shows a sign-in wall, tell the user rather than working past it.';
   }
   if (c && c.status === 'down') {
@@ -817,7 +847,7 @@ function continuationDetail(c, label = 'Mac') {
   const page = c && c.continued && safeResumeUrl(c.continued.url);
   if (page && idOk(c.continued.tabId)) {
     return (
-      `Continued ${page} as VPS tab ${c.continued.tabId}. Keep working in that tab. ` +
+      `Continued ${page} as VPS tab ${c.continued.tabId}. After a host/tab change or uncertain input, inspect current tabs/controller/epoch and snapshot before dependent work; do not blindly repeat input. Check the page and available drafts. ` +
       'Logins did not carry over; if the page asks you to sign in, tell the user rather than working past the login wall.'
     );
   }
@@ -826,7 +856,7 @@ function continuationDetail(c, label = 'Mac') {
 
 function continuationNotice(c, label = 'Mac') {
   const detail = continuationDetail(c, label)
-    || 'No tabs were mirrored, so reopen the page you were on in the VPS browser and snapshot it before acting. ' +
+    || 'No restored tabs are confirmed. Use a current VPS destination if available; otherwise reopen the last page. After this host/tab change, inspect current tabs, controller/epoch and a fresh snapshot before dependent work. Do not blindly repeat uncertain earlier input. Check the page and available drafts. ' +
        'Logins did not carry over; if a page shows a sign-in wall, tell the user rather than working past it.';
   return `[workspace] the ${label} browser did not answer in time; work moved to the VPS browser. ${detail}`;
 }
@@ -1010,11 +1040,53 @@ function cleanCommit(commit) {
   };
 }
 
+// Browser approval-binding-v1 proof belongs to the trusted connector/router
+// channel (desktop/docs/integration.md), not the agent's page description.
+// Call only AFTER learnTabUse has cached the original reply. Custom MCP _meta
+// and structuredContent are agent-visible in ordinary Hermes clients, so the
+// proof stays in tabPages; it is never moved into another outbound field.
+function projectWorkspaceReply(result, req) {
+  if (!req || req.method !== 'tools/call' || !['cua_alans_way_snapshot', 'cua_alans_way_action'].includes(req.name)
+      || !result || result.isError || !Array.isArray(result.content)) return;
+  const part = result.content.find(p => p && p.type === 'text');
+  if (!part || typeof part.text !== 'string' || !part.text.includes('"approvalContext"')) return;
+  let data;
+  try { data = JSON.parse(part.text); } catch { return; }
+  // Recognize the workspace page envelope, never a page's eval/CDP value or
+  // arbitrary JSON whose business keys happen to have the same spelling.
+  if (!data || Array.isArray(data) || typeof data.tab?.id !== 'string' || !Number.isInteger(data.generation)) return;
+  const projectPage = (page) => {
+    const context = page?.approvalContext;
+    // Future proof versions and older hosts retain their original replies.
+    if (!context || context.version !== 1 || typeof context.documentId !== 'string' || typeof context.url !== 'string') return false;
+    delete page.approvalContext;
+    for (const key of ['elements', 'changed']) {
+      if (!Array.isArray(page[key])) continue;
+      for (const el of page[key]) {
+        if (el && typeof el.ref === 'string' && typeof el.role === 'string' && typeof el.approvalTarget === 'string') delete el.approvalTarget;
+      }
+    }
+    return true;
+  };
+  if (!projectPage(data)) return;
+  // Older hosts may include page observations in successful batch step
+  // envelopes. Never descend into value, effect, errors, or nested user JSON.
+  if (req.name === 'cua_alans_way_action' && Array.isArray(data.results)) {
+    let args;
+    try { args = JSON.parse(req.line).params.arguments; } catch { /* no batch context */ }
+    if (args?.action === 'batch' && Array.isArray(args.steps)) {
+      for (const step of data.results.slice(0, args.steps.length)) if (step?.ok === true) projectPage(step);
+    }
+  }
+  part.text = JSON.stringify(data);
+}
+
 // Additive decoration of one outbound JSON-RPC message: structured host state
 // under result._meta.workspace plus, for tool results, the notice as an extra
 // text content item. Anything not a result object passes through untouched.
-function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotId) {
+function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotId, req) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
+  projectWorkspaceReply(msg.result, req);
   rewriteOpenHost(msg.result);
   rewriteTabDefaults(msg.result);
   addCommitParam(msg.result);
@@ -1078,7 +1150,7 @@ function appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged) {
 function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) {
   let onlineAnnounced = false;
   const remembered = resumePath(stateFile, ctx.botId);
-  return function annotateLine(line, ms) {
+  return function annotateLine(line, ms, req) {
     const shape = resultShape(line);
     let msg;
     if (!shape) {
@@ -1122,7 +1194,9 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
     // _meta drops the list for any other host.
     const tabIdChanged = host === 'vps' && ctx.takeTabIdChanged ? ctx.takeTabIdChanged() : ctx.tabIdChanged;
     if (shape) return appendResultMeta(line, shape, host, mac, notice, ms, tabIdChanged);
-    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, tabIdChanged, ctx.botId));
+    // learnTabUse deliberately does not cache large replies. Keep their proof
+    // on the wire too rather than projecting anything we did not retain.
+    return JSON.stringify(annotateResult(msg, host, mac, notice, ms, tabIdChanged, ctx.botId, line.length <= BIG_LINE ? req : undefined));
   };
 }
 
@@ -1308,7 +1382,85 @@ async function main() {
   let fellBack = false;
   let macRetried = false;
   let shuttingDown = false;
+  // Terminal shutdown owns every connector, including a superseded child
+  // whose close event has not arrived yet. EOF drains existing requests for
+  // at most 1s, then gives children 1s after stdin.end() and 500ms after TERM
+  // before KILL. No failover, replay or continuation may begin after EOF.
+  const ownedChildren = new Set();
+  let shutdownCode = 0;
+  let shutdownSignal = null;
+  let inputsClosed = false;
+  let drainTimer = null;
+  let drainPoll = null;
+  let termTimer = null;
+  let killTimer = null;
+  let finishing = false;
   let watchdog = null;
+
+  function finishShutdown() {
+    if (!shuttingDown || !inputsClosed || ownedChildren.size || finishing) return;
+    finishing = true;
+    for (const timer of [drainTimer, drainPoll, termTimer, killTimer]) clearTimeout(timer);
+    // Preserve the final response/cancellation frame before leaving. Child
+    // close (rather than exit) also guarantees its stdout has been drained.
+    process.stdout.write('', () => process.exit(shutdownCode));
+  }
+
+  function ownChild(c) {
+    ownedChildren.add(c);
+    c.once('close', (code, signal) => {
+      ownedChildren.delete(c);
+      if (shuttingDown && !superseded.has(c) && (code || (signal && signal !== shutdownSignal))) shutdownCode ||= code > 0 ? code : 1;
+      finishShutdown();
+    });
+  }
+
+  function cancelShutdownRequests() {
+    for (const [id, req] of pendingRequests) {
+      pendingRequests.delete(id);
+      noteDead(id);
+      const message = 'The browser request did not complete before router shutdown; cancelled. ' +
+        (READ_ONLY_TOOLS.has(req.name) ? 'The read was not replayed.' : 'Its outcome may be unknown; no request was replayed.');
+      if (req.method === 'tools/call') emitToolError(id, message);
+      else process.stdout.write(jsonLine(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32800, message } })));
+    }
+    tabMerges.clear();
+    heldCalls.length = 0;
+    bufferedStdin.length = 0;
+  }
+
+  function closeChildInputs(signal) {
+    if (inputsClosed) return;
+    inputsClosed = true;
+    clearTimeout(drainTimer);
+    clearInterval(drainPoll);
+    cancelShutdownRequests();
+    for (const c of ownedChildren) {
+      try { if (signal) c.kill(signal); else c.stdin.end(); } catch { /* close still settles ownership */ }
+    }
+    termTimer = setTimeout(() => {
+      if (!ownedChildren.size) return;
+      shutdownCode ||= 1;
+      process.stderr.write('workspace-router: child shutdown exceeded 1s; terminating owned connectors\n');
+      for (const c of ownedChildren) { try { c.kill('SIGTERM'); } catch {} }
+      killTimer = setTimeout(() => {
+        for (const c of ownedChildren) { try { c.kill('SIGKILL'); } catch {} }
+      }, 500);
+    }, 1000);
+    finishShutdown();
+  }
+
+  function shutdown(code = 0, { drain = false, signal } = {}) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    shutdownCode = code;
+    shutdownSignal = signal;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    if (drain && pendingRequests.size) {
+      drainPoll = setInterval(() => { if (!pendingRequests.size) closeChildInputs(); }, 10);
+      drainTimer = setTimeout(() => closeChildInputs(), 1000);
+    } else closeChildInputs(signal);
+  }
   let hostStartedAt = 0;
   let unavailableStreak = 0;
   let holdCalls = false;
@@ -1444,18 +1596,18 @@ async function main() {
     if (handshake.initialize) {
       const pendingInit = replay.find((req) => req.method === 'initialize');
       if (pendingInit) {
-        c.stdin.write(`${pendingInit.line}\n`);
+        c.stdin.write(jsonLine(pendingInit.line));
       } else {
         try {
           const msg = JSON.parse(handshake.initialize);
           msg.id = `wsr-init-${swallowIds.size}`;
           swallowIds.add(msg.id);
-          c.stdin.write(`${JSON.stringify(msg)}\n`);
+          c.stdin.write(jsonLine(JSON.stringify(msg)));
         } catch { /* a handshake that will not parse cannot be replayed */ }
       }
     }
-    if (handshake.initialized) c.stdin.write(`${handshake.initialized}\n`);
-    for (const req of replay) if (req.method !== 'initialize') c.stdin.write(`${req.line}\n`);
+    if (handshake.initialized) c.stdin.write(jsonLine(handshake.initialized));
+    for (const req of replay) if (req.method !== 'initialize') c.stdin.write(jsonLine(req.line));
   }
 
   // What to put on the VPS backend before the agent's first action: the
@@ -1467,6 +1619,11 @@ async function main() {
   // worth opening. A mirror that exists but is still restoring never falls
   // back to the single page: that would open a cookie-less duplicate.
   async function prepareContinuation(live) {
+    // A request already sent may finish, but EOF must not start the next
+    // restore retry, tab read or automatic open in this async sequence.
+    const fetchWhileOpen = (...args) => shuttingDown
+      ? Promise.reject(new Error('workspace-router is shutting down'))
+      : fetch(...args);
     const resumeFile = resumePath(macStateFile, botId);
     const record = readResumeRecord(resumeFile);
     const seen = (readMacState(macStateFile) || {}).lastSeenOnline;
@@ -1479,7 +1636,9 @@ async function main() {
       botName,
       timeoutMs: restoreMs,
       retryMs: Math.round(restoreMs * 0.8),
+      fetchImpl: fetchWhileOpen,
     });
+    if (shuttingDown) return { args: [] };
     if (restored.status === 'restored') {
       return { ...restored, args: ['--tab-map', JSON.stringify(restored.map)] };
     }
@@ -1491,6 +1650,7 @@ async function main() {
         record,
         botId,
         botName,
+        fetchImpl: fetchWhileOpen,
       });
       if (continued) {
         markResumeOpened(resumeFile, record, continued.tabId);
@@ -1513,7 +1673,7 @@ async function main() {
         `This action was in flight when the ${hostName} connection dropped. It may or may not have happened and was NOT retried. ` +
         `${notice} Check the page in the VPS tab before repeating it.`;
       const msg = { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
-      process.stdout.write(`${JSON.stringify(annotateResult(msg, 'vps', mac, null, undefined, annotCtx.tabIdChanged))}\n`);
+      process.stdout.write(jsonLine(JSON.stringify(annotateResult(msg, 'vps', mac, null, undefined, annotCtx.tabIdChanged))));
     }
   }
 
@@ -1522,12 +1682,12 @@ async function main() {
     let settled = false;
     let lostSent = false;
     const answerLost = (notice) => {
-      if (lostSent || !lost.length) return;
+      if (shuttingDown || lostSent || !lost.length) return;
       lostSent = true;
       sendLostCallErrors(lost, notice);
     };
     const settle = (continuation) => {
-      if (settled) return;
+      if (settled || shuttingDown) return;
       settled = true;
       if (continuation.args.length && activeHost === 'vps' && !shuttingDown) {
         const old = activeChild;
@@ -1571,14 +1731,14 @@ async function main() {
   function startVpsBackend({ replay = null, reads = [], lost = [] } = {}) {
     const c = spawnVps([]);
     if (replay) replayHandshake(c, replay);
-    else for (const line of bufferedStdin) c.stdin.write(`${line}\n`);
+    else for (const line of bufferedStdin) c.stdin.write(jsonLine(line));
     heldCalls.push(...reads);
     if (macSsh) beginContinuation(lost);
   }
 
   function writeToChild(line) {
     try {
-      if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(`${line}\n`);
+      if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(jsonLine(line));
     } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
   }
 
@@ -1629,7 +1789,45 @@ async function main() {
     } catch {
       out = JSON.stringify(msg);
     }
-    process.stdout.write(`${out}\n`);
+    process.stdout.write(jsonLine(out));
+  }
+
+  // A malformed child frame has no trustworthy request ID. Settle the calls
+  // already sent on that stream explicitly, without replaying uncertain input;
+  // retire their later replies while allowing subsequent frames/reads through.
+  function validBackendFrame(line, viaVm) {
+    try { JSON.parse(line); return true; } catch { /* transport failure */ }
+    process.stderr.write('workspace-router: invalid JSON frame from browser connector\n');
+    for (const [id, req] of pendingRequests) {
+      if ((req.via === 'vm') !== viaVm || req.awaitingApproval || heldCalls.includes(req.line)) continue;
+      pendingRequests.delete(id);
+      unbuffer(req.line);
+      noteDead(id);
+      const merge = tabMerges.get(id);
+      if (merge && typeof merge === 'object') {
+        noteDead(merge.vmId);
+        tabMerges.delete(merge.vmId);
+        tabMerges.delete(id);
+      }
+      const read = req.method !== 'tools/call' || READ_ONLY_TOOLS.has(req.name);
+      const text = 'The browser connector returned an invalid JSON frame. ' + (read
+        ? 'The request did not return usable state. Retry the read.'
+        : 'This action may or may not have happened and was not retried. Check a fresh snapshot before repeating it.');
+      if (req.method === 'tools/call') emitToolError(id, text, viaVm ? vmAnnotate : annotate);
+      else process.stdout.write(jsonLine(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32603, message: text } })));
+    }
+    // The computer half may already have cleared the original pending ID.
+    // A malformed VM half must also finish the router-owned merge promptly.
+    for (const [id, merge] of [...tabMerges]) {
+      if (typeof merge !== 'object' || (viaVm ? merge.vm : merge.mac)) continue;
+      tabMerges.delete(id);
+      tabMerges.delete(merge.vmId);
+      pendingRequests.delete(id);
+      noteDead(id);
+      noteDead(merge.vmId);
+      emitToolError(id, 'The browser connector returned an invalid JSON frame while listing tabs. Retry the tabs read.');
+    }
+    return false;
   }
 
   // A consumed line must not also replay onto the failover backend.
@@ -1758,8 +1956,19 @@ async function main() {
     if (typeof tabId !== 'string' || !data || typeof data !== 'object') return;
     let page = tabPages.get(tabId);
     if (!page) {
-      page = { names: new Map(), hrefs: new Map(), origin: '', url: '', live: new Set(), full: false };
+      page = { names: new Map(), hrefs: new Map(), controls: new Map(), origin: '', url: '', live: new Set(), full: false };
       tabPages.set(tabId, page);
+    }
+    const context = data.approvalContext;
+    if (context && context.version === 1 && typeof context.documentId === 'string' && typeof context.url === 'string') {
+      if (page.approvalContext && context.documentId !== page.approvalContext.documentId) {
+        page.names.clear(); page.hrefs.clear(); page.controls.clear(); page.live.clear(); page.full = false;
+      }
+      page.approvalContext = { ...context };
+    } else if ([data.elements, data.changed, data.removed].some(Array.isArray)) {
+      // A later/older backend observation without proof cannot inherit the
+      // capability of a previous document or connection from the cache.
+      delete page.approvalContext;
     }
     const url = data.url || (data.effect && data.effect.url) || (data.tab && data.tab.url);
     try {
@@ -1771,6 +1980,7 @@ async function main() {
           page.url = parsed.href;
           page.names = new Map();
           page.hrefs = new Map();
+          page.controls = new Map();
           page.live = new Set();
           page.full = false;
           page.frame = undefined;
@@ -1783,7 +1993,7 @@ async function main() {
     const c = data.challenge;
     page.challenge = c && typeof c === 'object' && typeof c.kind === 'string' ? { kind: c.kind, blocking: c.blocking === true } : null;
     if (Array.isArray(data.elements)) {
-      page.full = data.truncated && typeof data.truncated === 'object'
+      page.full = data.loading ? false : data.truncated && typeof data.truncated === 'object'
         ? !data.truncated.elements
         : data.elements.length < ACTION_ELEMENT_CAP;
     } else if (Array.isArray(data.changed) || Array.isArray(data.removed)) {
@@ -1803,6 +2013,13 @@ async function main() {
     }
     const overlays = Array.isArray(data.overlays)
       ? data.overlays.map((o) => o && { ref: o.close, name: o.closeName }) : [];
+    // Only a complete list can retire omitted controls. Partial action replies
+    // and deltas cannot establish that a name is unique on the current page.
+    if (Array.isArray(data.elements) && page.full && data.truncated && typeof data.truncated === 'object') {
+      page.names.clear();
+      page.hrefs.clear();
+      page.controls.clear();
+    }
     const lists = [data.elements, data.changed, overlays,
       ...(Array.isArray(data.results) ? data.results.map((r) => r && r.elements) : [])];
     for (const list of lists) {
@@ -1811,6 +2028,7 @@ async function main() {
         if (!el || typeof el.ref !== 'string') continue;
         const name = typeof el.name === 'string' ? el.name : '';
         page.names.set(el.ref, name);
+        page.controls.set(el.ref, { role: el.role, type: el.type, row: el.row, approvalTarget: el.approvalTarget });
         if (typeof el.href === 'string' && el.href) page.hrefs.set(el.ref, el.href);
         else page.hrefs.delete(el.ref);
         if (name && isCommitName(name)) page.live.add(cardText(name, 80));
@@ -1825,12 +2043,19 @@ async function main() {
         if (listed.has(ref)) continue;
         page.names.delete(ref);
         page.hrefs.delete(ref);
+        page.controls.delete(ref);
       }
     }
     for (const ref of page.names.keys()) {
       if (page.names.size <= 2000) break;
       page.names.delete(ref);
       page.hrefs.delete(ref);
+      page.controls.delete(ref);
+    }
+    for (const ref of Array.isArray(data.removed) ? data.removed : []) {
+      page.names.delete(ref);
+      page.hrefs.delete(ref);
+      page.controls.delete(ref);
     }
   }
 
@@ -2021,7 +2246,7 @@ async function main() {
     } catch {
       out = JSON.stringify(merged);
     }
-    process.stdout.write(`${out}\n`);
+    process.stdout.write(jsonLine(out));
   }
 
   // Both halves of a merged tabs call are held until the other backend
@@ -2097,11 +2322,11 @@ async function main() {
     args.push('--connection', vpsConnection);
     const c = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
     vmChild = c;
+    ownChild(c);
     c.stdin.on('error', () => {});
-    readline
-      .createInterface({ input: c.stdout, crlfDelay: Infinity })
-      .on('line', (line) => {
+    readJsonLines(c.stdout, (line) => {
         if (c !== vmChild) return;
+        if (!validBackendFrame(line, true)) return;
         touchActivity();
         if (swallowLine(line)) return;
         if (deadReplyLine(line)) return;
@@ -2112,12 +2337,12 @@ async function main() {
         learnTabUse(line, seenReq, 'vm');
         let out;
         try {
-          out = vmAnnotate(line, callMs);
+          out = vmAnnotate(line, callMs, seenReq);
         } catch {
           out = line;
         }
         if (out === null) return;
-        process.stdout.write(`${out}\n`);
+        process.stdout.write(jsonLine(out));
       });
     const drop = () => {
       if (c !== vmChild) return;
@@ -2137,7 +2362,7 @@ async function main() {
       }
     };
     c.on('error', drop);
-    c.on('exit', drop);
+    c.on('close', drop);
     replayHandshake(c, []);
     process.stderr.write('workspace-router: started the VM browser connector\n');
   }
@@ -2185,8 +2410,15 @@ async function main() {
   // each is judged against. A reload on a commit page may resubmit it, and a
   // same-site address that reads like an action may commit by loading.
   const keyLabel = (key) => (key === ' ' ? 'Space' : /^[\r\n]+$/.test(key) ? 'Enter' : cardText(key, 10) || 'a control key');
+  // Match refsSource().byName's equality, not the commit classifier's wider
+  // linguistic readings. Hyphens, Unicode look-alikes and near names are not
+  // equivalent browser targets. Snapshot roles are tags or explicit ARIA roles.
+  const targetName = (name) => String(name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const targetRole = (control) => control.role === 'input'
+    ? ({ checkbox: 'checkbox', radio: 'radio', submit: 'button', button: 'button', reset: 'button', range: 'slider', search: 'searchbox' }[control.type] || 'textbox')
+    : ({ a: 'link', select: 'combobox', textarea: 'textbox', summary: 'button' }[control.role] || control.role);
   function clickTargets(args) {
-    const found = { acts: [], commits: [], unseen: null, unread: null, banned: null };
+    const found = { acts: [], commits: [], unseen: null, unread: null, unbound: null, banned: null };
     const page = tabPages.get(args.tabId);
     const live = page && page.live.size ? [...page.live][0] : '';
     const steps = args.action === 'batch' ? (Array.isArray(args.steps) ? args.steps : []) : [args];
@@ -2279,13 +2511,24 @@ async function main() {
             else if (follows) actionHref(end.ref);
           }
         } else if (typeof end.name === 'string' && end.name) {
-          // The app acts only on a control with exactly this name.
+          // The browser resolves exact names with case and whitespace folded,
+          // and applies role/row before checking uniqueness. A cached href is
+          // evidence only for that same unique target. Keep the name request so
+          // the host still rechecks live ambiguity and the freshly resolved href.
           const name = cardText(end.name, 80);
           found.acts.push(`${act} "${name}"`);
           if (isCommitName(end.name)) found.commits.push(`"${name}" looks like it buys, books, sends, posts, submits or deletes`);
-          else if (page && follows) {
-            const wanted = end.name.trim().toLowerCase();
-            for (const [ref, known] of page.names) if (known.trim().toLowerCase() === wanted) actionHref(ref);
+          else {
+            const wanted = targetName(end.name), role = targetName(end.role), row = targetName(end.row);
+            const matches = !page ? [] : [...page.names].filter(([ref, known]) => {
+              const control = page.controls.get(ref) || {};
+              return targetName(known) === wanted
+                && (!role || control.role === role || targetRole(control) === role)
+                && (!row || targetName(control.row).includes(row));
+            });
+            if (moved || !page || !page.full || matches.length !== 1) {
+              found.unbound = found.unbound || `the name "${name}"${role ? ` with role "${cardText(role, 30)}"` : ''} cannot be bound to one current observed control. Take a complete snapshot and use its ref`;
+            } else if (follows) actionHref(matches[0][0]);
           }
         } else if (typeof end.selector === 'string' && end.selector) {
           const selector = cardText(end.selector, 80);
@@ -2303,12 +2546,53 @@ async function main() {
     return found;
   }
 
+  // Same canonical operation as the enforcing host; routing metadata is
+  // excluded, but nested params, destinations, text and dialogs are bound.
+  function approvalActionKey(body) {
+    const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+    return crypto.createHash('sha256').update(JSON.stringify(stable(Object.fromEntries(Object.entries(body).filter(([key]) => !['tabId', 'epoch', 'generation', 'approval', 'commit'].includes(key)))))).digest('hex');
+  }
+  function bindApproval(args, page) {
+    const context = page?.approvalContext;
+    if (context?.version !== 1 || !/^[a-f0-9]{32}$/.test(context.documentId || ''))
+      return { error: 'approval_binding_unavailable: this host/connector provides no document and target proof. Update the browser host and workspace connector to approval-binding-v1, take a fresh snapshot, then request approval again. Nothing ran.' };
+    const resolve = target => {
+      let ref = target.ref;
+      if (!ref && target.name && page.full) {
+        const wanted = targetName(target.name), role = targetName(target.role), row = targetName(target.row);
+        const matches = [...page.names].filter(([ref, name]) => {
+          const control = page.controls.get(ref) || {};
+          return targetName(name) === wanted && (!role || control.role === role || targetRole(control) === role)
+            && (!row || targetName(control.row).includes(row));
+        });
+        if (matches.length === 1) ref = matches[0][0];
+      }
+      const token = page.controls.get(ref)?.approvalTarget;
+      return typeof ref === 'string' && /^[a-f0-9]{32}$/.test(token || '') ? { ref, token } : null;
+    };
+    const steps = args.action === 'batch' ? args.steps : [args], bound = [];
+    for (const step of steps || []) {
+      const targets = [];
+      if (TARGET_STEPS[step.action] || ['type', 'move'].includes(step.action)) {
+        const source = resolve(step);
+        const destination = step.action === 'drag' ? resolve({ ref: step.toRef }) : null;
+        if (!source || (step.action === 'drag' && !destination)) return { error: 'approval_binding_unavailable: this input has no observed target proof. Take a fresh snapshot and use an observed ref or a unique exact name; for a drag, use toRef. Then request approval again. Nothing ran.' };
+        targets.push(source);
+        if (destination) targets.push(destination);
+      }
+      if (step.action === 'cdp' && /^Input\./.test(String(step.method))) return { error: 'approval_binding_unavailable: raw input has no observed target proof. Use a snapshot ref or exact name with the browser input actions, then request approval again. Nothing ran.' };
+      bound.push({ key: approvalActionKey(step), targets });
+    }
+    return { version: 1, documentId: context.documentId, url: context.url, key: approvalActionKey(args), steps: bound };
+  }
+
   const APPROVAL_REFUSALS = {
     declined: 'declined: the user did not approve this, or no one could be asked (in a scheduled job Hermes declines on its own). It did not run. Do not retry it or reach the same result another way. Leave everything staged up to this step and tell the user it is waiting for them.',
     approval_timeout: 'approval_timeout: the user did not answer in time. It did not run. Ask the user in chat before trying again.',
     approval_unavailable: 'approval_unavailable: this session cannot ask the user to approve (for example a scheduled job). It did not run. Leave everything staged up to this step and ask the user to finish it.',
     host_changed: 'host_changed: the browser moved to another machine while the approval was pending. It did not run. Check the page, then ask again.',
-    page_changed: 'page_changed: the tab left the approved page, or someone else took control of it, while the approval was pending. It did not run. Check the page, then ask again.',
+    page_changed: 'page_changed: the reviewed document or target changed, or someone else took control, while approval was pending. It did not run. Take a fresh snapshot, review the current target, then request a new approval.',
   };
 
   // Returns true when the call was refused or is now awaiting approval.
@@ -2318,7 +2602,7 @@ async function main() {
     const targets = msg.params.name === 'cua_alans_way_open'
       ? clickTargets({ action: 'navigate', url: args.url })
       : clickTargets(args);
-    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread && !targets.banned) return false;
+    if (args.commit === undefined && !targets.commits.length && !targets.unseen && !targets.unread && !targets.unbound && !targets.banned) return false;
     unbuffer(line);
     const page = tabPages.get(args.tabId);
     const origin = page ? page.origin : '';
@@ -2359,6 +2643,9 @@ async function main() {
     if (targets.unseen) {
       return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
     }
+    if (targets.unbound) {
+      return refuse(`snapshot_required: ${targets.unbound}. It did not run.`);
+    }
     if (args.commit === undefined && !targets.commits.length) {
       return refuse(`snapshot_required: ${targets.unread}, or pass commit so the user can approve it. It did not run.`);
     }
@@ -2376,6 +2663,8 @@ async function main() {
       logDecision(record, 'approval_unavailable');
       return refuse(APPROVAL_REFUSALS.approval_unavailable);
     }
+    const binding = msg.params.name === 'cua_alans_way_action' ? bindApproval(args, page) : null;
+    if (binding?.error) return refuse(binding.error);
     const req = pendingRequests.get(msg.id);
     // The window runs from when the call arrived, so time it spent held
     // during a failover comes out of the user's share, not the action's.
@@ -2395,15 +2684,17 @@ async function main() {
     // The origin and the clicked controls are the router's own reading of
     // the page; everything before them is the agent's description.
     const acts = targets.acts.length ? ` (${targets.acts.join('; ')})` : '';
-    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${acts}`;
+    const destinations = binding ? [...new Set(binding.steps.flatMap(step => step.targets.map(target => page.hrefs.get(target.ref)).filter(Boolean)))] : [];
+    const review = binding ? ` Review page: ${cardText(binding.url, 160)}${destinations.length ? `; destination: ${destinations.map(url => cardText(url, 160)).join(', ')}` : ''}.` : '';
+    const message = `${botName || botId} wants to ${COMMIT_VERBS[commit.kind]}: ${what}${origin ? ` on ${origin}` : ''}${acts}.${review}`;
     const id = `wsr-commit-${++approvalSeq}`;
     const timer = setTimeout(() => settleApproval(id, 'approval_timeout'), windowMs);
     timer.unref();
     // The page and control epoch the user approved; the receipt the app
     // checks is bound to the same tab and epoch.
-    const bound = msg.params.name === 'cua_alans_way_action' ? { tabId: args.tabId, epoch: args.epoch, origin } : null;
+    const bound = msg.params.name === 'cua_alans_way_action' ? { tabId: args.tabId, epoch: args.epoch, origin, binding } : null;
     approvals.set(id, { callId: msg.id, line: forward, child: activeChild, record, timer, bound, commit });
-    process.stdout.write(`${JSON.stringify({
+    process.stdout.write(jsonLine(JSON.stringify({
       jsonrpc: '2.0',
       id,
       method: 'elicitation/create',
@@ -2421,7 +2712,7 @@ async function main() {
           required: ['approve'],
         },
       },
-    })}\n`);
+    })));
     return true;
   }
 
@@ -2438,11 +2729,13 @@ async function main() {
       const known = knownTabs.get(entry.bound.tabId);
       const page = tabPages.get(entry.bound.tabId);
       if ((known && Number.isInteger(known.epoch) && known.epoch !== entry.bound.epoch)
-        || (page && page.origin && entry.bound.origin && page.origin !== entry.bound.origin)) decision = 'page_changed';
+        || (page && page.origin && entry.bound.origin && page.origin !== entry.bound.origin)
+        || (page?.approvalContext && (page.approvalContext.documentId !== entry.bound.binding.documentId || page.approvalContext.url !== entry.bound.binding.url))
+        || (page && entry.bound.binding.steps.some(step => step.targets.some(t => page.controls.get(t.ref)?.approvalTarget !== t.token)))) decision = 'page_changed';
     }
     logDecision(entry.record, decision);
     if (decision === 'approval_timeout' || decision === 'cancelled') {
-      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: decision } })}\n`);
+      process.stdout.write(jsonLine(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: decision } })));
     }
     const req = pendingRequests.get(entry.callId);
     if (decision === 'cancelled') {
@@ -2470,6 +2763,7 @@ async function main() {
         issuedAt: Date.now(),
         tabId: entry.bound.tabId,
         epoch: entry.bound.epoch,
+        binding: entry.bound.binding,
       };
       line = JSON.stringify(msg);
     }
@@ -2587,7 +2881,7 @@ async function main() {
       tabMerges.set(merge.vmId, msg.id);
       writeToChild(out);
       try {
-        vmChild.stdin.write(`${JSON.stringify({ ...msg, id: merge.vmId })}\n`);
+        vmChild.stdin.write(jsonLine(JSON.stringify({ ...msg, id: merge.vmId })));
       } catch { /* the merge completes with whatever the computer side answered */ }
       return null;
     }
@@ -2600,7 +2894,7 @@ async function main() {
     if (req) req.via = 'vm';
     unbuffer(line);
     try {
-      vmChild.stdin.write(`${out}\n`);
+      vmChild.stdin.write(jsonLine(out));
     } catch { /* a dead connector fails the call from its exit handler */ }
     return null;
   }
@@ -2608,17 +2902,18 @@ async function main() {
   function bindChild(c, host) {
     activeChild = c;
     activeHost = host;
+    ownChild(c);
     if (host === 'mac') hostStartedAt = Date.now();
     // A write after the Mac ssh has already exited emits EPIPE asynchronously.
     // That must not kill the process that is about to answer from the VPS.
     c.stdin.on('error', () => {});
     annotate = safeAnnotator(host);
-    readline
-      .createInterface({ input: c.stdout, crlfDelay: Infinity })
-      .on('line', (line) => {
+    readJsonLines(c.stdout, (line) => {
         if (c !== activeChild) return;
+        if (!validBackendFrame(line, false)) return;
         touchActivity();
         if (swallowLine(line)) return;
+        if (deadReplyLine(line)) return;
         if (host === 'mac') {
           // ssh is up but the app behind it is gone: the backend answers
           // every call with "browser unavailable". The first such error is the
@@ -2643,23 +2938,23 @@ async function main() {
         bufferedStdin.length = 0;
         let out;
         try {
-          out = annotate(line, callMs);
+          out = annotate(line, callMs, seenReq);
         } catch {
           out = line;
         }
         if (out === null) return;
-        process.stdout.write(`${out}\n`);
+        process.stdout.write(jsonLine(out));
       });
     c.on('error', (e) => {
       if (superseded.has(c)) return;
       process.stderr.write(`workspace-router: failed to spawn backend: ${e.message}\n`);
-      if (host === 'mac' && !provedAlive) {
+      if (host === 'mac' && !provedAlive && !shuttingDown) {
         failOver(`${hostName} backend failed to spawn`);
         return;
       }
-      process.exit(1);
+      shutdown(1);
     });
-    c.on('exit', (code, sig) => {
+    c.on('close', (code, sig) => {
       if (superseded.has(c)) return;
       if (c !== activeChild) return;
       if (host === 'mac' && !shuttingDown) {
@@ -2670,17 +2965,19 @@ async function main() {
           : `${hostName} backend died before its first response`);
         return;
       }
-      process.exit(code === null ? (sig ? 1 : 0) : code);
+      shutdown(code === null ? (sig ? 1 : 0) : code);
     });
   }
 
   let lastActivity = Date.now();
   const touchActivity = () => { lastActivity = Date.now(); };
 
-  readline
-    .createInterface({ input: process.stdin, crlfDelay: Infinity })
-    .on('line', (raw) => {
+  readJsonLines(process.stdin, (raw) => {
       touchActivity();
+      try { JSON.parse(raw); } catch {
+        process.stdout.write(jsonLine(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON frame. Send one complete JSON message per LF-delimited line.' } })));
+        return;
+      }
       if (raw.includes('wsr-commit-') && answerApproval(raw)) return;
       const line = withoutApproval(raw);
       const method = noteClientRpc(line, pendingRequests);
@@ -2702,6 +2999,9 @@ async function main() {
       }
       armWatchdog();
     });
+  // Register after readJsonLines so its final unterminated frame is handled
+  // before terminal EOF disables all restart/replay paths.
+  process.stdin.once('end', () => shutdown(0, { drain: true }));
 
   if (macCommand) {
     process.stderr.write(`workspace-router: routing to ${hostName} browser host\n`);
@@ -2779,24 +3079,17 @@ async function main() {
   let routerMtime = 0;
   try { routerMtime = fs.statSync(__filename).mtimeMs; } catch { /* a missing script has nothing newer to load */ }
   const reloadTimer = setInterval(() => {
-    if (pendingRequests.size > 0 || Date.now() - lastActivity < 1000) return;
+    if (shuttingDown || pendingRequests.size > 0 || Date.now() - lastActivity < 1000) return;
     let mtime = routerMtime;
     try { mtime = fs.statSync(__filename).mtimeMs; } catch { return; }
     if (mtime <= routerMtime) return;
     process.stderr.write('workspace-router: script replaced — exiting so the next connection loads it\n');
-    shuttingDown = true;
-    try { if (activeChild) activeChild.kill('SIGTERM'); } catch { /* the exit below is what Hermes respawns from */ }
-    try { if (vmChild) vmChild.kill('SIGTERM'); } catch {}
-    process.exit(0);
+    shutdown(0, { signal: 'SIGTERM' });
   }, 5000);
   reloadTimer.unref();
   for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(s, () => {
-      shuttingDown = true;
-      try {
-        if (activeChild) activeChild.kill(s);
-        if (vmChild) vmChild.kill(s);
-      } catch {}
+      shutdown(1, { signal: s });
     });
   }
 
@@ -2810,6 +3103,7 @@ async function main() {
   if (macSsh) {
     let onlineStreak = 0;
     const timer = setInterval(() => {
+      if (shuttingDown) return;
       if (activeHost === 'mac') {
         onlineStreak = 0;
         return;
@@ -2827,12 +3121,7 @@ async function main() {
         process.stderr.write(
           `workspace-router: ${hostName} is online — exiting so the next connection re-probes and routes to it\n`,
         );
-        shuttingDown = true;
-        try {
-          if (activeChild) activeChild.kill('SIGTERM');
-          if (vmChild) vmChild.kill('SIGTERM');
-        } catch {}
-        process.exit(0);
+        shutdown(0, { signal: 'SIGTERM' });
       }
     }, 10000);
     timer.unref();

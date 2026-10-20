@@ -219,39 +219,79 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "setup.sh must be passed the pinned desktop ref",
         )
 
-    def test_busy_mode_choice_requires_an_answer_before_restart(self):
-        for phrase in ("When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?",
-                       "every platform in that profile", "after the current step finishes",
-                       "Never treat silence or non-interactive runs as consent",
-                       "already `steer`", "skills.config.workspace-setup.busy_input_choice",
-                       "config set display.busy_input_mode steer",
-                       "config set display.busy_input_mode interrupt"):
-            self.assertIn(phrase, self.normalized)
-        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\n# Prepare"))
+    def autonomy_step(self):
+        self.assertIn("**Working on its own", self.text)
+        return _normalized(self.text.split("**Working on its own", 1)[1]
+                           .split("**Make Telegram feel right.**", 1)[0])
+
+    def test_autonomy_question_and_goal_hint_are_exact_and_before_restart(self):
+        question = ("Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, "
+                    "double-check code changes before calling them done, and fold in anything you send while I'm working. "
+                    "(Recommended. Say no to keep things as they are.)")
+        hint = "For a big job, start your message with /goal and I'll keep at it until it's verified done."
+        step = self.autonomy_step()
+        self.assertEqual(step.count(question), 1)
+        self.assertEqual(step.count(hint), 1)
+        for rule in ("ask once", "every platform in that profile", "after the current step finishes",
+                     "After setup, say once"):
+            self.assertIn(rule, step)
+        self.assertLess(self.text.index("**Working on its own"), self.text.index("```sh\n# Prepare"))
+        self.assertLess(self.text.index("**Working on its own"),
+                        self.text.index("6. **The gateway restart"))
+
+    def test_autonomy_reads_each_key_and_only_changes_stock_defaults(self):
+        step = self.autonomy_step()
+        for key, stock, recommended in (("display.busy_input_mode", "interrupt", "steer"),
+                                        ("agent.intent_ack_continuation", "auto", "true"),
+                                        ("agent.verify_on_stop", "false", "true")):
+            with self.subTest(key=key):
+                self.assertIn(f"| `{key}` | `{stock}` | `{recommended}` |", step)
+                self.assertIn(f"config get {key}", step)
+                self.assertIn(f"config set {key} {recommended}", step)
+        for rule in ("effective value", "including Hermes's defaults", "only when its effective value is the stock default",
+                     "Read back all three keys", "including unchanged keys", "report the actual values",
+                     "Preserve and show every other existing value", "`steer` or `queue`",
+                     "`agent.intent_ack_continuation: false`", "`agent.verify_on_stop: false`",
+                     "deliberately chose", "merged value", "cannot distinguish", "same consent exchange",
+                     "Preserve unknown values and unreadable config"):
+            self.assertIn(rule, step)
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)
 
-    def test_busy_mode_uses_effective_value_and_skips_steer_queue_or_remembered_interrupt(self):
-        for rule in ("effective value", "config get display.busy_input_mode",
-                     "already `steer` or `queue`", "A recorded `keep-interrupt`",
-                     "An absent marker means ask once", "report the unknown state"):
-            self.assertIn(rule, self.normalized)
+    def test_autonomy_reruns_preserve_saved_and_legacy_choices(self):
+        step = self.autonomy_step()
+        for rule in ("config get skills.config.workspace-setup.autonomy_choice",
+                     "A recorded `keep-current` or `chosen`", "continue without asking or rewriting",
+                     "config get skills.config.workspace-setup.busy_input_choice",
+                     "A recorded `keep-interrupt` skips only `display.busy_input_mode`",
+                     "still offer the other two keys", "confirmed “Config key not set”",
+                     "report the unknown state", "never restore settings from it or override later user changes",
+                     "config unset skills.config.workspace-setup.autonomy_choice"):
+            self.assertIn(rule, step)
 
     def test_silence_cannot_be_overridden_by_setup(self):
-        for rule in ("with no answer, leave the mode and marker untouched",
-                     "General setup or proactivity consent does not answer this question",
-                     "Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices"):
-            self.assertIn(rule, self.normalized)
+        for rule in ("with no answer, leave the settings and marker untouched",
+                     "Never treat silence or non-interactive runs as consent",
+                     "General setup or proactivity consent does not answer this question"):
+            self.assertIn(rule, self.autonomy_step())
+        self.assertIn("Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices", self.normalized)
 
-    def test_answer_and_readback_gate_marker_write(self):
+    def test_autonomy_marker_is_last_and_requires_successful_readbacks(self):
+        step = self.autonomy_step()
         for rule in ("Apply only the answered choice with the supported CLI",
-                     "Read back that key and report a failure before continuing",
-                     "only after that answer and a successful mode readback",
-                     "never restore a mode from it or override later user changes",
-                     "config unset skills.config.workspace-setup.busy_input_choice"):
-            self.assertIn(rule, self.normalized)
+                     "An explicit no preserves all three settings", "config.yaml",
+                     "only after that answer and successful readbacks",
+                     "report the mismatch and leave the marker untouched",
+                     "Read back the marker too", "failed writes/readbacks"):
+            self.assertIn(rule, step)
+        for answer in ("chosen", "keep-current"):
+            marker_write = f"config set skills.config.workspace-setup.autonomy_choice {answer}"
+            self.assertIn(marker_write, step)
+            self.assertLess(step.index("Read back all three keys"), step.index(marker_write))
+            for key in ("display.busy_input_mode", "agent.intent_ack_continuation", "agent.verify_on_stop"):
+                self.assertLess(step.index(f"config set {key}"), step.index(marker_write))
 
     def test_global_interim_preference_is_preserved_by_telegram_offer(self):
         self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
@@ -364,12 +404,12 @@ class SetupPinProcedureTests(unittest.TestCase):
         checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
                                    "describe", "--tags", "--exact-match"],
                                   capture_output=True, text=True, env=self.env)
-        self.assertEqual(checkout.stdout.strip(), "v0.21.6")
+        self.assertEqual(checkout.stdout.strip(), "v0.21.7")
 
     def prepare_checkout(self, existing=False):
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "commit", "--allow-empty", "-qm", "first")
-        self.git("tag", "-f", "v0.21.6")
+        self.git("tag", "-f", "v0.21.7")
         self.destination = self.root / "alans-way-agents"
         if existing:
             subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],

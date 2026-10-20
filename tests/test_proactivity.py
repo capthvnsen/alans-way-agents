@@ -943,6 +943,37 @@ class PromptTests(unittest.TestCase):
 
 
 class RegisterTests(unittest.TestCase):
+    def test_task_policy_reaches_every_profile_and_surface_with_tone_disabled(self):
+        package = sys.modules["alans_way_idle_test"]
+        for profile in ("default", "secondary"):
+            hooks = []
+            state = FakeState()
+            state.set("voice", {"mode": "default"})
+            ctx = SimpleNamespace(
+                profile_name=profile, state=state,
+                register_tool=lambda **kw: None,
+                register_hook=lambda name, fn: hooks.append((name, fn)),
+                register_skill=lambda *a: None, register_command=lambda *a, **kw: None,
+                on_unload=self.addCleanup)
+            with tempfile.TemporaryDirectory() as home:
+                package.register(ctx, legacy_home=home, background=False)
+            self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
+            for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron", ""):
+                with self.subTest(profile=profile, platform=platform):
+                    for first in (True, False):
+                        result = package.task_context(platform=platform, is_first_turn=first,
+                                                      user_message="Compare and save the reports.")
+                        self.assertEqual(set(result), {"context"})
+                        for rule in ("verified done or genuinely blocked", "checklist of mini goals",
+                                     "native todo tool when available", "otherwise in working context",
+                                     "Verify each goal and mark it done", "without waiting for 'keep going'",
+                                     "independent authorized work", "login or CAPTCHA, approval or decision",
+                                     "information only they have", "cannot safely recover",
+                                     "what is done, what remains and exactly what is needed to resume",
+                                     "check it against each thing they explicitly asked for",
+                                     "trying the source's own page before saying a fact isn't available"):
+                            self.assertIn(rule, result["context"])
+
     def test_register_wires_public_surfaces_only(self):
         calls, factories = [], {}
         ctx = SimpleNamespace(
