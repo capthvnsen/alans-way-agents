@@ -13,7 +13,7 @@ from .cross_bot import CrossBot, CROSS_SCHEMA, ASK_SCHEMA
 TASK_NOTE = (
     "[Task completion] Work until every requested outcome is verified done or genuinely blocked."
     " For multi-step tasks, keep a short checklist of mini goals in Hermes's native todo tool"
-    " when available, otherwise in working context. Verify each goal, then continue to the next"
+    " when available, otherwise in working context. Verify each goal and mark it done, then continue to the next"
     " without waiting for 'keep going'. Real blockers require a user's login or CAPTCHA, approval"
     " or decision, information only they have, or a failure you cannot safely recover from with"
     " available tools. Finish independent authorized work before handing back. At a blocker,"

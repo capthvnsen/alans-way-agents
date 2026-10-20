@@ -966,7 +966,7 @@ class RegisterTests(unittest.TestCase):
                         self.assertEqual(set(result), {"context"})
                         for rule in ("verified done or genuinely blocked", "checklist of mini goals",
                                      "native todo tool when available", "otherwise in working context",
-                                     "Verify each goal", "without waiting for 'keep going'",
+                                     "Verify each goal and mark it done", "without waiting for 'keep going'",
                                      "independent authorized work", "login or CAPTCHA, approval or decision",
                                      "information only they have", "cannot safely recover",
                                      "what is done, what remains and exactly what is needed to resume"):
