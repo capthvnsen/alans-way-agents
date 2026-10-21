@@ -18,6 +18,12 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
+    def test_keep_browser_only_skips_disabling_and_needs_explicit_reenable(self):
+        self.assertIn("built-in browser toolset for Telegram and cron", self.normalized)
+        self.assertIn("`--keep-browser` only skips disabling it; it does not re-enable an already-disabled toolset", self.normalized)
+        self.assertIn("hermes -p <profile> tools enable browser --platform <platform>", self.normalized)
+        self.assertNotIn("`--keep-browser` undoes that", self.normalized)
+
     def telegram_step(self):
         return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
                            .split("```sh", 1)[0])

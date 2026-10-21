@@ -18,15 +18,17 @@ native-app steps use its approval-gated `computer_use` path.
 
 ## Pick the host
 
-`cua_alans_way_open` takes an optional `host`. Run the errand on the
-user's computer when their own session matters — a logged-in account, a
-cart they built, member pricing, a checkout that needs their saved
-details. That tab shares the user's Alan's Workspace browser profile,
-so what you see is what they would see. Run it on the VPS (`host:"vm"`) when their
-computer is asleep or the errand must finish while they are away; the VPS
-browser keeps its own profile, so expect to sign in once per site — ask
-the user rather than working past a login wall. If the computer drops
-mid-errand, follow workspace-operations' continuation notice and new tab
+`cua_alans_way_open` takes an optional `host`. Omit it for normal work,
+including errands that continue while the user is away: the router starts
+on the user's computer when it is reachable and uses the VM's own Workspace
+browser when it is not. Pass `host:"vm"` only when the user explicitly asks
+for your own computer or the VM, or the router reports the user's computer
+unreachable. Login, CAPTCHA, approval and uncertain-action errors are not
+outages and never switch browsers. Hermes's native browser is not a third tier.
+The user's computer shares their Alan's Workspace browser profile; the VM
+keeps its own profile, so ask the user rather than working past a login wall.
+Finish an already-running VM task there even when the user's computer returns.
+If the computer drops mid-errand, follow workspace-operations' continuation notice and new tab
 id. Re-read the staged details on that host before committing. If a
 commit's outcome is uncertain, inspect the page before doing anything
 that could repeat it; a host switch is not evidence that it failed.

@@ -21,6 +21,35 @@ def run(*args, env=None, check=True):
     return result
 
 
+class SetupBrowserPolicyTests(unittest.TestCase):
+    def test_keep_browser_rerun_does_not_reenable_the_disabled_native_browser(self):
+        from test_setup_sh import env_for, read_log, run as run_setup, tooling
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            (home / "profiles" / "delta").mkdir(parents=True)
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            env = env_for(root, bin_dir, home)
+            args = ("--bot-id", "111222333", "--profile", "delta", "--skip-browser",
+                    "--skip-services", "--non-interactive", "--hermes-home", str(home))
+            first = run_setup(*args, env=env, check=False)
+            for platform in ("telegram", "cron"):
+                self.assertIn(f"-p delta tools disable browser --platform {platform}", read_log(log))
+                self.assertIn(f"hermes -p delta tools enable browser --platform {platform}", first.stdout)
+            self.assertNotIn("To keep it on, re-run with --keep-browser", first.stdout)
+            log.write_text("")
+            kept = run_setup("--keep-browser", *args, env=env, check=False)
+            self.assertNotIn("tools disable browser", read_log(log))
+            self.assertNotIn("tools enable browser", read_log(log))
+            self.assertIn("skipping built-in browser toolset changes (--keep-browser)", kept.stdout)
+            self.assertIn("does not re-enable an already-disabled toolset", kept.stdout)
+            self.assertNotIn("keeping the built-in browser toolset on", kept.stdout)
+            help_text = run_setup("--help", env=env).stdout
+            self.assertIn("does not re-enable it", help_text)
+
+
 class PrintModeTests(unittest.TestCase):
     def test_prints_quoted_block_for_manual_paste(self):
         result = run("--bot-id", "bot_123", "--bot-name", 'Scout "The Bot"',
