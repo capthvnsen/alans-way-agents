@@ -282,6 +282,27 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
         self.assertIn("when their own session matters", self.normalized)
         self.assertIn("computer is asleep", self.normalized)
 
+    def test_watches_use_continuity_and_conditional_change_detection(self):
+        watch = self.normalized.split("## A watch is a cron job")[1]
+        for rule in ('"continuity": true', "previous completed output",
+                     "reply exactly `[SILENT]`", "only when the user asks",
+                     "or accepts your offer", "`attach_to_session` true",
+                     "omit `deliver`", '"monitor": "https://example.com/status.json"',
+                     "safe, read-only deterministic probe",
+                     "matches the condition the user asked to watch",
+                     "omit `monitor`", "no timestamps",
+                     "first tick runs the agent", "first check report a compact baseline",
+                     "continuity skips silent outputs", "unchanged output skips",
+                     "changed output gives the agent a diff", "a check failed",
+                     "source failure is an error"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, watch)
+
+    def test_application_records_use_the_users_chosen_place(self):
+        applications = self.recipes_normalized.split("## Job applications")[1].split("## Forms")[0]
+        self.assertIn("in the user's chosen project or task record", applications)
+        self.assertNotIn("in memory", applications)
+
     def test_recipes_cover_the_errand_kinds(self):
         for heading in ("## Shopping and cart comparison",
                         "## Booking and travel",
