@@ -446,13 +446,15 @@ Once the tab is the user's:
    hands the tab back on its own once the challenge clears. When the tab is
    back with you (`controller` is `agent` and its handback says
    `human_returned`), carry on without another message: the epoch moved on,
-   and the tab list you just read gave you the fresh one. A tab you released
-   yourself on the VM can stay with the human after the challenge clears, so
-   there the user saying they're done also ends the wait.
+   and the tab list you just read gave you the fresh one. The VM tab is held too:
+   ask the user to press Give back in Alan's Workspace when finished;
+   the user saying they're done also ends the wait.
 3. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
    message already said you will pick it back up. When the user says it's
-   done, list your tabs; if the tab is still theirs, their reply is the
-   agreement to claim it, so claim it and continue.
+   done, list your tabs. Keep the host, tab id and fresh epoch together from the same reply.
+   If the tab is still theirs, try to claim it once.
+   Continue if it succeeds; if the claim is refused with `awaiting_human`, ask them to press Give back
+   in Alan's Workspace and wait for the return. Respect any other refusal.
 
 **Back off.** When a reply's `challenge` (or the tab's `handback`) has
 `backOff:true`, its `advice` says the site has challenged twice in 10 minutes:

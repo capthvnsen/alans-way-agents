@@ -627,10 +627,12 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertIn("carry on without another message", self.captcha)
         self.assertIn("the tab list you just read gave you the fresh one", self.captcha)
         self.assertIn("After 30 minutes, or if you cannot keep waiting in this turn, stop.", self.captcha)
-        # A bot's own release on the VM is not held or watched the same way:
-        # the user's "done" ends the wait and is the claim agreement.
+        # A VM release holds the tab too; a chat reply cannot bypass the hold.
         self.assertIn("the user saying they're done also ends the wait", self.captcha)
-        self.assertIn("their reply is the agreement to claim it", self.captcha)
+        self.assertIn("Keep the host, tab id and fresh epoch together from the same reply", self.captcha)
+        self.assertIn("The VM tab is held too", self.captcha)
+        self.assertIn("press Give back", self.captcha)
+        self.assertIn("if the claim is refused with `awaiting_human`, ask them to press Give back", self.captcha)
         self.assertIn("ask them to say when they're through", self.captcha)
 
     def test_a_site_that_challenges_twice_is_dropped(self):
