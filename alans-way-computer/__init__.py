@@ -15,6 +15,7 @@ import collections
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -391,18 +392,25 @@ class AlansWayComputerBackend(ComputerUseBackend):
         since = self._tree["gen"] if self._tree and self._tree["pid"] == pid else None
         before, notes, kept = self._host, [], [] if since is None else self._tree["notes"]
         els, gen = (self._tree["els"], self._tree["gen"]) if mode == "vision" and since is not None else ([], None)
+        window = None
         if mode != "vision":
             _, texts, _ = self._read("workspace_computer_snapshot", {"pid": pid, **({"since": since} if since is not None else {})}, before)
             notes = [t for t in texts[1:] if t]
             body = _json(texts[0] if texts else "")
+            window = body.get("selectedWindow", body.get("window"))
             if body.get("unchanged") and since is not None:
                 els, gen = self._tree["els"], self._tree["gen"]
             else:
                 els, gen, kept = body.get("elements") or [], body.get("generation"), _tree_notes(body)
         named = any(map(_readable, els))
+        coverage = None
+        if (mode == "som" and named and isinstance(window, dict)
+                and all(type(window.get(k)) in (int, float) and math.isfinite(window[k]) for k in ("x", "y", "width", "height"))
+                and window["width"] > 0 and window["height"] > 0):
+            coverage = _coverage(els, {"wx": window["x"], "wy": window["y"], "ww": window["width"], "wh": window["height"]})
         png = mime = shot = None
         width = height = 0
-        if mode != "ax":
+        if mode != "ax" and (coverage is None or coverage < MIN_COVERAGE):
             try:
                 items, shot_texts, _ = self._read("workspace_computer_screenshot", {"pid": pid}, before)
                 image = next(i for i in items if i.get("type") == "image")
@@ -418,8 +426,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
                     raise RuntimeError(f"screenshot failed: {why}") from e
                 if not named:
                     notes.append(f"Screenshot unavailable: {why}")
-        # The screenshot is fetched for its window size; the model gets it (~1.2k tokens) only when named
-        # controls leave most of the window unexplained: a canvas, a game, a web area.
+        # Older snapshots omit window geometry; their screenshot still supplies it.
         coverage = _coverage(els, shot) if mode == "som" and png and named and shot else None
         if coverage is not None and coverage >= MIN_COVERAGE:
             png = mime = shot = None
