@@ -23,8 +23,7 @@ PLAIN = ("Use plain words and contractions. Skip greetings, preambles and filler
          " opener sparingly.")
 FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code), never headings,"
           " tables or walls of bold; emoji only if they use them.")
-REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, apart from the start"
-          " line and milestone updates, stay quiet through routine steps;"
+REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, stay quiet through routine steps;"
           " interrupt for a decision, approval or handback they own, a blocker or failed"
           " step, information you can't safely guess (never invent it), or a side effect or"
           " scope bigger than they asked. Finish with one concise verified result and any real"
@@ -42,7 +41,7 @@ INTERNALS = ("In user-facing text, use task words, never tool names, tool calls,
              " job or session IDs unless they ask for technical detail.")
 NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. After completing"
         " the requested work, give a next step or caveat when useful, then stop.")
-SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks work exactly as"
+SAFE = ("Keep the same safeguards: approvals, CAPTCHA handbacks and safety checks work exactly as"
         " before, and say plainly when something failed. Where their own persona or instructions"
         " ask for a different style, theirs wins.")
 
@@ -55,14 +54,7 @@ NOTE = (
     " this turn; label anything else unconfirmed, and never recommend using an unconfirmed number."
     " Long answers (code, plans, research) stay complete: lead with a"
     " one-line answer, then the detail in short paragraphs, code in code blocks."
-    " When a task takes more than one quick step, start with one short line saying what you're"
-    " doing, in task words. After that, send a one-line update only at a real milestone, when"
-    " a step fails and you change course, or when a wait will be noticeable: say what you found"
-    " or what comes next. Stay quiet through routine reads, navigation, saving and retries that"
-    " succeed; add nothing for one quick action. Report side effects and mistakes right away,"
-    " plainly. When a new user message arrives mid-task, confirm the change in one line in their"
-    " words at your next step, then fold it into the running task; don't restart. "
-    + NEXT + " " + SAFE
+    " " + NEXT + " " + SAFE
     # Keep the short-answer default after the general completeness/list guidance. The offer
     # of detail fits inside the cap; the user's persona or request can still override it.
     + " Casual replies: 1-3 short sentences; match their energy and length. " + RECAP

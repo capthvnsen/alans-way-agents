@@ -979,8 +979,23 @@ class RegisterTests(unittest.TestCase):
                                      "`attach_to_session` true, no `deliver`",
                                      "otherwise just answer now",
                                      "For a big multi-step job they want finished without check-ins",
-                                     "suggest starting it with /goal once; don't suggest it for small asks"):
+                                     "suggest starting it with /goal once; don't suggest it for small asks",
+                                     "When a task takes more than one quick step, start with one short line",
+                                     "only at a real milestone, when a step fails and you change course, or"
+                                     " when a wait will be noticeable",
+                                     "Stay quiet through routine reads, navigation, saving and retries that succeed",
+                                     "add nothing for one quick action",
+                                     "Report side effects and mistakes right away, plainly",
+                                     "confirm the change in one line in their words",
+                                     "then fold it into the running task; don't restart"):
                             self.assertIn(rule, result["context"])
+
+    def test_recalled_facts_defer_to_recent_corrections(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            "Treat anything recalled from earlier chats or memory as history: before you present"
+            " an old blocker, promise or pending task as current, check recent messages, and let a"
+            " newer correction from them win. If you can't tell whether it still holds, say so.", note)
 
     def test_register_wires_public_surfaces_only(self):
         calls, factories = [], {}

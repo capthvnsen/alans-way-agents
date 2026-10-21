@@ -207,13 +207,13 @@ class NoteTests(unittest.TestCase):
 
     def test_progress_policy_is_sparse_and_confirms_steers(self):
         note = self.turn(voice(), "telegram")["context"]
-        for rule in ("Mid-task, apart from the start line and milestone updates, stay quiet"
-                     " through routine steps",
+        for rule in ("Mid-task, stay quiet through routine steps",
                      "interrupt for a decision, approval or handback they own, a blocker or"
                      " failed step",
                      "information you can't safely guess (never invent it)",
-                     "one concise verified result and any real caveat, not a step-by-step log",
-                     "start with one short line saying what you're doing",
+                     "one concise verified result and any real caveat, not a step-by-step log"):
+            self.assertIn(rule, note)
+        for rule in ("start with one short line saying what you're doing",
                      "only at a real milestone, when a step fails and you change course, or"
                      " when a wait will be noticeable",
                      "add nothing for one quick action",
@@ -221,7 +221,8 @@ class NoteTests(unittest.TestCase):
                      "confirm the change in one line in their words",
                      "then fold it into the running task",
                      "don't restart"):
-            self.assertIn(rule, note)
+            self.assertNotIn(rule, note)
+        self.assertNotIn("This changes tone only", V.SAFE)
         for dropped in ("Before each multi-step chunk", "one update per roughly two actions",
                         "first-person action and say what's next",
                         "Narrate your steps only when they ask for live updates",
@@ -230,7 +231,8 @@ class NoteTests(unittest.TestCase):
             self.assertNotIn(dropped, note)
 
     def test_one_step_question_keeps_the_no_start_line_rule(self):
-        note = self.turn(voice(), "telegram", text="what time is it in Tokyo?")["context"]
+        note = sys.modules["alans_way_idle_test"].task_context(
+            user_message="what time is it in Tokyo?")["context"]
         self.assertIn("When a task takes more than one quick step, start with one short line", note)
         self.assertIn("add nothing for one quick action", note)
 
@@ -299,9 +301,11 @@ class TelegramConversationTests(unittest.TestCase):
                                      if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
                             self.assertEqual(len(notes), 1)
                             self.assertIn(V.REPORT, notes[0])
-                            self.assertIn("start with one short line saying what you're doing", notes[0])
-                            self.assertIn("confirm the change in one line in their words", notes[0])
-                            self.assertIn("then fold it into the running task; don't restart", notes[0])
+                            task_note = sys.modules["alans_way_idle_test"].TASK_NOTE
+                            self.assertIn({"context": task_note}, results)
+                            self.assertIn("start with one short line saying what you're doing", task_note)
+                            self.assertIn("confirm the change in one line in their words", task_note)
+                            self.assertIn("then fold it into the running task; don't restart", task_note)
                             self.assertEqual("group chat" in notes[0], chat != "dm")
                         history.extend([
                             {"role": "user", "content": text},
@@ -505,8 +509,7 @@ class CorpusRuleTests(unittest.TestCase):
         self.assert_rules("Lead with the concrete status, then evidence or a caveat")
 
     def test_progress_is_quiet_and_interrupts_only_for_theirs(self):
-        self.assert_rules("Mid-task, apart from the start line and milestone updates, stay quiet"
-                          " through routine steps",
+        self.assert_rules("Mid-task, stay quiet through routine steps",
                           "interrupt for a decision, approval or handback they own",
                           "never invent it",
                           "one concise verified result and any real caveat, not a step-by-step log")
