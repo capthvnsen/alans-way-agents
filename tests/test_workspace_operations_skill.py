@@ -16,6 +16,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         section = re.search(r"## Promised follow-ups(.*?)(?:## |\Z)", self.text, re.S)
         self.assertIsNotNone(section)
         policy = _normalized(section.group(1))
+        self.assertNotIn("or you offer to", self.text)
+        self.assertIn("or says yes when you offer to", policy)
+        self.assertIn("An offer they haven't answered is not a yes: save nothing.", policy)
         for rule in ("cronjob_manage", "`action` create", "`schedule`", "`prompt`",
                      "when to stop", "`attach_to_session` true", "no `deliver`",
                      "Confirm with the local time in one line",
@@ -25,6 +28,11 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                      "Remove the job when its reason goes away"):
             with self.subTest(rule=rule):
                 self.assertIn(rule, policy)
+
+    def test_follow_up_docs_require_acceptance_of_an_offer(self):
+        docs = _normalized((ROOT / "docs" / "proactivity.md").read_text())
+        self.assertNotIn("or the bot offers one", docs)
+        self.assertIn("or say yes when the bot offers one", docs)
 
     def test_move_is_described_truthfully(self):
         section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)

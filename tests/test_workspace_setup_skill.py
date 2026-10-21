@@ -226,13 +226,15 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
 
     def test_autonomy_question_and_goal_hint_are_exact_and_before_restart(self):
         question = ("Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, "
-                    "double-check code changes before calling them done, and fold in anything you send while I'm working. "
+                    "and fold in anything you send while I'm working. "
                     "(Recommended. Say no to keep things as they are.)")
         hint = "For a big job, start your message with /goal and I'll keep at it until it's verified done."
         step = self.autonomy_step()
         self.assertEqual(step.count(question), 1)
         self.assertEqual(step.count(hint), 1)
-        for rule in ("ask once", "every platform in that profile", "after the current step finishes",
+        for rule in ("ask once", "every platform in that profile", "takes effect after the bot restarts",
+                     "the restart at the end of setup does that", "it applies at the next restart",
+                     "a message sent mid-task waits for the current step to finish",
                      "After setup, say once"):
             self.assertIn(rule, step)
         self.assertLess(self.text.index("**Working on its own"), self.text.index("```sh\n# Prepare"))
@@ -242,19 +244,32 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_autonomy_reads_each_key_and_only_changes_stock_defaults(self):
         step = self.autonomy_step()
         for key, stock, recommended in (("display.busy_input_mode", "interrupt", "steer"),
-                                        ("agent.intent_ack_continuation", "auto", "true"),
-                                        ("agent.verify_on_stop", "false", "true")):
+                                        ("agent.intent_ack_continuation", "auto", "true")):
             with self.subTest(key=key):
                 self.assertIn(f"| `{key}` | `{stock}` | `{recommended}` |", step)
                 self.assertIn(f"config get {key}", step)
                 self.assertIn(f"config set {key} {recommended}", step)
         for rule in ("effective value", "including Hermes's defaults", "only when its effective value is the stock default",
-                     "Read back all three keys", "including unchanged keys", "report the actual values",
+                     "Read back both keys", "including unchanged keys", "report the actual values",
                      "Preserve and show every other existing value", "`steer` or `queue`",
-                     "`agent.intent_ack_continuation: false`", "`agent.verify_on_stop: false`",
-                     "deliberately chose", "merged value", "cannot distinguish", "same consent exchange",
+                     "`agent.intent_ack_continuation: false`", "including `interrupt`",
+                     "deliberately chose a stock value, preserve it", "merged value", "cannot distinguish",
+                     "Show current values and proposed changes.",
                      "Preserve unknown values and unreadable config"):
             self.assertIn(rule, step)
+        self.assertNotIn("stock-looking", self.text)
+
+    def test_code_verification_is_separate_and_only_when_requested(self):
+        step = self.autonomy_step()
+        opt_in = ("Leave `agent.verify_on_stop` as it is. If the user codes with this bot and asks for stricter checks, "
+                  "`hermes -p <profile> config set agent.verify_on_stop true` makes it double-check code changes "
+                  "before finishing; don't offer it otherwise.")
+        self.assertIn(opt_in, step)
+        self.assertEqual(step.count("config set agent.verify_on_stop true"), 1)
+        self.assertNotIn("agent.verify_on_stop", step.replace(opt_in, ""))
+        yes_path = step.split("After yes, recheck each", 1)[1].split("An explicit no", 1)[0]
+        self.assertEqual(re.findall(r"config set ([\w.]+) (\w+)", yes_path),
+                         [("display.busy_input_mode", "steer"), ("agent.intent_ack_continuation", "true")])
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
@@ -266,7 +281,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "A recorded `keep-current` or `chosen`", "continue without asking or rewriting",
                      "config get skills.config.workspace-setup.busy_input_choice",
                      "A recorded `keep-interrupt` skips only `display.busy_input_mode`",
-                     "still offer the other two keys", "confirmed “Config key not set”",
+                     "still offer the other key", "confirmed “Config key not set”",
                      "report the unknown state", "never restore settings from it or override later user changes",
                      "config unset skills.config.workspace-setup.autonomy_choice"):
             self.assertIn(rule, step)
@@ -281,7 +296,7 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
     def test_autonomy_marker_is_last_and_requires_successful_readbacks(self):
         step = self.autonomy_step()
         for rule in ("Apply only the answered choice with the supported CLI",
-                     "An explicit no preserves all three settings", "config.yaml",
+                     "An explicit no preserves both settings", "config.yaml",
                      "only after that answer and successful readbacks",
                      "report the mismatch and leave the marker untouched",
                      "Read back the marker too", "failed writes/readbacks"):
@@ -289,8 +304,8 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         for answer in ("chosen", "keep-current"):
             marker_write = f"config set skills.config.workspace-setup.autonomy_choice {answer}"
             self.assertIn(marker_write, step)
-            self.assertLess(step.index("Read back all three keys"), step.index(marker_write))
-            for key in ("display.busy_input_mode", "agent.intent_ack_continuation", "agent.verify_on_stop"):
+            self.assertLess(step.index("Read back both keys"), step.index(marker_write))
+            for key in ("display.busy_input_mode", "agent.intent_ack_continuation"):
                 self.assertLess(step.index(f"config set {key}"), step.index(marker_write))
 
     def test_global_interim_preference_is_preserved_by_telegram_offer(self):
@@ -339,6 +354,11 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                             "Hermes 0.21.x", "Check setup"):
             self.assertIn(instruction, self.normalized)
         self.assertNotIn("most likely running inside this gateway. `setup.sh --restart`", self.normalized)
+
+    def test_restart_checks_use_output_pasted_by_the_user(self):
+        self.assertIn("Ask the user to paste the app's output, then report failed checks and warnings from it.",
+                      self.normalized)
+        self.assertNotIn("Read the app's output", self.text)
 
     def test_windows_setup_is_a_human_handoff_outside_the_gateway(self):
         step = self.normalized.split("4. **A Windows guest", 1)[1].split("5. **", 1)[0]

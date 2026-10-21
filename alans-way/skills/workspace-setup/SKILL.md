@@ -94,37 +94,34 @@ Only a confirmed “Config key not set” result means the marker is absent.
 Preserve unknown markers and unreadable config; report the unknown state and
 skip this offer. If absent, read `hermes -p <profile> config get
 skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
-skips only `display.busy_input_mode`; still offer the other two keys. Preserve
+skips only `display.busy_input_mode`; still offer the other key. Preserve
 that legacy marker. If it is unknown or unreadable, skip the busy key and
-report the unknown state, while still checking the other two keys.
+report the unknown state, while still checking the other key.
 
 Read each effective value, including Hermes's defaults when no key is stored:
-`hermes -p <profile> config get display.busy_input_mode`,
-`hermes -p <profile> config get agent.intent_ack_continuation`, and
-`hermes -p <profile> config get agent.verify_on_stop`.
+`hermes -p <profile> config get display.busy_input_mode` and
+`hermes -p <profile> config get agent.intent_ack_continuation`.
 
 | Key | Stock default | Recommended value |
 | --- | --- | --- |
 | `display.busy_input_mode` | `interrupt` | `steer` |
 | `agent.intent_ack_continuation` | `auto` | `true` |
-| `agent.verify_on_stop` | `false` | `true` |
+
+Leave `agent.verify_on_stop` as it is. If the user codes with this bot and asks for stricter checks, `hermes -p <profile> config set agent.verify_on_stop true` makes it double-check code changes before finishing; don't offer it otherwise.
 
 Preserve and show every other existing value, including busy mode already set
 to `steer` or `queue` and `agent.intent_ack_continuation: false`. Preserve unknown
 values and unreadable config; report them and skip those keys. If the user
-deliberately chose a stock value, preserve it too, including `interrupt` and
-`agent.verify_on_stop: false`. `config get` returns the merged value and cannot
+deliberately chose a stock value, preserve it too, including `interrupt`.
+`config get` returns the merged value and cannot
 distinguish a stock default from a deliberate choice of that same value.
-Show current values and proposed changes; in the same consent exchange, invite
-the user to identify any stock-looking values they chose deliberately, and
-exclude those keys from the offer. If none remain eligible, continue without
+Show current values and proposed changes. If none remain eligible, continue without
 asking or writing a marker.
 
 With eligible keys, ask once with this exact copy:
-"Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, double-check code changes before calling them done, and fold in anything you send while I'm working. (Recommended. Say no to keep things as they are.)"
-Explain that this applies to every platform in that profile, takes effect
-after the current step finishes, and guidance waits for the current tool batch
-to return. Disclose that you will remember the answer in this profile's
+"Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, and fold in anything you send while I'm working. (Recommended. Say no to keep things as they are.)"
+Explain that this applies to every platform in that profile, takes effect after the bot restarts (the restart at the end of setup does that; if they change it outside setup, it applies at the next restart), and a message sent mid-task waits for the current step to finish.
+Disclose that you will remember the answer in this profile's
 `config.yaml`. Never treat silence or non-interactive runs as consent; with no
 answer, leave the settings and marker untouched and continue the other setup work.
 General setup or proactivity consent does not answer this question.
@@ -132,10 +129,9 @@ General setup or proactivity consent does not answer this question.
 Apply only the answered choice with the supported CLI. After yes, recheck each
 eligible key and write only when its effective value is the stock default and
 it was not deliberately chosen:
-`hermes -p <profile> config set display.busy_input_mode steer`,
-`hermes -p <profile> config set agent.intent_ack_continuation true`, and
-`hermes -p <profile> config set agent.verify_on_stop true`.
-An explicit no preserves all three settings. Read back all three keys with the
+`hermes -p <profile> config set display.busy_input_mode steer` and
+`hermes -p <profile> config set agent.intent_ack_continuation true`.
+An explicit no preserves both settings. Read back both keys with the
 same `config get` commands, including unchanged keys, and report the actual values.
 If any write fails or a readback is unreadable or differs from the expected
 changed or preserved value, report the mismatch and leave the marker untouched.
@@ -491,8 +487,8 @@ different bot's route silently.
    over the plan, send your final message with the choices, pins and next checks.
    The user clicks Finish setup and restart my bot in the app. The external
    `setup.sh --restart` verifies first and schedules a detached restart only
-   after required checks pass. Read the app's output; report failed checks and
-   warnings. A scheduled restart is not proof that the gateway came back.
+   after required checks pass. Ask the user to paste the app's output, then report failed checks and warnings from it.
+   A scheduled restart is not proof that the gateway came back.
    Wait about a minute, then ask the user to message the bot and use Check setup.
    Human `/restart` is also supported by Hermes 0.22 when slash permissions
    allow it, but sending `/restart` as a bot message does not execute it and
