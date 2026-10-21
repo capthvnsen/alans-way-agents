@@ -11,6 +11,16 @@ it saves a job that returns to this chat and confirms the local time. See
 [Promised follow-ups](../alans-way/skills/workspace-operations/SKILL.md#promised-follow-ups)
 for the scheduling and cleanup rules.
 
+To watch a job, deploy or status in this conversation, send
+`/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>`.
+Add `reply exactly [SILENT] when nothing meaningful changed` to the check.
+Send `/heartbeat clear` when finished. The user sends these commands; the bot
+cannot set or clear the heartbeat itself. There is one heartbeat per conversation;
+setting another replaces it. Checks run when the conversation is idle and the
+owning chat process or gateway is running, and each check uses a model turn.
+Keep cron for isolated browser watches; see the
+[watch recipe](../alans-way/skills/web-errands/SKILL.md#a-watch-is-a-cron-job).
+
 ## When it checks in
 
 - After **2 hours** of quiet in the bound chat (from you or the bot).

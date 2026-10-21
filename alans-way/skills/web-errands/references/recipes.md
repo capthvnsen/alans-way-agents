@@ -55,9 +55,10 @@ policy, dispatch and human handback. These are the per-kind steps.
 3. Never message, connect with, or DM a recruiter or poster without a
    `kind:"send"` commit of its own. An application flow that asks for a
    sign-in or a code is a wall: release it.
-4. Capture each submission's confirmation and record the application —
-   company, role, date, posting URL — in memory, so interview replies and
-   follow-ups have somewhere to land.
+4. Capture each submission's confirmation and record the application
+   (company, role, date, posting URL) in the user's chosen project or task record,
+   so interview replies and follow-ups have somewhere to land. Ask where to
+   keep it if they have not chosen a place.
 
 ## Forms, permits and civic portals
 
