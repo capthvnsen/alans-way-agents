@@ -175,12 +175,13 @@ m = mark(); be.key("cmd+s"); R["key_combo"] = action_calls(m)
 m = mark(); be.key("return"); R["key_plain"] = action_calls(m)
 m = mark(); R["type_text_mac"] = plain(be.type_text("hi")); R["type_text"] = action_calls(m)
 
-# --- som takes a screenshot only when the tree names nothing; the app's notes ride in the capture note
+# --- som uses window coverage; the app's notes ride in the capture note
 def captured(cap, m):
     return {"png": bool(cap.png_b64), "w": cap.width, "elements": [[e.index, e.label, list(e.bounds)] for e in cap.elements],
             "note": cap.note, "calls": [c["name"] for c in calls(m)]}
 full = [{"ref": "c1", "role": "AXTextArea", "name": "Body", "x": 100, "y": 100, "width": 960, "height": 600}]
-CTL.write_text(json.dumps({"snap": {"generation": 89, "elements": full}}))
+CTL.write_text(json.dumps({"snap": {"generation": 89, "elements": full,
+                                    "window": {"x": 100, "y": 100, "width": 960, "height": 600}}}))
 m = mark(); R["som_full"] = captured(be.capture(mode="som", pid=101), m)
 unnamed = [{"ref": "c1", "role": "AXGroup", "name": "", "x": 300, "y": 250, "width": 100, "height": 40}]
 CTL.write_text(json.dumps({"snap": {"generation": 90, "elements": unnamed, "hidden": 12}}))
@@ -619,6 +620,65 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertFalse(near({"x": 300, "y": 0, "width": 10, "height": 10}, (0, 0, 100, 10)))
         self.assertFalse(near({"name": "no geometry"}, (0, 0, 100, 10)))
 
+    def capture_fixture(self, body, mode="som", backend=None):
+        be = backend or self.backend([])
+        win = {"x": 100, "y": 100, "width": 960, "height": 600}
+        shot = {"content": [{"type": "image", "data": "anBlZw==", "mimeType": "image/jpeg"},
+                            {"type": "text", "text": json.dumps({"window": win, "imageWidth": 480, "imageHeight": 300})}]}
+        def reply(tool, args):
+            return {"content": [{"type": "text", "text": json.dumps(body)}]} if tool == "workspace_computer_snapshot" else shot
+        with mock.patch.object(be, "_call", side_effect=reply) as call, \
+                mock.patch.object(self.mod, "CaptureResult", side_effect=lambda **kw: kw), \
+                mock.patch.object(self.mod, "UIElement", side_effect=lambda **kw: kw):
+            cap = be.capture(mode=mode, pid=101)
+        return be, cap, [c.args[0] for c in call.call_args_list]
+
+    def test_som_skips_the_screenshot_rpc_when_snapshot_geometry_has_enough_coverage(self):
+        win = {"x": 100, "y": 100, "width": 960, "height": 600}
+        body = {"generation": 2, "selectedWindow": win,
+                "elements": [{"ref": "body", "name": "Draft", "role": "AXTextArea", **win}]}
+        be, _, _ = self.capture_fixture(body, mode="vision")
+        be, cap, calls = self.capture_fixture(body, backend=be)
+        self.assertEqual(calls, ["workspace_computer_snapshot"])
+        self.assertEqual((cap["png_b64"], cap["width"], cap["height"], be._shot), (None, 0, 0, None))
+        self.assertEqual(cap["elements"][0]["bounds"], (100, 100, 960, 600))
+        self.assertEqual(be._point(120, 140), {"x": 120, "y": 140})
+        self.assertEqual(be._tree["gen"], 2)
+        self.assertIn("No screenshot is attached", cap["note"])
+        body["window"] = body.pop("selectedWindow")
+        _, _, calls = self.capture_fixture(body)
+        self.assertEqual(calls, ["workspace_computer_snapshot"])
+
+    def test_som_keeps_the_screenshot_rpc_for_unknown_or_sparse_geometry(self):
+        win = {"x": 100, "y": 100, "width": 960, "height": 600}
+        element = {"ref": "body", "name": "Draft", "role": "AXTextArea", **win}
+        for geometry in (None, {}, [], "unknown", {**win, "width": 0}, {**win, "height": -1},
+                         {**win, "x": "100"}, {**win, "y": True}, {**win, "x": float("nan")},
+                         {**win, "width": float("inf")}, {**win, "width": 3000}):
+            with self.subTest(geometry=geometry):
+                _, _, calls = self.capture_fixture({"generation": 2, "selectedWindow": geometry, "elements": [element]})
+                self.assertEqual(calls, ["workspace_computer_snapshot", "workspace_computer_screenshot"])
+        for elements in ([], [{**element, "name": ""}], [{**element, "width": 100, "height": 40}]):
+            with self.subTest(elements=elements):
+                be, cap, calls = self.capture_fixture({"generation": 2, "selectedWindow": win, "elements": elements})
+                self.assertEqual(calls, ["workspace_computer_snapshot", "workspace_computer_screenshot"])
+                self.assertEqual(cap["png_b64"], "anBlZw==")
+                self.assertEqual(be._point(100, 75), {"x": 300, "y": 250})
+
+    def test_each_capture_uses_current_geometry_even_when_the_tree_is_unchanged(self):
+        win = {"x": 100, "y": 100, "width": 960, "height": 600}
+        body = {"generation": 2, "selectedWindow": win, "elements": [{"ref": "body", "name": "Draft", **win}]}
+        be, _, _ = self.capture_fixture(body)
+        for geometry, expected in ((win, 1), ({**win, "width": 3000}, 2), (None, 2)):
+            with self.subTest(geometry=geometry):
+                _, _, calls = self.capture_fixture({"generation": 2, "unchanged": True, "selectedWindow": geometry}, backend=be)
+                self.assertEqual(len(calls), expected)
+        for mode, expected in (("ax", ["workspace_computer_snapshot"]), ("vision", ["workspace_computer_screenshot"])):
+            with self.subTest(mode=mode):
+                _, cap, calls = self.capture_fixture(body, mode=mode, backend=be)
+                self.assertEqual(calls, expected)
+                self.assertEqual(bool(cap["png_b64"]), mode == "vision")
+
     def test_error_texts_map_to_codes_with_a_next_step(self):
         coded = self.mod._coded
         self.assertEqual(coded("The screen is locked, so apps cannot be read or driven.")[0], "locked")
@@ -722,6 +782,7 @@ class ProviderTests(unittest.TestCase):
         som = self.r["som_full"]
         self.assertEqual((som["png"], som["w"]), (False, 0))
         self.assertEqual(som["elements"], [[1, "Body", [100, 100, 960, 600]]])
+        self.assertEqual(som["calls"], ["workspace_computer_snapshot"])
         self.assertIn("No screenshot is attached", som["note"])
         self.assertIn("capture(mode='vision')", som["note"])
 
