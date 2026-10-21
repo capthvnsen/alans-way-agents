@@ -35,9 +35,18 @@ which does not approve arbitrary newer revisions.
 
 Optional cross-bot proactivity reads bounded recent owner-DM excerpts exported by all enabled profiles on one gateway. It stores sanitized digests for 24 hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files). Exchanges that look like they contain credentials or payment details are skipped entirely. It may automatically inject one read-only or draft-only ask per primary check-in into another bot's bound Telegram DM. Results appear there with primary attribution. Existing approvals still govern consequential actions. Disable cross-bot proactivity per bot with /proactivity cross off; copied context may remain in Hermes history, memory-provider records and model-provider retention after digest expiry.
 
+Short helper outcomes require a separate `/proactivity cross results on` choice in
+both bots' bound owner chats. This is off by default, including for existing
+cross-bot users. Future asks may return a sanitized done/blocked summary of up to
+280 UTF-8 bytes, correlated to one ask and expiring two hours after that ask.
+The asking bot consumes it once at its next owner turn or permitted check-in.
+This creates no wake, retry or delivery receipt. Use `/proactivity cross results off`
+to stop and purge pending outcomes; cross-bot opt-out also revokes this choice.
+Previously copied chat and provider context may remain after expiry or opt-out.
+
 Default off; `/proactivity cross on|off|status` controls each bot. Sanitization
 cannot guarantee detection of every secret. No historical backfill, attachment
-or tool-history export. Context is supplied only to permitted primary check-ins;
+or tool-history export. Digest context is supplied only to permitted primary check-ins;
 other profiles' exports are JSON-escaped as untrusted observations. The instruction
 not to save excerpts to memory is model policy, not enforced deletion. Normal
 Hermes/provider history, sidecars and compaction can retain copied context.
