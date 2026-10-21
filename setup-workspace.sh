@@ -312,7 +312,7 @@ $MARK_BEGIN
       - --bot-id
       - $(yaml_quote "$BOT_ID")$BOT_NAME_BLOCK
     lazy: true
-    connect_timeout: 12
+    connect_timeout: 25
     timeout: $TOOL_TIMEOUT$DESKTOP_TOOLS_BLOCK
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
