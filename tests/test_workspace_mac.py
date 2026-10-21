@@ -1759,7 +1759,7 @@ class HostFailoverTests(unittest.TestCase):
                            MAC_STUB=str(self.dir / "mac-stub.cjs"), VPS_LOG=str(self.dir / "vps.log"),
                            SSH_LOG=str(self.dir / "ssh.log"), MAC_MODE=mode,
                            PROBE_DOWN=str(self.dir / "probe-down"),
-                           HERMES_ROUTER_CALL_DEADLINE_MS="700", HERMES_ROUTER_CALL_HARD_MS="1500")
+                           HERMES_ROUTER_CALL_DEADLINE_MS="700", HERMES_ROUTER_CALL_HARD_MS="4500")
         environment.update(env)
         self.proc = subprocess.Popen(
             [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "bot1",
@@ -1915,7 +1915,8 @@ class HostFailoverTests(unittest.TestCase):
                                           "lastSeenOnline": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
         (self.dir / "router-last-self-probe").write_text(str(int(time.time() * 1000)))
         vm = FakeVmHost({"h1": "v1"}, delay=2.0)
-        self.start("ok", vm)
+        # Leave room for the restore and the router's 3s receipt slack.
+        self.start("ok", vm, HERMES_ROUTER_CALL_HARD_MS="6000")
         started = time.time()
         self.send("initialize")
         self.assertEqual(self.served_by(self.recv()), "vps")
@@ -2026,7 +2027,7 @@ class HostFailoverTests(unittest.TestCase):
         # The MCP SDK writes {"result":...,"jsonrpc":"2.0","id":N}. If the id
         # is not found, the call stays pending, the deadline fires and a
         # healthy session is moved to the VPS.
-        self.start("bigshot", HERMES_ROUTER_CALL_DEADLINE_MS="300", HERMES_ROUTER_CALL_HARD_MS="800")
+        self.start("bigshot", HERMES_ROUTER_CALL_DEADLINE_MS="300", HERMES_ROUTER_CALL_HARD_MS="3800")
         self.handshake()
         shot = self.send("tools/call", name="shot", arguments={})
         answered = self.recv()

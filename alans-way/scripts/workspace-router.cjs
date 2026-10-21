@@ -259,11 +259,14 @@ function noteClientRpc(line, pending) {
     if (msg.id != null) {
       if (pending instanceof Map) {
         const args = msg.params && msg.params.arguments;
+        const at = Date.now();
         pending.set(msg.id, {
+          id: msg.id,
           method: msg.method,
           name: msg.params && msg.params.name,
           line,
-          at: Date.now(),
+          at,
+          acceptedAt: at,
           batch: Boolean(args && args.action === 'batch'),
         });
       } else pending.add(msg.id);
@@ -1367,9 +1370,8 @@ async function main() {
   // Mac spawn that means the remote script crashed (missing module, killed
   // app), and exiting here would leave the MCP client hanging on a dead
   // child until its own connect timeout. Falling back to the VPS host in
-  // that window costs ~a second instead. Client lines written to the dead
-  // child are buffered and replayed; nothing it could have acted on ever
-  // produced a response, so no request executes twice.
+  // that window costs ~a second instead. A missing response does not prove
+  // an action was refused: only reads and calls never written may replay.
   //
   // A backend that already answered and then drops (host asleep, network
   // gone, app quit, a call stuck past its deadline) fails over in-process
@@ -1475,8 +1477,8 @@ async function main() {
   // call still open after the soft limit gets one liveness probe: an app that
   // answers means the call is just slow, so keep waiting and re-check; a
   // probe that fails or hangs (a half-open connection) fails over now. The
-  // hard limit fails over regardless, leaving the rest of the budget for the
-  // VPS to redo the work.
+  // hard limit fails over regardless. A replayed read only gets the time
+  // remaining from its original budget.
   const num = (name, fallback) => Number(process.env[name]) || fallback;
   const CALL_SOFT_MS = num('HERMES_ROUTER_CALL_DEADLINE_MS', 45000);
   const CALL_HARD_MS = num('HERMES_ROUTER_CALL_HARD_MS', 80000);
@@ -1512,20 +1514,23 @@ async function main() {
     watchdog.unref();
   }
 
-  // The killed spawn's buffered input replays onto the new one verbatim, the
-  // same replay the VPS fallback does: a remote action may theoretically have
-  // run on it already, which sshd's SIGHUP on the dead session prevents.
+  // Killing the connector cannot undo an action it already received.
   function retryMacBackend() {
     if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
     macRetried = true;
     const old = activeChild;
     superseded.add(old);
     try { old.kill('SIGKILL'); } catch { /* already gone */ }
+    for (const req of pendingRequests.values()) {
+      if (req.via === 'vm' || req.awaitingApproval) continue;
+      if (req.cancelled) answerCancelled(req);
+      else if (req.sent && req.method === 'tools/call' && !READ_ONLY_TOOLS.has(req.name)) failCall(req, COMMIT_LOST);
+    }
     process.stderr.write(
       `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize; mac-watch reports it online — retrying the spawn\n`,
     );
     startMacBackend();
-    for (const line of bufferedStdin) writeToChild(line);
+    for (const line of [...bufferedStdin]) writeToChild(line);
     armWatchdog(MAC_RETRY_MS);
   }
 
@@ -1538,10 +1543,6 @@ async function main() {
     superseded.add(old);
     try { old.kill('SIGKILL'); } catch { /* already gone */ }
     annotCtx.failedOver = true;
-    if (!provedAlive) {
-      startVpsBackend();
-      return;
-    }
     flushResumes();
     const lost = [];
     const replay = [];
@@ -1551,8 +1552,9 @@ async function main() {
       // A commit still awaiting approval was never sent; settleApproval
       // refuses it once it sees the host changed.
       if (req.via === 'vm' || req.awaitingApproval) continue;
+      if (req.cancelled) { answerCancelled(req); continue; }
       if (req.method !== 'tools/call') replay.push(req);
-      else if (READ_ONLY_TOOLS.has(req.name)) reads.push(req.line);
+      else if (!req.committed && (READ_ONLY_TOOLS.has(req.name) || !req.sent)) reads.push(req.line);
       else lost.push({ id, at: req.at });
     }
     for (const { id } of lost) pendingRequests.delete(id);
@@ -1596,7 +1598,7 @@ async function main() {
     if (handshake.initialize) {
       const pendingInit = replay.find((req) => req.method === 'initialize');
       if (pendingInit) {
-        c.stdin.write(jsonLine(pendingInit.line));
+        dispatchToChild(c, pendingInit.line);
       } else {
         try {
           const msg = JSON.parse(handshake.initialize);
@@ -1607,7 +1609,7 @@ async function main() {
       }
     }
     if (handshake.initialized) c.stdin.write(jsonLine(handshake.initialized));
-    for (const req of replay) if (req.method !== 'initialize') c.stdin.write(jsonLine(req.line));
+    for (const req of replay) if (req.method !== 'initialize') dispatchToChild(c, req.line);
   }
 
   // What to put on the VPS backend before the agent's first action: the
@@ -1731,15 +1733,42 @@ async function main() {
   function startVpsBackend({ replay = null, reads = [], lost = [] } = {}) {
     const c = spawnVps([]);
     if (replay) replayHandshake(c, replay);
-    else for (const line of bufferedStdin) c.stdin.write(jsonLine(line));
+    else for (const line of [...bufferedStdin]) writeToChild(line);
     heldCalls.push(...reads);
     if (macSsh) beginContinuation(lost);
   }
 
   function writeToChild(line) {
+    dispatchToChild(activeChild, line);
+  }
+
+  function dispatchToChild(child, line, req) {
     try {
-      if (activeChild && activeChild.exitCode === null && activeChild.stdin.writable) activeChild.stdin.write(jsonLine(line));
-    } catch { /* a dying child's pipe is not the router's problem — the fallback replays */ }
+      const msg = JSON.parse(line);
+      if (typeof msg.method === 'string' && msg.id != null) req ||= pendingRequests.get(msg.id);
+      if (msg.method === 'tools/call') {
+        if (!req) return;
+        if (req.cancelled) { answerCancelled(req); return; }
+        const read = READ_ONLY_TOOLS.has(req.name);
+        const remainingMs = Math.floor((req.batch ? BATCH_HARD_MS : CALL_HARD_MS) - (Date.now() - req.acceptedAt) - 3000);
+        if ((req.sent && !read) || remainingMs <= 0) {
+          failCall(req, req.sent && !read ? COMMIT_LOST
+            : 'The browser did not answer the call in time. ' + (read ? 'Retry the read.' : COMMIT_LOST));
+          return;
+        }
+        msg.params._meta = { ...msg.params._meta, 'alans-way/remainingMs': remainingMs };
+        line = JSON.stringify(msg);
+      }
+      if (child && child.exitCode === null && child.stdin.writable) {
+        // Handing bytes to the pipe never proves refusal or completion.
+        if (req) {
+          req.sent = true;
+          req.targets ||= new Map();
+          req.targets.set(child, msg.id);
+        }
+        child.stdin.write(jsonLine(line));
+      }
+    } catch { /* a dying child's pipe is handled by failover; sent actions stay uncertain */ }
   }
 
   // A second, lazily started connector to this machine's own browser host —
@@ -2356,9 +2385,9 @@ async function main() {
         if (req.via !== 'vm') continue;
         pendingRequests.delete(id);
         noteDead(id);
-        emitToolError(id, req.committed
+        emitToolError(id, req.committed || !READ_ONLY_TOOLS.has(req.name)
           ? `The VM browser connector stopped. ${COMMIT_LOST}`
-          : 'The VM browser connector stopped. Retry the call.');
+          : 'The VM browser connector stopped. Retry the read.', vmAnnotate);
       }
     };
     c.on('error', drop);
@@ -2788,17 +2817,44 @@ async function main() {
     return true;
   }
 
-  // A cancelled call never runs: withdraw its approval, or drop it from the
-  // calls held during a failover before it ever reaches the gate.
-  function cancelCall(callId) {
+  function failCall(req, text) {
+    pendingRequests.delete(req.id);
+    unbuffer(req.line);
+    noteDead(req.id);
+    const merge = tabMerges.get(req.id);
+    if (merge && typeof merge === 'object') {
+      noteDead(merge.vmId);
+      tabMerges.delete(merge.vmId);
+      tabMerges.delete(req.id);
+    }
+    if (req.method === 'tools/call') emitToolError(req.id, text, req.via === 'vm' ? vmAnnotate : annotate);
+    else process.stdout.write(jsonLine(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32800, message: text } })));
+  }
+
+  function answerCancelled(req) {
+    failCall(req, 'The browser request was cancelled. ' +
+      (req.sent && req.method === 'tools/call' && !READ_ONLY_TOOLS.has(req.name) ? COMMIT_LOST : 'It was not retried.'));
+  }
+
+  // Unsent calls are withdrawn here; in-flight calls keep the backend's
+  // cancellation result, including any batch steps that already finished.
+  function cancelCall(params) {
+    const callId = params.requestId;
+    const merge = tabMerges.get(callId);
+    const req = pendingRequests.get(callId) || (merge && merge.req);
     for (const [id, entry] of approvals) {
       if (entry.callId === callId) settleApproval(id, 'cancelled');
     }
-    const req = pendingRequests.get(callId);
-    const held = req ? heldCalls.indexOf(req.line) : -1;
-    if (held >= 0) {
-      heldCalls.splice(held, 1);
-      pendingRequests.delete(callId);
+    if (!req) return;
+    req.cancelled = true;
+    unbuffer(req.line);
+    const held = heldCalls.indexOf(req.line);
+    if (held >= 0) heldCalls.splice(held, 1);
+    if (!req.sent) { answerCancelled(req); return; }
+    for (const [child, requestId] of req.targets || []) {
+      if (superseded.has(child) || (child !== activeChild && child !== vmChild)) continue;
+      if (merge && (child === vmChild ? merge.vm : merge.mac)) continue;
+      dispatchToChild(child, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { ...params, requestId } }));
     }
   }
 
@@ -2888,13 +2944,11 @@ async function main() {
     if (host === 'computer') return out;
     if (!wantsVm && msg.params && msg.params.name === 'cua_alans_way_tabs' && activeHost !== 'vps' && vmAlive()) {
       unbuffer(line);
-      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now() };
+      const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now(), req: pendingRequests.get(msg.id) };
       tabMerges.set(msg.id, merge);
       tabMerges.set(merge.vmId, msg.id);
       writeToChild(out);
-      try {
-        vmChild.stdin.write(jsonLine(JSON.stringify({ ...msg, id: merge.vmId })));
-      } catch { /* the merge completes with whatever the computer side answered */ }
+      dispatchToChild(vmChild, JSON.stringify({ ...msg, id: merge.vmId }), pendingRequests.get(msg.id));
       return null;
     }
     if (!wantsVm) return out;
@@ -2905,9 +2959,7 @@ async function main() {
     const req = pendingRequests.get(msg.id);
     if (req) req.via = 'vm';
     unbuffer(line);
-    try {
-      vmChild.stdin.write(jsonLine(out));
-    } catch { /* a dead connector fails the call from its exit handler */ }
+    dispatchToChild(vmChild, out);
     return null;
   }
 
@@ -2996,7 +3048,8 @@ async function main() {
       if (method === 'initialize') handshake.initialize = line;
       else if (method === 'notifications/initialized') handshake.initialized = line;
       else if (method === 'notifications/cancelled') {
-        try { cancelCall(JSON.parse(line).params.requestId); } catch { /* nothing to withdraw */ }
+        try { cancelCall(JSON.parse(line).params); } catch { /* nothing to withdraw */ }
+        return;
       }
       if (!provedAlive) bufferedStdin.push(line);
       if (holdCalls && method === 'tools/call') {
@@ -3053,7 +3106,7 @@ async function main() {
           if (age > hard) {
             pendingRequests.delete(id);
             noteDead(id);
-            emitToolError(id, req.committed
+            emitToolError(id, req.committed || !READ_ONLY_TOOLS.has(req.name)
               ? `The VM browser did not answer the call in time. ${COMMIT_LOST}`
               : 'The VM browser did not answer the call in time. Retry it.', vmAnnotate);
           }
