@@ -50,7 +50,10 @@ Files under that root (new plugin-owned JSON, no Hermes session DB reads/writes)
   heartbeat and bound boolean; no DM address exported. Receiver eligibility
   fields (timezone/window/pause) are deferred to PR 2.
 - `profiles/<profile>/digest.json`: bounded exchange ring; replace on append.
-- `inbox/<target>/<uuid>.json`: pending ask (future stage only); no receipt store.
+- `inbox/<target>/<uuid>.json`: pending ask; no receipt store.
+- `results.json`: optional bounded ask/outcome records, enabled separately in both bots.
+  New and existing enrollments default to result sharing off. See
+  [helper outcomes](../proactivity.md#optional-helper-outcomes) for consent and lifecycle.
 - `profiles/<profile>/dedup.json`: body-free hashed turn IDs, 48-hour TTL, maximum 512 per profile; refuse overflow until expiry.
 - `limits.json` (future stages) and lock files: spent check-in permits and rate counters.
 
@@ -76,7 +79,10 @@ provide no digest and status reports that gap. No historical backfill. Prune exp
 before store reads/writes while activated; explicitly activated startup prunes too.
 Dormant profiles do no state/store I/O and start no task. Offline files may physically
 remain beyond TTL until an activated profile prunes them; expired text is never exported. Ask TTL 2 hours, at most one pending ask per target, at most 64 pending gateway-wide.
-Delete ask body on claim; keep only body-free dedup/budget records for 48 hours for the rate limits; no receipt lifecycle or receipt store.
+Delete ask body on claim; keep body-free dedup/budget records for 48 hours for the rate limits.
+Separately consented outcome records expire two hours after the original ask and contain
+only correlation metadata and a sanitized terminal summary, never the ask body.
+There is no receipt lifecycle or receipt store.
 Counts survive restart; storage corruption disables dispatch.
 
 ## 1. Read mechanism: profile-exported digests
