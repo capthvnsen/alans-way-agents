@@ -538,10 +538,26 @@ If a call fails with a permission error, ask the user to turn on Accessibility a
 
 When the user asks you to check in, remind them or report back later, or says yes when you offer to, create one `cronjob_manage` job right then: `action` create, a `schedule` such as `in 5m` or an exact time, a `prompt` that says what to ask or check and when to stop, `attach_to_session` true so their reply continues this chat, and no `deliver` so it comes back here. Confirm with the local time in one line. An offer they haven't answered is not a yes: save nothing. Never promise a later message without a saved job. If they answer a check-in with "not yet", offer one more at a specific time; don't schedule repeats they didn't ask for. Remove the job when its reason goes away.
 
+When the user wants a job, deploy or status watched inside this conversation,
+suggest they send `/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>`
+and `/heartbeat clear` to stop. The user sends these commands; you cannot set or clear
+the heartbeat yourself. Include `reply exactly [SILENT] when nothing meaningful changed`
+in the suggested check. There is one heartbeat per conversation; setting another
+replaces it. It fires only while the conversation is idle and the owning chat
+process or gateway is running, costs a model turn per check, and needs the user's
+clear command when finished. Keep cron for isolated browser watches using
+[web-errands](../web-errands/SKILL.md#a-watch-is-a-cron-job).
+
 ## Preserve vanilla Hermes
 
-Save durable user facts, decisions and preferences to memory as they come up during work,
-so nothing important lives only in chat history. Transient tab state, element refs and handback state
+Save lasting general facts and preferences to memory only when they
+apply across sessions regardless of task, such as a general preference for concise replies.
+How-to procedures, pitfalls and task-specific preferences belong in the relevant skill.
+Project and task records, including decisions, application confirmations and status,
+belong in the user's chosen place, such as a project file or tracker; ask if no place
+has been chosen, and keep short-lived facts in session history.
+Do not migrate or delete existing memory as part of this guidance.
+Transient tab state, element refs and handback state
 must never go into durable memory; reacquire live workspace state from the tools when needed.
 
 Keep integration in supported profile configuration, optional plugins, hooks

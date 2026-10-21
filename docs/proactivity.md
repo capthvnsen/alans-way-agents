@@ -11,6 +11,16 @@ it saves a job that returns to this chat and confirms the local time. See
 [Promised follow-ups](../alans-way/skills/workspace-operations/SKILL.md#promised-follow-ups)
 for the scheduling and cleanup rules.
 
+To watch a job, deploy or status in this conversation, send
+`/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>`.
+Add `reply exactly [SILENT] when nothing meaningful changed` to the check.
+Send `/heartbeat clear` when finished. The user sends these commands; the bot
+cannot set or clear the heartbeat itself. There is one heartbeat per conversation;
+setting another replaces it. Checks run when the conversation is idle and the
+owning chat process or gateway is running, and each check uses a model turn.
+Keep cron for isolated browser watches; see the
+[watch recipe](../alans-way/skills/web-errands/SKILL.md#a-watch-is-a-cron-job).
+
 ## When it checks in
 
 - After **2 hours** of quiet in the bound chat (from you or the bot).
@@ -136,9 +146,10 @@ other bot can research or draft without external changes, citing the evidence
 IDs. After dispatch it tells you which bot it asked and what it asked for in one
 line; the result will appear in that bot's chat.
 Ordinary messages, morning briefs, cron, child and imported turns receive no
-cross-bot context or dispatch permit. Secondary bots still do not run spontaneous
-check-ins. Results stay in the target's own existing bound Telegram DM with
-primary attribution; the primary does not poll for them. The target needs
+digest context or dispatch permit. Secondary bots still do not run spontaneous
+check-ins. Replies appear in the target's own existing bound Telegram DM with
+primary attribution. Separately enabled short outcomes can return at the primary's
+next ordinary owner turn or permitted check-in, without polling or waking it. The target needs
 operator-configured `allow_gateway_injection: true`; missing routes or permission
 can prevent delivery even after scheduling.
 
@@ -239,7 +250,45 @@ before enqueue: four attempts per rolling day gateway-wide, two per target, with
 wait for busy, paused or out-of-hours targets until expiry; an unbound target drops
 the ask. Claims recheck enrollment/generation under the store lock and durably
 delete the body **before injection**, so a crash can lose an ask but cannot replay
-it. There is no receipt store, completion tracking or result polling.
+it. Scheduling acceptance is not a completion or delivery receipt.
+
+### Optional helper outcomes
+
+Result sharing is **off by default**, including for bots already enrolled in
+cross-bot proactivity. Existing consent covers replies in the helper's chat, so
+returning an outcome requires a new sharing choice. In **both bots' bound owner
+DMs**, after enabling cross-bot proactivity, send:
+
+```text
+/proactivity cross results on
+```
+
+This applies only to future asks created while both bots have opted in. Each
+records its ask ID, enrollment generations, hashes of the exact imported prompt
+and answering turn, and a two-hour expiry measured from the original ask.
+The helper is asked to start its answer after attribution with `Done:` or
+`Blocked:` and a one-line outcome. A successful completed-turn hook captures that
+explicit status and at most **280 UTF-8 bytes** of summary. The entire response is
+scanned with the existing secret detector and operator redaction terms before
+truncation. Failed, interrupted, silent, unmarked or sensitive answers produce
+no report. The outcome is the helper's claim, not independent verification.
+
+The private shared `results.json` holds at most 64 correlated records. Unknown
+asks, expired records and stale enrollments are ignored. The primary consumes
+terminal outcomes once on its next ordinary owner turn or already-permitted
+check-in, as escaped, untrusted observations. Other chats, child turns, cron and
+briefs cannot collect them. Consumption deletes summaries before returning
+context. A crash can lose a report; a restart cannot replay a consumed report.
+A helper restart before its completed-turn hook can also lose the outcome.
+Missing reports mean unknown. Nothing wakes a bot, retries uncertain work,
+confirms delivery, changes approvals or authorizes another ask.
+
+Use `/proactivity cross results off` to stop sharing and purge this bot's pending
+outcomes. `/proactivity cross off` also revokes result sharing; enabling cross-bot
+proactivity again requires a new result-sharing opt-in. Settings persist in the
+private shared presence record and appear in `/proactivity cross status`.
+If the result batch is corrupt, opting out discards it rather than parsing
+untrusted summaries. Already copied chat or provider context is not erased.
 
 Before injecting a primary check-in, the plugin writes a private, one-use
 `profiles/<primary>/permit.json` with a random check-in ID, hashes of the exact

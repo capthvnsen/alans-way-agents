@@ -34,6 +34,19 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertNotIn("or the bot offers one", docs)
         self.assertIn("or say yes when the bot offers one", docs)
 
+    def test_in_chat_monitoring_is_a_command_the_user_sends(self):
+        for path in (SKILL_PATH, ROOT / "docs" / "proactivity.md"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                self.assertIn("/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>", text)
+                self.assertIn("/heartbeat clear", text)
+                normalized = _normalized(text)
+                for rule in ("The user sends these commands", "cannot set or clear",
+                             "one heartbeat per conversation", "idle",
+                             "running", "[SILENT]", "isolated browser watches"):
+                    self.assertIn(rule, normalized)
+                self.assertNotRegex(normalized, r"(?i)\b(?:I|we|the bot|the agent) (?:can|will) (?:run|send|set|clear) (?:the )?`?/heartbeat")
+
     def test_move_is_described_truthfully(self):
         section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)
         self.assertIsNotNone(section)
@@ -161,13 +174,24 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
         cls.normalized = _normalized(cls.text)
 
-    def test_durable_memory_is_saved_during_work_without_transient_browser_state(self):
-        for requirement in ("Save durable user facts, decisions and preferences to memory",
-                            "as they come up during work", "only in chat history",
+    def test_memory_is_scoped_without_transient_browser_state(self):
+        for requirement in ("lasting general facts and preferences",
+                            "apply across sessions regardless of task",
+                            "How-to procedures, pitfalls and task-specific preferences",
+                            "relevant skill", "Project and task records",
+                            "user's chosen place", "Do not migrate or delete existing memory",
                             "Transient tab state, element refs and handback state",
                             "never go into durable memory"):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, self.normalized)
+
+    def test_long_chat_docs_use_the_same_memory_scope(self):
+        docs = _normalized((ROOT / "docs" / "long-chats.md").read_text())
+        for rule in ("lasting general facts and preferences", "regardless of task",
+                     "How-to procedures", "relevant skill", "Project and task records",
+                     "user's chosen place", "does not migrate or delete existing memory"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, docs)
 
     def test_ordinary_actions_are_preauthorized(self):
         self.assertIn(

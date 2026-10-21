@@ -90,11 +90,11 @@ human with `action:"release"`, `reason:"login"`, `reason:"two_factor"`
 or `reason:"payment_details"` respectively; `review` and `other` cover
 other human-only steps. Include a plain-text `note` of at most 140
 characters naming the site and what you need, and send one chat message.
-On the user's computer, a reasoned release marks the tab `awaiting_human`
-and refuses bot input until the human gives it back or the 30-minute hold
-expires. Read the current tab state and fresh epoch on `human_returned`.
-On the VPS, an ordinary reasoned release records the reason but does not
-hold the tab; wait for the user's reply before claiming it again.
+On the user's computer and on the VM alike, a reasoned release marks the
+tab `awaiting_human` and refuses bot input until the person presses
+Give back in Alan's Workspace or 30 minutes pass. The app shows a
+banner and a notification for the handback. Read the current tab state
+and fresh epoch on `human_returned`.
 
 For a CAPTCHA, follow [CAPTCHA handback](../workspace-operations/SKILL.md#when-a-site-shows-a-captcha).
 Release a needed widget with `{action:"release", reason:"captcha"}` and
@@ -124,12 +124,34 @@ A price, restock, ticket, refund-status or appointment watch is a Hermes
 cron job, not a loop inside this conversation: create it with
 `cronjob_manage` (`create`, and later `update`, `pause` or `remove`; list
 jobs before managing one by its id), or
-ask the operator for a `hermes cron` entry, delivering to Telegram. Poll
-no more often than every 10 minutes — tighter polling is what gets
-accounts rate-limited or suspended — and back off when a check fails.
+ask the operator for a `hermes cron` entry. Save a watch only when the user asks
+or accepts your offer. Set `attach_to_session` true and omit `deliver` so
+results return to the originating chat and replies can continue there;
+each check still runs in a fresh session. For an operator-created entry,
+preserve that chat as the delivery destination. Poll
+no more often than every 10 minutes to avoid rate limits or suspension,
+and back off when a check fails.
 Give the job a self-contained prompt with the URL, constraints and stop
 conditions: stop on success, and stop after three consecutive failures;
-report either way. Cron scheduling tools are disabled within cron runs by
+report either way. Add `"continuity": true` so each run sees its own
+previous completed output. Have the first check report a compact baseline;
+continuity skips silent outputs. On later checks, compare the requested condition
+with that output and reply exactly `[SILENT]` unless something meaningful
+changed, a check failed or the target was reached.
+
+Add `monitor` only for a safe, read-only deterministic probe that
+matches the condition the user asked to watch. For example,
+`"monitor": "https://example.com/status.json"` fits a watch on that endpoint's
+stable status response. A script path is also supported, under the same
+path restrictions as a cron script. Its output must contain only the relevant
+state, with no timestamps or other changing noise. If the probe cannot capture
+the requested condition reliably, omit `monitor` and let the scheduled check
+compare results. The first tick runs the agent to establish a baseline;
+unchanged output skips the agent and delivery, while changed output gives
+the agent a diff to assess. A source failure is an error, not a change or
+success; preserve failure reporting and backoff.
+
+Cron scheduling tools are disabled within cron runs by
 default; arrange the pause/remove with the operator unless they have
 enabled `cron.allow_agent_scheduling: true`. A job must not assume it can
 stop itself.

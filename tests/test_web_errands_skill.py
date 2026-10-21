@@ -227,9 +227,12 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
                 self.assertIn(reason, self.normalized)
         self.assertIn("`note`", self.normalized)
         self.assertIn("awaiting_human", self.normalized)
-        self.assertIn("On the user's computer", self.normalized)
-        self.assertIn("On the VPS", self.normalized)
-        self.assertIn("does not hold the tab", self.normalized)
+        handback = self.normalized.split("## The walls you hand back")[1].split("## Verify, then report")[0]
+        self.assertNotRegex(handback, r"(?i)\bnot\s+held\b|\bdoes\s+not\s+hold\b")
+        self.assertIn("On the user's computer and on the VM alike", handback)
+        self.assertIn("Give back in Alan's Workspace", handback)
+        self.assertIn("30 minutes pass", handback)
+        self.assertIn("banner and a notification", handback)
         self.assertIn("140 characters", self.normalized)
         self.assertIn("[CAPTCHA handback]", self.text)
         self.assertIn("human_returned", self.normalized)
@@ -281,6 +284,27 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
         self.assertIn("`host:\"vm\"`", self.normalized)
         self.assertIn("when their own session matters", self.normalized)
         self.assertIn("computer is asleep", self.normalized)
+
+    def test_watches_use_continuity_and_conditional_change_detection(self):
+        watch = self.normalized.split("## A watch is a cron job")[1]
+        for rule in ('"continuity": true', "previous completed output",
+                     "reply exactly `[SILENT]`", "only when the user asks",
+                     "or accepts your offer", "`attach_to_session` true",
+                     "omit `deliver`", '"monitor": "https://example.com/status.json"',
+                     "safe, read-only deterministic probe",
+                     "matches the condition the user asked to watch",
+                     "omit `monitor`", "no timestamps",
+                     "first tick runs the agent", "first check report a compact baseline",
+                     "continuity skips silent outputs", "unchanged output skips",
+                     "changed output gives the agent a diff", "a check failed",
+                     "source failure is an error"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, watch)
+
+    def test_application_records_use_the_users_chosen_place(self):
+        applications = self.recipes_normalized.split("## Job applications")[1].split("## Forms")[0]
+        self.assertIn("in the user's chosen project or task record", applications)
+        self.assertNotIn("in memory", applications)
 
     def test_recipes_cover_the_errand_kinds(self):
         for heading in ("## Shopping and cart comparison",

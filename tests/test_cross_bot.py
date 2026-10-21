@@ -751,8 +751,8 @@ class RegistrationTests(unittest.TestCase):
                     if profile == "default":
                         self.assertEqual(C.hashlib.sha256(json.dumps(tools["proactivity"]["schema"], sort_keys=True).encode()).hexdigest(), schema_sha)
                         s = P.Settings(timezone="UTC")
-                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "2dadb69a59def9e1b6da1c299c4056eb23af120afd3a668967c9b4dc945e8579"),
-                                               (runtime.brief_prompt(s, NOW), "548718b14190917f86eedb3c039e157f01d954a3a71f35012eec2f661e2709a2")):
+                        for text, expected in ((runtime.prompt(s, timedelta(hours=2), NOW), "3a15e2cd26f14046e92be647bd86d3acd9a34ba69e7225ba712447dcfd7c5cc8"),
+                                               (runtime.brief_prompt(s, NOW), "4a4a614ed8d439f6f0c6bcbaf21e0a817ced6eba03963deb1b377610fd813c07")):
                             self.assertEqual(C.hashlib.sha256(text.encode()).hexdigest(), expected)
                     else:
                         self.assertEqual(tools, {})
