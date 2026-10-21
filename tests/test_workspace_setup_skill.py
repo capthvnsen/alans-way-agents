@@ -333,10 +333,20 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("proactivity bind --session-key", self.normalized)
         self.assertIn("proactivity status", self.normalized)
 
-    def test_restart_comes_last_and_the_agent_answers_first(self):
-        self.assertIn("comes last", self.normalized)
-        self.assertIn("send your final message", self.normalized)
-        self.assertIn("detached", self.normalized)
+    def test_setup_hands_a_pinned_plan_to_the_app_outside_the_gateway(self):
+        for instruction in ("Never bypass the lifecycle guard", "Finish setup and restart my bot",
+                            "repoRef", "desktopRef", "JSON setup plan", "outside the gateway",
+                            "Hermes 0.21.x", "Check setup"):
+            self.assertIn(instruction, self.normalized)
+        self.assertNotIn("most likely running inside this gateway. `setup.sh --restart`", self.normalized)
+
+    def test_windows_setup_is_a_human_handoff_outside_the_gateway(self):
+        step = self.normalized.split("4. **A Windows guest", 1)[1].split("5. **", 1)[0]
+        for rule in ("ask the human", "external Git Bash shell", "outside the gateway",
+                     "Never run setup through Hermes's terminal", "pinned setup command",
+                     "WSL2 counts as Linux"):
+            self.assertIn(rule, step)
+        self.assertNotIn("so run the same command there", step)
 
     def test_linux_hosts_and_validated_key_flags_are_covered(self):
         self.assertIn("--host-os <mac|windows|linux>", self.normalized)
@@ -435,7 +445,7 @@ class SetupPinProcedureTests(unittest.TestCase):
         wrapper.chmod(0o755)
 
     def procedure(self):
-        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n~/alans-way-agents/setup.sh",
+        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n# End checkout preparation",
                           SKILL_PATH.read_text(), re.S).group(1)
         return subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root),
                               PATH=str(self.bin) + os.pathsep + os.environ["PATH"]),
