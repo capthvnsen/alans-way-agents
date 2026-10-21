@@ -90,11 +90,11 @@ human with `action:"release"`, `reason:"login"`, `reason:"two_factor"`
 or `reason:"payment_details"` respectively; `review` and `other` cover
 other human-only steps. Include a plain-text `note` of at most 140
 characters naming the site and what you need, and send one chat message.
-On the user's computer, a reasoned release marks the tab `awaiting_human`
-and refuses bot input until the human gives it back or the 30-minute hold
-expires. Read the current tab state and fresh epoch on `human_returned`.
-On the VPS, an ordinary reasoned release records the reason but does not
-hold the tab; wait for the user's reply before claiming it again.
+On the user's computer and on the VM alike, a reasoned release marks the
+tab `awaiting_human` and refuses bot input until the person presses
+Give back in Alan's Workspace or 30 minutes pass. The app shows a
+banner and a notification for the handback. Read the current tab state
+and fresh epoch on `human_returned`.
 
 For a CAPTCHA, follow [CAPTCHA handback](../workspace-operations/SKILL.md#when-a-site-shows-a-captcha).
 Release a needed widget with `{action:"release", reason:"captcha"}` and
