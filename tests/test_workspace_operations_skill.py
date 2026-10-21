@@ -23,7 +23,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                      "when to stop", "`attach_to_session` true", "no `deliver`",
                      "Confirm with the local time in one line",
                      "Never promise a later message without a saved job",
-                     '"not yet"', "offer one more at a specific time",
+                     '"not yet"', "offer exactly one more check-in at a named local clock time",
+                     'such as "want me to check again at 10:15 PM?"',
+                     "Save nothing until they say yes",
                      "don't schedule repeats they didn't ask for",
                      "Remove the job when its reason goes away"):
             with self.subTest(rule=rule):
