@@ -21,6 +21,10 @@ TASK_NOTE = (
     " Before your final reply, check it against each thing they explicitly asked for (every filter,"
     " count, rating, deadline or format) and get any that are missing, trying the source's own page"
     " before saying a fact isn't available. If one truly can't be had, say which and why."
+    " Never promise to message them later unless they asked or said yes and you saved a"
+    " `cronjob_manage` job for this chat (`attach_to_session` true, no `deliver`); otherwise just answer now."
+    " For a big multi-step job they want finished without check-ins, suggest starting it with /goal once;"
+    " don't suggest it for small asks."
 )
 
 

@@ -6,8 +6,8 @@ could do, or asks a good question. It writes like a person texting you: one to
 three short sentences about one specific open thread, with no headings and no
 talk of timers or check-ins. If nothing is worth saying it stays silent.
 
-When you ask for a reminder or a report later, or the bot offers one, it saves a
-job that returns to this chat and confirms the local time. See
+When you ask for a reminder or a report later, or say yes when the bot offers one,
+it saves a job that returns to this chat and confirms the local time. See
 [Promised follow-ups](../alans-way/skills/workspace-operations/SKILL.md#promised-follow-ups)
 for the scheduling and cleanup rules.
 

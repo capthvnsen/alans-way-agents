@@ -10,7 +10,7 @@ class SetupRestartOrderTests(unittest.TestCase):
         skill = (Path(__file__).resolve().parents[1] / "alans-way" / "skills" /
                  "workspace-setup" / "SKILL.md").read_text(encoding="utf-8")
         offer = ("Want me to work on my own? I'll keep going until a job is done instead of "
-                 "stopping to check in, double-check code changes before calling them done, "
+                 "stopping to check in, "
                  "and fold in anything you send while I'm working. "
                  "(Recommended. Say no to keep things as they are.)")
         normalized = " ".join(skill.split())

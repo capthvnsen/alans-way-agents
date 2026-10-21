@@ -961,9 +961,11 @@ class RegisterTests(unittest.TestCase):
             for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron", ""):
                 with self.subTest(profile=profile, platform=platform):
                     for first in (True, False):
-                        result = package.task_context(platform=platform, is_first_turn=first,
-                                                      user_message="Compare and save the reports.")
-                        self.assertEqual(set(result), {"context"})
+                        results = [fn(platform=platform, is_first_turn=first,
+                                      user_message="Compare and save the reports.")
+                                   for name, fn in hooks if name == "pre_llm_call"]
+                        result = {"context": package.TASK_NOTE}
+                        self.assertIn(result, results)
                         for rule in ("verified done or genuinely blocked", "checklist of mini goals",
                                      "native todo tool when available", "otherwise in working context",
                                      "Verify each goal and mark it done", "without waiting for 'keep going'",
@@ -971,7 +973,13 @@ class RegisterTests(unittest.TestCase):
                                      "information only they have", "cannot safely recover",
                                      "what is done, what remains and exactly what is needed to resume",
                                      "check it against each thing they explicitly asked for",
-                                     "trying the source's own page before saying a fact isn't available"):
+                                     "trying the source's own page before saying a fact isn't available",
+                                     "Never promise to message them later unless they asked or said yes",
+                                     "saved a `cronjob_manage` job for this chat",
+                                     "`attach_to_session` true, no `deliver`",
+                                     "otherwise just answer now",
+                                     "For a big multi-step job they want finished without check-ins",
+                                     "suggest starting it with /goal once; don't suggest it for small asks"):
                             self.assertIn(rule, result["context"])
 
     def test_register_wires_public_surfaces_only(self):
