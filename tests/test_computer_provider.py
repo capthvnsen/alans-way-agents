@@ -68,6 +68,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (c.os) { s.os = c.os; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ host: s.os || 'mac', apps: APPS });
+  else if (name === 'cua_alans_way_status') result = text({ capabilities: ['computer-launch-v1'] });
   else if (c.error) result = fail(c.error);
   else if (args.pid === 103) result = fail('in_front: The user is using that app in front right now. Retry in a few seconds.');
   else if (name === 'workspace_computer_launch') result = args.app === 'Calculator'
@@ -484,6 +485,11 @@ class StaticTests(unittest.TestCase):
         self.assertRegex(manifest, r'(?m)^name:\s*"?alans-way-computer"?\s*$')
         self.assertRegex(manifest, r'(?m)^requires_hermes:\s*"?>=0\.21\.5"?\s*$')
 
+    def test_provider_description_identifies_the_stock_native_mac_tool(self):
+        description = (PLUGIN / "plugin.yaml").read_text()
+        for identity in ("stock computer_use", "alans-way-computer", "native Mac", "through Alan's Workspace"):
+            self.assertIn(identity, description)
+
     def test_provider_markers_sit_in_the_first_8k_for_exclusive_classification(self):
         head = (PLUGIN / "__init__.py").read_text(encoding="utf-8-sig")[:8192]
         self.assertIn("register_computer_use_provider", head)
@@ -604,14 +610,41 @@ class ReplyFoldingTests(unittest.TestCase):
     def test_focus_launches_a_missing_named_app_and_targets_its_pid(self):
         be = self.backend([])
         with mock.patch.object(be, "list_apps", return_value=[]), \
-                mock.patch.object(be, "_call", return_value={"content": [
+                mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}, {"content": [
                     {"type": "text", "text": '{"pid": 105, "name": "Calculator"}'}],
-                    "_meta": {"workspace": {"host": "mac"}}}) as call, \
+                    "_meta": {"workspace": {"host": "mac"}}}]) as call, \
                 mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
             result = be.focus_app("Calculator")
         self.assertTrue(result["ok"])
         self.assertEqual((be._pid, be._app), (105, "Calculator"))
-        self.assertEqual(call.call_args.args, ("workspace_computer_launch", {"app": "Calculator"}))
+        self.assertEqual(call.call_args_list[0].args, ("cua_alans_way_status", {}))
+        self.assertEqual(call.call_args.args, ("workspace_computer_launch", {"app": "Calculator", "expect_host": "computer"}))
+
+    def test_focus_only_launches_when_the_same_host_advertises_the_capability(self):
+        for capabilities in ([], None, "computer-launch-v1"):
+            be = self.backend([])
+            def reply(name, args):
+                body = {"capabilities": capabilities} if name == "cua_alans_way_status" else {"pid": 105}
+                return {"content": [{"type": "text", "text": json.dumps(body)}]}
+            with self.subTest(capabilities=capabilities), mock.patch.object(be, "list_apps", return_value=[]), \
+                    mock.patch.object(be, "_call", side_effect=reply) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                result = be.focus_app("Calculator")
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "not_found")
+            self.assertEqual([c.args[0] for c in call.call_args_list], ["cua_alans_way_status"])
+
+        be = self.backend([])
+        be._host = "mac"
+        with mock.patch.object(be, "list_apps", return_value=[]), \
+                mock.patch.object(be, "_call", return_value={"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "vps"}}}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.focus_app("Calculator")
+        self.assertEqual(result.code, "host_changed")
+        self.assertIsNone(be._pid)
+        self.assertEqual([c.args[0] for c in call.call_args_list], ["cua_alans_way_status"])
 
     def test_focus_does_not_launch_an_ambiguous_match_or_hide_old_host_error(self):
         be = self.backend([])
@@ -623,8 +656,9 @@ class ReplyFoldingTests(unittest.TestCase):
             self.assertEqual(be.focus_app("Note")["code"], "not_found")
         self.assertFalse(call.called)
         with mock.patch.object(be, "list_apps", return_value=[]), \
-                mock.patch.object(be, "_call", return_value={"isError": True, "content": [
-                    {"type": "text", "text": "unsupported_action: Unknown action launch."}]}), \
+                mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}]}, {"isError": True, "content": [
+                    {"type": "text", "text": "unsupported_action: Unknown action launch."}]}]), \
                 mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
             result = be.focus_app("Calculator")
         self.assertEqual(result["code"], "not_found")
@@ -636,7 +670,8 @@ class ReplyFoldingTests(unittest.TestCase):
             be = self.backend([])
             be._host = "mac"
             with self.subTest(code=code), mock.patch.object(be, "list_apps", return_value=[]), \
-                    mock.patch.object(be, "_call", return_value=reply) as call, \
+                    mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                        '{"capabilities": ["computer-launch-v1"]}'}]}, reply]) as call, \
                     mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
                 result = be.focus_app("Calculator")
             self.assertEqual(result["code"], code)

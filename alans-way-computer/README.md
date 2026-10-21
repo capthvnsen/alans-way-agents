@@ -1,7 +1,7 @@
 # Alan's Way Plugin: computer-use provider
 
-A computer-use provider for Hermes. Select it and the stock `computer_use` tool drives desktop apps on the
-user's own computer through the Alan's Workspace app. When that computer is offline it drives the VM's desktop
+With backend `alans-way-computer`, Hermes's stock `computer_use` tool is Alan's Way's native Mac app control.
+It drives the user's own computer through Alan's Workspace. When that computer is offline it drives the VM's desktop
 instead, with no change on the Hermes side.
 
 It needs a Hermes build with the pluggable computer-use API (pull request 133556, merged after 0.21.5). On older
@@ -24,7 +24,8 @@ Hermes the plugin installs and logs that it did nothing.
   falls back to the VM desktop when that fails. A dead or silent router is restarted on the next call.
 - Targets one app. On Mac, it can read that app in front and drive or raise it after the user has been idle for
   at least 2 seconds. Foreground requests ask the host to activate only that target before acting.
-  `focus_app` launches a missing named app when the host supports it; `raise_window` asks the host to raise it.
+  `focus_app` launches a missing named app when the host advertises `computer-launch-v1`;
+  `raise_window` asks the host to raise it with `activate`.
   Keychains, password managers and password fields stay off limits. Other hosts keep their own restrictions.
 - `capture` (`mode="som"`) returns the element list alone when its named controls cover most of the window; when
   they don't (a canvas, a game, a web area) it attaches the window screenshot and says why. `mode="vision"` is the

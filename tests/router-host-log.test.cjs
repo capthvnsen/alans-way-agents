@@ -93,6 +93,20 @@ else {
 }
 const serving = c => c.stderr().split('\n').filter(line => line.startsWith('workspace-router: served ')).map(line => JSON.parse(line.slice('workspace-router: served '.length)));
 
+test('native tool discovery points read-only Mac tools to the configured stock input tool', () => {
+  const names = ['apps', 'snapshot', 'menu', 'screenshot'].map(name => 'workspace_computer_' + name);
+  const tools = [...names, 'workspace_computer_unknown'].map(name => ({ name,
+    description: 'Existing read description.', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }));
+  const result = require(router).annotateResult({ result: { tools } }, 'mac', null, null).result;
+  for (const tool of result.tools.filter(t => names.includes(t.name))) {
+    for (const identity of ['Existing read description.', 'stock computer_use', 'alans-way-computer', "through Alan's Workspace"])
+      assert.ok(tool.description.includes(identity), tool.description);
+    assert.deepEqual(tool.inputSchema, { type: 'object' });
+    assert.equal(tool.annotations.readOnlyHint, true);
+  }
+  assert.equal(result.tools.at(-1).description, 'Existing read description.');
+});
+
 test('serving logs identify default Mac, requested VM, tab affinity and a merged list without private data', async t => {
   const f = fixture(t), c = f.start();await c.ready();
   const mac = await c.call(2, 'open', { url: 'https://private.invalid/private-url' });

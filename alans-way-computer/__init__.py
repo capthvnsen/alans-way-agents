@@ -353,10 +353,14 @@ class AlansWayComputerBackend(ComputerUseBackend):
             names = ", ".join(f"{a['name']} (pid {a['pid']})" for a in (hits or apps))
             missing = f"{'Several apps match' if hits else 'No running app matches'} {app!r}: {names}"
             if not hits and launch:
-                args = {"app": app}
-                if self._host:
-                    args["expect_host"] = "vm" if self._host in ("vps", "vm") else "computer"
                 try:
+                    _, status, _ = self._read("cua_alans_way_status", {}, self._host)
+                    capabilities = _json(status[0] if status else "").get("capabilities")
+                    if not isinstance(capabilities, list) or "computer-launch-v1" not in capabilities:
+                        raise LookupError(missing)
+                    args = {"app": app}
+                    if self._host:
+                        args["expect_host"] = "vm" if self._host in ("vps", "vm") else "computer"
                     _, texts, _ = self._read("workspace_computer_launch", args, self._host)
                 except _ToolError as e:
                     if _coded(str(e), e.code)[0] in ("unsupported_action", "bad_request") or any(
@@ -861,7 +865,7 @@ def _label(e):
 
 class AlansWayComputerProvider(ComputerUseProvider):
     name = NAME
-    display_name = "Alan's Way (your computer, VM desktop as fallback)"
+    display_name = "Alan's Way native app control through Alan's Workspace (VM fallback)"
 
     def create_backend(self, *, permission_mode):
         return AlansWayComputerBackend(permission_mode)

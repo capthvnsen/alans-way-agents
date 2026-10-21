@@ -885,14 +885,17 @@ function workspaceMeta(host, mac, ms, tabIdChanged) {
 
 // Older connectors still declare open's `host` as Ignored; the router routes
 // it now, so the advertised schema says what it does. open's description also
-// carries the search routing: the tool list is in every turn, the skill is not.
+// carries routing guidance: the tool list is in every turn, the skill is not.
 const SEARCH_ROUTING = 'For a plain lookup, use web_search or web_extract when you have them instead of opening a search engine page. '
   + 'When a search needs the real page, omit host so it runs on the user\'s computer: the VM browser meets far more CAPTCHAs. '
   + 'Never solve a CAPTCHA: release the tab with reason captcha and ask the user.';
-function rewriteOpenHost(result) {
+function rewriteToolRouting(result) {
   const tools = result && result.tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
+    if (tool && READ_ONLY_TOOLS.has(tool.name) && tool.name.startsWith('workspace_computer_')) {
+      tool.description = `${tool.description ? `${tool.description} ` : ''}Native input uses the stock computer_use tool (backend alans-way-computer), Alan's Way's own Mac control through Alan's Workspace, with VM fallback when the computer is unreachable.`;
+    }
     if (!tool || tool.name !== 'cua_alans_way_open') continue;
     tool.description = tool.description ? `${tool.description} ${SEARCH_ROUTING}` : SEARCH_ROUTING;
     const props = tool.inputSchema && tool.inputSchema.properties;
@@ -1091,7 +1094,7 @@ function projectWorkspaceReply(result, req) {
 function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotId, req) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   projectWorkspaceReply(msg.result, req);
-  rewriteOpenHost(msg.result);
+  rewriteToolRouting(msg.result);
   rewriteTabDefaults(msg.result);
   addCommitParam(msg.result);
   // The app lists owners and grants, but a new conversation may not know

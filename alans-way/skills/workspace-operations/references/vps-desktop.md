@@ -4,10 +4,10 @@ These tools follow the connector. When the user's computer (a Mac, or a Windows 
 
 Managed Chromium tabs use `cua_alans_way_snapshot` and `cua_alans_way_action`.
 
-Other applications are driven by the `computer_use` tool. Approvals follow the user's Hermes settings: `list_apps` names the running apps, `capture` with `app` returns the app's numbered element list, and `click`, `key`, `set_value`, `scroll`, `drag` and `focus_app` act on it. Follow [Where to act](../SKILL.md#choose-the-execution-host) for the target app's foreground policy. That reads the accessibility tree and does not move the pointer. Password fields are off limits.
+Other applications are driven by the stock `computer_use` tool with backend `alans-way-computer`, Alan's Way's own native app control through Alan's Workspace. Approvals follow the user's Hermes settings: `list_apps` names the running apps, `capture` with `app` returns the app's numbered element list, and `click`, `key`, `set_value`, `scroll`, `drag` and `focus_app` act on it. Follow [Where to act](../SKILL.md#choose-the-execution-host) for the target app's foreground policy. That reads the accessibility tree and does not move the pointer. Password fields are off limits.
 
 `workspace_computer_apps`, `workspace_computer_snapshot`, `workspace_computer_menu` and `workspace_computer_screenshot` still read the desktop without asking; `workspace_computer_screenshot` is one window, a small jpeg, and only when the element list has no named control. Do not screenshot a window you can already read as names and refs.
 
 When the VM's desktop has no accessibility stack (no AT-SPI bus) or no screenshot tool, these calls fail outright instead of answering. Report "VM desktop accessibility unavailable" once and go on without desktop control; do not retry the call in a loop or substitute shell screenshot tools.
 
-If `computer_use` is not loaded, stop and report that. Do not fall back to an external computer-use driver or a full-desktop screenshot.
+If `computer_use` is not loaded, stop and report that. This profile needs its configured Alan's Way backend for native input.

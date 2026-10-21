@@ -1,6 +1,6 @@
 ---
 name: workspace-operations
-description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
+description: Use for native Mac app tasks with stock computer_use (backend alans-way-computer), or whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
 ---
 
 # Workspace operations
@@ -181,7 +181,7 @@ usually a Mac, so this skill says "Mac", but it can be a Windows or Linux PC
 instead, and every rule below is identical either way. (Likewise "VPS" is
 Hermes' own computer, which can be a Linux VPS or a macOS virtual machine.)
 All web work goes through the `cua_alans_way_*` tools, never another browser
-tool (browser_exec, computer-use drivers), and never opening a URL in the
+tool such as browser_exec, and never opening a URL in the
 human's personal browser via terminal/`open`. Never call the app's HTTP API
 yourself (curl or a script with its `connection.json` token, locally or over
 SSH): those tabs carry another bot id, and the tools refuse them afterwards.
@@ -230,7 +230,9 @@ honor that gate without adding a separate chat approval for each action.
 Press a ref from the accessibility tree and do not move the human's cursor.
 
 **Where to act.** A web page is `cua_alans_way_*` work, following the host
-policy above. A native app is `computer_use` work; `workspace_computer_apps` says which
+policy above. A native app is `computer_use` work. With backend `alans-way-computer`,
+this stock tool drives the user's Mac through Alan's Workspace.
+`workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
 `vps` is the VM desktop). When the user asks for a task in an app,
 bringing that app forward is part of the task; use `focus_app` to launch a
@@ -244,7 +246,7 @@ their own foreground restrictions.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
-for that boundary. Do not use an external computer-use driver.
+for that boundary. For native input, use this profile's configured `computer_use` tool.
 
 ## The connector layer self-heals; never operate on it
 
@@ -532,8 +534,10 @@ takes priority: acquire the fresh state required by the recovery instructions.
 A screenshot is only for a canvas, a chart, or a page the snapshot says it could not read.
 Never screenshot a page you can already read as text.
 
-Desktop apps, on the Mac and on the Linux machine, are driven by the
-`computer_use` tool. Hermes applies the user's configured approvals;
+Desktop apps, on the Mac and on the Linux machine, are driven by the stock
+`computer_use` tool with backend `alans-way-computer`: Alan's Way's own native
+app control. It drives the user's Mac through Alan's Workspace, using the VM
+desktop when that computer is unreachable. Hermes applies the user's configured approvals;
 that approval gate is the only desktop-input path, so never look for a way
 around it. `computer_use` `list_apps` names the running apps; `capture` with
 `app` returns one app's numbered element list, with a small window

@@ -694,6 +694,20 @@ class DesktopAppsSkillTests(unittest.TestCase):
         self.assertIn("never run screencapture, osascript or ssh scripts to drive the user's desktop", self.normalized)
         self.assertIn("use the `computer_use` tool (and the read-only `workspace_computer_*` tools to look)", self.normalized)
 
+    def test_native_mac_guidance_identifies_stock_tool_as_the_workspace_control_path(self):
+        for section in (self.normalized.split("**Where to act.**")[1].split("## ")[0],
+                        self.normalized.split("Desktop apps,")[1].split("## ")[0]):
+            for identity in ("`computer_use`", "`alans-way-computer`", "through Alan's Workspace"):
+                self.assertIn(identity, section)
+        description = re.search(r"^description: (.*)$", SKILL_PATH.read_text(), re.M).group(1)
+        self.assertIn("native Mac app", description)
+        self.assertIn("computer_use", description)
+        reference = _normalized((SKILL_PATH.parent / "references/vps-desktop.md").read_text())
+        for text in (self.normalized, reference):
+            self.assertNotRegex(text, r"(?i)(?:external|separate|third.party) computer[- ]use driver")
+            self.assertNotIn("computer-use drivers", text)
+        self.assertIn("approval gate is the only desktop-input path", self.normalized)
+
     def test_where_to_act_names_each_surface_and_when_to_ask(self):
         self.assertIn("**Where to act.** A web page is `cua_alans_way_*` work", self.normalized)
         self.assertIn("A native app is `computer_use` work", self.normalized)
