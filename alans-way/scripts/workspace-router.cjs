@@ -336,13 +336,13 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 // Desktop input is ungated at the MCP layer (this server carries no trust
-// key), so workspace_computer_action is hidden from tools/list and refused
+// key), so desktop action and launch tools are hidden from tools/list and refused
 // unless the operator opted in: setup-workspace.sh --allow-desktop-actions
 // writes HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS into the managed block, and
 // the alans-way-computer provider sets it on its own private router child
 // (Hermes's computer_use approval gate sits above that path). The read-only
 // computer tools above stay exposed either way.
-const DESKTOP_INPUT_TOOL = 'workspace_computer_action';
+const DESKTOP_INPUT_TOOLS = new Set(['workspace_computer_action', 'workspace_computer_launch']);
 const desktopActionsAllowed = !['', '0', 'false', 'no'].includes(
   (process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '').trim().toLowerCase());
 
@@ -1108,7 +1108,7 @@ function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotI
     });
   }
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
-    msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
+    msg.result.tools = msg.result.tools.filter((tool) => !tool || !DESKTOP_INPUT_TOOLS.has(tool.name));
   }
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms, tabIdChanged) };
   if (notice && Array.isArray(msg.result.content)) {
@@ -1818,16 +1818,27 @@ async function main() {
   function logServed(req, host) {
     // Only fixed tool names and routing facts may reach this diagnostic.
     if (!req || req.method !== 'tools/call'
-        || !/^cua_alans_way_(status|tabs|open|snapshot|screenshot|action|close|recordings)$/.test(req.name)) return;
+        || !/^(cua_alans_way_(status|tabs|open|snapshot|screenshot|action|close|recordings)|workspace_computer_(apps|snapshot|screenshot|menu|action|launch))$/.test(req.name)) return;
     const requested = normalizeHost(JSON.parse(req.line).params.arguments?.host);
     const fallback = host === 'vm' && macSsh && req.via !== 'vm' && requested !== 'vm';
-    process.stderr.write(`workspace-router: served ${JSON.stringify({
+    const line = `workspace-router: served ${JSON.stringify({
+      requestId: typeof req.id === 'number' ? req.id : crypto.createHash('sha256').update(String(req.id)).digest('hex').slice(0, 16),
       tool: req.name,
       host,
       selection: fallback ? 'fallback' : requested ? 'requested' : 'defaulted',
       reason: fallback ? fallbackReason : null,
       elapsedMs: Date.now() - req.acceptedAt,
-    })}\n`);
+    })}\n`;
+    process.stderr.write(line);
+    // MCP clients may capture stderr without forwarding it to the profile log.
+    const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || os.homedir(), process.platform === 'win32' ? 'hermes' : '.hermes');
+    try {
+      const dir = path.join(home, 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, 'workspace-router.log'), line, { mode: 0o600 });
+    } catch {
+      process.stderr.write('workspace-router: could not write profile serving log\n');
+    }
   }
 
   function emitToolError(id, text, note = annotate) {
@@ -2923,12 +2934,12 @@ async function main() {
       const req = pendingRequests.get(msg.id);
       if (req) req.line = out;
     }
-    if (!desktopActionsAllowed && msg.params && msg.params.name === DESKTOP_INPUT_TOOL) {
+    if (!desktopActionsAllowed && msg.params && DESKTOP_INPUT_TOOLS.has(msg.params.name)) {
       pendingRequests.delete(msg.id);
       unbuffer(line);
       emitToolError(
         msg.id,
-        'workspace_computer_action is not exposed by this server. Desktop input goes through the approval-gated computer_use tool.',
+        'Desktop input is not exposed by this server. Use the approval-gated computer_use tool.',
       );
       return null;
     }
@@ -2943,7 +2954,7 @@ async function main() {
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
       || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
-    if (msg.params?.name === DESKTOP_INPUT_TOOL && args.expect_host !== undefined) {
+    if (DESKTOP_INPUT_TOOLS.has(msg.params?.name) && args.expect_host !== undefined) {
       const targetHost = host || (wantsVm || activeHost === 'vps' ? 'vm' : 'computer');
       const invalid = !['computer', 'vm'].includes(args.expect_host);
       if (invalid || args.expect_host !== targetHost) {

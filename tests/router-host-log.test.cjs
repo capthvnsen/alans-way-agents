@@ -60,7 +60,7 @@ else {
   const command = { command: process.execPath, args: ['--require', file('preload.cjs'), router,
     '--bot-id', 'private-bot', '--mac-ssh', 'owned-fixture-only', '--mac-script', '/fixture/browser-mcp.cjs',
     '--mac-state-file', file('state.json'), '--vps-script', file('backend.cjs'), '--vps-connection', file('absent.json')],
-    env: { PATH: file('bin'), HOME: dir, HOST_FIXTURE_NODE: process.execPath, HOST_FIXTURE_DIR: dir,
+    env: { PATH: file('bin'), HOME: dir, HERMES_HOME: file('profile'), HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: '1', HOST_FIXTURE_NODE: process.execPath, HOST_FIXTURE_DIR: dir,
       HOST_FIXTURE_FAST: fast ? '1' : '', HOST_FIXTURE_SLOW_PROBE: slowProbe ? '1' : '', HOST_FIXTURE_SILENT: silent ? '1' : '' }, stderr: 'pipe' };
   const processes = [], transports = [];
   const events = name => fs.existsSync(file(name)) ? fs.readFileSync(file(name), 'utf8').trim().split('\n').filter(Boolean) : [];
@@ -106,9 +106,27 @@ test('serving logs identify default Mac, requested VM, tab affinity and a merged
     { tool: 'cua_alans_way_snapshot', host: 'vm', selection: 'defaulted', reason: null },
     { tool: 'cua_alans_way_tabs', host: 'mac', selection: 'defaulted', reason: null },
   ]);
-  for (const row of serving(c)) { assert.equal(typeof row.elapsedMs, 'number');assert.ok(row.elapsedMs >= 0);assert.deepEqual(Object.keys(row).sort(), ['elapsedMs','host','reason','selection','tool']); }
+  for (const row of serving(c)) { assert.equal(typeof row.elapsedMs, 'number');assert.ok(row.elapsedMs >= 0);assert.deepEqual(Object.keys(row).sort(), ['elapsedMs','host','reason','requestId','selection','tool']); }
   for (const secret of ['private-url','private-title','private-page-content','private-token','private-bot']) assert.ok(!c.stderr().includes(secret), secret);
   assert.equal(mac.result._meta.workspace.host, 'mac');assert.equal(vm.result._meta.workspace.host, 'vm');
+});
+
+test('profile log retains one correlated line for every browser and native Mac reply', async t => {
+  const f = fixture(t), c = f.start();await c.ready();
+  await c.call(2, 'open', { url: 'https://private.invalid/private-url' });
+  for (const [id, name] of [[3, 'apps'], [4, 'snapshot'], [5, 'menu'], [6, 'screenshot'], [7, 'action'], [8, 'launch']]) {
+    c.send({ id, method: 'tools/call', params: { name: 'workspace_computer_' + name, arguments: { pid: 101, action: 'key', key: 'x' } } });
+    await c.recv(id);
+  }
+  const log = f.file('profile/logs/workspace-router.log');
+  await until(() => fs.existsSync(log) && fs.readFileSync(log, 'utf8').trim().split('\n').length === 7, 'profile served log');
+  const lines = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.deepEqual(lines, c.stderr().split('\n').filter(l => l.startsWith('workspace-router: served ')));
+  const rows = lines.map(l => JSON.parse(l.slice('workspace-router: served '.length)));
+  assert.deepEqual(rows.map(r => r.requestId), [2, 3, 4, 5, 6, 7, 8]);
+  assert.ok(rows.every(r => r.host === 'mac'));
+  assert.ok(!fs.existsSync(f.file('.hermes/logs/workspace-router.log')), 'use the selected profile');
+  for (const secret of ['private-url', 'private-title', 'private-page-content', 'private-token', 'private-bot']) assert.ok(!lines.join('\n').includes(secret));
 });
 
 test('large replies and backend errors each log once; arbitrary tool names cannot leak into stderr', async t => {

@@ -289,7 +289,7 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("An action or batch result also includes elements for up to 40 controls; use those refs.", self.normalized)
         self.assertIn("When a successful reply says unchanged, the controls you already have are still valid, so do not snapshot again.", self.normalized)
         self.assertIn("`set_value` replaces a field's text", self.normalized)
-        self.assertIn("Skip the focused window, Keychain, and password fields.", self.normalized)
+        self.assertIn("Skip Keychain, password managers and password fields.", self.normalized)
         self.assertIn("Never screenshot a page you can already read as text.", self.normalized)
         self.assertIn("do not move the human's cursor", self.normalized)
 
@@ -705,6 +705,25 @@ class DesktopAppsSkillTests(unittest.TestCase):
     def test_a_permission_error_names_the_app_and_both_switches(self):
         self.assertIn("Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp)", self.normalized)
         self.assertIn("System Settings", self.normalized)
+
+    def test_task_authorizes_target_foreground_and_settings_govern_approvals(self):
+        self.assertIn("Approvals follow the user's Hermes settings", self.normalized)
+        self.assertIn("bringing that app forward is part of the task", self.normalized)
+        self.assertIn("wait a few seconds and retry once", self.normalized)
+        self.assertNotIn("asks the user for approval on each action", self.normalized)
+        self.assertNotIn("asks the user for approval before each action", self.normalized)
+        self.assertNotIn("Skip the focused window", self.normalized)
+        reference = _normalized((SKILL_PATH.parent / "references/vps-desktop.md").read_text())
+        self.assertIn("Approvals follow the user's Hermes settings", reference)
+        self.assertNotIn("Leave the focused window alone", reference)
+
+    def test_sign_in_requests_release_the_opened_tab_even_without_an_errand(self):
+        section = self.normalized.split("## Sign-in handback")[1].split("## ")[0]
+        for rule in ("including when the user only asks you to open a sign-in page",
+                     'action:"release"', 'reason:"login"', "current epoch", "awaiting_human",
+                     "Give back", "notification", "viewerUrl", "human_returned",
+                     "Opening the page alone does not complete the handback"):
+            self.assertIn(rule, section)
 
 
 if __name__ == "__main__":

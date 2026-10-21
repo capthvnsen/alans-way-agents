@@ -1010,6 +1010,12 @@ class RegisterTests(unittest.TestCase):
                      "checking a business's own site for hours does not replace checking reviews"):
             self.assertIn(rule, note)
 
+    def test_recommendations_require_location_ratings_and_verified_discounts(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn("replace it with an option that has a location-specific rating", note)
+        self.assertIn("Verify coupon eligibility and the resulting price before presenting a discounted alternative", note)
+        self.assertNotIn("labeled unverified", note)
+
     def test_each_items_facts_come_from_its_own_source(self):
         note = sys.modules["alans_way_idle_test"].task_context()["context"]
         self.assertIn(
@@ -1032,10 +1038,10 @@ class RegisterTests(unittest.TestCase):
                      " claiming the fact is absent"):
             self.assertIn(rule, note)
 
-    def test_unchecked_extras_do_not_become_paragraphs(self):
+    def test_unchecked_extras_are_omitted(self):
         note = sys.modules["alans_way_idle_test"].task_context()["context"]
-        self.assertIn("Omit unchecked extras. If one truly matters to their decision, use at most"
-                      " one short clause labeled unverified, never a paragraph", note)
+        self.assertIn("Omit unchecked extras.", note)
+        self.assertNotIn("labeled unverified", note)
 
     def test_register_wires_public_surfaces_only(self):
         calls, factories = [], {}

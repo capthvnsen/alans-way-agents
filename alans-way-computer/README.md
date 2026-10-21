@@ -22,8 +22,10 @@ Hermes the plugin installs and logs that it did nothing.
 - Starts the router from the `workspace_browser` block as a long-lived `node` child, one per Hermes session, and
   talks to it over its stdio. The router reaches the user's computer by SSH over the user's Tailscale tailnet and
   falls back to the VM desktop when that fails. A dead or silent router is restarted on the next call.
-- Never takes focus. Input is delivered in the background, `focus_app` only chooses which app later actions
-  target, and foreground delivery is refused. Keychains, password managers and password fields are off limits.
+- Targets one app. On Mac, it can read that app in front and drive or raise it after the user has been idle for
+  at least 2 seconds. Foreground requests ask the host to activate only that target before acting.
+  `focus_app` launches a missing named app when the host supports it; `raise_window` asks the host to raise it.
+  Keychains, password managers and password fields stay off limits. Other hosts keep their own restrictions.
 - `capture` (`mode="som"`) returns the element list alone when its named controls cover most of the window; when
   they don't (a canvas, a game, a web area) it attaches the window screenshot and says why. `mode="vision"` is the
   screenshot alone.
@@ -35,17 +37,18 @@ Hermes the plugin installs and logs that it did nothing.
   generation does not match. Older apps still return full lists or reuse an unchanged list.
 - When the app identifies a window, later captures, screenshots and actions stay on that window. Select another
   with `capture(window_id=...)`; a mismatched window reply requires a fresh capture before acting again.
-- Errors carry a code and, where there is one, the next step: `locked`, `in_front` and `no_window` mean asking the
-  user; `stale_ref` means capture again. A capture of an app whose windows are on another Space says so in its note.
+- Errors carry a code and a next step: `in_front` means wait a few seconds and retry once, then briefly report
+  the refusal; `locked` and `no_window` need the user's help, and `stale_ref` means capture again.
+  A capture of an app whose windows are on another Space says so in its note.
 - After a switch between the computer and the VM, app ids and element numbers no longer mean anything. The
   next action returns `host_changed`: call `list_apps` and `capture` again.
-- Typing needs a field: use `set_value` with an element number. `type` with no target, middle and triple clicks and
-  modifier clicks return `unsupported_action`.
+- Prefer `set_value` with a field's element number. Free typing depends on the host's support; middle and triple
+  clicks and modifier clicks return `unsupported_action`.
 
 ## Approvals
 
-Hermes asks for approval before every `computer_use` action except `capture`, `list_apps`, `list_windows` and `wait`, once per action
-type. An unattended Telegram bot has nobody to answer, so grant them once. Either tap Always in Telegram when asked,
+Approvals follow the user's Hermes settings. The plugin uses that gate without adding per-action chat questions.
+For an unattended Telegram bot, either tap Always in Telegram when asked,
 or add these entries to `command_allowlist` in the profile's config.yaml, one each, and restart the gateway (`hermes gateway restart`; on a supervisord host `supervisorctl signal USR1 <program>` on the program running `hermes gateway run`; a plain `restart`/`stop` can SIGKILL it mid-drain and corrupt `state.db`):
 
 ```yaml
@@ -61,6 +64,10 @@ command_allowlist:
 ```
 
 `computer_use.permission_mode` applies to the cua driver only and has no effect here.
+
+Serving diagnostics go to the selected profile's `logs/workspace-router.log` as well as stderr. Each line names
+the host, request id and tool, without page content or arguments. Rerunning workspace setup binds the profile log
+directory for the browser connector; the computer provider also passes Hermes's currently bound profile home.
 
 ## Limits
 

@@ -225,16 +225,22 @@ read with
 `mcp__workspace_browser__workspace_computer_snapshot`,
 `mcp__workspace_browser__workspace_computer_menu` and
 `mcp__workspace_browser__workspace_computer_screenshot`, and acted on
-with the `computer_use` tool, which asks the user for approval on each
-action. Press a ref from the accessibility
-tree, leave the focused window alone, and do not move the pointer.
+with the `computer_use` tool. Approvals follow the user's Hermes settings;
+honor that gate without adding a separate chat approval for each action.
+Press a ref from the accessibility tree and do not move the human's cursor.
 
 **Where to act.** A web page is `cua_alans_way_*` work, following the host
 policy above. A native app is `computer_use` work; `workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
-`vps` is the VM desktop). If the app is in front, on another Space, or the
-screen is locked, the error or capture note says so: ask the user instead of
-working around it.
+`vps` is the VM desktop). When the user asks for a task in an app,
+bringing that app forward is part of the task; use `focus_app` to launch a
+named app if it is not running. On Mac, the target app may be read in front
+and driven or raised when the user has been idle for at least 2 seconds.
+For `in_front`, wait a few seconds and retry once, then tell the user briefly
+if it still refuses. Do not ask for permission to use the front window.
+If the app is on another Space or the screen is locked, the error or capture
+note says so: ask the user instead of working around it. Other hosts keep
+their own foreground restrictions.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
@@ -475,6 +481,21 @@ ignore that CAPTCHA. This is a change of source, not a browser failure: say
 in your reply which source you used. If no other source can answer, ask the
 user how to go on.
 
+## Sign-in handback
+
+When sign-in or 2FA needs the user, including when the user only asks you to open a sign-in page,
+open and inspect the tab, then call `cua_alans_way_action` with its tab id and current epoch,
+`action:"release"`, `reason:"login"` (or `reason:"two_factor"`), and a short `note`
+naming the site and what the user needs to do. Confirm the reply marks it
+`awaiting_human` before saying it is ready; report a failed release plainly.
+Opening the page alone does not complete the handback.
+The existing hold shows a banner and notification in Alan's Workspace and keeps
+bot input paused until Give back or the hold expires. Send one short chat message;
+for a VM tab include the handback's `viewerUrl` when returned, otherwise direct
+them to the VM viewer in Alan's Workspace. On `human_returned`, read current
+tab state and a fresh epoch before resuming. Follow the [human-only steps](../web-errands/SKILL.md#the-walls-you-hand-back)
+for other sensitive fields and the [CAPTCHA handback](#when-a-site-shows-a-captcha) for challenges.
+
 ## Hand a task between computers
 
 Control handoff of a Mac tab keeps that same live tab, login and page state on
@@ -512,7 +533,7 @@ A screenshot is only for a canvas, a chart, or a page the snapshot says it could
 Never screenshot a page you can already read as text.
 
 Desktop apps, on the Mac and on the Linux machine, are driven by the
-`computer_use` tool. Hermes asks the user for approval before each action;
+`computer_use` tool. Hermes applies the user's configured approvals;
 that approval gate is the only desktop-input path, so never look for a way
 around it. `computer_use` `list_apps` names the running apps; `capture` with
 `app` returns one app's numbered element list, with a small window
@@ -524,7 +545,7 @@ successful action reply lists current changes or unchanged state, so use that
 observation instead of capturing it again. Recovery from an uncertain action
 or missing current state needs a fresh capture before deciding on more input;
 on Linux (the VM desktop or a Linux computer), capture before acting by number again. `set_value` replaces a field's text; free typing with no target
-element is not available because nothing takes focus. A stale element
+element depends on the host's support; prefer a named field. A stale element
 number comes back `stale_ref`, and a switch between the computer and the VM
 comes back `host_changed`: `list_apps` and `capture` again. To look without
 acting, `workspace_computer_apps`, `workspace_computer_snapshot`,
@@ -532,7 +553,7 @@ acting, `workspace_computer_apps`, `workspace_computer_snapshot`,
 desktop directly. If `computer_use` is not loaded at all, this Hermes has no
 approval-gated desktop path: report that and stop; do not improvise one.
 These calls do not move the
-human's cursor. Skip the focused window, Keychain, and password fields. Do not open
+human's cursor. Skip Keychain, password managers and password fields. Do not open
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
 

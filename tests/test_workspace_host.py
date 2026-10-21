@@ -54,6 +54,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
         pid: { type: 'integer' } } } },
       { name: 'workspace_computer_action', inputSchema: { type: 'object', properties: {
         pid: { type: 'integer' }, action: { type: 'string' } } } },
+      { name: 'workspace_computer_launch', inputSchema: { type: 'object', properties: { app: { type: 'string' } } } },
     ] } }) + '\n');
   }
   if (m.method === 'tools/call') {
@@ -799,6 +800,7 @@ class DesktopInputGateTests(ExplicitHostRoutingTests):
         self.handshake()
         names = self.tool_names()
         self.assertNotIn("workspace_computer_action", names)
+        self.assertNotIn("workspace_computer_launch", names)
         # Read-only computer tools stay exposed.
         self.assertIn("workspace_computer_apps", names)
         self.assertIn("workspace_computer_snapshot", names)
@@ -817,11 +819,21 @@ class DesktopInputGateTests(ExplicitHostRoutingTests):
         self.start(HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS="1")
         self.handshake()
         self.assertIn("workspace_computer_action", self.tool_names())
+        self.assertIn("workspace_computer_launch", self.tool_names())
         call = self.call("workspace_computer_action", {"pid": 5, "action": "key", "key": "a"})
         answered = self.recv()
         self.assertEqual(answered["id"], call)
         self.assertFalse(answered["result"].get("isError"))
         self.assertIn("workspace_computer_action", self.log("mac.log"))
+
+    def test_launch_also_requires_the_provider_or_explicit_opt_in(self):
+        self.start()
+        self.handshake()
+        call = self.call("workspace_computer_launch", {"app": "Calculator"})
+        msg = self.recv()
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertNotIn("workspace_computer_launch", self.log("mac.log"))
 
 
 @unittest.skipUnless(NODE, "node is required for normalizeHost tests")

@@ -12,8 +12,8 @@ description: >-
   plugin's workspace setup. Select it with computer_use.backend: alans-way-computer.
   Disclosure: starts the workspace router from the profile's workspace_browser MCP block as a long-running
   node child and talks to it over stdio (app screenshots, element lists and input actions); the router reaches the
-  user's computer over SSH on the user's tailnet. It never takes the focused window, and Hermes's computer_use
-  approval gate is unchanged.
+  user's computer over SSH on the user's tailnet. The Mac host permits reading the target app in front and
+  driving or raising it after two seconds of user idle time. Hermes's computer_use approval gate is unchanged.
 maintainer: capthvnsen
 tier: community
 category: tools
@@ -23,9 +23,9 @@ readme: true
 platforms: [linux, macos]
 known_issues:
   - "Needs a Hermes build with the pluggable computer-use API (merged to main after 0.21.5). On older Hermes the plugin installs and does nothing. Install alans-way first and run its workspace setup, which writes the workspace_browser block this provider reuses."
-  - "Hermes asks for approval on every computer_use action type until it is granted. For an unattended Telegram bot, grant them once with Always in Telegram, or add cua:<action>:background entries to command_allowlist (see the README). Takes effect after a gateway restart."
+  - "Approvals follow the user's Hermes settings. For an unattended Telegram bot, use Always in Telegram or cua:<action>:background entries in command_allowlist (see the README). Takes effect after a gateway restart."
   - "Runs only in the plugin host: it cannot load under plugins.isolation: host, because the provider hands Hermes a live router session."
-  - "Typing without a target field is not available because the app never takes focus: the agent uses set_value on a field instead."
+  - "Prefer set_value on a named field; free typing depends on the host's support. Launching a missing named app and raising the target window need a Mac host with those capabilities."
 capabilities:
   provides_tools: []
   provides_hooks: []
