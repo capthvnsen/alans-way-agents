@@ -679,6 +679,159 @@ class ReplyFoldingTests(unittest.TestCase):
                 self.assertEqual(calls, expected)
                 self.assertEqual(bool(cap["png_b64"]), mode == "vision")
 
+    def capture_replies(self, be, replies, **kwargs):
+        with mock.patch.object(be, "_call", side_effect=[
+                {"content": [{"type": "text", "text": json.dumps(body)}]} for body in replies]) as call, \
+                mock.patch.object(self.mod, "CaptureResult", side_effect=lambda **kw: kw), \
+                mock.patch.object(self.mod, "UIElement", side_effect=lambda **kw: kw):
+            cap = be.capture(mode="ax", pid=101, **kwargs)
+        return cap, [c.args for c in call.call_args_list]
+
+    def test_snapshot_delta_keeps_numbers_updates_adds_and_removes(self):
+        be = self.backend(["a", "b", "c"])
+        cap, calls = self.capture_replies(be, [{"generation": 2, "changed": [
+            {"ref": "b", "name": "Edited draft"}, {"ref": "d", "name": "Saved"}], "removed": ["a"]}])
+        self.assertEqual(calls, [("workspace_computer_snapshot", {"pid": 101, "since": 1, "delta": True})])
+        self.assertEqual([(e["index"], e["label"]) for e in cap["elements"]], [(2, "Edited draft"), (3, "C"), (4, "Saved")])
+        self.assertEqual(be._tree["gen"], 2)
+        cap, _ = self.capture_replies(be, [{"generation": 2, "unchanged": True}])
+        self.assertEqual([e["index"] for e in cap["elements"]], [2, 3, 4])
+
+    def test_snapshot_full_fallback_and_old_app_contract(self):
+        be = self.backend(["a", "b"])
+        cap, calls = self.capture_replies(be, [{"generation": 9, "elements": [{"ref": "z", "name": "New page"}]}])
+        self.assertEqual([e["label"] for e in cap["elements"]], ["New page"])
+        cap, calls = self.capture_replies(be, [{"generation": 9, "unchanged": True}])
+        self.assertEqual([e["label"] for e in cap["elements"]], ["New page"])
+        self.assertNotIn("windowId", calls[0][1])
+        self.assertEqual(be._last_target, {"pid": 101, "window_id": 0})
+        self.capture_replies(be, [{"generation": 10, "elements": []}], window_id=42)
+        self.assertIsNone(be._window_id)
+        self.assertEqual(be._last_target, {"pid": 101, "window_id": 0})
+
+    def test_unusable_snapshot_delta_requests_one_full_tree(self):
+        bad = [
+            {"generation": 2, "changed": [], "removed": ["missing"]},
+            {"generation": 2, "changed": [{"name": "No ref"}], "removed": []},
+            {"generation": 2, "changed": [], "removed": "a"},
+            {"generation": True, "changed": [], "removed": []},
+            {"generation": 2, "unchanged": True},
+            {"generation": 1, "changed": [{"ref": "a", "name": "Wrong generation"}], "removed": []},
+        ]
+        for body in bad:
+            with self.subTest(body=body):
+                be = self.backend(["a"])
+                cap, calls = self.capture_replies(be, [body, {"generation": 3, "elements": [{"ref": "z", "name": "Fresh"}]}])
+                self.assertEqual([e["label"] for e in cap["elements"]], ["Fresh"])
+                self.assertEqual(calls[-1], ("workspace_computer_snapshot", {"pid": 101, "delta": True}))
+
+    def test_delta_without_baseline_falls_back_and_bad_fallback_drops_target(self):
+        be = self.backend([])
+        be._tree = None
+        cap, calls = self.capture_replies(be, [{"generation": 2, "changed": [], "removed": []}, {"generation": 2, "elements": []}])
+        self.assertEqual(len(calls), 2)
+        with self.assertRaisesRegex(RuntimeError, "snapshot"):
+            self.capture_replies(be, [{"unchanged": True, "generation": 8}, {"unchanged": True, "generation": 8}])
+        self.assertIsNone(be._tree)
+        self.assertIsNone(be._pid)
+
+    def test_observed_window_binds_screenshot_actions_and_later_captures(self):
+        be = self.backend(["a"])
+        cap, _ = self.capture_replies(be, [{"generation": 2, "windowId": 41, "elements": [{"ref": "a", "name": "Draft"}]}])
+        self.assertEqual(cap["elements"][0]["window_id"], 41)
+        self.assertEqual(be._last_target, {"pid": 101, "window_id": 41})
+        with mock.patch.object(be, "_call", return_value={"content": [{"type": "text", "text": "{}"}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            be.key("a")
+        self.assertEqual(call.call_args.args[1]["windowId"], 41)
+        _, calls = self.capture_replies(be, [{"generation": 2, "windowId": 41, "unchanged": True}])
+        self.assertEqual(calls[0][1]["windowId"], 41)
+        shot = {"content": [{"type": "image", "data": "anBlZw=="}, {"type": "text", "text": json.dumps({
+            "windowId": 41, "window": {"x": 0, "y": 0, "width": 20, "height": 20}, "imageWidth": 20, "imageHeight": 20})}]}
+        with mock.patch.object(be, "_call", return_value=shot) as call, \
+                mock.patch.object(self.mod, "CaptureResult", side_effect=lambda **kw: kw):
+            be.capture(mode="vision", pid=101)
+        self.assertEqual(call.call_args.args[1], {"pid": 101, "windowId": 41})
+        be._target(202, "Other app")
+        self.assertEqual(be._last_target, {"pid": 202, "window_id": 0})
+
+    def test_select_window_validates_and_does_not_reuse_another_windows_tree(self):
+        be = self.backend(["a"])
+        _, calls = self.capture_replies(be, [{"generation": 2, "windowId": 42, "elements": []}], window_id=42)
+        self.assertEqual(calls[0][1], {"pid": 101, "windowId": 42, "delta": True})
+        for bad in (True, -1, "42", 2**32, 1.5):
+            with self.subTest(window_id=bad), mock.patch.object(be, "_call") as call:
+                with self.assertRaisesRegex(RuntimeError, "window"):
+                    be.capture(mode="ax", pid=101, window_id=bad)
+                call.assert_not_called()
+
+    def test_window_mismatch_never_retargets_or_retries_an_action(self):
+        be = self.backend(["a"])
+        self.capture_replies(be, [{"generation": 1, "windowId": 41, "elements": [{"ref": "a", "name": "Draft"}]}])
+        with self.assertRaisesRegex(RuntimeError, "window"):
+            self.capture_replies(be, [{"generation": 2, "windowId": 42, "elements": []}])
+        self.assertIsNone(be._pid)
+        self.capture_replies(be, [{"generation": 1, "windowId": 41, "elements": [{"ref": "a", "name": "Draft"}]}])
+        with mock.patch.object(be, "_call", return_value={"content": [{"type": "text", "text": json.dumps({"windowId": 42, "generation": 2, "elements": []})}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.key("a")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "stale_window")
+        self.assertEqual(call.call_count, 1)
+        self.assertIsNone(be._pid)
+
+    def test_snapshot_window_is_used_for_the_same_captures_screenshot(self):
+        for returned in (41, 42, None, True, "41", 0, 2**32):
+            with self.subTest(returned=returned):
+                be = self.backend([])
+                replies = [
+                    {"content": [{"type": "text", "text": json.dumps({"generation": 1, "windowId": 41, "elements": []})}]},
+                    {"content": [{"type": "image", "data": "anBlZw=="}, {"type": "text", "text": json.dumps({
+                        "windowId": returned, "window": {"x": 0, "y": 0, "width": 20, "height": 20}, "imageWidth": 20, "imageHeight": 20})}]},
+                ]
+                with mock.patch.object(be, "_call", side_effect=replies) as call, \
+                        mock.patch.object(self.mod, "CaptureResult", side_effect=lambda **kw: kw):
+                    if type(returned) is int and returned == 41:
+                        self.assertEqual(be.capture(mode="som", pid=101)["png_b64"], "anBlZw==")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "window"):
+                            be.capture(mode="som", pid=101)
+                        self.assertIsNone(be._pid)
+                self.assertEqual(call.call_args.args, ("workspace_computer_screenshot", {"pid": 101, "windowId": 41}))
+
+    def test_window_change_in_vision_mode_drops_old_element_numbers(self):
+        be = self.backend(["a"])
+        self.capture_replies(be, [{"generation": 1, "windowId": 41, "elements": [{"ref": "a", "name": "Old draft"}]}])
+        shot = {"content": [{"type": "image", "data": "anBlZw=="}, {"type": "text", "text": json.dumps({
+            "windowId": 42, "window": {"x": 0, "y": 0, "width": 20, "height": 20}, "imageWidth": 20, "imageHeight": 20})}]}
+        with mock.patch.object(be, "_call", return_value=shot), mock.patch.object(self.mod, "CaptureResult", side_effect=lambda **kw: kw):
+            be.capture(mode="vision", pid=101, window_id=42)
+        self.assertIsNone(be._tree)
+        self.assertIsNone(be._element(1))
+        be._reset()
+        self.assertIsNone(be._window_id)
+
+    def test_a_delta_cannot_introduce_a_window_binding_without_a_full_baseline(self):
+        be = self.backend(["a"])
+        _, calls = self.capture_replies(be, [
+            {"generation": 2, "windowId": 41, "changed": [], "removed": []},
+            {"generation": 2, "windowId": 41, "elements": []},
+        ])
+        self.assertEqual(calls[-1][1], {"pid": 101, "windowId": 41, "delta": True})
+
+    def test_window_refusal_clears_the_target_without_replaying(self):
+        be = self.backend(["a"])
+        self.capture_replies(be, [{"generation": 1, "windowId": 41, "elements": [{"ref": "a", "name": "Draft"}]}])
+        with mock.patch.object(be, "_call", return_value={"isError": True, "content": [
+                {"type": "text", "text": "stale_window: Take a snapshot of the selected window before acting."}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.click(element=1)
+        self.assertEqual(result["code"], "stale_window")
+        self.assertIsNone(be._window_id)
+        self.assertIsNone(be._tree)
+        self.assertIsNone(be._pid)
+        self.assertEqual(call.call_count, 1)
+
     def test_error_texts_map_to_codes_with_a_next_step(self):
         coded = self.mod._coded
         self.assertEqual(coded("The screen is locked, so apps cannot be read or driven.")[0], "locked")
@@ -896,7 +1049,7 @@ class ProviderTests(unittest.TestCase):
         names = [name for name, _ in ax["calls"]]
         self.assertNotIn("workspace_computer_screenshot", names)
         snapshot = next(args for name, args in ax["calls"] if name == "workspace_computer_snapshot")
-        self.assertEqual(snapshot, {"pid": 101, "since": 7})
+        self.assertEqual(snapshot, {"pid": 101, "since": 7, "delta": True})
 
     def test_click_by_element_sends_the_capture_generation(self):
         self.assertEqual(self.r["click_el_call"], [{"pid": 101, "action": "press", "ref": "c1", "generation": 7}])
