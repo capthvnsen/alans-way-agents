@@ -40,6 +40,11 @@ class PrintModeTests(unittest.TestCase):
         self.assertIn("    timeout: 120\n", out)
         self.assertIn("    lazy: true\n", out)
 
+    def test_connect_timeout_covers_probe_watchdog_and_warm_retry(self):
+        out = run("--bot-id", "bot_123").stdout
+        # 8s probe + 8s silence + 4s warm retry, plus VM initialization margin.
+        self.assertIn("    connect_timeout: 25\n", out)
+
     def test_omits_bot_name_args_when_not_given(self):
         result = run("--bot-id", "bot_123")
         self.assertNotIn("--bot-name", result.stdout)

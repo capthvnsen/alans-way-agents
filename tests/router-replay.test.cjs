@@ -115,6 +115,11 @@ for (const mode of ['retry','exit']) test('pre-ready reads replay on '+mode,asyn
   const c=client(t,mode);c.init();c.call(2,'cua_alans_way_status',{});
   await c.recv(2);
   assert.deepEqual(c.effects(2).map(e=>e.host),mode==='retry'?['mac','mac']:['mac','vm']);
+  const logs=c.stderr().split('\n').filter(line=>line.startsWith('workspace-router: served ')).map(line=>JSON.parse(line.slice('workspace-router: served '.length)));
+  assert.equal(logs.length,1,'only the completed read is logged, never its replay attempts');
+  assert.equal(logs[0].host,mode==='retry'?'mac':'vm');
+  assert.equal(logs[0].selection,mode==='retry'?'defaulted':'fallback');
+  assert.equal(logs[0].reason,mode==='retry'?null:'backend_unavailable');
 });
 test('established failover refuses uncertain write and replays read only',async t=>{
   const c=client(t,'established'); c.init(); await c.recv(1);
