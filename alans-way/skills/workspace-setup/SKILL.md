@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/b9f571d7d8ef762f0a243989e3aa096171300c5e/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -355,7 +355,7 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.7
+[ -n "$PIN" ] || PIN=v0.21.8
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
@@ -369,7 +369,7 @@ not run this command through your terminal. Use the resolved checkout commit
 (`git -C ~/alans-way-agents rev-parse HEAD`), not a tag name, for `repoRef`:
 
 ```json
-{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"b9f571d7d8ef762f0a243989e3aa096171300c5e","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
+{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
 ```
 
 Include `--profile` and its name unless default. Add public `--mac-key` and
@@ -386,7 +386,7 @@ For an external shell only (also the command the app constructs):
 ```sh
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref b9f571d7d8ef762f0a243989e3aa096171300c5e \
+    --desktop-ref 2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \

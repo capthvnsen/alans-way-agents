@@ -438,12 +438,12 @@ class SetupPinProcedureTests(unittest.TestCase):
         checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
                                    "describe", "--tags", "--exact-match"],
                                   capture_output=True, text=True, env=self.env)
-        self.assertEqual(checkout.stdout.strip(), "v0.21.7")
+        self.assertEqual(checkout.stdout.strip(), "v0.21.8")
 
     def prepare_checkout(self, existing=False):
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "commit", "--allow-empty", "-qm", "first")
-        self.git("tag", "-f", "v0.21.7")
+        self.git("tag", "-f", "v0.21.8")
         self.destination = self.root / "alans-way-agents"
         if existing:
             subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],
