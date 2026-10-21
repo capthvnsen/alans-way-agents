@@ -205,24 +205,34 @@ class NoteTests(unittest.TestCase):
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
 
-    def test_quiet_policy_replaces_progress_narration(self):
+    def test_progress_policy_is_sparse_and_confirms_steers(self):
         note = self.turn(voice(), "telegram")["context"]
-        for rule in ("stay quiet through routine reads, navigation, saving, retries that succeed"
-                     " and step transitions",
-                     "interrupt only for a decision, approval or handback they own, a blocker or"
+        for rule in ("Mid-task, apart from the start line and milestone updates, stay quiet"
+                     " through routine steps",
+                     "interrupt for a decision, approval or handback they own, a blocker or"
                      " failed step",
                      "information you can't safely guess (never invent it)",
                      "one concise verified result and any real caveat, not a step-by-step log",
-                     "no play-by-play bubbles while a task runs",
-                     "activity indicator already shows it working",
-                     "Narrate your steps only when they ask for live updates",
+                     "start with one short line saying what you're doing",
+                     "only at a real milestone, when a step fails and you change course, or"
+                     " when a wait will be noticeable",
+                     "add nothing for one quick action",
                      "side effects and mistakes right away",
-                     "acknowledge it in one line and fold it into the running task",
+                     "confirm the change in one line in their words",
+                     "then fold it into the running task",
                      "don't restart"):
             self.assertIn(rule, note)
         for dropped in ("Before each multi-step chunk", "one update per roughly two actions",
-                        "first-person action and say what's next"):
+                        "first-person action and say what's next",
+                        "Narrate your steps only when they ask for live updates",
+                        "no play-by-play bubbles",
+                        "Give progress updates only when the user asks for them"):
             self.assertNotIn(dropped, note)
+
+    def test_one_step_question_keeps_the_no_start_line_rule(self):
+        note = self.turn(voice(), "telegram", text="what time is it in Tokyo?")["context"]
+        self.assertIn("When a task takes more than one quick step, start with one short line", note)
+        self.assertIn("add nothing for one quick action", note)
 
     def test_truth_rules_for_tools_and_exact_claims(self):
         note = self.turn(voice(), "telegram")["context"]
@@ -289,8 +299,9 @@ class TelegramConversationTests(unittest.TestCase):
                                      if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
                             self.assertEqual(len(notes), 1)
                             self.assertIn(V.REPORT, notes[0])
-                            self.assertIn("no play-by-play bubbles while a task runs", notes[0])
-                            self.assertIn("acknowledge it in one line and fold it into the running task", notes[0])
+                            self.assertIn("start with one short line saying what you're doing", notes[0])
+                            self.assertIn("confirm the change in one line in their words", notes[0])
+                            self.assertIn("then fold it into the running task; don't restart", notes[0])
                             self.assertEqual("group chat" in notes[0], chat != "dm")
                         history.extend([
                             {"role": "user", "content": text},
@@ -494,9 +505,9 @@ class CorpusRuleTests(unittest.TestCase):
         self.assert_rules("Lead with the concrete status, then evidence or a caveat")
 
     def test_progress_is_quiet_and_interrupts_only_for_theirs(self):
-        self.assert_rules("Mid-task, stay quiet through routine reads, navigation, saving, retries"
-                          " that succeed and step transitions",
-                          "interrupt only for a decision, approval or handback they own",
+        self.assert_rules("Mid-task, apart from the start line and milestone updates, stay quiet"
+                          " through routine steps",
+                          "interrupt for a decision, approval or handback they own",
                           "never invent it",
                           "one concise verified result and any real caveat, not a step-by-step log")
 

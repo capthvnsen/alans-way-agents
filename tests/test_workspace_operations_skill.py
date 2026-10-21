@@ -12,6 +12,47 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_promised_follow_ups_are_saved_jobs_in_this_chat(self):
+        section = re.search(r"## Promised follow-ups(.*?)(?:## |\Z)", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("or you offer to", self.text)
+        self.assertIn("or says yes when you offer to", policy)
+        self.assertIn("An offer they haven't answered is not a yes: save nothing.", policy)
+        for rule in ("cronjob_manage", "`action` create", "`schedule`", "`prompt`",
+                     "when to stop", "`attach_to_session` true", "no `deliver`",
+                     "Confirm with the local time in one line",
+                     "Never promise a later message without a saved job",
+                     '"not yet"', "offer one more at a specific time",
+                     "don't schedule repeats they didn't ask for",
+                     "Remove the job when its reason goes away"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_follow_up_docs_require_acceptance_of_an_offer(self):
+        docs = _normalized((ROOT / "docs" / "proactivity.md").read_text())
+        self.assertNotIn("or the bot offers one", docs)
+        self.assertIn("or say yes when the bot offers one", docs)
+
+    def test_move_is_described_truthfully(self):
+        section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("handoff controls are not exposed in its UI", policy)
+        for rule in ("Move button", "page address and scroll position",
+                     "drafts when they choose", "only when the app reports a restore",
+                     "passwords, uploads and in-memory state stay behind",
+                     "You have no move tool", "check the destination page and login"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_browser_scrolling_uses_the_scroll_action(self):
+        section = re.search(r"## Operate a browser tab(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertIn("use the scroll action", policy)
+        self.assertIn("scripts and reloads are refused on pages that show payment or donate buttons", policy)
+
     def test_connector_recovery_separates_reads_from_uncertain_mutations(self):
         section = re.search(r"## The connector layer self-heals; never operate on it(.*?)## ", self.text, re.S)
         self.assertIsNotNone(section)
@@ -359,11 +400,14 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
 
     def test_progress_is_bounded_and_mid_task_messages_are_folded_in(self):
         for rule in ("email sent, form submitted, or page the user must act on",
-                     "side effects and mistakes right away", "Give progress updates only when the user asks",
+                     "side effects and mistakes right away",
+                     "For multi-step work, send one short start line",
+                     "then a one-line update only at a real milestone, a failed step you route around, or a noticeable wait",
                      "Keep routine reads, actions and step transitions quiet",
                      "one quick action", "no tool names, headings or step counters",
                      "acknowledge it in one line and fold it into the running task", "do not restart"):
             self.assertIn(rule, self.normalized)
+        self.assertNotIn("Give progress updates only when the user asks for them", self.normalized)
 
     def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
         # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
@@ -591,10 +635,12 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertIn("carry on without another message", self.captcha)
         self.assertIn("the tab list you just read gave you the fresh one", self.captcha)
         self.assertIn("After 30 minutes, or if you cannot keep waiting in this turn, stop.", self.captcha)
-        # A bot's own release on the VM is not held or watched the same way:
-        # the user's "done" ends the wait and is the claim agreement.
+        # A VM release holds the tab too; a chat reply cannot bypass the hold.
         self.assertIn("the user saying they're done also ends the wait", self.captcha)
-        self.assertIn("their reply is the agreement to claim it", self.captcha)
+        self.assertIn("Keep the host, tab id and fresh epoch together from the same reply", self.captcha)
+        self.assertIn("The VM tab is held too", self.captcha)
+        self.assertIn("press Give back", self.captcha)
+        self.assertIn("if the claim is refused with `awaiting_human`, ask them to press Give back", self.captcha)
         self.assertIn("ask them to say when they're through", self.captcha)
 
     def test_a_site_that_challenges_twice_is_dropped(self):

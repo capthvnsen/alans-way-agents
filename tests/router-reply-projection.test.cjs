@@ -34,11 +34,11 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 `;
 
 class Client {
-  constructor(t, computer=false) {
+  constructor(t, computer=false, desktop=false) {
     this.dir=fs.mkdtempSync(path.join(os.tmpdir(),'router-reply-'));this.log=path.join(this.dir,'calls.jsonl');
     fs.writeFileSync(path.join(this.dir,'connector.cjs'),connector);
     fs.mkdirSync(path.join(this.dir,'bin'));fs.writeFileSync(path.join(this.dir,'bin/ssh'),'#!/bin/sh\nfor last in "$@"; do :; done\ncase "$last" in\n *conn_script*) printf %s /fixture/browser-mcp.cjs ;;\n *) exec "$REPLY_NODE" "$REPLY_CONNECTOR" ;;\nesac\n',{mode:0o755});
-    this.p=spawn(process.execPath,[router,'--bot-id','reply-test','--vps-script',path.join(this.dir,'connector.cjs'),'--vps-connection',path.join(this.dir,'connection.json'),'--mac-state-file',path.join(this.dir,'mac.json'),...(computer?['--mac-ssh','fixture-only','--mac-script','/fixture/browser-mcp.cjs']:[])],{env:{...process.env,HERMES_WORKSPACE_MAC_SSH:'',REPLY_LOG:this.log,REPLY_NODE:process.execPath,REPLY_CONNECTOR:path.join(this.dir,'connector.cjs'),PATH:path.join(this.dir,'bin')+path.delimiter+process.env.PATH},stdio:['pipe','pipe','pipe']});
+    this.p=spawn(process.execPath,[router,'--bot-id','reply-test','--vps-script',path.join(this.dir,'connector.cjs'),'--vps-connection',path.join(this.dir,'connection.json'),'--mac-state-file',path.join(this.dir,'mac.json'),...(computer?['--mac-ssh','fixture-only','--mac-script','/fixture/browser-mcp.cjs']:[])],{env:{...process.env,HERMES_WORKSPACE_MAC_SSH:'',HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS:desktop?'1':'',REPLY_LOG:this.log,REPLY_NODE:process.execPath,REPLY_CONNECTOR:path.join(this.dir,'connector.cjs'),PATH:path.join(this.dir,'bin')+path.delimiter+process.env.PATH},stdio:['pipe','pipe','pipe']});
     this.next=1;this.messages=[];this.stderr='';this.p.stderr.on('data',b=>this.stderr+=b);
     readline.createInterface({input:this.p.stdout}).on('line',line=>this.messages.push(JSON.parse(line)));
     t.after(async()=>{this.p.kill();await new Promise(r=>this.p.exitCode!==null?r():this.p.once('exit',r));fs.rmSync(this.dir,{recursive:true,force:true});});
@@ -97,4 +97,28 @@ for(const backend of ['active computer','lazy VM'])test(backend+' projects only 
  const c=new Client(t,true);await c.ready();const r=await c.call('snapshot',backend==='lazy VM'?{host:'vm'}:{});
  assert.equal(data(r).approvalContext,undefined);assert.equal(data(r).elements[0].approvalTarget,undefined);
  assert.equal(r.result._meta.workspace.host,backend==='lazy VM'?'vm':'mac');
+});
+
+for (const computer of [false, true]) test('desktop actions check the expected host before forwarding: '+(computer?'computer online':'computer offline'), async t=>{
+ const c=new Client(t,computer,true);await c.ready();
+ const action=args=>c.rpc('tools/call',{name:'workspace_computer_action',arguments:{pid:101,action:'key',key:'a',...args}});
+ const refused=await action({expect_host:computer?'vm':'computer'});
+ assert.equal(refused.result.isError,true);assert.match(refused.result.content[0].text,/^host_changed:/);
+ assert.equal(c.calls().filter(m=>m.id===refused.id).length,0,'a stale target never reaches a connector');
+ for(const expect_host of [null,1,'mac','box']){
+   const reply=await action({expect_host});assert.equal(reply.result.isError,true);
+   assert.match(reply.result.content[0].text,/^bad_request:/);
+   assert.equal(c.calls().filter(m=>m.id===reply.id).length,0);
+ }
+ for(const args of [{expect_host:computer?'computer':'vm'},{}]){
+   const reply=await action(args);assert.ok(!reply.result.isError);
+   assert.equal(c.calls().filter(m=>m.id===reply.id).length,1,'matching and legacy calls still forward once');
+ }
+ if(computer){
+   const refused=await action({host:'vm',expect_host:'computer'});
+   assert.equal(refused.result.isError,true);assert.match(refused.result.content[0].text,/^host_changed:/);
+   assert.equal(c.calls().filter(m=>m.id===refused.id).length,0,'check the selected host even when the computer is online');
+   const reply=await action({host:'vm',expect_host:'vm'});assert.ok(!reply.result.isError);
+   assert.equal(reply.result._meta.workspace.host,'vm');
+ }
 });
