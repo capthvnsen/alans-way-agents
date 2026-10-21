@@ -2862,6 +2862,21 @@ async function main() {
       emitToolError(msg.id, 'Use host "computer" or "vm", or omit it.');
       return null;
     }
+    const wantsVm = host === 'vm'
+      || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
+      || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
+    if (msg.params?.name === DESKTOP_INPUT_TOOL && args.expect_host !== undefined) {
+      const targetHost = host || (wantsVm || activeHost === 'vps' ? 'vm' : 'computer');
+      const invalid = !['computer', 'vm'].includes(args.expect_host);
+      if (invalid || args.expect_host !== targetHost) {
+        pendingRequests.delete(msg.id);
+        unbuffer(line);
+        emitToolError(msg.id, invalid
+          ? 'bad_request: The expected computer must be "computer" or "vm".'
+          : 'host_changed: The computer changed before this action started. No input was sent. List apps and take a new capture.');
+        return null;
+      }
+    }
     if (host === 'computer' && activeHost === 'vps') {
       pendingRequests.delete(msg.id);
       unbuffer(line);
@@ -2871,9 +2886,6 @@ async function main() {
     // After the host checks, so a call that would fail anyway never asks.
     if (!approved && msg.params && GATED_TOOLS.has(msg.params.name) && gateCommit(msg, line)) return null;
     if (host === 'computer') return out;
-    const wantsVm = host === 'vm'
-      || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
-      || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
     if (!wantsVm && msg.params && msg.params.name === 'cua_alans_way_tabs' && activeHost !== 'vps' && vmAlive()) {
       unbuffer(line);
       const merge = { vmId: `wsr-tabs-${msg.id}`, mac: null, vm: null, ms: undefined, at: Date.now() };

@@ -489,7 +489,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         return None
 
     def _error(self, action, text, code=None):
-        if any(marker in text for marker in _LOST):
+        if code == "host_changed" or text.startswith("host_changed:") or any(marker in text for marker in _LOST):
             self._reset()
             return self._fail(action, "host_changed", f"{text} App ids and element numbers are gone: call list_apps and capture again.")
         return self._fail(action, *_coded(text, code))
@@ -555,6 +555,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
         acted = next((e for e in tree["els"] if e and e["ref"] == step["ref"]), None) if tree and "ref" in step else None
         box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
         before = self._host
+        if before is not None:
+            step["expect_host"] = "vm" if before in ("vps", "vm") else "computer"
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:

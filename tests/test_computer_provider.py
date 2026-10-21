@@ -460,7 +460,7 @@ print("RESULT:" + json.dumps({"registered": NewContext.registered is not None}))
 
 
 def bare(actions):
-    return [{k: v for k, v in a.items() if k != "generation"} for a in actions]
+    return [{k: v for k, v in a.items() if k not in ("generation", "expect_host")} for a in actions]
 
 
 def last_result(proc):
@@ -528,6 +528,25 @@ class ReplyFoldingTests(unittest.TestCase):
         be._pid = 101
         be._tree = {"pid": 101, "gen": 1, "els": [{"ref": r, "role": "AXButton", "name": r.upper()} for r in refs], "notes": []}
         return be
+
+    def test_actions_expect_the_last_seen_host(self):
+        for host, expected in (("mac", "computer"), ("windows", "computer"), ("linux", "computer"), ("vps", "vm"), ("vm", "vm")):
+            with self.subTest(host=host):
+                be = self.backend(["a"])
+                reply = {"content": [{"type": "text", "text": "{}"}], "_meta": {"workspace": {"host": host}}}
+                with mock.patch.object(be, "_call", return_value=reply) as call, mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+                    be.list_apps()
+                    be._run("key", {"action": "key", "key": "a"})
+                self.assertEqual(call.call_args.args, ("workspace_computer_action", {
+                    "pid": 101, "action": "key", "key": "a", "generation": 1, "expect_host": expected}))
+
+    def test_host_refusal_clears_the_old_target(self):
+        be = self.backend(["a"])
+        be._seen("mac")
+        with mock.patch.object(be, "_call", return_value={"isError": True, "content": [{"type": "text", "text": "host_changed: The computer changed before this action started."}]}), mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be._run("key", {"action": "key", "key": "a"})
+        self.assertEqual(result["code"], "host_changed")
+        self.assertEqual((be._pid, be._host, be._tree), (None, None, None))
 
     def test_a_delta_updates_in_place_appends_new_and_tombstones_gone(self):
         be = self.backend(["a", "b", "c"])
