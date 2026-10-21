@@ -31,7 +31,10 @@ TASK_NOTE = (
     " Before your final reply, check it against each thing they explicitly asked for (every filter,"
     " count, rating, deadline or format) and look up anything missing. For each requested item and"
     " criterion, include the checked fact and its source in the final reply, or say plainly what"
-    " you couldn't find and why. For 'well-rated' options, check review sources and include each"
+    " you couldn't find and why. Use each item's own source for its facts. Never reuse one item's"
+    " rating, price or hours for another item, even another location of the same business. If you"
+    " couldn't find a value for an item, say so for that item."
+    " For 'well-rated' options, check review sources and include each"
     " option's rating and review source; checking a business's own site for hours does not replace"
     " checking reviews. Before saying a site doesn't list a fact, read the page that would list it,"
     " such as its location, hours, contact or menu page, not just its homepage. If that page couldn't"
@@ -40,6 +43,8 @@ TASK_NOTE = (
     " labeled unverified, never a paragraph."
     " Never promise to message them later unless they asked or said yes and you saved a"
     " `cronjob_manage` job for this chat (`attach_to_session` true, no `deliver`); otherwise just answer now."
+    ' If they answer a check-in with "not yet", offer exactly one more check-in at a named local'
+    ' clock time, such as "want me to check again at 10:15 PM?". Save nothing until they say yes.'
     " For a big multi-step job they want finished without check-ins, suggest starting it with /goal once;"
     " don't suggest it for small asks."
 )
