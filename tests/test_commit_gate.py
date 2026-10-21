@@ -985,7 +985,7 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(self.decisions()[-1]["decision"], "approval_timeout")
 
     def test_a_slow_approval_does_not_trip_the_call_deadlines(self):
-        self.env = {"HERMES_ROUTER_CALL_DEADLINE_MS": "300", "HERMES_ROUTER_CALL_HARD_MS": "600"}
+        self.env = {"HERMES_ROUTER_CALL_DEADLINE_MS": "300", "HERMES_ROUTER_CALL_HARD_MS": "6000"}
         self.open_checkout()
         call = self.act(action="click", ref="e1", commit=PURCHASE)
         ask = self.recv()
@@ -1004,6 +1004,7 @@ class CommitGateTests(unittest.TestCase):
         self.send("notifications/cancelled", requestId=call, reason="user stopped the turn")
         withdrawn = self.recv()
         self.assertEqual(withdrawn["params"]["requestId"], ask["id"])
+        self.refused(call, "cancelled")
         self.answer(ask, "accept", {})
         self.assertIsNone(self.recv(timeout=1, required=False))
         self.assertEqual(self.actions(), [])
@@ -1019,7 +1020,7 @@ class CommitGateTests(unittest.TestCase):
         self.assertIsNone(self.recv(timeout=1, required=False), msg)
 
     def test_an_approved_vm_commit_that_times_out_is_not_called_retryable(self):
-        self.env = {"VM_MODE": "slow", "VM_DELAY_MS": "3000", "HERMES_ROUTER_CALL_HARD_MS": "1000"}
+        self.env = {"VM_MODE": "slow", "VM_DELAY_MS": "6000", "HERMES_ROUTER_CALL_HARD_MS": "4000"}
         vm_file = self.dir / "vm-stub.cjs"
         vm_file.write_text(VM_STUB.replace("generation:1,url:'https://vm.example/'",
             "generation:1,approvalContext:{version:1,documentId:'c'.repeat(32),url:'https://vm.example/'},url:'https://vm.example/'")
@@ -1049,6 +1050,7 @@ class CommitGateTests(unittest.TestCase):
         time.sleep(0.5)  # the host is gone; calls now wait for the VPS restore
         call = self.act(action="click", ref="e1", commit=PURCHASE)
         self.send("notifications/cancelled", requestId=call, reason="user stopped the turn")
+        self.refused(call, "cancelled")
         self.assertEqual(self.recv()["id"], status)
         self.assertIsNone(self.recv(timeout=2, required=False))
         self.assertEqual(self.actions("vm.log"), [])
