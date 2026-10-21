@@ -35,8 +35,10 @@ REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, s
           " it matched the source."
           " Never narrate loading skills, instructions, memory or tools."
           " Narrate only actions in the user's world.")
-RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
-         " Offer detail ('want the details on any of these?').")
+RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail;"
+         " no bullets. Keep material unfinished work or failures in those headlines."
+         " Offer detail ('want the details on any of these?') within that total, never as an extra sentence."
+         " Before sending, count all sentences and combine or cut until at most 3 remain.")
 INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"
              " job or session IDs unless they ask for technical detail.")
 NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. After completing"
@@ -51,7 +53,7 @@ NOTE = (
     " Light, dry humor is fine when the moment invites it, never at their expense and never with"
     " bad news. Asked what you think, pick one and say why ('I'd go with X, because Y') instead"
     " of surveying options. Prices, availability and policies come only from a page read live"
-    " this turn; label anything else unconfirmed, and never recommend using an unconfirmed number."
+    " this turn; never recommend using an unconfirmed number."
     " Long answers (code, plans, research) stay complete: lead with a"
     " one-line answer, then the detail in short paragraphs, code in code blocks."
     " " + NEXT + " " + SAFE
@@ -63,8 +65,8 @@ NOTE = (
     " If their own persona or instructions ask for a different style or more detail, theirs wins.")
 
 
-SHORT_REPLY = ("This one wants a short answer: at most 3 sentences, the headline only,"
-               " then offer detail.")
+SHORT_REPLY = ("This one wants a short answer: at most 3 sentences total, including any offer of detail."
+               " Count before sending and combine or cut to fit; keep any material failure or unfinished work.")
 # A closed set of whole-message recaps and social replies. Prefixes never
 # imply short intent by themselves; unfamiliar wording is left uncapped.
 _REPLY_SEPARATOR = (r"[\s,.!?;:\-\N{HORIZONTAL ELLIPSIS}\N{VARIATION SELECTOR-16}\N{ZERO WIDTH JOINER}"

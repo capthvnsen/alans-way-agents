@@ -170,8 +170,9 @@ class NoteTests(unittest.TestCase):
     def test_recommendations_require_facts_read_live_this_turn(self):
         note = self.turn(voice(), "telegram")["context"]
         for rule in ("Prices, availability and policies", "page read live this turn",
-                     "label anything else unconfirmed", "never recommend using an unconfirmed number"):
+                     "never recommend using an unconfirmed number"):
             self.assertIn(rule, note)
+        self.assertNotIn("label anything else unconfirmed", note)
 
     def turn(self, v, platform, chat_type="dm", text="hey can you check my calendar tomorrow"):
         with env(HERMES_SESSION_CHAT_TYPE=chat_type):
@@ -350,8 +351,20 @@ class RecapLengthTests(unittest.TestCase):
                 self.assertIn(V.RECAP, tail)
                 self.assertTrue(note.endswith(
                     "theirs wins." + (V.GROUP if chat == "group" else "")
-                    + "\nThis one wants a short answer: at most 3 sentences, the headline only,"
-                    " then offer detail."))
+                    + "\n" + ShortReplyIntentTests.reminder))
+
+    def test_recap_budget_includes_offer_and_failures_on_every_chat_surface(self):
+        for platform in ("telegram", "desktop", "tui", "bot_room"):
+            for chat in ("dm", "group"):
+                with self.subTest(platform=platform, chat=chat):
+                    note = self.turn(voice(), platform, chat,
+                                     "hey, quick one: what did you get done today?")["context"]
+                    self.assertIn("1-3 sentences total, including any offer of detail", note)
+                    self.assertIn("Before sending, count all sentences and combine or cut until"
+                                  " at most 3 remain", note)
+                    self.assertIn("Keep material unfinished work or failures in those headlines", note)
+                    self.assertTrue(note.endswith(ShortReplyIntentTests.reminder))
+                    self.assertNotIn("then offer detail", note)
 
     def test_length_default_preserves_explicit_detail_and_persona_requests(self):
         for text in ("Give me a detailed recap with evidence for every item.",
@@ -375,8 +388,8 @@ class ShortReplyIntentTests(unittest.TestCase):
     """The hook scopes an extra reminder; it does not enforce generated reply length."""
 
     turn = NoteTests.turn
-    reminder = ("This one wants a short answer: at most 3 sentences, the headline only,"
-                " then offer detail.")
+    reminder = ("This one wants a short answer: at most 3 sentences total, including any offer of detail."
+                " Count before sending and combine or cut to fit; keep any material failure or unfinished work.")
 
     def test_short_reply_requests_get_one_reminder_at_the_very_end(self):
         for text in ("hey, quick one: what did you get done today?",
@@ -538,13 +551,14 @@ class CorpusRuleTests(unittest.TestCase):
         self.assertIn("Casual replies: 1-3 short sentences", self.prompts()["chat"])
 
     def test_recaps_lead_with_headlines_and_offer_detail(self):
-        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets",
-                          "Offer detail ('want the details on any of these?')")
+        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail",
+                          "Offer detail ('want the details on any of these?') within that total, never as an extra sentence",
+                          "Before sending, count all sentences and combine or cut until at most 3 remain")
 
     def test_quick_daily_recap_gets_the_rule_on_the_actual_turn(self):
         note = V.note_for("hey, quick one: what did you get done today?", platform="telegram")
-        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets", note)
-        self.assertIn("Offer detail ('want the details on any of these?')", note)
+        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail", note)
+        self.assertIn("Offer detail ('want the details on any of these?') within that total, never as an extra sentence", note)
 
     def test_internals_stay_out_of_user_text_unless_technical_detail_is_requested(self):
         self.assert_rules("In user-facing text, use task words, never tool names, tool calls,"

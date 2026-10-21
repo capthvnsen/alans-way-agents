@@ -973,7 +973,10 @@ class RegisterTests(unittest.TestCase):
                                      "information only they have", "cannot safely recover",
                                      "what is done, what remains and exactly what is needed to resume",
                                      "check it against each thing they explicitly asked for",
-                                     "trying the source's own page before saying a fact isn't available",
+                                     "For each requested item and criterion, include the checked fact and its source",
+                                     "include each option's rating and review source",
+                                     "not just its homepage",
+                                     "Omit unchecked extras",
                                      "Never promise to message them later unless they asked or said yes",
                                      "saved a `cronjob_manage` job for this chat",
                                      "`attach_to_session` true, no `deliver`",
@@ -996,6 +999,28 @@ class RegisterTests(unittest.TestCase):
             "Treat anything recalled from earlier chats or memory as history: before you present"
             " an old blocker, promise or pending task as current, check recent messages, and let a"
             " newer correction from them win. If you can't tell whether it still holds, say so.", note)
+
+    def test_final_reply_accounts_for_each_requested_fact_and_source(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        for rule in ("For each requested item and criterion, include the checked fact and its source"
+                     " in the final reply, or say plainly what you couldn't find and why",
+                     "For 'well-rated' options, check review sources",
+                     "include each option's rating and review source",
+                     "checking a business's own site for hours does not replace checking reviews"):
+            self.assertIn(rule, note)
+
+    def test_missing_facts_require_the_relevant_page_not_only_the_homepage(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        for rule in ("Before saying a site doesn't list a fact, read the page that would list it",
+                     "location, hours, contact or menu page, not just its homepage",
+                     "If that page couldn't be opened or read, report that limit instead of"
+                     " claiming the fact is absent"):
+            self.assertIn(rule, note)
+
+    def test_unchecked_extras_do_not_become_paragraphs(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn("Omit unchecked extras. If one truly matters to their decision, use at most"
+                      " one short clause labeled unverified, never a paragraph", note)
 
     def test_register_wires_public_surfaces_only(self):
         calls, factories = [], {}
