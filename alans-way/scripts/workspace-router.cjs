@@ -517,7 +517,7 @@ function hostTimezoneCommand() {
   return (hostOs === 'linux' ? linuxBackendCommand : macBackendCommand)('', '', null, '', expr);
 }
 
-function probeMac(timeoutMs, connectTimeout = 6) {
+function probeMac(timeoutMs, connectTimeout = 6, onSpawn) {
   return new Promise((resolve) => {
     const probe = hostOs === 'windows' ? windowsProbeCommand() : posixProbeCommand();
     const child = spawn(
@@ -536,6 +536,7 @@ function probeMac(timeoutMs, connectTimeout = 6) {
       ],
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
     );
+    if (onSpawn) onSpawn(child);
     let output = '';
     let errOutput = '';
     child.stdout.on('data', chunk => { if (output.length < 4096) output += chunk; });
@@ -1382,6 +1383,9 @@ async function main() {
   let activeHost = null;
   let provedAlive = false;
   let fellBack = false;
+  let fallbackReason = macSsh && !macCommand
+    ? macSeen && macSeen.state === 'offline' ? 'watcher_offline' : 'probe_failed'
+    : null;
   let macRetried = false;
   let shuttingDown = false;
   // Terminal shutdown owns every connector, including a superseded child
@@ -1537,6 +1541,7 @@ async function main() {
   function failOver(reason) {
     if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
     fellBack = true;
+    fallbackReason = 'backend_unavailable';
     if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     process.stderr.write(`workspace-router: ${reason} — routing to VPS browser host\n`);
     const old = activeChild;
@@ -1808,6 +1813,21 @@ async function main() {
       }
     }
     return id !== undefined && deadIds.has(id);
+  }
+
+  function logServed(req, host) {
+    // Only fixed tool names and routing facts may reach this diagnostic.
+    if (!req || req.method !== 'tools/call'
+        || !/^cua_alans_way_(status|tabs|open|snapshot|screenshot|action|close|recordings)$/.test(req.name)) return;
+    const requested = normalizeHost(JSON.parse(req.line).params.arguments?.host);
+    const fallback = host === 'vm' && macSsh && req.via !== 'vm' && requested !== 'vm';
+    process.stderr.write(`workspace-router: served ${JSON.stringify({
+      tool: req.name,
+      host,
+      selection: fallback ? 'fallback' : requested ? 'requested' : 'defaulted',
+      reason: fallback ? fallbackReason : null,
+      elapsedMs: Date.now() - req.acceptedAt,
+    })}\n`);
   }
 
   function emitToolError(id, text, note = annotate) {
@@ -2276,6 +2296,7 @@ async function main() {
       out = JSON.stringify(merged);
     }
     process.stdout.write(jsonLine(out));
+    logServed(merge.req, 'mac');
   }
 
   // Both halves of a merged tabs call are held until the other backend
@@ -2372,6 +2393,7 @@ async function main() {
         }
         if (out === null) return;
         process.stdout.write(jsonLine(out));
+        logServed(seenReq, 'vm');
       });
     const drop = () => {
       if (c !== vmChild) return;
@@ -3008,6 +3030,7 @@ async function main() {
         }
         if (out === null) return;
         process.stdout.write(jsonLine(out));
+        logServed(seenReq, host === 'mac' ? 'mac' : 'vm');
       });
     c.on('error', (e) => {
       if (superseded.has(c)) return;
@@ -3167,13 +3190,25 @@ async function main() {
   // an in-flight VPS task alive, since the tabs it works in live on the VPS.
   if (macSsh) {
     let onlineStreak = 0;
-    const timer = setInterval(() => {
+    let directMac = null;
+    let probing = false;
+    const timer = setInterval(async () => {
       if (shuttingDown) return;
       if (activeHost === 'mac') {
         onlineStreak = 0;
         return;
       }
-      const mac = freshMacState(macStateFile);
+      if (probing) return;
+      const idle = pendingRequests.size === 0 && !holdCalls && Date.now() - lastActivity > RECONVERGE_IDLE_MS;
+      if (idle && Date.now() - readSelfProbeAt(probeStampFile) > SELF_PROBE_INTERVAL_MS) {
+        probing = true;
+        writeSelfProbeAt(probeStampFile);
+        const probe = await probeMac(5000, 6, ownChild);
+        probing = false;
+        if (shuttingDown) return;
+        directMac = probe.script ? { state: 'online', at: Date.now() } : null;
+      }
+      const mac = directMac && Date.now() - directMac.at < 45000 ? directMac : freshMacState(macStateFile);
       onlineStreak = mac && mac.state === 'online' ? onlineStreak + 1 : 0;
       if (mayReconverge({
         mac,
@@ -3186,6 +3221,10 @@ async function main() {
         process.stderr.write(
           `workspace-router: ${hostName} is online — exiting so the next connection re-probes and routes to it\n`,
         );
+        // The next connection must probe again instead of trusting the wrong offline marker.
+        if (directMac && mac === directMac) {
+          try { fs.rmSync(probeStampFile, { force: true }); } catch {}
+        }
         shutdown(0, { signal: 'SIGTERM' });
       }
     }, 10000);

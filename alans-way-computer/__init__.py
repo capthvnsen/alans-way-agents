@@ -15,6 +15,7 @@ import collections
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -42,7 +43,7 @@ _SAFE_ENV = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"
              "COMSPEC", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATHEXT", "PROGRAMDATA", "PROGRAMFILES",
              "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERNAME", "USERPROFILE", "WINDIR",
              "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"}
-_CODES = {"stale_ref", "unsupported_action", "off_limits", "in_front", "no_window", "not_found", "bad_request", "failed",
+_CODES = {"stale_ref", "stale_window", "unsupported_action", "off_limits", "in_front", "no_window", "not_found", "bad_request", "failed",
           "locked", "permission", "timeout", "unresponsive", "focus_unverified"}
 # The router passes the app's error text through without its code, so most codes are read back from the text.
 _INFER = (("off limits", "off_limits"), ("in front", "in_front"), ("no window", "no_window"), ("no control at that point", "not_found"),
@@ -51,6 +52,7 @@ _INFER = (("off limits", "off_limits"), ("in front", "in_front"), ("no window", 
           ("which field has focus", "focus_unverified"))
 # What to do next, appended to every error with that code.
 _NEXT = {
+    "stale_window": "Capture the intended window again before acting; check its state before repeating an action.",
     "stale_ref": "That control changed since your element list: capture again for fresh element numbers.",
     "locked": "Nothing can be read or driven until the user unlocks it; then capture again.",
     "permission": "Ask the user to turn it on for alans-way-localapp in System Settings > Privacy & Security, then retry.",
@@ -286,6 +288,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
 
     def _reset(self):
         self._pid = self._app = self._host = None
+        self._window_id = None
         self._tree = None  # {"pid", "gen", "els"}: the elements the model's indexes refer to
         self._shot = None  # window geometry of the last screenshot; None means coordinates are screen pixels
         self._last_target = self._last_app = None
@@ -350,15 +353,16 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def _target(self, pid, name):
         if pid != self._pid:
             self._tree = self._shot = None
+            self._window_id = None
         self._pid, self._app = pid, name
-        self._last_target, self._last_app = {"pid": pid, "window_id": 0}, name
+        self._last_target, self._last_app = {"pid": pid, "window_id": self._window_id or 0}, name
 
     # -- capture
 
     def capture(self, mode="som", app=None, pid=None, window_id=None):
         for attempt in (0, 1):
             try:
-                return self._capture(mode, app, pid)
+                return self._capture(mode, app, pid, window_id)
             except _Unavailable as e:
                 raise RuntimeError(f"workspace router unavailable: {e}") from e
             except _HostChanged as e:
@@ -368,6 +372,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 if attempt:
                     raise RuntimeError(f"workspace router: {e}") from e
             except _ToolError as e:
+                if e.code == "stale_window" or str(e).startswith("stale_window:"):
+                    self._reset()
                 code, message = _coded(str(e), e.code)
                 raise RuntimeError(f"{code}: {message}" if code != "failed" else message) from e
             except LookupError as e:
@@ -379,7 +385,18 @@ class AlansWayComputerBackend(ComputerUseBackend):
             raise _HostChanged(f"The workspace switched from {before} to {out[2]}, so app ids and element numbers changed")
         return out
 
-    def _capture(self, mode, app, pid):
+    def _window(self, body, expected):
+        window_id = body.get("windowId", expected)
+        if ("windowId" in body or window_id is not None) and (
+                type(window_id) is not int or not 1 <= window_id <= 0xffffffff
+                or expected is not None and window_id != expected):
+            self._reset()
+            raise _ToolError("stale_window: The reply does not identify the observed window.", "stale_window")
+        return window_id
+
+    def _capture(self, mode, app, pid, window_id=None):
+        if window_id is not None and (type(window_id) is not int or not 0 <= window_id <= 0xffffffff):
+            raise _ToolError("bad_request: window_id must be a positive window number.", "bad_request")
         if pid is not None:
             name = app or (self._app if pid == self._pid else f"pid {pid}")
         elif app:
@@ -388,43 +405,80 @@ class AlansWayComputerBackend(ComputerUseBackend):
             pid, name = self._pid, self._app
         else:
             raise LookupError("capture needs app= (a name from list_apps) or pid=; the focused app is off limits")
-        since = self._tree["gen"] if self._tree and self._tree["pid"] == pid else None
+        bound = self._window_id if pid == self._pid else None
+        window_id = window_id or bound
+        if pid == self._pid and window_id != bound:
+            self._tree = self._shot = None
+        since = self._tree["gen"] if self._tree and self._tree["pid"] == pid and window_id == bound else None
         before, notes, kept = self._host, [], [] if since is None else self._tree["notes"]
         els, gen = (self._tree["els"], self._tree["gen"]) if mode == "vision" and since is not None else ([], None)
+        window = None
         if mode != "vision":
-            _, texts, _ = self._read("workspace_computer_snapshot", {"pid": pid, **({"since": since} if since is not None else {})}, before)
-            notes = [t for t in texts[1:] if t]
+            args = {"pid": pid, "delta": True, **({"since": since} if since is not None else {}),
+                    **({"windowId": window_id} if window_id is not None else {})}
+            _, texts, _ = self._read("workspace_computer_snapshot", args, before)
             body = _json(texts[0] if texts else "")
+            window_id = self._window(body, window_id)
+            if "windowId" not in body and bound is None:
+                window_id = None
+            if (not _snapshot_valid(body, self._tree if since is not None else None)
+                    or window_id != bound and not isinstance(body.get("elements"), list)):
+                args.pop("since", None)
+                if window_id is not None:
+                    args["windowId"] = window_id
+                _, texts, _ = self._read("workspace_computer_snapshot", args, before)
+                body = _json(texts[0] if texts else "")
+                window_id = self._window(body, window_id)
+                if not _snapshot_valid(body, None) or not isinstance(body.get("elements"), list):
+                    self._reset()
+                    raise _ToolError("failed: Could not read a full snapshot; capture again.")
+            notes = [t for t in texts[1:] if t]
+            window = body.get("selectedWindow", body.get("window"))
             if body.get("unchanged") and since is not None:
                 els, gen = self._tree["els"], self._tree["gen"]
+            elif "changed" in body:
+                self._merge(body)
+                els, gen, kept = self._tree["els"], self._tree["gen"], self._tree["notes"]
             else:
                 els, gen, kept = body.get("elements") or [], body.get("generation"), _tree_notes(body)
         named = any(map(_readable, els))
+        coverage = None
+        if (mode == "som" and named and isinstance(window, dict)
+                and all(type(window.get(k)) in (int, float) and math.isfinite(window[k]) for k in ("x", "y", "width", "height"))
+                and window["width"] > 0 and window["height"] > 0):
+            coverage = _coverage(els, {"wx": window["x"], "wy": window["y"], "ww": window["width"], "wh": window["height"]})
         png = mime = shot = None
         width = height = 0
-        if mode != "ax":
+        if mode != "ax" and (coverage is None or coverage < MIN_COVERAGE):
             try:
-                items, shot_texts, _ = self._read("workspace_computer_screenshot", {"pid": pid}, before)
+                items, shot_texts, _ = self._read("workspace_computer_screenshot", {
+                    "pid": pid, **({"windowId": window_id} if window_id is not None else {})}, before)
                 image = next(i for i in items if i.get("type") == "image")
                 geo = _json(shot_texts[0] if shot_texts else "")
+                window_id = self._window(geo, window_id)
+                if mode == "vision" and bound is None and "windowId" not in geo:
+                    window_id = None
                 win = geo["window"]
                 png, mime = image["data"], image.get("mimeType", "image/jpeg")
                 width, height = int(geo["imageWidth"]), int(geo["imageHeight"])
                 if win["width"] > 0 and win["height"] > 0 and width > 0 and height > 0:
                     shot = {"wx": win["x"], "wy": win["y"], "ww": win["width"], "wh": win["height"], "iw": width, "ih": height}
             except (_ToolError, StopIteration, KeyError, TypeError, ValueError) as e:
+                if isinstance(e, _ToolError) and e.code == "stale_window":
+                    raise
                 why = _coded(str(e), e.code)[1] if isinstance(e, _ToolError) else str(e)
                 if mode == "vision":
                     raise RuntimeError(f"screenshot failed: {why}") from e
                 if not named:
                     notes.append(f"Screenshot unavailable: {why}")
-        # The screenshot is fetched for its window size; the model gets it (~1.2k tokens) only when named
-        # controls leave most of the window unexplained: a canvas, a game, a web area.
+        # Older snapshots omit window geometry; their screenshot still supplies it.
         coverage = _coverage(els, shot) if mode == "som" and png and named and shot else None
         if coverage is not None and coverage >= MIN_COVERAGE:
             png = mime = shot = None
             width = height = 0
         self._target(pid, name)
+        self._window_id = window_id
+        self._last_target["window_id"] = window_id or 0
         self._tree, self._shot = ({"pid": pid, "gen": gen, "els": els, "notes": kept} if mode != "vision" else self._tree), shot
         if png:
             space = ("Coordinates are screenshot pixels" + ("; bounds in earlier element lists were screen pixels." if mode == "vision" else ".")
@@ -443,7 +497,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
             notes += kept
         elements = [] if mode == "vision" else [
             UIElement(index=i, role=e.get("role", ""), label=_label(e), bounds=self._bounds(e), app=name, pid=pid,
-                      window_id=0, attributes={"value": e["value"]} if e.get("value") else {})
+                      window_id=window_id or 0, attributes={"value": e["value"]} if e.get("value") else {})
             for i, e in enumerate(els, 1) if e is not None]
         return CaptureResult(mode=mode, width=width, height=height, png_b64=png, elements=elements, app=name,
                              png_bytes_len=len(png) * 3 // 4 if png else 0, image_mime_type=mime, note=" ".join(notes))
@@ -492,6 +546,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
         if code == "host_changed" or text.startswith("host_changed:") or any(marker in text for marker in _LOST):
             self._reset()
             return self._fail(action, "host_changed", f"{text} App ids and element numbers are gone: call list_apps and capture again.")
+        if code == "stale_window" or text.startswith("stale_window:"):
+            self._reset()
         return self._fail(action, *_coded(text, code))
 
     def _merge(self, body):
@@ -549,6 +605,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def _run(self, action, step):
         if self._pid is None:
             return self._no_target(action)
+        if self._window_id is not None:
+            step["windowId"] = self._window_id
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree and tree["gen"] is not None:
             step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
@@ -571,6 +629,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
                               "at an app that no longer exists there and may not have happened. App ids and element numbers are gone: "
                               "call list_apps and capture again.")
         body = _json(texts[0] if texts else "")
+        try:
+            self._window(body, self._window_id)
+        except _ToolError as e:
+            return self._fail(action, "stale_window", _coded(str(e), e.code)[1])
         held = tree["notes"] if tree else []
         parts, effect = [f"{action} sent to {self._app}."], None
         if self._os in _STABLE_REFS:
@@ -665,6 +727,26 @@ class AlansWayComputerBackend(ComputerUseBackend):
         self._target(pid, name)
         return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Alan's Way never raises or focuses windows; "
                             "input is delivered in the background.")
+
+
+def _snapshot_valid(body, tree):
+    if isinstance(body.get("elements"), list):
+        return True
+    if not any(k in body for k in ("unchanged", "changed", "removed")):
+        return True  # Older helpers can return only a note when there is no tree.
+    if tree is None or type(body.get("generation")) is not int:
+        return False
+    if body.get("unchanged"):
+        return body["generation"] == tree["gen"] and "changed" not in body and "removed" not in body
+    changed, removed = body.get("changed"), body.get("removed")
+    if body["generation"] == tree["gen"] or not isinstance(changed, list) or not isinstance(removed, list):
+        return False
+    refs = [e.get("ref") for e in changed if isinstance(e, dict)]
+    if len(refs) != len(changed) or any(not isinstance(ref, str) or not ref for ref in refs + removed):
+        return False
+    known = {e["ref"] for e in tree["els"] if e is not None}
+    return (len(set(refs)) == len(refs) and len(set(removed)) == len(removed)
+            and not set(refs).intersection(removed) and set(removed) <= known)
 
 
 def _coded(text, code=None):

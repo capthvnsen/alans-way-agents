@@ -280,10 +280,15 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
         self.assertIn("three consecutive failures", self.normalized)
         self.assertIn("`cron.allow_agent_scheduling: true`", self.normalized)
 
-    def test_host_choice_follows_the_users_session(self):
-        self.assertIn("`host:\"vm\"`", self.normalized)
-        self.assertIn("when their own session matters", self.normalized)
-        self.assertIn("computer is asleep", self.normalized)
+    def test_host_choice_starts_on_the_users_computer_even_while_away(self):
+        host = _normalized(self.text.split("## Pick the host", 1)[1].split("## ", 1)[0])
+        for rule in ("Omit it for normal work, including errands that continue while the user is away",
+                     'Pass `host:"vm"` only when the user explicitly asks for your own computer or the VM, or the router reports the user\'s computer unreachable',
+                     "Login, CAPTCHA, approval and uncertain-action errors are not outages and never switch browsers",
+                     "Finish an already-running VM task there even when the user's computer returns"):
+            self.assertIn(rule, host)
+        self.assertNotIn("or the errand must finish while they are away", host)
+        self.assertIn("ask the user rather than working past a login wall", host)
 
     def test_watches_use_continuity_and_conditional_change_detection(self):
         watch = self.normalized.split("## A watch is a cron job")[1]

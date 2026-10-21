@@ -23,7 +23,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
                      "when to stop", "`attach_to_session` true", "no `deliver`",
                      "Confirm with the local time in one line",
                      "Never promise a later message without a saved job",
-                     '"not yet"', "offer one more at a specific time",
+                     '"not yet"', "offer exactly one more check-in at a named local clock time",
+                     'such as "want me to check again at 10:15 PM?"',
+                     "Save nothing until they say yes",
                      "don't schedule repeats they didn't ask for",
                      "Remove the job when its reason goes away"):
             with self.subTest(rule=rule):
@@ -377,7 +379,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
         self.assertIn("A link href omits tracking parameters.", self.normalized)
         self.assertIn("A frame src omits tracking parameters too.", self.normalized)
-        self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertIn("VPS status identifies the serving host, not whether the Mac is reachable", self.normalized)
+        self.assertNotIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertNotIn("computer app version is unavailable while it is offline", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
         self.assertIn("use `cua_alans_way_open` to open a new page for inspection", self.normalized)
@@ -445,9 +449,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         )
 
     def test_host_arg_routes_to_the_named_machine(self):
-        self.assertIn('`host:"vm"` to use the VM\'s own browser even while the user\'s computer is online', self.normalized)
+        for rule in ("Omit it for normal work, including errands that continue while the user is away",
+                     'Pass `host:"vm"` only when the user explicitly asks for your own computer or the VM, or the router reports the user\'s computer unreachable',
+                     "Login, CAPTCHA, approval and uncertain-action errors are not outages and never switch browsers",
+                     "Finish the current VPS task there even when the Mac returns"):
+            self.assertIn(rule, self.normalized)
         self.assertIn('`host:"computer"` to force the user\'s computer', self.normalized)
-        self.assertIn("Omit it for the default", self.normalized)
 
     def test_select_accepts_any_option_handle(self):
         self.assertIn("`select` (an option by value, label, option, text or choice)", self.normalized)
@@ -595,13 +602,13 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertTrue(self.search, "the Search the web section is gone")
         hermes = self.search.index("use Hermes' own `web_search`, then `web_extract`")
         computer = self.search.index("open a tab on the user's computer: omit `host`")
-        vm = self.search.index("search engine in the VM browser only while the user's computer is offline")
+        vm = self.search.index("search engine in the VM browser only on an explicit VM request or a router-reported outage")
         self.assertLess(hermes, computer)
         self.assertLess(computer, vm)
         self.assertIn("Do not open a search engine page in a tab for this.", self.search)
         self.assertIn("maps, shopping, signed-in results", self.search)
         self.assertIn("expect a CAPTCHA there", self.search)
-        self.assertIn('Never pass `host:"vm"` to a search engine while the computer is online.', self.search)
+        self.assertIn("Follow the host policy below", self.search)
         self.assertIn("If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.", self.search)
         # The browser is the default only for what a plain lookup cannot answer.
         self.assertIn("default surface for anything web-shaped that a plain lookup cannot answer", self.normalized)

@@ -40,8 +40,9 @@ anything you cannot read; a planned pin is not an observed running version.
 - Alan's Workspace: call `cua_alans_way_status` and report its `version` and
   `build` (commit/channel/dirty when supplied) only when the response identifies
   the user's computer. A response with `host: vps` is the VM browser, so the
-  computer app version is unavailable while it is offline. Missing fields on
-  an older app are unavailable, not the connector's MCP protocol version.
+  computer app version is unavailable from that response; it does not prove
+  the computer is offline. Missing fields on an older app are unavailable,
+  not the connector's MCP protocol version.
   The existing connector passes `/v1/status` through; no app API token, SSH
   request, install, update or restart is needed for this check.
 
@@ -163,9 +164,9 @@ Take the first of these that answers the question:
 2. When you need the real page (maps, shopping, signed-in results, or a page
    you must click through), open a tab on the user's computer: omit `host`.
    Their real connection and session meet far fewer challenges.
-3. Use a search engine in the VM browser only while the user's computer is
-   offline, and expect a CAPTCHA there. Never pass `host:"vm"` to a search
-   engine while the computer is online.
+3. Use a search engine in the VM browser only on an explicit VM request or a
+   router-reported outage, and expect a CAPTCHA there. Follow the host policy
+   below.
 
 If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.
 
@@ -187,11 +188,16 @@ SSH): those tabs carry another bot id, and the tools refuse them afterwards.
 If a workspace browser call fails, report the failure; do not silently
 substitute another browser.
 
-`cua_alans_way_open` takes an optional `host`. Omit it for the default: the
-user's computer when it is reachable, the VM's own browser when it is not.
-Pass `host:"vm"` to use the VM's own browser even while the user's computer
-is online. Pass `host:"computer"` to force the user's computer; while it is
+`cua_alans_way_open` takes an optional `host`. Omit it for normal work,
+including errands that continue while the user is away: the router starts
+on the user's computer when it is reachable and uses the VM's own Workspace
+browser when it is not. Pass `host:"vm"` only when the user explicitly asks
+for your own computer or the VM, or the router reports the user's computer
+unreachable. Pass `host:"computer"` to force the user's computer; while it is
 offline the call errors instead of silently landing on the VM.
+Login, CAPTCHA, approval and uncertain-action errors are not outages and
+never switch browsers. If the VM browser also fails, report the failure;
+Hermes's native browser is not a third tier.
 
 Hermes registers these MCP tools under the `workspace_browser` server, so
 their exact names are `mcp__workspace_browser__cua_alans_way_status`,
@@ -211,8 +217,10 @@ Skip status and tabs unless a call fails or you are checking tabs for cleanup: e
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
-another host. When status shows the VPS, the Mac is unreachable: the same
-`cua_alans_way_*` tools are that machine's browser. Its desktop is read with
+another host. VPS status identifies the serving host, not whether the Mac
+is reachable: an explicit VM request can use it while the Mac is online.
+The same `cua_alans_way_*` tools are that machine's browser. Its desktop is
+read with
 `mcp__workspace_browser__workspace_computer_apps`,
 `mcp__workspace_browser__workspace_computer_snapshot`,
 `mcp__workspace_browser__workspace_computer_menu` and
@@ -221,9 +229,8 @@ with the `computer_use` tool, which asks the user for approval on each
 action. Press a ref from the accessibility
 tree, leave the focused window alone, and do not move the pointer.
 
-**Where to act.** A web page is `cua_alans_way_*` work: the user's computer
-by default, the VM with `host:"vm"` or while the computer is offline. A
-native app is `computer_use` work; `workspace_computer_apps` says which
+**Where to act.** A web page is `cua_alans_way_*` work, following the host
+policy above. A native app is `computer_use` work; `workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
 `vps` is the VM desktop). If the app is in front, on another Space, or the
 screen is locked, the error or capture note says so: ask the user instead of
@@ -298,7 +305,7 @@ closed laptop does not stop them.
 Stop with a "needs Mac" note only for something that exists only on that
 Mac: a local file, or a Mac app that is not a website. When the Mac is back,
 start the next web task in the in-app Mac browser. Finish the current VPS
-step first.
+task there even when the Mac returns.
 
 ## Shared links
 
@@ -536,7 +543,7 @@ If a call fails with a permission error, ask the user to turn on Accessibility a
 
 ## Promised follow-ups
 
-When the user asks you to check in, remind them or report back later, or says yes when you offer to, create one `cronjob_manage` job right then: `action` create, a `schedule` such as `in 5m` or an exact time, a `prompt` that says what to ask or check and when to stop, `attach_to_session` true so their reply continues this chat, and no `deliver` so it comes back here. Confirm with the local time in one line. An offer they haven't answered is not a yes: save nothing. Never promise a later message without a saved job. If they answer a check-in with "not yet", offer one more at a specific time; don't schedule repeats they didn't ask for. Remove the job when its reason goes away.
+When the user asks you to check in, remind them or report back later, or says yes when you offer to, create one `cronjob_manage` job right then: `action` create, a `schedule` such as `in 5m` or an exact time, a `prompt` that says what to ask or check and when to stop, `attach_to_session` true so their reply continues this chat, and no `deliver` so it comes back here. Confirm with the local time in one line. An offer they haven't answered is not a yes: save nothing. Never promise a later message without a saved job. If they answer a check-in with "not yet", offer exactly one more check-in at a named local clock time, such as "want me to check again at 10:15 PM?". Save nothing until they say yes; don't schedule repeats they didn't ask for. Remove the job when its reason goes away.
 
 When the user wants a job, deploy or status watched inside this conversation,
 suggest they send `/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>`

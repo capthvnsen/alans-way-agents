@@ -557,7 +557,10 @@ for approval per action unless they re-run setup with `--allow-desktop-actions`
 provider API it also exposes a desktop-input tool that runs with no approval
 at all). Tell the user that setup turned off Hermes'
 built-in browser toolset for Telegram and cron so you use their workspace
-browser, and that `--keep-browser` undoes that. Setup never turns off the
+browser. `--keep-browser` only skips disabling it; it does not re-enable an
+already-disabled toolset. Re-enabling it requires the explicit command
+`hermes -p <profile> tools enable browser --platform <platform>` for each
+chosen platform (`telegram` or `cron`). Setup never turns off the
 built-in `computer_use` toolset: desktop input always goes through it. If setup
 warns about a `cua-driver` MCP server the user added, leave it and tell them the
 `hermes -p <profile> mcp remove <name>` command from the warning.

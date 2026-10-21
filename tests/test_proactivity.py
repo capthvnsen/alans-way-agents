@@ -958,7 +958,8 @@ class RegisterTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as home:
                 package.register(ctx, legacy_home=home, background=False)
             self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
-            for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron", ""):
+            for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron",
+                             "discord", "slack", "api_server", "webhook", "bot_room", "", None):
                 with self.subTest(profile=profile, platform=platform):
                     for first in (True, False):
                         results = [fn(platform=platform, is_first_turn=first,
@@ -1008,6 +1009,20 @@ class RegisterTests(unittest.TestCase):
                      "include each option's rating and review source",
                      "checking a business's own site for hours does not replace checking reviews"):
             self.assertIn(rule, note)
+
+    def test_each_items_facts_come_from_its_own_source(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            "Use each item's own source for its facts. Never reuse one item's rating, price"
+            " or hours for another item, even another location of the same business. If you"
+            " couldn't find a value for an item, say so for that item.", note)
+
+    def test_not_yet_offers_one_named_local_time_and_waits_for_yes(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            'If they answer a check-in with "not yet", offer exactly one more check-in at a'
+            ' named local clock time, such as "want me to check again at 10:15 PM?". Save'
+            " nothing until they say yes.", note)
 
     def test_missing_facts_require_the_relevant_page_not_only_the_homepage(self):
         note = sys.modules["alans_way_idle_test"].task_context()["context"]

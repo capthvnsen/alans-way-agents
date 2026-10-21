@@ -31,6 +31,10 @@ Hermes the plugin installs and logs that it did nothing.
   the list in place, so a number keeps meaning the same control and no capture is needed to read the result. Linux
   (the VM desktop, or a Linux computer) numbers controls by position, so there the reply describes the change and
   asks for a capture before acting by number again.
+- Captures request only changed controls when the app supports it, and recover with a full list if the held
+  generation does not match. Older apps still return full lists or reuse an unchanged list.
+- When the app identifies a window, later captures, screenshots and actions stay on that window. Select another
+  with `capture(window_id=...)`; a mismatched window reply requires a fresh capture before acting again.
 - Errors carry a code and, where there is one, the next step: `locked`, `in_front` and `no_window` mean asking the
   user; `stale_ref` means capture again. A capture of an app whose windows are on another Space says so in its note.
 - After a switch between the computer and the VM, app ids and element numbers no longer mean anything. The
