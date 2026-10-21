@@ -943,6 +943,100 @@ class PromptTests(unittest.TestCase):
 
 
 class RegisterTests(unittest.TestCase):
+    def test_task_policy_reaches_every_profile_and_surface_with_tone_disabled(self):
+        package = sys.modules["alans_way_idle_test"]
+        for profile in ("default", "secondary"):
+            hooks = []
+            state = FakeState()
+            state.set("voice", {"mode": "default"})
+            ctx = SimpleNamespace(
+                profile_name=profile, state=state,
+                register_tool=lambda **kw: None,
+                register_hook=lambda name, fn: hooks.append((name, fn)),
+                register_skill=lambda *a: None, register_command=lambda *a, **kw: None,
+                on_unload=self.addCleanup)
+            with tempfile.TemporaryDirectory() as home:
+                package.register(ctx, legacy_home=home, background=False)
+            self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
+            for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron",
+                             "discord", "slack", "api_server", "webhook", "bot_room", "", None):
+                with self.subTest(profile=profile, platform=platform):
+                    for first in (True, False):
+                        results = [fn(platform=platform, is_first_turn=first,
+                                      user_message="Compare and save the reports.")
+                                   for name, fn in hooks if name == "pre_llm_call"]
+                        result = {"context": package.TASK_NOTE}
+                        self.assertIn(result, results)
+                        for rule in ("verified done or genuinely blocked", "checklist of mini goals",
+                                     "native todo tool when available", "otherwise in working context",
+                                     "Verify each goal and mark it done", "without waiting for 'keep going'",
+                                     "independent authorized work", "login or CAPTCHA, approval or decision",
+                                     "information only they have", "cannot safely recover",
+                                     "what is done, what remains and exactly what is needed to resume",
+                                     "check it against each thing they explicitly asked for",
+                                     "For each requested item and criterion, include the checked fact and its source",
+                                     "include each option's rating and review source",
+                                     "not just its homepage",
+                                     "Omit unchecked extras",
+                                     "Never promise to message them later unless they asked or said yes",
+                                     "saved a `cronjob_manage` job for this chat",
+                                     "`attach_to_session` true, no `deliver`",
+                                     "otherwise just answer now",
+                                     "For a big multi-step job they want finished without check-ins",
+                                     "suggest starting it with /goal once; don't suggest it for small asks",
+                                     "When a task takes more than one quick step, start with one short line",
+                                     "only at a real milestone, when a step fails and you change course, or"
+                                     " when a wait will be noticeable",
+                                     "Stay quiet through routine reads, navigation, saving and retries that succeed",
+                                     "add nothing for one quick action",
+                                     "Report side effects and mistakes right away, plainly",
+                                     "confirm the change in one line in their words",
+                                     "then fold it into the running task; don't restart"):
+                            self.assertIn(rule, result["context"])
+
+    def test_recalled_facts_defer_to_recent_corrections(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            "Treat anything recalled from earlier chats or memory as history: before you present"
+            " an old blocker, promise or pending task as current, check recent messages, and let a"
+            " newer correction from them win. If you can't tell whether it still holds, say so.", note)
+
+    def test_final_reply_accounts_for_each_requested_fact_and_source(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        for rule in ("For each requested item and criterion, include the checked fact and its source"
+                     " in the final reply, or say plainly what you couldn't find and why",
+                     "For 'well-rated' options, check review sources",
+                     "include each option's rating and review source",
+                     "checking a business's own site for hours does not replace checking reviews"):
+            self.assertIn(rule, note)
+
+    def test_each_items_facts_come_from_its_own_source(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            "Use each item's own source for its facts. Never reuse one item's rating, price"
+            " or hours for another item, even another location of the same business. If you"
+            " couldn't find a value for an item, say so for that item.", note)
+
+    def test_not_yet_offers_one_named_local_time_and_waits_for_yes(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn(
+            'If they answer a check-in with "not yet", offer exactly one more check-in at a'
+            ' named local clock time, such as "want me to check again at 10:15 PM?". Save'
+            " nothing until they say yes.", note)
+
+    def test_missing_facts_require_the_relevant_page_not_only_the_homepage(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        for rule in ("Before saying a site doesn't list a fact, read the page that would list it",
+                     "location, hours, contact or menu page, not just its homepage",
+                     "If that page couldn't be opened or read, report that limit instead of"
+                     " claiming the fact is absent"):
+            self.assertIn(rule, note)
+
+    def test_unchecked_extras_do_not_become_paragraphs(self):
+        note = sys.modules["alans_way_idle_test"].task_context()["context"]
+        self.assertIn("Omit unchecked extras. If one truly matters to their decision, use at most"
+                      " one short clause labeled unverified, never a paragraph", note)
+
     def test_register_wires_public_surfaces_only(self):
         calls, factories = [], {}
         ctx = SimpleNamespace(

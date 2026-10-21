@@ -18,6 +18,12 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceSetupSkillTests(unittest.TestCase):
+    def test_keep_browser_only_skips_disabling_and_needs_explicit_reenable(self):
+        self.assertIn("built-in browser toolset for Telegram and cron", self.normalized)
+        self.assertIn("`--keep-browser` only skips disabling it; it does not re-enable an already-disabled toolset", self.normalized)
+        self.assertIn("hermes -p <profile> tools enable browser --platform <platform>", self.normalized)
+        self.assertNotIn("`--keep-browser` undoes that", self.normalized)
+
     def telegram_step(self):
         return _normalized(self.text.split("**Make Telegram feel right.**", 1)[1]
                            .split("```sh", 1)[0])
@@ -219,39 +225,94 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
             "setup.sh must be passed the pinned desktop ref",
         )
 
-    def test_busy_mode_choice_requires_an_answer_before_restart(self):
-        for phrase in ("When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?",
-                       "every platform in that profile", "after the current step finishes",
-                       "Never treat silence or non-interactive runs as consent",
-                       "already `steer`", "skills.config.workspace-setup.busy_input_choice",
-                       "config set display.busy_input_mode steer",
-                       "config set display.busy_input_mode interrupt"):
-            self.assertIn(phrase, self.normalized)
-        self.assertLess(self.text.index("**Messages while working"), self.text.index("```sh\n# Prepare"))
+    def autonomy_step(self):
+        self.assertIn("**Working on its own", self.text)
+        return _normalized(self.text.split("**Working on its own", 1)[1]
+                           .split("**Make Telegram feel right.**", 1)[0])
+
+    def test_autonomy_question_and_goal_hint_are_exact_and_before_restart(self):
+        question = ("Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, "
+                    "and fold in anything you send while I'm working. "
+                    "(Recommended. Say no to keep things as they are.)")
+        hint = "For a big job, start your message with /goal and I'll keep at it until it's verified done."
+        step = self.autonomy_step()
+        self.assertEqual(step.count(question), 1)
+        self.assertEqual(step.count(hint), 1)
+        for rule in ("ask once", "every platform in that profile", "takes effect after the bot restarts",
+                     "the restart at the end of setup does that", "it applies at the next restart",
+                     "a message sent mid-task waits for the current step to finish",
+                     "After setup, say once"):
+            self.assertIn(rule, step)
+        self.assertLess(self.text.index("**Working on its own"), self.text.index("```sh\n# Prepare"))
+        self.assertLess(self.text.index("**Working on its own"),
+                        self.text.index("6. **The gateway restart"))
+
+    def test_autonomy_reads_each_key_and_only_changes_stock_defaults(self):
+        step = self.autonomy_step()
+        for key, stock, recommended in (("display.busy_input_mode", "interrupt", "steer"),
+                                        ("agent.intent_ack_continuation", "auto", "true")):
+            with self.subTest(key=key):
+                self.assertIn(f"| `{key}` | `{stock}` | `{recommended}` |", step)
+                self.assertIn(f"config get {key}", step)
+                self.assertIn(f"config set {key} {recommended}", step)
+        for rule in ("effective value", "including Hermes's defaults", "only when its effective value is the stock default",
+                     "Read back both keys", "including unchanged keys", "report the actual values",
+                     "Preserve and show every other existing value", "`steer` or `queue`",
+                     "`agent.intent_ack_continuation: false`", "including `interrupt`",
+                     "deliberately chose a stock value, preserve it", "merged value", "cannot distinguish",
+                     "Show current values and proposed changes.",
+                     "Preserve unknown values and unreadable config"):
+            self.assertIn(rule, step)
+        self.assertNotIn("stock-looking", self.text)
+
+    def test_code_verification_is_separate_and_only_when_requested(self):
+        step = self.autonomy_step()
+        opt_in = ("Leave `agent.verify_on_stop` as it is. If the user codes with this bot and asks for stricter checks, "
+                  "`hermes -p <profile> config set agent.verify_on_stop true` makes it double-check code changes "
+                  "before finishing; don't offer it otherwise.")
+        self.assertIn(opt_in, step)
+        self.assertEqual(step.count("config set agent.verify_on_stop true"), 1)
+        self.assertNotIn("agent.verify_on_stop", step.replace(opt_in, ""))
+        yes_path = step.split("After yes, recheck each", 1)[1].split("An explicit no", 1)[0]
+        self.assertEqual(re.findall(r"config set ([\w.]+) (\w+)", yes_path),
+                         [("display.busy_input_mode", "steer"), ("agent.intent_ack_continuation", "true")])
 
     def test_idempotent_and_verify_documented(self):
         self.assertIn("idempotent", self.normalized)
         self.assertIn("--verify", self.normalized)
 
-    def test_busy_mode_uses_effective_value_and_skips_steer_queue_or_remembered_interrupt(self):
-        for rule in ("effective value", "config get display.busy_input_mode",
-                     "already `steer` or `queue`", "A recorded `keep-interrupt`",
-                     "An absent marker means ask once", "report the unknown state"):
-            self.assertIn(rule, self.normalized)
+    def test_autonomy_reruns_preserve_saved_and_legacy_choices(self):
+        step = self.autonomy_step()
+        for rule in ("config get skills.config.workspace-setup.autonomy_choice",
+                     "A recorded `keep-current` or `chosen`", "continue without asking or rewriting",
+                     "config get skills.config.workspace-setup.busy_input_choice",
+                     "A recorded `keep-interrupt` skips only `display.busy_input_mode`",
+                     "still offer the other key", "confirmed “Config key not set”",
+                     "report the unknown state", "never restore settings from it or override later user changes",
+                     "config unset skills.config.workspace-setup.autonomy_choice"):
+            self.assertIn(rule, step)
 
     def test_silence_cannot_be_overridden_by_setup(self):
-        for rule in ("with no answer, leave the mode and marker untouched",
-                     "General setup or proactivity consent does not answer this question",
-                     "Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices"):
-            self.assertIn(rule, self.normalized)
+        for rule in ("with no answer, leave the settings and marker untouched",
+                     "Never treat silence or non-interactive runs as consent",
+                     "General setup or proactivity consent does not answer this question"):
+            self.assertIn(rule, self.autonomy_step())
+        self.assertIn("Neither `setup.sh` nor `setup-workspace.sh` writes these Telegram choices", self.normalized)
 
-    def test_answer_and_readback_gate_marker_write(self):
+    def test_autonomy_marker_is_last_and_requires_successful_readbacks(self):
+        step = self.autonomy_step()
         for rule in ("Apply only the answered choice with the supported CLI",
-                     "Read back that key and report a failure before continuing",
-                     "only after that answer and a successful mode readback",
-                     "never restore a mode from it or override later user changes",
-                     "config unset skills.config.workspace-setup.busy_input_choice"):
-            self.assertIn(rule, self.normalized)
+                     "An explicit no preserves both settings", "config.yaml",
+                     "only after that answer and successful readbacks",
+                     "report the mismatch and leave the marker untouched",
+                     "Read back the marker too", "failed writes/readbacks"):
+            self.assertIn(rule, step)
+        for answer in ("chosen", "keep-current"):
+            marker_write = f"config set skills.config.workspace-setup.autonomy_choice {answer}"
+            self.assertIn(marker_write, step)
+            self.assertLess(step.index("Read back both keys"), step.index(marker_write))
+            for key in ("display.busy_input_mode", "agent.intent_ack_continuation"):
+                self.assertLess(step.index(f"config set {key}"), step.index(marker_write))
 
     def test_global_interim_preference_is_preserved_by_telegram_offer(self):
         self.assertNotIn("config set display.interim_assistant_messages", self.normalized)
@@ -293,10 +354,25 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
         self.assertIn("proactivity bind --session-key", self.normalized)
         self.assertIn("proactivity status", self.normalized)
 
-    def test_restart_comes_last_and_the_agent_answers_first(self):
-        self.assertIn("comes last", self.normalized)
-        self.assertIn("send your final message", self.normalized)
-        self.assertIn("detached", self.normalized)
+    def test_setup_hands_a_pinned_plan_to_the_app_outside_the_gateway(self):
+        for instruction in ("Never bypass the lifecycle guard", "Finish setup and restart my bot",
+                            "repoRef", "desktopRef", "JSON setup plan", "outside the gateway",
+                            "Hermes 0.21.x", "Check setup"):
+            self.assertIn(instruction, self.normalized)
+        self.assertNotIn("most likely running inside this gateway. `setup.sh --restart`", self.normalized)
+
+    def test_restart_checks_use_output_pasted_by_the_user(self):
+        self.assertIn("Ask the user to paste the app's output, then report failed checks and warnings from it.",
+                      self.normalized)
+        self.assertNotIn("Read the app's output", self.text)
+
+    def test_windows_setup_is_a_human_handoff_outside_the_gateway(self):
+        step = self.normalized.split("4. **A Windows guest", 1)[1].split("5. **", 1)[0]
+        for rule in ("ask the human", "external Git Bash shell", "outside the gateway",
+                     "Never run setup through Hermes's terminal", "pinned setup command",
+                     "WSL2 counts as Linux"):
+            self.assertIn(rule, step)
+        self.assertNotIn("so run the same command there", step)
 
     def test_linux_hosts_and_validated_key_flags_are_covered(self):
         self.assertIn("--host-os <mac|windows|linux>", self.normalized)
@@ -362,12 +438,12 @@ class SetupPinProcedureTests(unittest.TestCase):
         checkout = subprocess.run(["git", "-C", str(self.root / "alans-way-agents"),
                                    "describe", "--tags", "--exact-match"],
                                   capture_output=True, text=True, env=self.env)
-        self.assertEqual(checkout.stdout.strip(), "v0.21.7")
+        self.assertEqual(checkout.stdout.strip(), "v0.21.8")
 
     def prepare_checkout(self, existing=False):
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "commit", "--allow-empty", "-qm", "first")
-        self.git("tag", "-f", "v0.21.7")
+        self.git("tag", "-f", "v0.21.8")
         self.destination = self.root / "alans-way-agents"
         if existing:
             subprocess.run(["git", "clone", "-q", str(self.source), str(self.destination)],
@@ -395,7 +471,7 @@ class SetupPinProcedureTests(unittest.TestCase):
         wrapper.chmod(0o755)
 
     def procedure(self):
-        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n~/alans-way-agents/setup.sh",
+        block = re.search(r"```sh\n((?:mkdir |# Prepare).*?)\n# End checkout preparation",
                           SKILL_PATH.read_text(), re.S).group(1)
         return subprocess.run(["sh", "-c", block], env=dict(self.env, HOME=str(self.root),
                               PATH=str(self.bin) + os.pathsep + os.environ["PATH"]),

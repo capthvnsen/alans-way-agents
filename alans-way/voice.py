@@ -23,9 +23,8 @@ PLAIN = ("Use plain words and contractions. Skip greetings, preambles and filler
          " opener sparingly.")
 FORMAT = ("Plain text or light formatting Telegram renders (bold, italic, code), never headings,"
           " tables or walls of bold; emoji only if they use them.")
-REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, stay quiet through"
-          " routine reads, navigation, saving, retries that succeed and step transitions;"
-          " interrupt only for a decision, approval or handback they own, a blocker or failed"
+REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, stay quiet through routine steps;"
+          " interrupt for a decision, approval or handback they own, a blocker or failed"
           " step, information you can't safely guess (never invent it), or a side effect or"
           " scope bigger than they asked. Finish with one concise verified result and any real"
           " caveat, not a step-by-step log. Own limits, failures and side effects plainly."
@@ -36,13 +35,15 @@ REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, s
           " it matched the source."
           " Never narrate loading skills, instructions, memory or tools."
           " Narrate only actions in the user's world.")
-RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets."
-         " Offer detail ('want the details on any of these?').")
+RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail;"
+         " no bullets. Keep material unfinished work or failures in those headlines."
+         " Offer detail ('want the details on any of these?') within that total, never as an extra sentence."
+         " Before sending, count all sentences and combine or cut until at most 3 remain.")
 INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"
              " job or session IDs unless they ask for technical detail.")
-NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. Otherwise give"
-        " a next step or caveat when useful, then stop.")
-SAFE = ("This changes tone only: approvals, CAPTCHA handbacks and safety checks work exactly as"
+NEXT = ("Ask only when the user owns a decision; name the choice or needed detail. After completing"
+        " the requested work, give a next step or caveat when useful, then stop.")
+SAFE = ("Keep the same safeguards: approvals, CAPTCHA handbacks and safety checks work exactly as"
         " before, and say plainly when something failed. Where their own persona or instructions"
         " ask for a different style, theirs wins.")
 
@@ -52,15 +53,10 @@ NOTE = (
     " Light, dry humor is fine when the moment invites it, never at their expense and never with"
     " bad news. Asked what you think, pick one and say why ('I'd go with X, because Y') instead"
     " of surveying options. Prices, availability and policies come only from a page read live"
-    " this turn; label anything else unconfirmed, and never recommend using an unconfirmed number."
+    " this turn; never recommend using an unconfirmed number."
     " Long answers (code, plans, research) stay complete: lead with a"
-    " one-line answer, then the detail in short paragraphs, code in code blocks. Keep routine"
-    " work quiet: no play-by-play bubbles while a task runs - the activity indicator already"
-    " shows it working - and when you do interrupt, one short plain line in task words, no"
-    " headings or step counters. Report side effects and mistakes right away, plainly."
-    " Narrate your steps only when they ask for live updates. When a new user message arrives"
-    " mid-task, acknowledge it in one line and fold it into the running task; don't restart. "
-    + NEXT + " " + SAFE
+    " one-line answer, then the detail in short paragraphs, code in code blocks."
+    " " + NEXT + " " + SAFE
     # Keep the short-answer default after the general completeness/list guidance. The offer
     # of detail fits inside the cap; the user's persona or request can still override it.
     + " Casual replies: 1-3 short sentences; match their energy and length. " + RECAP
@@ -69,8 +65,8 @@ NOTE = (
     " If their own persona or instructions ask for a different style or more detail, theirs wins.")
 
 
-SHORT_REPLY = ("This one wants a short answer: at most 3 sentences, the headline only,"
-               " then offer detail.")
+SHORT_REPLY = ("This one wants a short answer: at most 3 sentences total, including any offer of detail."
+               " Count before sending and combine or cut to fit; keep any material failure or unfinished work.")
 # A closed set of whole-message recaps and social replies. Prefixes never
 # imply short intent by themselves; unfamiliar wording is left uncapped.
 _REPLY_SEPARATOR = (r"[\s,.!?;:\-\N{HORIZONTAL ELLIPSIS}\N{VARIATION SELECTOR-16}\N{ZERO WIDTH JOINER}"

@@ -170,8 +170,9 @@ class NoteTests(unittest.TestCase):
     def test_recommendations_require_facts_read_live_this_turn(self):
         note = self.turn(voice(), "telegram")["context"]
         for rule in ("Prices, availability and policies", "page read live this turn",
-                     "label anything else unconfirmed", "never recommend using an unconfirmed number"):
+                     "never recommend using an unconfirmed number"):
             self.assertIn(rule, note)
+        self.assertNotIn("label anything else unconfirmed", note)
 
     def turn(self, v, platform, chat_type="dm", text="hey can you check my calendar tomorrow"):
         with env(HERMES_SESSION_CHAT_TYPE=chat_type):
@@ -205,24 +206,36 @@ class NoteTests(unittest.TestCase):
                      "say plainly when something failed", "theirs wins"):
             self.assertIn(rule, V.NOTE)
 
-    def test_quiet_policy_replaces_progress_narration(self):
+    def test_progress_policy_is_sparse_and_confirms_steers(self):
         note = self.turn(voice(), "telegram")["context"]
-        for rule in ("stay quiet through routine reads, navigation, saving, retries that succeed"
-                     " and step transitions",
-                     "interrupt only for a decision, approval or handback they own, a blocker or"
+        for rule in ("Mid-task, stay quiet through routine steps",
+                     "interrupt for a decision, approval or handback they own, a blocker or"
                      " failed step",
                      "information you can't safely guess (never invent it)",
-                     "one concise verified result and any real caveat, not a step-by-step log",
-                     "no play-by-play bubbles while a task runs",
-                     "activity indicator already shows it working",
-                     "Narrate your steps only when they ask for live updates",
-                     "side effects and mistakes right away",
-                     "acknowledge it in one line and fold it into the running task",
-                     "don't restart"):
+                     "one concise verified result and any real caveat, not a step-by-step log"):
             self.assertIn(rule, note)
+        for rule in ("start with one short line saying what you're doing",
+                     "only at a real milestone, when a step fails and you change course, or"
+                     " when a wait will be noticeable",
+                     "add nothing for one quick action",
+                     "side effects and mistakes right away",
+                     "confirm the change in one line in their words",
+                     "then fold it into the running task",
+                     "don't restart"):
+            self.assertNotIn(rule, note)
+        self.assertNotIn("This changes tone only", V.SAFE)
         for dropped in ("Before each multi-step chunk", "one update per roughly two actions",
-                        "first-person action and say what's next"):
+                        "first-person action and say what's next",
+                        "Narrate your steps only when they ask for live updates",
+                        "no play-by-play bubbles",
+                        "Give progress updates only when the user asks for them"):
             self.assertNotIn(dropped, note)
+
+    def test_one_step_question_keeps_the_no_start_line_rule(self):
+        note = sys.modules["alans_way_idle_test"].task_context(
+            user_message="what time is it in Tokyo?")["context"]
+        self.assertIn("When a task takes more than one quick step, start with one short line", note)
+        self.assertIn("add nothing for one quick action", note)
 
     def test_truth_rules_for_tools_and_exact_claims(self):
         note = self.turn(voice(), "telegram")["context"]
@@ -289,8 +302,11 @@ class TelegramConversationTests(unittest.TestCase):
                                      if isinstance(r, dict) and V.NOTE_MARKER in r.get("context", "")]
                             self.assertEqual(len(notes), 1)
                             self.assertIn(V.REPORT, notes[0])
-                            self.assertIn("no play-by-play bubbles while a task runs", notes[0])
-                            self.assertIn("acknowledge it in one line and fold it into the running task", notes[0])
+                            task_note = sys.modules["alans_way_idle_test"].TASK_NOTE
+                            self.assertIn({"context": task_note}, results)
+                            self.assertIn("start with one short line saying what you're doing", task_note)
+                            self.assertIn("confirm the change in one line in their words", task_note)
+                            self.assertIn("then fold it into the running task; don't restart", task_note)
                             self.assertEqual("group chat" in notes[0], chat != "dm")
                         history.extend([
                             {"role": "user", "content": text},
@@ -335,8 +351,20 @@ class RecapLengthTests(unittest.TestCase):
                 self.assertIn(V.RECAP, tail)
                 self.assertTrue(note.endswith(
                     "theirs wins." + (V.GROUP if chat == "group" else "")
-                    + "\nThis one wants a short answer: at most 3 sentences, the headline only,"
-                    " then offer detail."))
+                    + "\n" + ShortReplyIntentTests.reminder))
+
+    def test_recap_budget_includes_offer_and_failures_on_every_chat_surface(self):
+        for platform in ("telegram", "desktop", "tui", "bot_room"):
+            for chat in ("dm", "group"):
+                with self.subTest(platform=platform, chat=chat):
+                    note = self.turn(voice(), platform, chat,
+                                     "hey, quick one: what did you get done today?")["context"]
+                    self.assertIn("1-3 sentences total, including any offer of detail", note)
+                    self.assertIn("Before sending, count all sentences and combine or cut until"
+                                  " at most 3 remain", note)
+                    self.assertIn("Keep material unfinished work or failures in those headlines", note)
+                    self.assertTrue(note.endswith(ShortReplyIntentTests.reminder))
+                    self.assertNotIn("then offer detail", note)
 
     def test_length_default_preserves_explicit_detail_and_persona_requests(self):
         for text in ("Give me a detailed recap with evidence for every item.",
@@ -360,8 +388,8 @@ class ShortReplyIntentTests(unittest.TestCase):
     """The hook scopes an extra reminder; it does not enforce generated reply length."""
 
     turn = NoteTests.turn
-    reminder = ("This one wants a short answer: at most 3 sentences, the headline only,"
-                " then offer detail.")
+    reminder = ("This one wants a short answer: at most 3 sentences total, including any offer of detail."
+                " Count before sending and combine or cut to fit; keep any material failure or unfinished work.")
 
     def test_short_reply_requests_get_one_reminder_at_the_very_end(self):
         for text in ("hey, quick one: what did you get done today?",
@@ -494,9 +522,8 @@ class CorpusRuleTests(unittest.TestCase):
         self.assert_rules("Lead with the concrete status, then evidence or a caveat")
 
     def test_progress_is_quiet_and_interrupts_only_for_theirs(self):
-        self.assert_rules("Mid-task, stay quiet through routine reads, navigation, saving, retries"
-                          " that succeed and step transitions",
-                          "interrupt only for a decision, approval or handback they own",
+        self.assert_rules("Mid-task, stay quiet through routine steps",
+                          "interrupt for a decision, approval or handback they own",
                           "never invent it",
                           "one concise verified result and any real caveat, not a step-by-step log")
 
@@ -506,7 +533,7 @@ class CorpusRuleTests(unittest.TestCase):
 
     def test_questions_name_a_user_owned_decision(self):
         self.assert_rules("Ask only when the user owns a decision; name the choice or needed detail",
-                          "Otherwise give a next step or caveat when useful, then stop")
+                          "After completing the requested work, give a next step or caveat when useful, then stop")
 
     def test_owns_limits_failures_and_side_effects(self):
         self.assert_rules("Own limits, failures and side effects plainly")
@@ -524,13 +551,14 @@ class CorpusRuleTests(unittest.TestCase):
         self.assertIn("Casual replies: 1-3 short sentences", self.prompts()["chat"])
 
     def test_recaps_lead_with_headlines_and_offer_detail(self):
-        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets",
-                          "Offer detail ('want the details on any of these?')")
+        self.assert_rules("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail",
+                          "Offer detail ('want the details on any of these?') within that total, never as an extra sentence",
+                          "Before sending, count all sentences and combine or cut until at most 3 remain")
 
     def test_quick_daily_recap_gets_the_rule_on_the_actual_turn(self):
         note = V.note_for("hey, quick one: what did you get done today?", platform="telegram")
-        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences; no bullets", note)
-        self.assertIn("Offer detail ('want the details on any of these?')", note)
+        self.assertIn("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail", note)
+        self.assertIn("Offer detail ('want the details on any of these?') within that total, never as an extra sentence", note)
 
     def test_internals_stay_out_of_user_text_unless_technical_detail_is_requested(self):
         self.assert_rules("In user-facing text, use task words, never tool names, tool calls,"

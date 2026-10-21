@@ -66,13 +66,18 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/b9f571d7d8ef762f0a243989e3aa096171300c5e/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
 The Mac app requires an Apple Silicon Mac; the Windows app requires Windows
 10/11 x64. This plugin is already installed, so do not run a `setup.sh` line
-from that page that omits `--skip-plugin`. Use this command instead.
+from that page that omits `--skip-plugin`. Prepare the checkout below yourself;
+this skill’s external execution handoff takes precedence over lifecycle text in
+older linked prompts. The setup command is for the app's external SSH process, not your terminal.
+Never bypass the lifecycle guard or change its settings. Hermes scans the whole
+referenced setup script, so removing --restart alone does not make it safe to
+run inside the gateway. Use this handoff with Hermes 0.21.x too.
 `--non-interactive` means you do not wait for `setup.sh` prompts; ask the
 proactivity question yourself first. The bots text on Telegram in the plugin's
 texting voice by default; pass `--tone default` only when the user asked for
@@ -80,37 +85,67 @@ Hermes' own voice (they can also send `/tone default` any time). Add `--profile 
 is `default`. Give `--mac-ssh` the computer's Tailscale name or IP; `setup.sh`
 refuses anything else.
 
-**Messages while working (before setup and the gateway restart).** For each
+**Working on its own (before setup and the gateway restart).** For each
 Telegram profile using this plugin, read `hermes -p <profile> config get
-display.busy_input_mode` (use `-p default` for the default profile). Use the
-effective value, including Hermes's defaults when no key is stored. If it is
-already `steer` or `queue`, continue without asking. Preserve unknown values and
-unreadable config. If it is `interrupt`, first read `hermes -p <profile> config
-get skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
-means the user already chose to keep it; continue without asking or rewriting
-busy mode. An absent marker means ask once in plain words:
-“When you message me while I'm working, should I fold it into the current task (recommended) or stop and start over?”
-Explain that the choice applies to every platform in that profile and takes
-effect after the current step finishes; guidance waits for the current tool
-batch to return. Apply only the answered choice with the supported CLI:
-`hermes -p <profile> config set display.busy_input_mode steer` for folding it
-in, or `hermes -p <profile> config set display.busy_input_mode interrupt` for
-stopping and starting over. Read back that key and report a failure before
-continuing. Never treat silence or non-interactive runs as consent; with no
-answer, leave the mode and marker untouched and continue the other setup work.
+skills.config.workspace-setup.autonomy_choice` (use `-p default` for the default
+profile). A recorded `keep-current` or `chosen` means continue without asking or
+rewriting these settings unless the user explicitly revisits this choice.
+Only a confirmed “Config key not set” result means the marker is absent.
+Preserve unknown markers and unreadable config; report the unknown state and
+skip this offer. If absent, read `hermes -p <profile> config get
+skills.config.workspace-setup.busy_input_choice`. A recorded `keep-interrupt`
+skips only `display.busy_input_mode`; still offer the other key. Preserve
+that legacy marker. If it is unknown or unreadable, skip the busy key and
+report the unknown state, while still checking the other key.
+
+Read each effective value, including Hermes's defaults when no key is stored:
+`hermes -p <profile> config get display.busy_input_mode` and
+`hermes -p <profile> config get agent.intent_ack_continuation`.
+
+| Key | Stock default | Recommended value |
+| --- | --- | --- |
+| `display.busy_input_mode` | `interrupt` | `steer` |
+| `agent.intent_ack_continuation` | `auto` | `true` |
+
+Leave `agent.verify_on_stop` as it is. If the user codes with this bot and asks for stricter checks, `hermes -p <profile> config set agent.verify_on_stop true` makes it double-check code changes before finishing; don't offer it otherwise.
+
+Preserve and show every other existing value, including busy mode already set
+to `steer` or `queue` and `agent.intent_ack_continuation: false`. Preserve unknown
+values and unreadable config; report them and skip those keys. If the user
+deliberately chose a stock value, preserve it too, including `interrupt`.
+`config get` returns the merged value and cannot
+distinguish a stock default from a deliberate choice of that same value.
+Show current values and proposed changes. If none remain eligible, continue without
+asking or writing a marker.
+
+With eligible keys, ask once with this exact copy:
+"Want me to work on my own? I'll keep going until a job is done instead of stopping to check in, and fold in anything you send while I'm working. (Recommended. Say no to keep things as they are.)"
+Explain that this applies to every platform in that profile, takes effect after the bot restarts (the restart at the end of setup does that; if they change it outside setup, it applies at the next restart), and a message sent mid-task waits for the current step to finish.
+Disclose that you will remember the answer in this profile's
+`config.yaml`. Never treat silence or non-interactive runs as consent; with no
+answer, leave the settings and marker untouched and continue the other setup work.
 General setup or proactivity consent does not answer this question.
 
-Use no marker for `steer`: the value itself makes this check stateless. To avoid
-re-asking a user who explicitly keeps `interrupt` on every setup rerun, disclose
-that you will remember that answer in this profile's `config.yaml`, then run
-`hermes -p <profile> config set skills.config.workspace-setup.busy_input_choice keep-interrupt`
-only after that answer and a successful mode readback. If the marker cannot be
-read except for a confirmed “Config key not set” result, skip the question and
-report the unknown state. If its write fails, report that the answer could not
-be remembered; never invent a successful choice. This marker records only the
-setup answer: never restore a mode from it or override later user changes.
-The user can explicitly revisit the choice at any time, or remove the marker
-with `hermes -p <profile> config unset skills.config.workspace-setup.busy_input_choice`.
+Apply only the answered choice with the supported CLI. After yes, recheck each
+eligible key and write only when its effective value is the stock default and
+it was not deliberately chosen:
+`hermes -p <profile> config set display.busy_input_mode steer` and
+`hermes -p <profile> config set agent.intent_ack_continuation true`.
+An explicit no preserves both settings. Read back both keys with the
+same `config get` commands, including unchanged keys, and report the actual values.
+If any write fails or a readback is unreadable or differs from the expected
+changed or preserved value, report the mismatch and leave the marker untouched.
+Write the marker last, only after that answer and successful readbacks:
+`hermes -p <profile> config set skills.config.workspace-setup.autonomy_choice chosen`
+for yes, or
+`hermes -p <profile> config set skills.config.workspace-setup.autonomy_choice keep-current`
+for no. Read back the marker too with `hermes -p <profile> config get
+skills.config.workspace-setup.autonomy_choice` and report failed writes/readbacks.
+This marker records only the setup answer: never restore settings from it or
+override later user changes. The user can revisit the choice or remove the marker
+with `hermes -p <profile> config unset skills.config.workspace-setup.autonomy_choice`.
+After setup, say once in the final message before the planned restart:
+"For a big job, start your message with /goal and I'll keep at it until it's verified done."
 
 **Make Telegram feel right.** Before setup and restart, for each Telegram
 profile read `hermes -p <profile> config get <key>` for the leaves below and
@@ -320,21 +355,48 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.7
+[ -n "$PIN" ] || PIN=v0.21.8
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
+# End checkout preparation
+```
+
+Give the user a **JSON setup plan** to paste in Alan's Workspace → Settings →
+Agent setup. They save the two verified SSH addresses, then click **Finish setup
+and restart my bot**. The app runs setup outside the gateway over SSH; it does
+not run this command through your terminal. Use the resolved checkout commit
+(`git -C ~/alans-way-agents rev-parse HEAD`), not a tag name, for `repoRef`:
+
+```json
+{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
+```
+
+Include `--profile` and its name unless default. Add public `--mac-key` and
+`--mac-host-key` values obtained below. Carry only answered preferences:
+`--tone default`, `--keep-browser`, `--keep-computer-use`, or the explicit
+`--allow-desktop-actions` opt-in. Do not put `--restart`, pin flags, or
+`--skip-plugin` in args: the app supplies them. Never invent preference consent.
+The app checks the exact commit and rejects tracked checkout changes before
+execution. Its UI keeps the output for review. A Windows server needs an
+external Git Bash shell; the app step supports POSIX SSH shells.
+
+For an external shell only (also the command the app constructs):
+
+```sh
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref b9f571d7d8ef762f0a243989e3aa096171300c5e \
+    --desktop-ref 2fd64b4b71620dfb1b49e9aa4ab5e3021c0d0113 \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
     --bind --proactive <yes|no> [--tone default] [--profile <name>] --restart
 ```
 
-`setup.sh` is idempotent. Re-run it, or run `setup.sh --verify` alone, to
-audit with the same profile and any browser/service skip flags. `--verify`
+`setup.sh` is idempotent. Re-run it through the app. Use the app's Check setup
+for the post-restart audit, or `setup.sh --verify` in an external shell only,
+with the same profile and any browser/service skip flags. Even --verify scans
+the script's lifecycle code; never run it in the gateway terminal. `--verify`
 returns 0 for a complete local audit, 1 for failed required checks, and 2 for
 a partial install (warnings or skipped browser/services); report pending
 capabilities explicitly. A local audit does not verify computer-side viewing,
@@ -373,9 +435,11 @@ different bot's route silently.
    must be running for computer control even when the PC is reachable.
    Follow the steps in the app's `docs/setup-prompt.md`. Never use
    `StrictHostKeyChecking=accept-new` or ask for a password.
-4. **A Windows guest runs `setup.sh` from Git Bash.** Hermes' terminal tool
-   already uses Git Bash on native Windows, so run the same command there (WSL2
-   counts as Linux). It needs Node 22+, Python 3 (or `HERMES_PYTHON` pointing at
+4. **A Windows guest needs a human handoff.** Give the pinned setup command
+   above to the user and ask the human to run it in an external Git Bash shell,
+   outside the gateway. Never run setup through Hermes's terminal, even if it
+   uses Git Bash. WSL2 counts as Linux and uses the app handoff above.
+   Native Windows needs Node 22+, Python 3 (or `HERMES_PYTHON` pointing at
    a `python.exe`), Tailscale and Chrome or Edge. It registers Scheduled Tasks
    instead of systemd units, which start at logon, so tell the user to keep the PC
    awake and turn on automatic sign-in (`netplwiz`). Relay the OpenSSH Server lines
@@ -419,22 +483,23 @@ different bot's route silently.
    the pending handoff; do not claim preview readiness. A persistent tailnet
    listener is a separate exposure change needing separate consent and a
    computer-side check; this temporary forward does not change VM config.
-6. **The gateway restart ends your own session, so it comes last.** You are
-   most likely running inside this gateway. `setup.sh --restart` installs,
-   binds, sets the timezone and verifies first, prints its summary, and only
-   then schedules the restart, detached, about ten seconds later. As soon as
-   `setup.sh` returns, send your final message to the user with the summary and
-   what to check next, and start no further tool calls: the restart can cut the
-   conversation off. It goes through the gateway's real owner (`hermes gateway
-   restart`, or the supervisor that owns it), so never kill -9 a gateway
-   mid-message. Restarting one by hand on a supervisord host: `supervisorctl
-   restart` escalates SIGTERM to SIGKILL after `stopwaitsecs` (10s by default)
-   and a kill mid-checkpoint corrupts the gateway's `state.db` — signal the drain
-   instead (`supervisorctl signal USR1 <program>` on the program whose command
-   runs `hermes gateway run`), wait for the new pid, and use `start`/`restart`
-   only as fallbacks. If the restart was skipped, a check failed: say which one.
+6. **The gateway restart comes last, outside the gateway.** Before handing
+   over the plan, send your final message with the choices, pins and next checks.
+   The user clicks Finish setup and restart my bot in the app. The external
+   `setup.sh --restart` verifies first and schedules a detached restart only
+   after required checks pass. Ask the user to paste the app's output, then report failed checks and warnings from it.
+   A scheduled restart is not proof that the gateway came back.
+   Wait about a minute, then ask the user to message the bot and use Check setup.
+   Human `/restart` is also supported by Hermes 0.22 when slash permissions
+   allow it, but sending `/restart` as a bot message does not execute it and
+   it cannot make a blocked setup script run.
+   Restart through the gateway's real owner; never kill -9 a gateway mid-message.
+   On a supervisord host, `supervisorctl restart` escalates SIGTERM to SIGKILL
+   after `stopwaitsecs` (10s by default), which can corrupt `state.db` during a
+   checkpoint. Setup uses `supervisorctl signal USR1 <program>` to drain,
+   waits for the new pid, and uses start/restart only as fallbacks.
 7. **Bind only after a real DM route exists.** If no routes are listed, the
-   user messages the bot once, then `setup.sh --bind`. By hand:
+   user messages the bot once, then reruns the app plan with `--bind`. By hand:
    `hermes proactivity bind --session-key '<key>' --timezone <IANA-zone>`,
    tune with `hermes proactivity set --settings '<json>'`, and check with
    `hermes proactivity status`.
@@ -482,8 +547,9 @@ each other. After a move, check each one; a stale copy fails quietly:
 output verbatim in your final message: plugin enabled, workspace browser block,
 browser host state, and any FAIL lines. "Installed" means the verify output
 says so, not that the commands ran without visible errors. After the gateway has
-restarted (the next time the user writes to you), run `setup.sh --verify` for a
-full audit of the running install. Remind the user that check-ins are on once bound and are
+restarted (the next time the user writes to you), ask for the app's Check setup
+report for a full audit of the running install. Never execute setup.sh --verify
+inside the gateway. Report the app's output verbatim, including failed checks. Remind the user that check-ins are on once bound and are
 tuned by talking to the bot ("stop checking in" pauses them; `/proactivity resume` starts them
 again), and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
@@ -491,7 +557,10 @@ for approval per action unless they re-run setup with `--allow-desktop-actions`
 provider API it also exposes a desktop-input tool that runs with no approval
 at all). Tell the user that setup turned off Hermes'
 built-in browser toolset for Telegram and cron so you use their workspace
-browser, and that `--keep-browser` undoes that. Setup never turns off the
+browser. `--keep-browser` only skips disabling it; it does not re-enable an
+already-disabled toolset. Re-enabling it requires the explicit command
+`hermes -p <profile> tools enable browser --platform <platform>` for each
+chosen platform (`telegram` or `cron`). Setup never turns off the
 built-in `computer_use` toolset: desktop input always goes through it. If setup
 warns about a `cua-driver` MCP server the user added, leave it and tell them the
 `hermes -p <profile> mcp remove <name>` command from the warning.

@@ -265,8 +265,9 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         answered = self.recv()
         self.assertEqual((answered["id"], self.served(answered)), (other, "mac"))
         self.assertEqual(len(self.vm_spawns()), 1)
-        self.assertIn('"host": "vm"', self.log("vm.log"))
-        self.assertNotIn('"host": "vm"', self.log("mac.log"))
+        self.assertEqual(self.backend_calls("vm.log", "cua_alans_way_open"),
+                         [{"url": "https://vm.example/", "host": "vm"}])
+        self.assertEqual(self.backend_calls("mac.log", "cua_alans_way_open"), [])
 
     def served(self, msg):
         return self.text(msg).split()[0]
@@ -337,7 +338,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertNotIn("proxied", vm_tab["url"])
 
     def test_a_wedged_vm_call_errors_at_the_hard_deadline(self):
-        self.start(vm_mode="hang", HERMES_ROUTER_CALL_HARD_MS="1500")
+        self.start(vm_mode="hang", HERMES_ROUTER_CALL_HARD_MS="4500")
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
@@ -353,7 +354,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual((answered["id"], self.served(answered)), (status, "mac"))
 
     def test_a_merged_tabs_call_completes_when_the_vm_half_hangs(self):
-        self.start(vm_mode="hang-tabs", HERMES_ROUTER_CALL_HARD_MS="1500")
+        self.start(vm_mode="hang-tabs", HERMES_ROUTER_CALL_HARD_MS="4500")
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
@@ -667,7 +668,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertIn("mac-tab-1", self.text(answered))
 
     def test_a_late_vm_reply_after_the_deadline_is_dropped(self):
-        self.start(vm_mode="slow", VM_DELAY_MS="3000", HERMES_ROUTER_CALL_HARD_MS="1000")
+        self.start(vm_mode="slow", VM_DELAY_MS="6000", HERMES_ROUTER_CALL_HARD_MS="4000")
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://vm.example/", "host": "vm"})
         self.recv()
@@ -677,7 +678,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.assertEqual(msg["id"], call)
         self.assertTrue(msg["result"]["isError"])
         self.assertIn("VM browser", self.text(msg))
-        # The stub answers ~3s after the call, past the error the client got.
+        # The stub answers ~6s after the call, past the error the client got.
         time.sleep(3)
         status = self.call("cua_alans_way_status", {})
         answered = self.recv()

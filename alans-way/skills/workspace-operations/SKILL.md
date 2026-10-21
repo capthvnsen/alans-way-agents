@@ -40,8 +40,9 @@ anything you cannot read; a planned pin is not an observed running version.
 - Alan's Workspace: call `cua_alans_way_status` and report its `version` and
   `build` (commit/channel/dirty when supplied) only when the response identifies
   the user's computer. A response with `host: vps` is the VM browser, so the
-  computer app version is unavailable while it is offline. Missing fields on
-  an older app are unavailable, not the connector's MCP protocol version.
+  computer app version is unavailable from that response; it does not prove
+  the computer is offline. Missing fields on an older app are unavailable,
+  not the connector's MCP protocol version.
   The existing connector passes `/v1/status` through; no app API token, SSH
   request, install, update or restart is needed for this check.
 
@@ -163,9 +164,9 @@ Take the first of these that answers the question:
 2. When you need the real page (maps, shopping, signed-in results, or a page
    you must click through), open a tab on the user's computer: omit `host`.
    Their real connection and session meet far fewer challenges.
-3. Use a search engine in the VM browser only while the user's computer is
-   offline, and expect a CAPTCHA there. Never pass `host:"vm"` to a search
-   engine while the computer is online.
+3. Use a search engine in the VM browser only on an explicit VM request or a
+   router-reported outage, and expect a CAPTCHA there. Follow the host policy
+   below.
 
 If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.
 
@@ -187,11 +188,16 @@ SSH): those tabs carry another bot id, and the tools refuse them afterwards.
 If a workspace browser call fails, report the failure; do not silently
 substitute another browser.
 
-`cua_alans_way_open` takes an optional `host`. Omit it for the default: the
-user's computer when it is reachable, the VM's own browser when it is not.
-Pass `host:"vm"` to use the VM's own browser even while the user's computer
-is online. Pass `host:"computer"` to force the user's computer; while it is
+`cua_alans_way_open` takes an optional `host`. Omit it for normal work,
+including errands that continue while the user is away: the router starts
+on the user's computer when it is reachable and uses the VM's own Workspace
+browser when it is not. Pass `host:"vm"` only when the user explicitly asks
+for your own computer or the VM, or the router reports the user's computer
+unreachable. Pass `host:"computer"` to force the user's computer; while it is
 offline the call errors instead of silently landing on the VM.
+Login, CAPTCHA, approval and uncertain-action errors are not outages and
+never switch browsers. If the VM browser also fails, report the failure;
+Hermes's native browser is not a third tier.
 
 Hermes registers these MCP tools under the `workspace_browser` server, so
 their exact names are `mcp__workspace_browser__cua_alans_way_status`,
@@ -211,8 +217,10 @@ Skip status and tabs unless a call fails or you are checking tabs for cleanup: e
 `cua_alans_way_*` result already carries the serving `host`, so a working
 call needs no confirmation round trip. A connection failure means that host
 is unavailable; report it or continue only work already authorized on
-another host. When status shows the VPS, the Mac is unreachable: the same
-`cua_alans_way_*` tools are that machine's browser. Its desktop is read with
+another host. VPS status identifies the serving host, not whether the Mac
+is reachable: an explicit VM request can use it while the Mac is online.
+The same `cua_alans_way_*` tools are that machine's browser. Its desktop is
+read with
 `mcp__workspace_browser__workspace_computer_apps`,
 `mcp__workspace_browser__workspace_computer_snapshot`,
 `mcp__workspace_browser__workspace_computer_menu` and
@@ -221,9 +229,8 @@ with the `computer_use` tool, which asks the user for approval on each
 action. Press a ref from the accessibility
 tree, leave the focused window alone, and do not move the pointer.
 
-**Where to act.** A web page is `cua_alans_way_*` work: the user's computer
-by default, the VM with `host:"vm"` or while the computer is offline. A
-native app is `computer_use` work; `workspace_computer_apps` says which
+**Where to act.** A web page is `cua_alans_way_*` work, following the host
+policy above. A native app is `computer_use` work; `workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
 `vps` is the VM desktop). If the app is in front, on another Space, or the
 screen is locked, the error or capture note says so: ask the user instead of
@@ -298,7 +305,7 @@ closed laptop does not stop them.
 Stop with a "needs Mac" note only for something that exists only on that
 Mac: a local file, or a Mac app that is not a website. When the Mac is back,
 start the next web task in the in-app Mac browser. Finish the current VPS
-step first.
+task there even when the Mac returns.
 
 ## Shared links
 
@@ -342,9 +349,9 @@ the tab stays yours to keep working.
    `action=batch` can run up to 25 steps in order, stopping at the first error;
    that is a limit, not a target. End the chunk before any noticeable step
    (a send, a submit, or a page the user must act on). After each chunk,
-   read the returned errors and side effects before continuing, report them
-   promptly, and incorporate any new user guidance. The authorization policy
-   above still requires a whole checkout batch under one `commit`; keep that
+   read the returned errors and side effects before continuing, report blockers
+   and unexpected side effects promptly, and incorporate any new user guidance.
+   The authorization policy above still requires a whole checkout batch under one `commit`; keep that
    approved batch together and give the progress text before it. Act, `wait` for the
    text or selector you expect (`{action:"wait", text:"Done", timeout:8000}`;
    `selector`, `url`, and `visible:true` conditions also work, and
@@ -353,12 +360,14 @@ the tab stays yours to keep working.
    the state after the last step: it already shows the page after the
    action's own updates, so each chunk answers in one call, and you add
    `wait` or `read` steps only when you need something `effect` does not
-   show. Before each multi-step chunk, send one short plain sentence saying
-   the current action and the next step. Before a noticeable step
+   show. Continue into the next chunk until the task is done or blocked.
+   To bring something into view, use the scroll action; scripts and reloads are refused on pages that show payment or donate buttons.
+   Keep routine reads, actions and step transitions quiet. Before a noticeable step
    (email sent, form submitted, or page the user must act on), say what is
    about to happen; report side effects and mistakes right away, plainly.
-   Keep progress to at most one update per roughly two actions, except for
-   a noticeable step or mistake; add nothing for one quick action. Use
+   For multi-step work, send one short start line, then a one-line update only at
+   a real milestone, a failed step you route around, or a noticeable wait; add
+   nothing for one quick action. Interrupt for required user action, a blocker or mistake. Use
    no tool names, headings or step counters. When a new message arrives
    mid-task, acknowledge it in one line and fold it into the running task;
    do not restart. Finish with one short result message.
@@ -444,13 +453,15 @@ Once the tab is the user's:
    hands the tab back on its own once the challenge clears. When the tab is
    back with you (`controller` is `agent` and its handback says
    `human_returned`), carry on without another message: the epoch moved on,
-   and the tab list you just read gave you the fresh one. A tab you released
-   yourself on the VM can stay with the human after the challenge clears, so
-   there the user saying they're done also ends the wait.
+   and the tab list you just read gave you the fresh one. The VM tab is held too:
+   ask the user to press Give back in Alan's Workspace when finished;
+   the user saying they're done also ends the wait.
 3. After 30 minutes, or if you cannot keep waiting in this turn, stop. Your
    message already said you will pick it back up. When the user says it's
-   done, list your tabs; if the tab is still theirs, their reply is the
-   agreement to claim it, so claim it and continue.
+   done, list your tabs. Keep the host, tab id and fresh epoch together from the same reply.
+   If the tab is still theirs, try to claim it once.
+   Continue if it succeeds; if the claim is refused with `awaiting_human`, ask them to press Give back
+   in Alan's Workspace and wait for the return. Respect any other refusal.
 
 **Back off.** When a reply's `challenge` (or the tab's `handback`) has
 `backOff:true`, its `advice` says the site has challenged twice in 10 minutes:
@@ -477,14 +488,8 @@ snapshot and fresh review there; an uncertain earlier action or control change
 is not a failed action to replay, so do not repeat it without establishing its
 outcome and following its recovery instructions.
 
-The app supplies local Mac tabs and a single VPS desktop viewer; cross-host
-handoff controls are not exposed in its UI. Use an installed Companion
-handoff capability only when it advertises support; read its checkpoint
-context, wait for authorized agent control, and verify the destination page
-and login before continuing. `review_required` means the page needs human
-review. Available cookies may carry over when the connector reports a restore;
-passwords, uploads and in-memory state stay on the source host. Keep
-Chromium profiles with their running browser.
+The person can move a Mac tab to the VM with the Move button in Alan's Workspace. That carries the page address and scroll position, and drafts when they choose; cookies come along only when the app reports a restore, and passwords, uploads and in-memory state stay behind. You have no move tool: open the page on the other computer instead, and check the destination page and login before continuing.
+Keep Chromium profiles with their running browser.
 
 The viewer is one shared desktop. **Take control** enables the human's mouse
 and keyboard; **Stop control** returns to Watch. These viewer controls do not
@@ -536,10 +541,30 @@ For any desktop app on the user's computer, use the `computer_use` tool
 screencapture, osascript or ssh scripts to drive the user's desktop.
 If a call fails with a permission error, ask the user to turn on Accessibility and Screen Recording for the Alan's Workspace app (listed as alans-way-localapp) in System Settings, then retry.
 
+## Promised follow-ups
+
+When the user asks you to check in, remind them or report back later, or says yes when you offer to, create one `cronjob_manage` job right then: `action` create, a `schedule` such as `in 5m` or an exact time, a `prompt` that says what to ask or check and when to stop, `attach_to_session` true so their reply continues this chat, and no `deliver` so it comes back here. Confirm with the local time in one line. An offer they haven't answered is not a yes: save nothing. Never promise a later message without a saved job. If they answer a check-in with "not yet", offer exactly one more check-in at a named local clock time, such as "want me to check again at 10:15 PM?". Save nothing until they say yes; don't schedule repeats they didn't ask for. Remove the job when its reason goes away.
+
+When the user wants a job, deploy or status watched inside this conversation,
+suggest they send `/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>`
+and `/heartbeat clear` to stop. The user sends these commands; you cannot set or clear
+the heartbeat yourself. Include `reply exactly [SILENT] when nothing meaningful changed`
+in the suggested check. There is one heartbeat per conversation; setting another
+replaces it. It fires only while the conversation is idle and the owning chat
+process or gateway is running, costs a model turn per check, and needs the user's
+clear command when finished. Keep cron for isolated browser watches using
+[web-errands](../web-errands/SKILL.md#a-watch-is-a-cron-job).
+
 ## Preserve vanilla Hermes
 
-Save durable user facts, decisions and preferences to memory as they come up during work,
-so nothing important lives only in chat history. Transient tab state, element refs and handback state
+Save lasting general facts and preferences to memory only when they
+apply across sessions regardless of task, such as a general preference for concise replies.
+How-to procedures, pitfalls and task-specific preferences belong in the relevant skill.
+Project and task records, including decisions, application confirmations and status,
+belong in the user's chosen place, such as a project file or tracker; ask if no place
+has been chosen, and keep short-lived facts in session history.
+Do not migrate or delete existing memory as part of this guidance.
+Transient tab state, element refs and handback state
 must never go into durable memory; reacquire live workspace state from the tools when needed.
 
 Keep integration in supported profile configuration, optional plugins, hooks

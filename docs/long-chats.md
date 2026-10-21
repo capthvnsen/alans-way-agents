@@ -15,9 +15,13 @@ is an agent-guided option; running `setup.sh` alone does not enable it. It adds
 no compactor, changes no summary model and does not enable `micro_compact`.
 Each committed prune breaks the prompt-cache prefix, so savings vary.
 
-The workspace-operations skill saves durable facts, decisions and preferences
-to memory during work. Transient tabs, element refs and handback state stay out
-of durable memory.
+The workspace-operations skill saves lasting general facts and preferences
+to memory when they apply across sessions regardless of task, such as a preference
+for concise replies. How-to procedures, pitfalls and task-specific preferences
+belong in the relevant skill. Project and task records belong in the user's chosen
+place, such as a project file or tracker; the bot asks if no place has been chosen.
+Short-lived facts stay in session history. This guidance does not migrate or delete existing memory.
+Transient tabs, element refs and handback state stay out of durable memory.
 
 To undo the opt-in, run
 `hermes -p <profile> config set compression.proactive_prune_tokens 0` for each

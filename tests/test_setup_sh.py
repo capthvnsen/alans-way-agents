@@ -1061,12 +1061,12 @@ class StockBrowserTests(unittest.TestCase):
         self.assertIn("tools disable browser --platform cron", calls)
         self.assertIn("built-in browser toolset disabled for telegram", result.stdout)
         self.assertIn("built-in browser toolset disabled for cron", result.stdout)
-        self.assertIn("--keep-browser", result.stdout)
+        self.assertIn("tools enable browser --platform telegram", result.stdout)
 
     def test_keep_browser_opts_out(self):
         result, calls = self.setup_run("--keep-browser")
         self.assertNotIn("tools disable browser", calls)
-        self.assertIn("keeping the built-in browser toolset", result.stdout)
+        self.assertIn("skipping built-in browser toolset changes (--keep-browser)", result.stdout)
 
     def test_not_disabled_when_the_workspace_browser_was_not_configured(self):
         directory = tempfile.TemporaryDirectory()

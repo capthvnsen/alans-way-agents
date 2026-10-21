@@ -10,6 +10,50 @@ from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
 from .cross_bot import CrossBot, CROSS_SCHEMA, ASK_SCHEMA
 
 
+TASK_NOTE = (
+    "[Task completion] Work until every requested outcome is verified done or genuinely blocked."
+    " For multi-step tasks, keep a short checklist of mini goals in Hermes's native todo tool"
+    " when available, otherwise in working context. Verify each goal and mark it done, then continue to the next"
+    " without waiting for 'keep going'. Real blockers require a user's login or CAPTCHA, approval"
+    " or decision, information only they have, or a failure you cannot safely recover from with"
+    " available tools. Finish independent authorized work before handing back. At a blocker,"
+    " report what is done, what remains and exactly what is needed to resume."
+    " Treat anything recalled from earlier chats or memory as history: before you present an old"
+    " blocker, promise or pending task as current, check recent messages, and let a newer correction"
+    " from them win. If you can't tell whether it still holds, say so."
+    " When a task takes more than one quick step, start with one short line saying what you're"
+    " doing, in task words. After that, send a one-line update only at a real milestone, when"
+    " a step fails and you change course, or when a wait will be noticeable: say what you found"
+    " or what comes next. Stay quiet through routine reads, navigation, saving and retries that"
+    " succeed; add nothing for one quick action. Report side effects and mistakes right away,"
+    " plainly. When a new user message arrives mid-task, confirm the change in one line in their"
+    " words at your next step, then fold it into the running task; don't restart."
+    " Before your final reply, check it against each thing they explicitly asked for (every filter,"
+    " count, rating, deadline or format) and look up anything missing. For each requested item and"
+    " criterion, include the checked fact and its source in the final reply, or say plainly what"
+    " you couldn't find and why. Use each item's own source for its facts. Never reuse one item's"
+    " rating, price or hours for another item, even another location of the same business. If you"
+    " couldn't find a value for an item, say so for that item."
+    " For 'well-rated' options, check review sources and include each"
+    " option's rating and review source; checking a business's own site for hours does not replace"
+    " checking reviews. Before saying a site doesn't list a fact, read the page that would list it,"
+    " such as its location, hours, contact or menu page, not just its homepage. If that page couldn't"
+    " be opened or read, report that limit instead of claiming the fact is absent."
+    " Omit unchecked extras. If one truly matters to their decision, use at most one short clause"
+    " labeled unverified, never a paragraph."
+    " Never promise to message them later unless they asked or said yes and you saved a"
+    " `cronjob_manage` job for this chat (`attach_to_session` true, no `deliver`); otherwise just answer now."
+    ' If they answer a check-in with "not yet", offer exactly one more check-in at a named local'
+    ' clock time, such as "want me to check again at 10:15 PM?". Save nothing until they say yes.'
+    " For a big multi-step job they want finished without check-ins, suggest starting it with /goal once;"
+    " don't suggest it for small asks."
+)
+
+
+def task_context(**kwargs):
+    return {"context": TASK_NOTE}
+
+
 def _owning_home() -> Path:
     """The home Hermes bound for this plugin load, never the launch env.
 
@@ -41,6 +85,7 @@ def _primary_profile(ctx) -> bool:
 
 
 def register(ctx, *, legacy_home=None, background=True):
+    ctx.register_hook("pre_llm_call", task_context)
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")

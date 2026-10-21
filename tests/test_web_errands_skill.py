@@ -227,9 +227,12 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
                 self.assertIn(reason, self.normalized)
         self.assertIn("`note`", self.normalized)
         self.assertIn("awaiting_human", self.normalized)
-        self.assertIn("On the user's computer", self.normalized)
-        self.assertIn("On the VPS", self.normalized)
-        self.assertIn("does not hold the tab", self.normalized)
+        handback = self.normalized.split("## The walls you hand back")[1].split("## Verify, then report")[0]
+        self.assertNotRegex(handback, r"(?i)\bnot\s+held\b|\bdoes\s+not\s+hold\b")
+        self.assertIn("On the user's computer and on the VM alike", handback)
+        self.assertIn("Give back in Alan's Workspace", handback)
+        self.assertIn("30 minutes pass", handback)
+        self.assertIn("banner and a notification", handback)
         self.assertIn("140 characters", self.normalized)
         self.assertIn("[CAPTCHA handback]", self.text)
         self.assertIn("human_returned", self.normalized)
@@ -277,10 +280,36 @@ process.stdout.write(JSON.stringify(check(require, path, path.dirname(file), nam
         self.assertIn("three consecutive failures", self.normalized)
         self.assertIn("`cron.allow_agent_scheduling: true`", self.normalized)
 
-    def test_host_choice_follows_the_users_session(self):
-        self.assertIn("`host:\"vm\"`", self.normalized)
-        self.assertIn("when their own session matters", self.normalized)
-        self.assertIn("computer is asleep", self.normalized)
+    def test_host_choice_starts_on_the_users_computer_even_while_away(self):
+        host = _normalized(self.text.split("## Pick the host", 1)[1].split("## ", 1)[0])
+        for rule in ("Omit it for normal work, including errands that continue while the user is away",
+                     'Pass `host:"vm"` only when the user explicitly asks for your own computer or the VM, or the router reports the user\'s computer unreachable',
+                     "Login, CAPTCHA, approval and uncertain-action errors are not outages and never switch browsers",
+                     "Finish an already-running VM task there even when the user's computer returns"):
+            self.assertIn(rule, host)
+        self.assertNotIn("or the errand must finish while they are away", host)
+        self.assertIn("ask the user rather than working past a login wall", host)
+
+    def test_watches_use_continuity_and_conditional_change_detection(self):
+        watch = self.normalized.split("## A watch is a cron job")[1]
+        for rule in ('"continuity": true', "previous completed output",
+                     "reply exactly `[SILENT]`", "only when the user asks",
+                     "or accepts your offer", "`attach_to_session` true",
+                     "omit `deliver`", '"monitor": "https://example.com/status.json"',
+                     "safe, read-only deterministic probe",
+                     "matches the condition the user asked to watch",
+                     "omit `monitor`", "no timestamps",
+                     "first tick runs the agent", "first check report a compact baseline",
+                     "continuity skips silent outputs", "unchanged output skips",
+                     "changed output gives the agent a diff", "a check failed",
+                     "source failure is an error"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, watch)
+
+    def test_application_records_use_the_users_chosen_place(self):
+        applications = self.recipes_normalized.split("## Job applications")[1].split("## Forms")[0]
+        self.assertIn("in the user's chosen project or task record", applications)
+        self.assertNotIn("in memory", applications)
 
     def test_recipes_cover_the_errand_kinds(self):
         for heading in ("## Shopping and cart comparison",

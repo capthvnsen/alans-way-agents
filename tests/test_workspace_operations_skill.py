@@ -12,6 +12,62 @@ def _normalized(text: str) -> str:
 
 
 class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
+    def test_promised_follow_ups_are_saved_jobs_in_this_chat(self):
+        section = re.search(r"## Promised follow-ups(.*?)(?:## |\Z)", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("or you offer to", self.text)
+        self.assertIn("or says yes when you offer to", policy)
+        self.assertIn("An offer they haven't answered is not a yes: save nothing.", policy)
+        for rule in ("cronjob_manage", "`action` create", "`schedule`", "`prompt`",
+                     "when to stop", "`attach_to_session` true", "no `deliver`",
+                     "Confirm with the local time in one line",
+                     "Never promise a later message without a saved job",
+                     '"not yet"', "offer exactly one more check-in at a named local clock time",
+                     'such as "want me to check again at 10:15 PM?"',
+                     "Save nothing until they say yes",
+                     "don't schedule repeats they didn't ask for",
+                     "Remove the job when its reason goes away"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_follow_up_docs_require_acceptance_of_an_offer(self):
+        docs = _normalized((ROOT / "docs" / "proactivity.md").read_text())
+        self.assertNotIn("or the bot offers one", docs)
+        self.assertIn("or say yes when the bot offers one", docs)
+
+    def test_in_chat_monitoring_is_a_command_the_user_sends(self):
+        for path in (SKILL_PATH, ROOT / "docs" / "proactivity.md"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                self.assertIn("/heartbeat every <interval> <what to check; stay silent unless something meaningful changed>", text)
+                self.assertIn("/heartbeat clear", text)
+                normalized = _normalized(text)
+                for rule in ("The user sends these commands", "cannot set or clear",
+                             "one heartbeat per conversation", "idle",
+                             "running", "[SILENT]", "isolated browser watches"):
+                    self.assertIn(rule, normalized)
+                self.assertNotRegex(normalized, r"(?i)\b(?:I|we|the bot|the agent) (?:can|will) (?:run|send|set|clear) (?:the )?`?/heartbeat")
+
+    def test_move_is_described_truthfully(self):
+        section = re.search(r"## Hand a task between computers(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertNotIn("handoff controls are not exposed in its UI", policy)
+        for rule in ("Move button", "page address and scroll position",
+                     "drafts when they choose", "only when the app reports a restore",
+                     "passwords, uploads and in-memory state stay behind",
+                     "You have no move tool", "check the destination page and login"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, policy)
+
+    def test_browser_scrolling_uses_the_scroll_action(self):
+        section = re.search(r"## Operate a browser tab(.*?)## ", self.text, re.S)
+        self.assertIsNotNone(section)
+        policy = _normalized(section.group(1))
+        self.assertIn("use the scroll action", policy)
+        self.assertIn("scripts and reloads are refused on pages that show payment or donate buttons", policy)
+
     def test_connector_recovery_separates_reads_from_uncertain_mutations(self):
         section = re.search(r"## The connector layer self-heals; never operate on it(.*?)## ", self.text, re.S)
         self.assertIsNotNone(section)
@@ -120,13 +176,24 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         cls.text = SKILL_PATH.read_text(encoding="utf-8")
         cls.normalized = _normalized(cls.text)
 
-    def test_durable_memory_is_saved_during_work_without_transient_browser_state(self):
-        for requirement in ("Save durable user facts, decisions and preferences to memory",
-                            "as they come up during work", "only in chat history",
+    def test_memory_is_scoped_without_transient_browser_state(self):
+        for requirement in ("lasting general facts and preferences",
+                            "apply across sessions regardless of task",
+                            "How-to procedures, pitfalls and task-specific preferences",
+                            "relevant skill", "Project and task records",
+                            "user's chosen place", "Do not migrate or delete existing memory",
                             "Transient tab state, element refs and handback state",
                             "never go into durable memory"):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, self.normalized)
+
+    def test_long_chat_docs_use_the_same_memory_scope(self):
+        docs = _normalized((ROOT / "docs" / "long-chats.md").read_text())
+        for rule in ("lasting general facts and preferences", "regardless of task",
+                     "How-to procedures", "relevant skill", "Project and task records",
+                     "user's chosen place", "does not migrate or delete existing memory"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, docs)
 
     def test_ordinary_actions_are_preauthorized(self):
         self.assertIn(
@@ -312,7 +379,9 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn("jpeg quality 50 at 960px is the default.", self.normalized)
         self.assertIn("A link href omits tracking parameters.", self.normalized)
         self.assertIn("A frame src omits tracking parameters too.", self.normalized)
-        self.assertIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertIn("VPS status identifies the serving host, not whether the Mac is reachable", self.normalized)
+        self.assertNotIn("When status shows the VPS, the Mac is unreachable", self.normalized)
+        self.assertNotIn("computer app version is unavailable while it is offline", self.normalized)
         self.assertNotIn("must keep running after the Mac sleeps", self.normalized)
         self.assertIn("continue the task on the VPS", self.normalized)
         self.assertIn("use `cua_alans_way_open` to open a new page for inspection", self.normalized)
@@ -352,17 +421,21 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         self.assertIn('{action:"wait", text:"Done", timeout:8000}', self.normalized)
         self.assertIn("`gone:true` waits for the text or selector to disappear", self.normalized)
         self.assertIn('{action:"read"}', self.normalized)
-        self.assertIn("Before each multi-step chunk", self.normalized)
-        self.assertIn("the current action and the next step", self.normalized)
+        self.assertIn("Continue into the next chunk until the task is done or blocked", self.normalized)
+        self.assertNotIn("Before each multi-step chunk", self.normalized)
         self.assertNotIn("write no chat text between tool calls", self.normalized)
         self.assertIn("Skip status and tabs unless a call fails", self.normalized)
 
     def test_progress_is_bounded_and_mid_task_messages_are_folded_in(self):
         for rule in ("email sent, form submitted, or page the user must act on",
-                     "side effects and mistakes right away", "at most one update per roughly two actions",
+                     "side effects and mistakes right away",
+                     "For multi-step work, send one short start line",
+                     "then a one-line update only at a real milestone, a failed step you route around, or a noticeable wait",
+                     "Keep routine reads, actions and step transitions quiet",
                      "one quick action", "no tool names, headings or step counters",
                      "acknowledge it in one line and fold it into the running task", "do not restart"):
             self.assertIn(rule, self.normalized)
+        self.assertNotIn("Give progress updates only when the user asks for them", self.normalized)
 
     def test_tab_id_and_epoch_default_to_the_last_used_tab(self):
         # Every call used to repeat "tabId":"<uuid>","epoch":N — about 30
@@ -376,9 +449,12 @@ class WorkspaceOperationsSkillPolicyTests(unittest.TestCase):
         )
 
     def test_host_arg_routes_to_the_named_machine(self):
-        self.assertIn('`host:"vm"` to use the VM\'s own browser even while the user\'s computer is online', self.normalized)
+        for rule in ("Omit it for normal work, including errands that continue while the user is away",
+                     'Pass `host:"vm"` only when the user explicitly asks for your own computer or the VM, or the router reports the user\'s computer unreachable',
+                     "Login, CAPTCHA, approval and uncertain-action errors are not outages and never switch browsers",
+                     "Finish the current VPS task there even when the Mac returns"):
+            self.assertIn(rule, self.normalized)
         self.assertIn('`host:"computer"` to force the user\'s computer', self.normalized)
-        self.assertIn("Omit it for the default", self.normalized)
 
     def test_select_accepts_any_option_handle(self):
         self.assertIn("`select` (an option by value, label, option, text or choice)", self.normalized)
@@ -526,13 +602,13 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertTrue(self.search, "the Search the web section is gone")
         hermes = self.search.index("use Hermes' own `web_search`, then `web_extract`")
         computer = self.search.index("open a tab on the user's computer: omit `host`")
-        vm = self.search.index("search engine in the VM browser only while the user's computer is offline")
+        vm = self.search.index("search engine in the VM browser only on an explicit VM request or a router-reported outage")
         self.assertLess(hermes, computer)
         self.assertLess(computer, vm)
         self.assertIn("Do not open a search engine page in a tab for this.", self.search)
         self.assertIn("maps, shopping, signed-in results", self.search)
         self.assertIn("expect a CAPTCHA there", self.search)
-        self.assertIn('Never pass `host:"vm"` to a search engine while the computer is online.', self.search)
+        self.assertIn("Follow the host policy below", self.search)
         self.assertIn("If `web_search` or `web_extract` is not in your tools, or it fails, go to 2.", self.search)
         # The browser is the default only for what a plain lookup cannot answer.
         self.assertIn("default surface for anything web-shaped that a plain lookup cannot answer", self.normalized)
@@ -590,10 +666,12 @@ class SearchRoutingAndCaptchaSkillTests(unittest.TestCase):
         self.assertIn("carry on without another message", self.captcha)
         self.assertIn("the tab list you just read gave you the fresh one", self.captcha)
         self.assertIn("After 30 minutes, or if you cannot keep waiting in this turn, stop.", self.captcha)
-        # A bot's own release on the VM is not held or watched the same way:
-        # the user's "done" ends the wait and is the claim agreement.
+        # A VM release holds the tab too; a chat reply cannot bypass the hold.
         self.assertIn("the user saying they're done also ends the wait", self.captcha)
-        self.assertIn("their reply is the agreement to claim it", self.captcha)
+        self.assertIn("Keep the host, tab id and fresh epoch together from the same reply", self.captcha)
+        self.assertIn("The VM tab is held too", self.captcha)
+        self.assertIn("press Give back", self.captcha)
+        self.assertIn("if the claim is refused with `awaiting_human`, ask them to press Give back", self.captcha)
         self.assertIn("ask them to say when they're through", self.captcha)
 
     def test_a_site_that_challenges_twice_is_dropped(self):
