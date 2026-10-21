@@ -89,8 +89,9 @@ setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS
                    one, else the first free port from 9223 up; ALANS_WAY_CDP_PORT
                    sets it too)
   --skip-plugin    leave an already installed plugin in place (catalog installs)
-  --keep-browser   leave Hermes' built-in browser toolset on (setup turns it off
-                   for Telegram and cron once the workspace browser is configured)
+  --keep-browser   skip disabling Hermes' built-in browser toolset for Telegram
+                   and cron; does not re-enable it if already disabled
+                   (re-enable: hermes -p <profile> tools enable browser --platform <platform>)
   --keep-computer-use  deprecated no-op kept for compatibility: setup never disables
                    the approval-gated computer_use toolset
   --allow-desktop-actions  manual opt-in only: stop Telegram approval prompts for
@@ -2881,11 +2882,11 @@ workspace_for_profile() {
     # sessions see the same workspace tools, so the stock toolset goes off there
     # too (a cron-run agent has reached for the built-in browser first).
     if [ "$KEEP_BROWSER" = 1 ]; then
-      say "  keeping the built-in browser toolset on (--keep-browser); the agent may pick it instead of your workspace browser"
+      say "  skipping built-in browser toolset changes (--keep-browser); this does not re-enable an already-disabled toolset. To re-enable it, run: hermes${PROFILE:+ -p $PROFILE} tools enable browser --platform <platform> (telegram or cron)"
     else
       for platform in telegram cron; do
         hermes_p tools disable browser --platform "$platform" >/dev/null 2>&1 \
-          && ok "built-in browser toolset disabled for $platform so the agent uses your workspace browser. To keep it on, re-run with --keep-browser or run: hermes${PROFILE:+ -p $PROFILE} tools enable browser --platform $platform" \
+          && ok "built-in browser toolset disabled for $platform so the agent uses your workspace browser. To re-enable it, run: hermes${PROFILE:+ -p $PROFILE} tools enable browser --platform $platform" \
           || warn "could not disable the built-in browser toolset for $platform: the agent may bypass the workspace browser (run: hermes${PROFILE:+ -p $PROFILE} tools disable browser --platform $platform)"
       done
     fi
