@@ -685,7 +685,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
                           "Element numbers here follow position and may now point at other controls: capture before acting by number."]
         if body.get("unchanged"):
             parts.append("The app's element tree did not change. If the effect only shows in pixels, capture(mode='vision') to check before retrying.")
-        parts += [*(n for n in _tree_notes(body) if n not in held), *texts[1:]]
+        steps = [_ours(r["note"]) for r in body.get("results", []) if isinstance(r, dict) and isinstance(r.get("note"), str)]
+        parts += [*steps, *(n for n in _tree_notes(body) if n not in held and n not in steps), *texts[1:]]
         return ActionResult(ok=True, action=action, message=" ".join(p for p in parts if p), effect=effect,
                             meta={k: v for k, v in (("host", host), ("generation", body.get("generation"))) if v is not None})
 

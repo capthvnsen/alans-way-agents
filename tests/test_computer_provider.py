@@ -612,6 +612,13 @@ class ReplyFoldingTests(unittest.TestCase):
             self.assertFalse(be.key("return").ok)
         self.assertEqual(call.call_count, 1)
 
+    def test_step_notes_reach_the_model(self):
+        be = self.backend(["a"])
+        reply = {"content": [{"type": "text", "text": json.dumps({"results": [{"ok": True, "note": "This app has no open windows. Its menus still work (menubar:true), for example File > New."}]})}]}
+        with mock.patch.object(be, "_call", return_value=reply), mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be._run("focus_app", {"action": "activate"})
+        self.assertIn("File > New", result.message)
+
     def test_foreground_batch_reports_step_refusals_without_replaying_input(self):
         for results in ([{"error": "The user is using this app.", "code": "in_front"}],
                         [{"ok": True}, {"error": "The control changed.", "code": "stale_ref"}]):
