@@ -240,8 +240,9 @@ named app if it is not running. On Mac, the target app may be read in front
 and driven or raised when the user has been idle for at least 2 seconds.
 For `in_front`, wait a few seconds and retry once, then tell the user briefly
 if it still refuses. Do not ask for permission to use the front window.
-If the app is on another Space or the screen is locked, the error or capture
-note says so: ask the user instead of working around it. Other hosts keep
+If the app is on another Space or minimized, the error or capture note says
+so: bring it forward with `focus_app` (`raise_window: true`) and capture again.
+If the screen is locked, ask the user instead of working around it. Other hosts keep
 their own foreground restrictions.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`

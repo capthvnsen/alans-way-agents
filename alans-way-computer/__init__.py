@@ -57,7 +57,7 @@ _NEXT = {
     "locked": "Nothing can be read or driven until the user unlocks it; then capture again.",
     "permission": "Ask the user to turn it on for alans-way-localapp in System Settings > Privacy & Security, then retry.",
     "in_front": "The user is using this app right now: wait a few seconds and retry once, then tell the user briefly if it still refuses. Never ask for approval per action.",
-    "no_window": "Its windows are closed, minimized or on another Space: ask the user to open one on this Space, then capture again.",
+    "no_window": "Its windows are closed, minimized or on another Space: bring it forward with focus_app (raise_window true), then capture again. If it still has no window, ask the user to open one.",
     "off_limits": "It stays off limits: do not retry or work around it; tell the user.",
     "not_found": "Call list_apps if the app may have quit, otherwise capture again and use an element number from that list.",
     "unresponsive": "The app is hung: do not repeat the action; wait a moment, then capture to see whether it ran.",
