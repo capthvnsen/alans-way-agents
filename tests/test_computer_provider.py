@@ -689,6 +689,17 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertEqual(result["code"], "not_found")
         self.assertIn("No running app matches", result["message"])
 
+    def test_a_path_in_a_save_dialog_name_field_is_refused_with_the_recipe(self):
+        be = self.backend(["a", "b"])
+        be._tree["els"] = [{"ref": "a", "role": "AXStaticText", "name": "Save As:"}, {"ref": "b", "role": "AXTextField", "name": "", "value": "Untitled.txt"}]
+        with mock.patch.object(be, "_call", return_value={"content": []}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.set_value("/tmp/targets/x/note.txt", element=2)
+            self.assertFalse(result.ok)
+            self.assertIn("cmd+shift+g", result.message)
+            self.assertFalse(call.called)
+            self.assertTrue(be.set_value("note.txt", element=2).ok)
+
     def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
         be = self.backend(["a"])
         be._window_id = 41

@@ -746,6 +746,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def set_value(self, value, element=None):
         if element is None:
             return self._fail("set_value", "unsupported_action", "set_value needs an element number.")
+        in_dialog = self._tree and any(e and e.get("name", "").startswith(("Save As:", "Where:")) for e in self._tree["els"])
+        if in_dialog and isinstance(value, str) and value.startswith(("/", "~/")) and "/" in value.strip("/"):
+            return self._fail("set_value", "bad_request", "That is a save dialog's name field: a path there becomes part of the file name. "
+                              "Press cmd+shift+g, type the folder path, press return, then set the bare file name and press return.")
         return self._by_element_or_point("set_value", {"action": "type", "text": value}, element, None, None)
 
     def key(self, keys, *, delivery_mode=None, bring_to_front=False):
