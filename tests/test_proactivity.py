@@ -958,6 +958,11 @@ class RegisterTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as home:
                 package.register(ctx, legacy_home=home, background=False)
             self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
+            self.assertEqual(hooks.count(("pre_llm_call", package.tools_context)), 1)
+            note = package.tools_context()["context"]
+            for rule in ("mcp__workspace_browser__cua_alans_way_open {url}", "no tool_search or tool_describe",
+                         "focus_app(app, raise_window=true)", "cmd+shift+g", "cmd+option+v", "fresh capture"):
+                self.assertIn(rule, note)
             for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron",
                              "discord", "slack", "api_server", "webhook", "bot_room", "", None):
                 with self.subTest(profile=profile, platform=platform):

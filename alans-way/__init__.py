@@ -54,6 +54,25 @@ def task_context(**kwargs):
     return {"context": TASK_NOTE}
 
 
+# One-shot and chat turns rarely open the skill, so the moves that save turns ride along every turn.
+TOOLS_NOTE = (
+    "[Alan's Way tools] Call workspace browser tools directly through tool_call by full name, with no"
+    " tool_search or tool_describe first: mcp__workspace_browser__cua_alans_way_open {url},"
+    " mcp__workspace_browser__cua_alans_way_snapshot {tabId}, mcp__workspace_browser__cua_alans_way_action"
+    " {tabId, epoch, action, ref or text}, mcp__workspace_browser__cua_alans_way_close {tabId, epoch}."
+    " Mac apps use computer_use directly: focus_app(app, raise_window=true) launches or brings an app"
+    " forward with no extra approval; key cmd+n or cmd+o opens a window when none is open; type without"
+    " an element types into the focused field. In an Open or Save dialog press cmd+shift+g, type the"
+    " folder path, press return, then type the bare file name and press return. To move a file in"
+    " Finder, select it, press cmd+c, open the destination folder, then press cmd+option+v."
+    " Confirm the saved file, new name or moved file in a fresh capture before reporting done."
+)
+
+
+def tools_context(**kwargs):
+    return {"context": TOOLS_NOTE}
+
+
 def _owning_home() -> Path:
     """The home Hermes bound for this plugin load, never the launch env.
 
@@ -86,6 +105,7 @@ def _primary_profile(ctx) -> bool:
 
 def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", task_context)
+    ctx.register_hook("pre_llm_call", tools_context)
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
