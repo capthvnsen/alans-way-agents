@@ -56,8 +56,8 @@ def task_context(**kwargs):
 
 # One-shot and chat turns rarely open the skill, so the moves that save turns ride along every turn.
 TOOLS_NOTE = (
-    "[Alan's Way tools] Call workspace browser tools directly through tool_call by full name, with no"
-    " tool_search or tool_describe first: mcp__workspace_browser__cua_alans_way_open {url},"
+    "[Alan's Way tools] Call workspace browser tools by full name with no tool_search or tool_describe"
+    " first (through tool_call only when they are listed as deferred): mcp__workspace_browser__cua_alans_way_open {url},"
     " mcp__workspace_browser__cua_alans_way_snapshot {tabId}, mcp__workspace_browser__cua_alans_way_action"
     " {tabId, epoch, action, ref or text}, mcp__workspace_browser__cua_alans_way_close {tabId, epoch}."
     " Mac apps use computer_use directly: focus_app(app, raise_window=true) launches or brings an app"
