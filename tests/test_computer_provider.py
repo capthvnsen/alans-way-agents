@@ -594,6 +594,24 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertIn("tell the user briefly", result["message"])
         self.assertEqual(call.call_count, 1)
 
+    def test_a_window_out_of_focus_is_raised_and_retried_once(self):
+        for text in ("The selected window does not have keyboard focus. Bring that window forward when you are idle, then take a fresh snapshot.",
+                     "That window is not on the current screen. Bring it forward with activate, then take a fresh snapshot."):
+            be = self.backend(["a"])
+            refused = {"isError": True, "content": [{"type": "text", "text": text}]}
+            with self.subTest(text=text), mock.patch.object(be, "_call", side_effect=[refused, {"content": []}]) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                self.assertTrue(be.key("cmd+shift+g").ok)
+            self.assertEqual(call.call_count, 2)
+            retry = call.call_args.args[1]
+            self.assertEqual(retry["action"], "batch")
+            self.assertEqual(retry["steps"][0], {"action": "activate"})
+        be = self.backend(["a"])
+        with mock.patch.object(be, "_call", return_value={"isError": True, "content": [{"type": "text", "text": "stale_ref: c1 changed."}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertFalse(be.key("return").ok)
+        self.assertEqual(call.call_count, 1)
+
     def test_foreground_batch_reports_step_refusals_without_replaying_input(self):
         for results in ([{"error": "The user is using this app.", "code": "in_front"}],
                         [{"ok": True}, {"error": "The control changed.", "code": "stale_ref"}]):

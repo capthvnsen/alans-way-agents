@@ -74,6 +74,7 @@ _STABLE_REFS = {"mac", "windows"}
 MIN_COVERAGE = 0.35  # share of the window named controls must cover for som to leave the screenshot out
 NEAR = 120  # screen points around the acted-on control in which a change counts as the action's effect
 _LOST = ("NOT retried", "connection dropped")
+_UNFOCUSED = ("does not have keyboard focus", "not on the current screen")
 _MANAGED = {"node", "npm", "npx", "uv", "uvx"}
 
 
@@ -632,6 +633,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree and tree["gen"] is not None:
             step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
+        retry = {k: v for k, v in step.items() if k not in ("windowId", "generation")}
         target_ref = step.get("ref")
         acted = next((e for e in tree["els"] if e and e["ref"] == target_ref), None) if tree and target_ref else None
         box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
@@ -644,6 +646,9 @@ class AlansWayComputerBackend(ComputerUseBackend):
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:
+            # The host refuses these before any input lands, so raising the window and retrying once cannot repeat input.
+            if not bring_to_front and any(m in str(e) for m in _UNFOCUSED):
+                return self._run(action, retry, bring_to_front=True)
             return self._error(action, str(e), e.code)
         except _Unavailable as e:
             return self._fail(action, "unavailable", f"The workspace router is unavailable: {e}")
@@ -790,7 +795,8 @@ def _snapshot_valid(body, tree):
 
 def _ours(text):
     # The app names its raw activate step; this tool's way to raise a window is focus_app.
-    return text.replace("with activate", "with focus_app with raise_window=true")
+    return text.replace("with activate", "with focus_app with raise_window=true").replace(
+        "Bring that window forward when you are idle", "Bring it forward with focus_app with raise_window=true")
 
 
 def _coded(text, code=None):
