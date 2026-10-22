@@ -244,6 +244,12 @@ If the app is on another Space or minimized, the error or capture note says
 so: bring it forward with `focus_app` (`raise_window: true`) and capture again.
 If the screen is locked, ask the user instead of working around it. Other hosts keep
 their own foreground restrictions.
+On a Mac with no window open, `key` `cmd+n` or `cmd+o` opens one. `type` without
+an element types into the focused field, such as a rename box the capture
+does not list. In an Open or Save dialog, never put a path in the name field:
+press `cmd+shift+g`, type the folder path, press `return`, then type the bare
+file name and press `return`. Before reporting done, confirm the saved path or
+the new name in a fresh capture.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
