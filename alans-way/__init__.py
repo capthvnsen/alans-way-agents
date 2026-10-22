@@ -65,7 +65,9 @@ TOOLS_NOTE = (
     " an element types into the focused field. In an Open or Save dialog press cmd+shift+g, type the"
     " folder path, press return, then type the bare file name and press return. To move a file in"
     " Finder, select it, press cmd+c, open the destination folder, then press cmd+option+v."
+    " Pass capture_after=true on Mac actions instead of a separate capture call."
     " Confirm the saved file, new name or moved file in a fresh capture before reporting done."
+    " These notes cover routine browser and Mac tasks; open the workspace-operations skill only when stuck."
 )
 
 
