@@ -1377,11 +1377,8 @@ async function main() {
   // that window costs ~a second instead. A missing response does not prove
   // an action was refused: only reads and calls never written may replay.
   //
-  // A backend that already answered and then drops (host asleep, network
-  // gone, app quit, a call stuck past its deadline) fails over in-process
-  // instead of waiting for Hermes to respawn the router: reads in flight are
-  // replayed on the VPS backend, actions in flight are NOT (they may have
-  // happened) and answer with an error naming where to continue.
+  // A dropped connector gets one warm reconnect while mac-watch is online.
+  // Otherwise fail over in-process; actions in flight are never replayed.
   let activeChild = null;
   let activeHost = null;
   let provedAlive = false;
@@ -1390,6 +1387,7 @@ async function main() {
     ? macSeen && macSeen.state === 'offline' ? 'watcher_offline' : 'probe_failed'
     : null;
   let macRetried = false;
+  let lastMacReconnectAt = -Infinity;
   let shuttingDown = false;
   // Terminal shutdown owns every connector, including a superseded child
   // whose close event has not arrived yet. EOF drains existing requests for
@@ -1522,9 +1520,11 @@ async function main() {
   }
 
   // Killing the connector cannot undo an action it already received.
-  function retryMacBackend() {
+  function retryMacBackend(reason) {
     if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
     macRetried = true;
+    provedAlive = false;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     const old = activeChild;
     superseded.add(old);
     try { old.kill('SIGKILL'); } catch { /* already gone */ }
@@ -1533,11 +1533,15 @@ async function main() {
       if (req.cancelled) answerCancelled(req);
       else if (req.sent && req.method === 'tools/call' && !READ_ONLY_TOOLS.has(req.name)) failCall(req, COMMIT_LOST);
     }
-    process.stderr.write(
+    if (reason) {
+      lastMacReconnectAt = Date.now();
+      process.stderr.write(`workspace-router: ${reason} — reconnecting to ${hostName}\n`);
+    } else process.stderr.write(
       `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize; mac-watch reports it online — retrying the spawn\n`,
     );
     startMacBackend();
-    for (const line of [...bufferedStdin]) writeToChild(line);
+    if (reason) replayHandshake(activeChild, [...pendingRequests.values()].filter(req => req.via !== 'vm' && !req.awaitingApproval));
+    else for (const line of [...bufferedStdin]) writeToChild(line);
     armWatchdog(MAC_RETRY_MS);
   }
 
@@ -1766,6 +1770,12 @@ async function main() {
         }
         msg.params._meta = { ...msg.params._meta, 'alans-way/remainingMs': remainingMs };
         line = JSON.stringify(msg);
+        if (child === activeChild && activeHost === 'mac') {
+          const args = msg.params.arguments || {};
+          for (const target of [args, ...(Array.isArray(args.steps) ? args.steps : [])]) {
+            if (typeof target?.tabId === 'string' && !vmTabs.has(target.tabId)) macTabIds.add(target.tabId);
+          }
+        }
       }
       if (child && child.exitCode === null && child.stdin.writable) {
         // Handing bytes to the pipe never proves refusal or completion.
@@ -1988,6 +1998,7 @@ async function main() {
   // invented or bumped: a stale one still fails at the backend after a human
   // takeover instead of being silently repaired.
   const knownTabs = new Map(); // tabId -> { backend: 'computer'|'vm', epoch?: number }
+  const macTabIds = new Set(); // Retain affinity even when an uncertain action is removed from pending calls.
   let currentTabId = '';
   const CURRENT_TAB_TOOLS = new Set([
     'cua_alans_way_open',
@@ -2947,6 +2958,12 @@ async function main() {
       return null;
     }
     const args = (msg.params && msg.params.arguments) || {};
+    if (activeHost === 'vps' && [args, ...(Array.isArray(args.steps) ? args.steps : [])].some(target =>
+      typeof target?.tabId === 'string' && (macTabIds.has(target.tabId) || knownTabs.get(target.tabId)?.backend === 'computer'))) {
+      const req = pendingRequests.get(msg.id);
+      if (req) failCall(req, `The ${hostName} connection dropped. This tab is on your ${hostName}, so it cannot be read or changed in the VM browser. Wait for the connection or reopen the page in the VM browser.`);
+      return null;
+    }
     const host = normalizeHost(args.host);
     if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
       pendingRequests.delete(msg.id);
@@ -3012,6 +3029,9 @@ async function main() {
         if (c !== activeChild) return;
         if (!validBackendFrame(line, false)) return;
         touchActivity();
+        provedAlive = true;
+        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+        bufferedStdin.length = 0;
         if (swallowLine(line)) return;
         if (deadReplyLine(line)) return;
         if (host === 'mac') {
@@ -3033,9 +3053,6 @@ async function main() {
         if (mergeMacLine(line, callMs)) return;
         learnVmTabs(line, false);
         learnTabUse(line, seenReq, host === 'mac' ? 'computer' : 'vm');
-        provedAlive = true;
-        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-        bufferedStdin.length = 0;
         let out;
         try {
           out = annotate(line, callMs, seenReq);
@@ -3059,10 +3076,16 @@ async function main() {
       if (superseded.has(c)) return;
       if (c !== activeChild) return;
       if (host === 'mac' && !shuttingDown) {
+        const reason = `${hostName} backend exited (${code === null ? sig : code})`;
+        const mac = freshMacState(macStateFile);
+        if (provedAlive && Date.now() - lastMacReconnectAt >= 60000 && mac && mac.state === 'online') {
+          retryMacBackend(reason);
+          return;
+        }
         // Spawn can emit error and exit for the same death; failOver only
         // acts once.
         failOver(provedAlive
-          ? `${hostName} backend exited (${code === null ? sig : code})`
+          ? reason
           : `${hostName} backend died before its first response`);
         return;
       }

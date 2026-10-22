@@ -575,11 +575,12 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://mac.example/"})
         self.recv()
-        # The snapshot is the call the Mac dies under: a read, so it is
-        # replayed and its VPS answer is the first result after the move.
+        # The dropped Mac tab read is refused; its error reports the handoff.
         lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
         moved = self.recv(timeout=20)
         self.assertEqual(moved["id"], lost)
+        self.assertTrue(moved["result"].get("isError"))
+        self.assertIn("tab is on your Mac", self.text(moved))
         workspace = moved["result"]["_meta"]["workspace"]
         self.assertEqual(workspace["host"], "vps")
         self.assertEqual(
@@ -591,6 +592,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         repeated = self.recv()
         self.assertEqual(repeated["id"], again)
         self.assertNotIn("tabIdChanged", repeated["result"]["_meta"]["workspace"])
+        self.assertEqual(self.backend_calls("vm.log", "cua_alans_way_snapshot"), [])
 
     def test_a_handoff_does_not_pair_the_change_with_a_vm_tab(self):
         self.fake_browser_host()
@@ -605,6 +607,8 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
         moved = self.recv(timeout=20)
         self.assertEqual(moved["id"], lost)
+        self.assertTrue(moved["result"].get("isError"))
+        self.assertIn("tab is on your Mac", self.text(moved))
         workspace = moved["result"]["_meta"]["workspace"]
         self.assertEqual(workspace["host"], "vps")
         self.assertNotIn("tabIdChanged", workspace)
