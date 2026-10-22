@@ -1009,6 +1009,11 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertIn("cut", notes[2])
         self.assertEqual(self.mod._tree_notes({"hidden": 0}), [])
 
+    def test_app_hints_name_this_tools_raise_action(self):
+        bring = "That window is not on the current screen. Bring it forward with activate, then take a fresh snapshot."
+        self.assertIn("focus_app with raise_window=true", self.mod._tree_notes({"note": bring})[0])
+        self.assertNotIn("with activate", self.mod._coded(bring, "stale_window")[1])
+
 
 @NEEDS_HERMES
 class OldHermesTests(unittest.TestCase):

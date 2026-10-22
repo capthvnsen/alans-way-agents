@@ -788,8 +788,14 @@ def _snapshot_valid(body, tree):
             and not set(refs).intersection(removed) and set(removed) <= known)
 
 
+def _ours(text):
+    # The app names its raw activate step; this tool's way to raise a window is focus_app.
+    return text.replace("with activate", "with focus_app with raise_window=true")
+
+
 def _coded(text, code=None):
     """(code, message with the next step) for an error text the router passed through."""
+    text = _ours(text)
     m = re.match(r"([a-z_]+): (.*)", text, re.S)
     if code:
         message = m.group(2) if m and m.group(1) == code else text
@@ -850,7 +856,7 @@ def _listed(pairs_or_els):
 
 def _tree_notes(body):
     """The app's own words about a tree: why it is empty, what is scrolled away, whether it was cut."""
-    notes = [body["note"]] if isinstance(body.get("note"), str) and body["note"] else []
+    notes = [_ours(body["note"])] if isinstance(body.get("note"), str) and body["note"] else []
     if isinstance(body.get("hidden"), int) and body["hidden"] > 0:
         notes.append(f"{body['hidden']} more controls are scrolled out of view; scroll to reach them.")
     if body.get("truncated"):
