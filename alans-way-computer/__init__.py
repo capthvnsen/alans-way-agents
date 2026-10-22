@@ -755,8 +755,12 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def key(self, keys, *, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("key", delivery_mode, bring_to_front):
             return bad
-        return self._run("key", {"action": "hotkey", "keys": keys} if "+" in keys and len(keys) > 1 else {"action": "key", "key": keys},
-                         bring_to_front=bring_to_front or delivery_mode == "foreground")
+        result = self._run("key", {"action": "hotkey", "keys": keys} if "+" in keys and len(keys) > 1 else {"action": "key", "key": keys},
+                           bring_to_front=bring_to_front or delivery_mode == "foreground")
+        if getattr(result, "ok", False) and "cmd+" in keys.lower():
+            # App shortcuts open and close windows (Open panels, Go to Folder); read whichever window has focus next.
+            self._window_id, self._tree = None, None
+        return result
 
     def focus_app(self, app, raise_window=False):
         try:

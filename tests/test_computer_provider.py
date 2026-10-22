@@ -700,6 +700,15 @@ class ReplyFoldingTests(unittest.TestCase):
             self.assertFalse(call.called)
             self.assertTrue(be.set_value("note.txt", element=2).ok)
 
+    def test_a_cmd_shortcut_lets_the_next_capture_follow_the_focused_window(self):
+        for keys, dropped in (("cmd+o", True), ("cmd+shift+g", True), ("return", False)):
+            be = self.backend(["a"])
+            be._window_id = 41
+            with self.subTest(keys=keys), mock.patch.object(be, "_call", return_value={"content": []}), \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                self.assertTrue(be.key(keys).ok)
+            self.assertEqual(be._window_id is None, dropped)
+
     def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
         be = self.backend(["a"])
         be._window_id = 41
