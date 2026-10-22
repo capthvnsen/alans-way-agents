@@ -770,6 +770,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
             return self._fail("focus_app", "host_changed", f"{e}. Call list_apps and capture again before continuing.")
         self._target(pid, name)
         if raise_window:
+            # Raising is about the app: a held window may be gone after a dialog opened or closed.
+            self._window_id, self._tree = None, None
             return self._run("focus_app", {"action": "activate"})
         return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Capture before acting.")
 

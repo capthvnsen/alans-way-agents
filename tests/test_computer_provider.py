@@ -689,6 +689,16 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertEqual(result["code"], "not_found")
         self.assertIn("No running app matches", result["message"])
 
+    def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
+        be = self.backend(["a"])
+        be._window_id = 41
+        with mock.patch.object(be, "list_apps", return_value=[{"name": "TextEdit", "bundle_id": "com.apple.TextEdit", "pid": 101, "frontmost": False}]), \
+                mock.patch.object(be, "_call", return_value={"content": []}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("TextEdit", raise_window=True).ok)
+        self.assertEqual(call.call_args.args[1], {"pid": 101, "action": "activate"})
+        self.assertIsNone(be._window_id)
+
     def test_launch_refusals_and_host_changes_never_target_a_returned_pid(self):
         for reply, code in (({"isError": True, "content": [{"type": "text", "text": "off_limits: Refused."}]}, "off_limits"),
                             ({"content": [{"type": "text", "text": '{"pid": 105}'}], "_meta": {"workspace": {"host": "vps"}}}, "host_changed")):
