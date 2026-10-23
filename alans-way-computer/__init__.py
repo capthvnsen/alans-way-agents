@@ -775,9 +775,12 @@ class AlansWayComputerBackend(ComputerUseBackend):
         body = _json(texts[0] if texts else "")
         if type(body.get("pid")) is not int or body["pid"] <= 0:
             raise LookupError(f"Could not open {path!r}.")
+        shown = body.get("windowId")
+        self._opened_window = shown if type(shown) is int and 1 <= shown <= 0xffffffff else None
         return body["pid"], body.get("bundleId") or path.rsplit("/", 1)[-1]
 
     def focus_app(self, app, raise_window=False):
+        self._opened_window = None
         try:
             # An absolute path opens that document or folder in its app, skipping the Open dialog.
             pid, name = self._open_path(app) if isinstance(app, str) and app.startswith("/") else self._resolve(app, launch=True)
@@ -793,9 +796,13 @@ class AlansWayComputerBackend(ComputerUseBackend):
             self._reset()
             return self._fail("focus_app", "host_changed", f"{e}. Call list_apps and capture again before continuing.")
         self._target(pid, name)
+        if self._opened_window is not None:
+            # Read the window that shows the opened item, not another window of the same app.
+            self._window_id, self._tree = self._opened_window, None
         if raise_window:
             # Raising is about the app: a held window may be gone after a dialog opened or closed.
-            self._window_id, self._tree = None, None
+            if self._opened_window is None:
+                self._window_id, self._tree = None, None
             return self._run("focus_app", {"action": "activate"})
         return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Capture before acting.")
 

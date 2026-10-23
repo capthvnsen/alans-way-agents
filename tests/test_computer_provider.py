@@ -726,6 +726,16 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("cannot open files", result.message)
 
+    def test_a_path_binds_the_window_that_shows_it(self):
+        be = self.backend([])
+        status = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1", "computer-open-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        opened = {"content": [{"type": "text", "text": '{"pid": 778, "bundleId": "com.apple.finder", "windowId": 4242}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": [{"type": "text", "text": '{"windowId": 4242}'}]}]) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("/tmp/task", raise_window=True).ok)
+        self.assertEqual(call.call_args_list[2].args[1], {"pid": 778, "action": "activate", "windowId": 4242, "expect_host": "computer"})
+        self.assertEqual(be._window_id, 4242)
+
     def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
         be = self.backend(["a"])
         be._window_id = 41
