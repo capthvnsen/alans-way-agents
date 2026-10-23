@@ -1,5 +1,5 @@
 name: alans-way
-version: "0.21.8"
+version: "0.21.9"
 description: "Idle check-ins from your primary Hermes bot, plus workspace browser skills and integrations: consented account setup through native Hermes routes or pinned VM toolbox recipes for email, calendar, contacts, files, tasks, home and social. Includes web-errands for gated shopping, booking, applications and filings. Alan's Workspace is a separate desktop app. Optional cross-bot proactivity reads bounded recent owner-DM excerpts exported by all enabled profiles on one gateway. It stores sanitized digests for 24 hours and queued asks for up to 2 hours in a shared plugin-owned directory (private files). Exchanges that look like they contain credentials or payment details are skipped entirely. It may automatically inject one read-only or draft-only ask per primary check-in into another bot's bound Telegram DM. Results appear there with primary attribution. Existing approvals still govern consequential actions. Disable cross-bot proactivity per bot with /proactivity cross off; copied context may remain in Hermes history, memory-provider records and model-provider retention after digest expiry."
 author: "capthvnsen, Hermes Agent"
 license: MIT
