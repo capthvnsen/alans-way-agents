@@ -715,7 +715,9 @@ class ReplyFoldingTests(unittest.TestCase):
         opened = {"content": [{"type": "text", "text": '{"pid": 107, "bundleId": "com.apple.TextEdit"}'}], "_meta": {"workspace": {"host": "mac"}}}
         with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": []}]) as call, \
                 mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
-            self.assertTrue(be.focus_app("/tmp/task/edit.txt", raise_window=True).ok)
+            raised = be.focus_app("/tmp/task/edit.txt", raise_window=True)
+            self.assertTrue(raised.ok)
+            self.assertIn("(pid 107)", raised.message)
         self.assertEqual(call.call_args_list[1].args[:2], ("workspace_computer_launch", {"path": "/tmp/task/edit.txt", "expect_host": "computer"}))
         self.assertEqual(call.call_args_list[2].args[1], {"pid": 107, "action": "activate", "expect_host": "computer"})
         self.assertEqual(be._pid, 107)

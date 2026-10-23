@@ -669,7 +669,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
             if failed:
                 return self._error(action, f"{failed.get('error') or 'The action failed.'} Capture before continuing; earlier steps may have run.", failed.get("code"))
         held = tree["notes"] if tree else []
-        parts, effect = [f"{action} sent to {self._app}."], None
+        parts, effect = [f"{action} sent to {self._app} (pid {self._pid})."], None
         if self._os in _STABLE_REFS:
             changed, gone = self._merge(body)
             if changed or gone:
