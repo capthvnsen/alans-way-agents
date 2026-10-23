@@ -168,15 +168,7 @@ first_conf_running() {
 }
 
 # state <state> <step> [error] — atomic write via tmp file + mv.
-#
-# Merge semantics: an add-on script run after bootstrap may write its own
-# key into this file (e.g. {"addon_myservice": "ready"}). A prior version
-# of this function rewrote the file from scratch on every call, silently
-# destroying any such key the moment bootstrap's own loop advanced past it.
-# Read the existing document first and only set the four keys bootstrap
-# itself owns, so unknown keys survive. "warnings" is one of the keys
-# add-ons and pollers look for; default it to an empty list so it is
-# always present even on the very first write.
+# Add-ons write their own keys here, so set only bootstrap's keys and keep the rest.
 state() {
     local s="$1" step="$2" err="${3:-}"
     if [ "$DRY_RUN" = 1 ]; then
