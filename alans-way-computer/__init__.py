@@ -633,7 +633,6 @@ class AlansWayComputerBackend(ComputerUseBackend):
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree and tree["gen"] is not None:
             step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
-        retry = {k: v for k, v in step.items() if k not in ("windowId", "generation")}
         target_ref = step.get("ref")
         acted = next((e for e in tree["els"] if e and e["ref"] == target_ref), None) if tree and target_ref else None
         box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
@@ -646,9 +645,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:
-            # The host refuses these before any input lands, so raising the window and retrying once cannot repeat input.
+            # A raise is foreground input that Hermes approves under its own scope, so the model asks for it.
             if not bring_to_front and any(m in str(e) for m in _UNFOCUSED):
-                return self._run(action, retry, bring_to_front=True)
+                return self._error(action, f"{e} Re-issue this action with delivery_mode='foreground', "
+                                           "or call focus_app(raise_window=true) first.", e.code)
             return self._error(action, str(e), e.code)
         except _Unavailable as e:
             return self._fail(action, "unavailable", f"The workspace router is unavailable: {e}")
