@@ -37,6 +37,7 @@ REPORT = ("Lead with the concrete status, then evidence or a caveat. Mid-task, s
           " Narrate only actions in the user's world.")
 RECAP = ("Recaps: 2-3 headline outcomes in 1-3 sentences total, including any offer of detail;"
          " no bullets. Keep material unfinished work or failures in those headlines."
+         " Drop resolved blockers and omit old blockers unless recent evidence confirms they still apply."
          " Offer detail ('want the details on any of these?') within that total, never as an extra sentence."
          " Before sending, count all sentences and combine or cut until at most 3 remain.")
 INTERNALS = ("In user-facing text, use task words, never tool names, tool calls, file paths, scripts,"

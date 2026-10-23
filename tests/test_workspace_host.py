@@ -54,6 +54,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', (line) 
         pid: { type: 'integer' } } } },
       { name: 'workspace_computer_action', inputSchema: { type: 'object', properties: {
         pid: { type: 'integer' }, action: { type: 'string' } } } },
+      { name: 'workspace_computer_launch', inputSchema: { type: 'object', properties: { app: { type: 'string' } } } },
     ] } }) + '\n');
   }
   if (m.method === 'tools/call') {
@@ -574,11 +575,12 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.handshake()
         self.call("cua_alans_way_open", {"url": "https://mac.example/"})
         self.recv()
-        # The snapshot is the call the Mac dies under: a read, so it is
-        # replayed and its VPS answer is the first result after the move.
+        # The dropped Mac tab read is refused; its error reports the handoff.
         lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
         moved = self.recv(timeout=20)
         self.assertEqual(moved["id"], lost)
+        self.assertTrue(moved["result"].get("isError"))
+        self.assertIn("tab is on your Mac", self.text(moved))
         workspace = moved["result"]["_meta"]["workspace"]
         self.assertEqual(workspace["host"], "vps")
         self.assertEqual(
@@ -590,6 +592,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         repeated = self.recv()
         self.assertEqual(repeated["id"], again)
         self.assertNotIn("tabIdChanged", repeated["result"]["_meta"]["workspace"])
+        self.assertEqual(self.backend_calls("vm.log", "cua_alans_way_snapshot"), [])
 
     def test_a_handoff_does_not_pair_the_change_with_a_vm_tab(self):
         self.fake_browser_host()
@@ -604,6 +607,8 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         lost = self.call("cua_alans_way_snapshot", {"tabId": "mac-tab-1"})
         moved = self.recv(timeout=20)
         self.assertEqual(moved["id"], lost)
+        self.assertTrue(moved["result"].get("isError"))
+        self.assertIn("tab is on your Mac", self.text(moved))
         workspace = moved["result"]["_meta"]["workspace"]
         self.assertEqual(workspace["host"], "vps")
         self.assertNotIn("tabIdChanged", workspace)
@@ -799,6 +804,7 @@ class DesktopInputGateTests(ExplicitHostRoutingTests):
         self.handshake()
         names = self.tool_names()
         self.assertNotIn("workspace_computer_action", names)
+        self.assertNotIn("workspace_computer_launch", names)
         # Read-only computer tools stay exposed.
         self.assertIn("workspace_computer_apps", names)
         self.assertIn("workspace_computer_snapshot", names)
@@ -817,11 +823,21 @@ class DesktopInputGateTests(ExplicitHostRoutingTests):
         self.start(HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS="1")
         self.handshake()
         self.assertIn("workspace_computer_action", self.tool_names())
+        self.assertIn("workspace_computer_launch", self.tool_names())
         call = self.call("workspace_computer_action", {"pid": 5, "action": "key", "key": "a"})
         answered = self.recv()
         self.assertEqual(answered["id"], call)
         self.assertFalse(answered["result"].get("isError"))
         self.assertIn("workspace_computer_action", self.log("mac.log"))
+
+    def test_launch_also_requires_the_provider_or_explicit_opt_in(self):
+        self.start()
+        self.handshake()
+        call = self.call("workspace_computer_launch", {"app": "Calculator"})
+        msg = self.recv()
+        self.assertEqual(msg["id"], call)
+        self.assertTrue(msg["result"]["isError"])
+        self.assertNotIn("workspace_computer_launch", self.log("mac.log"))
 
 
 @unittest.skipUnless(NODE, "node is required for normalizeHost tests")

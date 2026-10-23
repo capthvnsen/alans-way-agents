@@ -15,10 +15,10 @@
 # --config edits an explicit file directly. The script replaces a previous managed
 # block (markers below) or inserts one under the selected profile's existing
 # mcp_servers key; everything else is untouched.
-# The block always excludes the ungated workspace_computer_action tool, so
+# The block excludes the ungated desktop action and launch tools, so
 # desktop input only goes through Hermes's approval-gated computer_use.
 # --allow-desktop-actions is the manual opt-out: it instead writes the env
-# marker that lets the router expose and serve that tool.
+# marker that lets the router expose and serve those tools.
 # --verify checks the install instead of writing: router script, node, the
 # host ssh hop and app API, the local VPS browser host, and the managed block.
 set -eu
@@ -294,7 +294,7 @@ block() {
   if [ "$ALLOW_DESKTOP" = 1 ]; then
     DESKTOP_ALLOW_ENV="$(printf '\n      HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS: "1"')"
   else
-    DESKTOP_TOOLS_BLOCK="$(printf '\n    tools:\n      exclude:\n        - workspace_computer_action')"
+    DESKTOP_TOOLS_BLOCK="$(printf '\n    tools:\n      exclude:\n        - workspace_computer_action\n        - workspace_computer_launch')"
   fi
   # When setup.sh put the availability watcher's state file somewhere other
   # than the router default (a non-root supervisord program), the router that
@@ -303,6 +303,11 @@ block() {
   MAC_STATE_ENV=""
   [ -z "${ALANS_WAY_MAC_STATE_FILE:-}" ] \
     || MAC_STATE_ENV="$(printf '\n      HERMES_MAC_STATE_FILE: %s' "$(yaml_quote "$ALANS_WAY_MAC_STATE_FILE")")"
+  PROFILE_HOME_ENV=""
+  if [ -n "$CONFIG" ]; then
+    PROFILE_LOG_HOME=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.abspath(sys.argv[1])))' "$CONFIG")
+    PROFILE_HOME_ENV="$(printf '\n      HERMES_HOME: %s' "$(yaml_quote "$PROFILE_LOG_HOME")")"
+  fi
   cat <<EOF
 $MARK_BEGIN
   workspace_browser:
@@ -316,7 +321,7 @@ $MARK_BEGIN
     timeout: $TOOL_TIMEOUT$DESKTOP_TOOLS_BLOCK
     env:
       HERMES_WORKSPACE_MAC_SSH: $(yaml_quote "${MAC_SSH:-}")
-      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")$DESKTOP_ALLOW_ENV$MAC_STATE_ENV
+      HERMES_WORKSPACE_HOST_OS: $(yaml_quote "$HOST_OS")$DESKTOP_ALLOW_ENV$MAC_STATE_ENV$PROFILE_HOME_ENV
 $MARK_END
 EOF
 }

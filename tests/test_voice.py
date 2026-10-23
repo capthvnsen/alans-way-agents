@@ -334,6 +334,10 @@ class RecapLengthTests(unittest.TestCase):
 
     turn = NoteTests.turn
 
+    def test_recaps_drop_resolved_or_stale_blockers(self):
+        note = self.turn(voice(), "telegram", "dm", "recap")["context"]
+        self.assertIn("Drop resolved blockers and omit old blockers unless recent evidence confirms they still apply", note)
+
     def test_quick_recap_length_is_last_after_general_detail_and_list_guidance(self):
         for chat in ("dm", "group"):
             with self.subTest(chat=chat):

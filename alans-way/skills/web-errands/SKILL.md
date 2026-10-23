@@ -87,6 +87,9 @@ before repeating anything.
 
 ## The walls you hand back
 
+For sign-in requests, including just opening a sign-in page, use the
+[sign-in handback](../workspace-operations/SKILL.md#sign-in-handback) before reporting it ready.
+
 At a sign-in or 2FA prompt, or a card-number field, hand the tab to the
 human with `action:"release"`, `reason:"login"`, `reason:"two_factor"`
 or `reason:"payment_details"` respectively; `review` and `other` cover

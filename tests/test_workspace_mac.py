@@ -1983,17 +1983,21 @@ class HostFailoverTests(unittest.TestCase):
         self.assertIn("Look at these before acting", text)
         self.assertIn("v2", text.split("Look at these")[1])
 
-    def test_reads_in_flight_when_the_host_dies_are_replayed_on_the_vps(self):
+    def test_a_mac_tab_read_in_flight_is_refused_after_failover_even_with_a_mirror(self):
         vm = FakeVmHost({"h1": "v1"})
         self.start("die-on-snapshot", vm)
         self.handshake()
         snapshot = self.send("tools/call", name="cua_alans_way_snapshot", arguments={"tabId": "h1"})
         answered = self.recv()
-        self.assertEqual((answered["id"], self.served_by(answered)), (snapshot, "vps"))
-        self.assertFalse(answered["result"].get("isError"))
+        self.assertEqual((answered["id"], answered["result"]["_meta"]["workspace"]["host"]), (snapshot, "vps"))
+        self.assertTrue(answered["result"].get("isError"))
+        self.assertIn("Mac connection dropped", self.text(answered))
+        self.assertIn("tab is on your Mac", self.text(answered))
         self.assertIn("Restored 1 tab", self.text(answered))
+        status = self.send("tools/call", name="cua_alans_way_status", arguments={})
+        self.assertEqual(self.recv()["id"], status)
         log = self.vps_log()
-        self.assertEqual(len(re.findall(r'cua_alans_way_snapshot', log)), 1)
+        self.assertEqual(len(re.findall(r'cua_alans_way_snapshot', log)), 0)
         spawns = self.vps_spawns()
         self.assertIn("--tab-map", spawns[-1])
 

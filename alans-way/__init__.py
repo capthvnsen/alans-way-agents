@@ -36,11 +36,11 @@ TASK_NOTE = (
     " couldn't find a value for an item, say so for that item."
     " For 'well-rated' options, check review sources and include each"
     " option's rating and review source; checking a business's own site for hours does not replace"
-    " checking reviews. Before saying a site doesn't list a fact, read the page that would list it,"
+    " checking reviews. If a location has no checked rating, replace it with an option that has a location-specific rating;"
+    " if too few qualify, report the shortfall. Before saying a site doesn't list a fact, read the page that would list it,"
     " such as its location, hours, contact or menu page, not just its homepage. If that page couldn't"
     " be opened or read, report that limit instead of claiming the fact is absent."
-    " Omit unchecked extras. If one truly matters to their decision, use at most one short clause"
-    " labeled unverified, never a paragraph."
+    " Omit unchecked extras. Verify coupon eligibility and the resulting price before presenting a discounted alternative."
     " Never promise to message them later unless they asked or said yes and you saved a"
     " `cronjob_manage` job for this chat (`attach_to_session` true, no `deliver`); otherwise just answer now."
     ' If they answer a check-in with "not yet", offer exactly one more check-in at a named local'
@@ -52,6 +52,30 @@ TASK_NOTE = (
 
 def task_context(**kwargs):
     return {"context": TASK_NOTE}
+
+
+# One-shot and chat turns rarely open the skill, so the moves that save turns ride along every turn.
+TOOLS_NOTE = (
+    "[Alan's Way tools] Call workspace browser tools by full name with no tool_search or tool_describe"
+    " first (through tool_call only when they are listed as deferred): mcp__workspace_browser__cua_alans_way_open {url},"
+    " mcp__workspace_browser__cua_alans_way_snapshot {tabId}, mcp__workspace_browser__cua_alans_way_action"
+    " {tabId, epoch, action, ref or text}, mcp__workspace_browser__cua_alans_way_close {tabId, epoch}."
+    " Mac apps use computer_use directly: focus_app(app, raise_window=true) launches or brings an app"
+    " forward with no extra approval; focus_app with app set to a document's or folder's absolute path"
+    " opens it in its app (a folder opens in Finder), so no Open dialog or Go to Folder is needed; key cmd+n or cmd+o opens a window when none is open; type without"
+    " an element types into the focused field. In an Open or Save dialog press cmd+shift+g, type the"
+    " folder path, press return, then type the bare file name and press return. To move a file in"
+    " Finder, select it, press cmd+c, open the destination folder, then press cmd+option+v."
+    " For a menu command, press its keyboard shortcut with key; mcp__workspace_browser__workspace_computer_menu"
+    " lists each item's shortcut."
+    " Pass capture_after=true on Mac actions instead of a separate capture call."
+    " Confirm the saved file, new name or moved file in a fresh capture before reporting done."
+    " These notes cover routine browser and Mac tasks; open the workspace-operations skill only when stuck."
+)
+
+
+def tools_context(**kwargs):
+    return {"context": TOOLS_NOTE}
 
 
 def _owning_home() -> Path:
@@ -86,6 +110,7 @@ def _primary_profile(ctx) -> bool:
 
 def register(ctx, *, legacy_home=None, background=True):
     ctx.register_hook("pre_llm_call", task_context)
+    ctx.register_hook("pre_llm_call", tools_context)
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
