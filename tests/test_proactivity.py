@@ -961,8 +961,8 @@ class RegisterTests(unittest.TestCase):
             self.assertEqual(hooks.count(("pre_llm_call", package.tools_context)), 1)
             note = package.tools_context()["context"]
             for rule in ("mcp__workspace_browser__cua_alans_way_open {url}", "with no tool_search or tool_describe",
-                         "focus_app(app, raise_window=true)", "cmd+shift+g", "cmd+option+v", "fresh capture",
-                         "capture_after=true", "only when stuck", "absolute path", "keyboard shortcut"):
+                         "focus_app(app, raise_window=true)", "cmd+shift+g", "cmd+option+v", "capture_after reply that lists it", "standard shortcuts",
+                         "capture_after=true", "only when stuck", "absolute path", "keyboard shortcut", "act on it directly"):
                 self.assertIn(rule, note)
             for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron",
                              "discord", "slack", "api_server", "webhook", "bot_room", "", None):

@@ -594,18 +594,19 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertIn("tell the user briefly", result["message"])
         self.assertEqual(call.call_count, 1)
 
-    def test_a_window_out_of_focus_is_raised_and_retried_once(self):
+    def test_a_window_out_of_focus_asks_for_an_explicit_raise(self):
+        # A raise is foreground input that Hermes approves under its own scope, so the backend never retries with one.
         for text in ("The selected window does not have keyboard focus. Bring that window forward when you are idle, then take a fresh snapshot.",
                      "That window is not on the current screen. Bring it forward with activate, then take a fresh snapshot."):
             be = self.backend(["a"])
             refused = {"isError": True, "content": [{"type": "text", "text": text}]}
-            with self.subTest(text=text), mock.patch.object(be, "_call", side_effect=[refused, {"content": []}]) as call, \
+            with self.subTest(text=text), mock.patch.object(be, "_call", return_value=refused) as call, \
                     mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
-                self.assertTrue(be.key("cmd+shift+g").ok)
-            self.assertEqual(call.call_count, 2)
-            retry = call.call_args.args[1]
-            self.assertEqual(retry["action"], "batch")
-            self.assertEqual(retry["steps"][0], {"action": "activate"})
+                result = be.key("cmd+shift+g")
+            self.assertFalse(result.ok)
+            self.assertEqual(call.call_count, 1)
+            self.assertIn("delivery_mode='foreground'", result.message)
+            self.assertIn("raise_window=true", result.message)
         be = self.backend(["a"])
         with mock.patch.object(be, "_call", return_value={"isError": True, "content": [{"type": "text", "text": "stale_ref: c1 changed."}]}) as call, \
                 mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
@@ -715,7 +716,9 @@ class ReplyFoldingTests(unittest.TestCase):
         opened = {"content": [{"type": "text", "text": '{"pid": 107, "bundleId": "com.apple.TextEdit"}'}], "_meta": {"workspace": {"host": "mac"}}}
         with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": []}]) as call, \
                 mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
-            self.assertTrue(be.focus_app("/tmp/task/edit.txt", raise_window=True).ok)
+            raised = be.focus_app("/tmp/task/edit.txt", raise_window=True)
+            self.assertTrue(raised.ok)
+            self.assertIn("(pid 107)", raised.message)
         self.assertEqual(call.call_args_list[1].args[:2], ("workspace_computer_launch", {"path": "/tmp/task/edit.txt", "expect_host": "computer"}))
         self.assertEqual(call.call_args_list[2].args[1], {"pid": 107, "action": "activate", "expect_host": "computer"})
         self.assertEqual(be._pid, 107)
@@ -745,6 +748,16 @@ class ReplyFoldingTests(unittest.TestCase):
             self.assertTrue(be.focus_app("TextEdit", raise_window=True).ok)
         self.assertEqual(call.call_args.args[1], {"pid": 101, "action": "activate"})
         self.assertIsNone(be._window_id)
+
+    def test_a_raise_the_host_carried_out_is_confirmed(self):
+        # The host refuses an activate it cannot bring to the front, so success needs no second capture.
+        be = self.backend(["a"])
+        with mock.patch.object(be, "list_apps", return_value=[{"name": "TextEdit", "bundle_id": "com.apple.TextEdit", "pid": 101, "frontmost": False}]), \
+                mock.patch.object(be, "_call", return_value={"content": []}), \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertEqual(be.focus_app("TextEdit", raise_window=True).effect, "confirmed")
+            be._tree = None
+            self.assertIsNone(be.key("cmd+n").effect)
 
     def test_launch_refusals_and_host_changes_never_target_a_returned_pid(self):
         for reply, code in (({"isError": True, "content": [{"type": "text", "text": "off_limits: Refused."}]}, "off_limits"),
