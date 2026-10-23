@@ -1053,7 +1053,7 @@ function cleanCommit(commit) {
 // and structuredContent are agent-visible in ordinary Hermes clients, so the
 // proof stays in tabPages; it is never moved into another outbound field.
 function projectWorkspaceReply(result, req) {
-  if (!req || req.method !== 'tools/call' || !['cua_alans_way_snapshot', 'cua_alans_way_action'].includes(req.name)
+  if (!req || req.method !== 'tools/call' || !['cua_alans_way_open', 'cua_alans_way_snapshot', 'cua_alans_way_action'].includes(req.name)
       || !result || result.isError || !Array.isArray(result.content)) return;
   const part = result.content.find(p => p && p.type === 'text');
   if (!part || typeof part.text !== 'string' || !part.text.includes('"approvalContext"')) return;
@@ -1061,7 +1061,9 @@ function projectWorkspaceReply(result, req) {
   try { data = JSON.parse(part.text); } catch { return; }
   // Recognize the workspace page envelope, never a page's eval/CDP value or
   // arbitrary JSON whose business keys happen to have the same spelling.
-  if (!data || Array.isArray(data) || typeof data.tab?.id !== 'string' || !Number.isInteger(data.generation)) return;
+  const observed = req.name === 'cua_alans_way_open' ? data?.observation : data;
+  if (!observed || Array.isArray(observed) || typeof observed.tab?.id !== 'string' || !Number.isInteger(observed.generation)) return;
+  if (req.name === 'cua_alans_way_open' && observed.tab.id !== data.id) return;
   const projectPage = (page) => {
     const context = page?.approvalContext;
     // Future proof versions and older hosts retain their original replies.
@@ -1075,7 +1077,7 @@ function projectWorkspaceReply(result, req) {
     }
     return true;
   };
-  if (!projectPage(data)) return;
+  if (!projectPage(observed)) return;
   // Older hosts may include page observations in successful batch step
   // envelopes. Never descend into value, effect, errors, or nested user JSON.
   if (req.name === 'cua_alans_way_action' && Array.isArray(data.results)) {
@@ -2236,6 +2238,10 @@ async function main() {
     const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
     if (typeof used === 'string' && TAB_ID.test(used)) {
       noteKnownTab(used, undefined, backend);
+      if (req.name === 'cua_alans_way_open' && data?.observation?.tab?.id === used) {
+        data = data.observation;
+        learnTabData(data, backend);
+      }
       learnTabPage(used, data, actedRefs(req));
       currentTabId = used;
     }
@@ -2603,7 +2609,7 @@ async function main() {
                 && (!row || targetName(control.row).includes(row));
             });
             if (moved || !page || !page.full || matches.length !== 1) {
-              found.unbound = found.unbound || `the name "${name}"${role ? ` with role "${cardText(role, 30)}"` : ''} cannot be bound to one current observed control. Take a complete snapshot and use its ref`;
+              found.unbound = found.unbound || `the name "${name}"${role ? ` with role "${cardText(role, 30)}"` : ''} cannot be bound to one current observed control`;
             } else if (follows) actionHref(matches[0][0]);
           }
         } else if (typeof end.selector === 'string' && end.selector) {
@@ -2716,11 +2722,8 @@ async function main() {
         ? `challenge_present: this page shows a ${kind} challenge and bots never solve one. It did not run. Release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can; it comes back to you once the challenge clears.`
         : `challenge_present: this page shows a ${kind} challenge and this connector cannot tell whether ${targets.blind} would land on it; bots never solve one. It did not run. Act on the page's other controls by ref or name, or, if the challenge must be solved to go on, release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can.`);
     }
-    if (targets.unseen) {
-      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
-    }
-    if (targets.unbound) {
-      return refuse(`snapshot_required: ${targets.unbound}. It did not run.`);
+    if (targets.unseen || targets.unbound) {
+      return refuse(`snapshot_required: ${targets.unseen || targets.unbound}. It did not run. Take a snapshot without a small maxElements limit (raise it up to 300 if controls are cut off), then use an observed ref or the control's exact name.`);
     }
     if (args.commit === undefined && !targets.commits.length) {
       return refuse(`snapshot_required: ${targets.unread}, or pass commit so the user can approve it. It did not run.`);
