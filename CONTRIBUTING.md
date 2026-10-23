@@ -18,3 +18,4 @@ CI runs those two commands on every push and pull request. To try a change again
 - Keep host keys checked (`StrictHostKeyChecking=yes`), timeouts bounded, and check-ins inside the user's waking hours.
 - Never commit personal paths, machine IPs, Telegram IDs, credentials, transcripts or unredacted logs. Use generic placeholders; `check_publication.py` enforces the common cases.
 - Pull requests must not deploy, restart gateways, or install services on anyone's host.
+- The bootstrap/migrate CLI flags, the status file's keys and merge semantics, and the `HERMES_HOME` layout are a stable interface private add-ons rely on (see [docs/addon-interface.md](docs/addon-interface.md)). A change to any of them is breaking and needs a version note in the changelog/release.

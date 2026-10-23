@@ -21,7 +21,7 @@ holds what your agents need to think and act:
 - **`alans-way/skills/`** — the `workspace-setup`, `workspace-operations`,
   `web-errands` and `integrations` skills ship inside the plugin so agents know
   how to use the tools correctly.
-- **`alans-way-computer/`**: a second plugin (v0.21.9): a computer-use provider
+- **`alans-way-computer/`**: a second plugin (v0.21.10): a computer-use provider
   for Hermes. It drives desktop apps on your computer through the same router,
   and on the VM desktop when your computer is offline. Actions go through
   Hermes' approval-gated `computer_use` tool: you approve each action type on
@@ -380,6 +380,11 @@ Useful flags: `bootstrap-orgo.sh --dry-run` prints what it would do;
 (required on the piped one-liner, since stdin is the script itself);
 `--hermes-home`/`--remote-home` cover non-standard layouts.
 
+A private add-on script run right after `bootstrap-orgo.sh` finishes can
+rely on [docs/addon-interface.md](docs/addon-interface.md): the CLI flags,
+the status file's keys and merge semantics, the `hermes-gateway` supervisord
+program, and the `HERMES_HOME` layout.
+
 ## The workspace_browser tools
 
 Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
@@ -450,7 +455,7 @@ alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hook
 alans-way/skills/     workspace-setup, workspace-operations, web-errands and integrations (with recipes)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
-docs/                 proactivity and voice guides, agent-driven setup prompt
+docs/                 proactivity and voice guides, agent-driven setup prompt, the stable add-on interface
 docs/catalog/         Hermes plugin-catalog entry drafts (alans-way-computer.yaml)
 scripts/              check_publication.py, the pre-publication secret and path check CI runs;
                       voice_eval.py, a local-only model-judged eval of the texting voice

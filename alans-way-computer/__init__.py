@@ -633,7 +633,6 @@ class AlansWayComputerBackend(ComputerUseBackend):
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree and tree["gen"] is not None:
             step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
-        retry = {k: v for k, v in step.items() if k not in ("windowId", "generation")}
         target_ref = step.get("ref")
         acted = next((e for e in tree["els"] if e and e["ref"] == target_ref), None) if tree and target_ref else None
         box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
@@ -646,9 +645,9 @@ class AlansWayComputerBackend(ComputerUseBackend):
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:
-            # The host refuses these before any input lands, so raising the window and retrying once cannot repeat input.
-            if not bring_to_front and any(m in str(e) for m in _UNFOCUSED):
-                return self._run(action, retry, bring_to_front=True)
+            # A raise is foreground input that Hermes approves under its own scope, so the model asks for it.
+            if not bring_to_front and action != "focus_app" and any(m in str(e) for m in _UNFOCUSED):
+                return self._error(action, f"{e} Or re-issue this action with delivery_mode='foreground'.", e.code)
             return self._error(action, str(e), e.code)
         except _Unavailable as e:
             return self._fail(action, "unavailable", f"The workspace router is unavailable: {e}")
@@ -669,7 +668,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
             if failed:
                 return self._error(action, f"{failed.get('error') or 'The action failed.'} Capture before continuing; earlier steps may have run.", failed.get("code"))
         held = tree["notes"] if tree else []
-        parts, effect = [f"{action} sent to {self._app}."], None
+        # The host refuses an activate it cannot bring to the front, so a raise that returned is confirmed.
+        parts, effect = [f"{action} sent to {self._app} (pid {self._pid})."], "confirmed" if action == "focus_app" else None
         if self._os in _STABLE_REFS:
             changed, gone = self._merge(body)
             if changed or gone:
