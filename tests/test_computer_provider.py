@@ -606,7 +606,7 @@ class ReplyFoldingTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(call.call_count, 1)
             self.assertIn("delivery_mode='foreground'", result.message)
-            self.assertIn("focus_app(raise_window=true)", result.message)
+            self.assertIn("raise_window=true", result.message)
         be = self.backend(["a"])
         with mock.patch.object(be, "_call", return_value={"isError": True, "content": [{"type": "text", "text": "stale_ref: c1 changed."}]}) as call, \
                 mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):

@@ -646,9 +646,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:
             # A raise is foreground input that Hermes approves under its own scope, so the model asks for it.
-            if not bring_to_front and any(m in str(e) for m in _UNFOCUSED):
-                return self._error(action, f"{e} Re-issue this action with delivery_mode='foreground', "
-                                           "or call focus_app(raise_window=true) first.", e.code)
+            if not bring_to_front and action != "focus_app" and any(m in str(e) for m in _UNFOCUSED):
+                return self._error(action, f"{e} Or re-issue this action with delivery_mode='foreground'.", e.code)
             return self._error(action, str(e), e.code)
         except _Unavailable as e:
             return self._fail(action, "unavailable", f"The workspace router is unavailable: {e}")

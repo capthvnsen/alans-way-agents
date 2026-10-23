@@ -65,7 +65,7 @@ TOOLS_NOTE = (
     " opens it in its app (a folder opens in Finder), so no Open dialog or Go to Folder is needed; key cmd+n or cmd+o opens a window when none is open; type without"
     " an element types into the focused field. In an Open or Save dialog press cmd+shift+g, type the"
     " folder path, press return, then type the file name and press return (the name field selects only the part"
-    " before the extension, so type the name without it). To move a file in"
+    " before the extension, so type the name without it unless the user asked for another extension). To move a file in"
     " Finder, select it, press cmd+c, open the destination folder, then press cmd+option+v."
     " Press standard shortcuts (cmd+s, cmd+n, cmd+shift+n, cmd+c, cmd+v) directly. For any other menu command,"
     " press it by its titles with mcp__workspace_browser__workspace_computer_action {pid (shown in each computer_use"
