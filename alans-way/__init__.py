@@ -70,7 +70,8 @@ TOOLS_NOTE = (
     " (the pid shown in each computer_use reply, path such as [\"View\"]) and press the keyboard shortcut it lists"
     " with key; do not guess shortcuts."
     " Pass capture_after=true on Mac actions instead of a separate capture call: its reply is the full"
-    " element list after the action, so act on it directly and capture again only when you need pixels."
+    " element list after the action, so act on it directly and capture again only when you need pixels"
+    " (a \"Re-capture\" hint in that reply is already answered by the capture in it)."
     " Confirm the saved file, new name or moved file in a fresh capture before reporting done."
     " These notes cover routine browser and Mac tasks; open the workspace-operations skill only when stuck."
 )

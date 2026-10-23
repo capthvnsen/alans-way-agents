@@ -669,7 +669,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
             if failed:
                 return self._error(action, f"{failed.get('error') or 'The action failed.'} Capture before continuing; earlier steps may have run.", failed.get("code"))
         held = tree["notes"] if tree else []
-        parts, effect = [f"{action} sent to {self._app} (pid {self._pid})."], None
+        # The host refuses an activate it cannot bring to the front, so a raise that returned is confirmed.
+        parts, effect = [f"{action} sent to {self._app} (pid {self._pid})."], "confirmed" if action == "focus_app" else None
         if self._os in _STABLE_REFS:
             changed, gone = self._merge(body)
             if changed or gone:

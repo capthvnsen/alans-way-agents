@@ -748,6 +748,16 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[1], {"pid": 101, "action": "activate"})
         self.assertIsNone(be._window_id)
 
+    def test_a_raise_the_host_carried_out_is_confirmed(self):
+        # The host refuses an activate it cannot bring to the front, so success needs no second capture.
+        be = self.backend(["a"])
+        with mock.patch.object(be, "list_apps", return_value=[{"name": "TextEdit", "bundle_id": "com.apple.TextEdit", "pid": 101, "frontmost": False}]), \
+                mock.patch.object(be, "_call", return_value={"content": []}), \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertEqual(be.focus_app("TextEdit", raise_window=True).effect, "confirmed")
+            be._tree = None
+            self.assertIsNone(be.key("cmd+n").effect)
+
     def test_launch_refusals_and_host_changes_never_target_a_returned_pid(self):
         for reply, code in (({"isError": True, "content": [{"type": "text", "text": "off_limits: Refused."}]}, "off_limits"),
                             ({"content": [{"type": "text", "text": '{"pid": 105}'}], "_meta": {"workspace": {"host": "vps"}}}, "host_changed")):
