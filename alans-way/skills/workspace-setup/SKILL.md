@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/f110115ff23367e4e21eeaf00e658a8706369652/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/20d468212ae962d58a3e30f60487644538f63b25/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -355,7 +355,7 @@ if row and not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
 print(sha)') || exit 1
 # No installer record: the release tag is the pin. It must exist; if the checkout
 # below cannot resolve it the tag was never pushed, so stop and report.
-[ -n "$PIN" ] || PIN=v0.21.9
+[ -n "$PIN" ] || PIN=v0.21.10
 case "$PIN" in v*) FETCH_REF="refs/tags/$PIN:refs/tags/$PIN";; *) FETCH_REF="$PIN";; esac
 git -C ~/alans-way-agents fetch --depth=1 origin "$FETCH_REF" || exit 1
 git -C ~/alans-way-agents checkout "$PIN" || exit 1
