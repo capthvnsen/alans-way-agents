@@ -709,6 +709,23 @@ class ReplyFoldingTests(unittest.TestCase):
                 self.assertTrue(be.key(keys).ok)
             self.assertEqual(be._window_id is None, dropped)
 
+    def test_focus_app_with_a_path_opens_that_document_in_its_app(self):
+        be = self.backend([])
+        status = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1", "computer-open-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        opened = {"content": [{"type": "text", "text": '{"pid": 107, "bundleId": "com.apple.TextEdit"}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": []}]) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("/tmp/task/edit.txt", raise_window=True).ok)
+        self.assertEqual(call.call_args_list[1].args[:2], ("workspace_computer_launch", {"path": "/tmp/task/edit.txt", "expect_host": "computer"}))
+        self.assertEqual(call.call_args_list[2].args[1], {"pid": 107, "action": "activate", "expect_host": "computer"})
+        self.assertEqual(be._pid, 107)
+        be = self.backend([])
+        old = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[old]), mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.focus_app("/tmp/task/edit.txt")
+        self.assertFalse(result.ok)
+        self.assertIn("cannot open files", result.message)
+
     def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
         be = self.backend(["a"])
         be._window_id = 41

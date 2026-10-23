@@ -762,9 +762,25 @@ class AlansWayComputerBackend(ComputerUseBackend):
             self._window_id, self._tree = None, None
         return result
 
+    def _open_path(self, path):
+        """Open a document or folder by absolute path in its app; returns (pid, app name)."""
+        _, status, _ = self._read("cua_alans_way_status", {}, self._host)
+        capabilities = _json(status[0] if status else "").get("capabilities")
+        if not isinstance(capabilities, list) or "computer-open-v1" not in capabilities:
+            raise LookupError("This computer cannot open files by path; open the app with focus_app and use its Open dialog.")
+        args = {"path": path}
+        if self._host:
+            args["expect_host"] = "vm" if self._host in ("vps", "vm") else "computer"
+        _, texts, _ = self._read("workspace_computer_launch", args, self._host)
+        body = _json(texts[0] if texts else "")
+        if type(body.get("pid")) is not int or body["pid"] <= 0:
+            raise LookupError(f"Could not open {path!r}.")
+        return body["pid"], body.get("bundleId") or path.rsplit("/", 1)[-1]
+
     def focus_app(self, app, raise_window=False):
         try:
-            pid, name = self._resolve(app, launch=True)
+            # An absolute path opens that document or folder in its app, skipping the Open dialog.
+            pid, name = self._open_path(app) if isinstance(app, str) and app.startswith("/") else self._resolve(app, launch=True)
         except LookupError as e:
             return self._fail("focus_app", "not_found", str(e))
         except RuntimeError as e:
