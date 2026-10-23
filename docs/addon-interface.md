@@ -32,7 +32,13 @@ stable text, only the non-zero exit code on a bad invocation.
 Default path `$ALAN_STATE_DIR/state.json`, default `$ALAN_STATE_DIR`
 `/var/lib/alan`. A poller or an add-on may read it at any time; the file is
 replaced with an atomic temp-file-plus-rename on every write, so a reader
-never observes a half-written document.
+never observes a half-written document. Bootstrap holds an exclusive
+`flock` on `$ALAN_STATE_DIR/.state.lock` while it reads and replaces the
+file; an add-on that writes its own key must hold the same lock and also
+write through a temp file plus rename, for example
+`flock "$ALAN_STATE_DIR/.state.lock" python3 my-addon-write.py`. A file
+that cannot be read as a JSON object is moved to `state.json.corrupt`
+rather than overwritten, and the next write notes that in `warnings`.
 
 Keys the bootstrap itself owns and always sets on every write:
 
@@ -55,9 +61,9 @@ under one of the bootstrap's own keys.
 
 ## The `hermes-gateway` supervisord program
 
-On an Orgo computer, or any host with no running systemd (no
-`/run/systemd/system`), `bootstrap-orgo.sh` makes sure a `supervisord`
-program named `hermes-gateway` exists and is reread/updated. It never
+`bootstrap-orgo.sh` runs the gateway under supervisord (it requires
+`supervisorctl` and fails without it) and makes sure a program named
+`hermes-gateway` exists and is reread/updated. It never
 installs a second `[program:hermes-gateway]` section: if one is already
 defined anywhere under the supervisor conf directory (default
 `/etc/supervisor/conf.d`), the bootstrap reuses that file's `command=`
@@ -65,11 +71,12 @@ as long as the referenced binary exists, rather than writing a conf of
 its own. Only when no conf defines the program does it write
 `hermes-gateway.conf` with a generated wrapper script (reusing an
 existing `orgo-hermes-gateway`-style wrapper on the host when present,
-otherwise writing `alan-hermes-gateway`) and `stopwaitsecs=180`, so an
+otherwise writing `alan-hermes-gateway`) and `stopwaitsecs=180`. An
 add-on may rely on `supervisorctl status hermes-gateway` once the
-bootstrap has finished, and on a drain-aware stop/restart (anything
-stopping it abruptly, before 180 seconds of SIGTERM, risks corrupting the
-gateway's own state). An add-on should never write its own
+bootstrap has finished. The 180-second drain window is guaranteed only for
+a conf bootstrap wrote; a reused conf keeps its own `stopwaitsecs`, so
+prefer `supervisorctl signal USR1 hermes-gateway` (drain, then restart)
+over `stop`, which can end the gateway mid-checkpoint. An add-on should never write its own
 `[program:hermes-gateway]` section; use `supervisorctl signal`/`stop`/
 `start` on the existing one instead.
 

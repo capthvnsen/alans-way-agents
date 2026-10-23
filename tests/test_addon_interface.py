@@ -81,6 +81,38 @@ class StatusFileKeysTests(unittest.TestCase):
             self.assertEqual(doc2.get("addon_myservice"), "installed")
             self.assertEqual(doc2["state"], "ready")
 
+    def test_an_unreadable_file_is_kept_aside_with_a_warning(self):
+        """A corrupt state.json is not silently replaced: its bytes move to
+        state.json.corrupt and the next write says so in warnings."""
+        for bad in ("{\"addon_myservice\": \"inst", "[1, 2]"):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as d:
+                directory = Path(d)
+                env, log, stub_bin = bo.fixture(directory)
+                bo.curl_stub(stub_bin)
+                bo.tailscale_stub(stub_bin, url="https://login.tailscale.com/a/addon5")
+                self.assertEqual(bo.run(env=env).returncode, 0)
+                state_file = directory / "state" / "state.json"
+                state_file.write_text(bad, encoding="utf-8")
+                self.assertEqual(bo.run(env=env).returncode, 0)
+                self.assertEqual((directory / "state" / "state.json.corrupt").read_text(encoding="utf-8"), bad)
+                doc = json.loads(state_file.read_text(encoding="utf-8"))
+                self.assertEqual(doc["state"], "ready")
+                self.assertTrue(any("state.json.corrupt" in w for w in doc["warnings"]))
+
+    def test_warnings_of_the_wrong_type_become_a_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            env, log, stub_bin = bo.fixture(directory)
+            bo.curl_stub(stub_bin)
+            bo.tailscale_stub(stub_bin, url="https://login.tailscale.com/a/addon6")
+            self.assertEqual(bo.run(env=env).returncode, 0)
+            state_file = directory / "state" / "state.json"
+            state_file.write_text(json.dumps({"warnings": None, "addon_myservice": "installed"}), encoding="utf-8")
+            self.assertEqual(bo.run(env=env).returncode, 0)
+            doc = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(doc["warnings"], [])
+            self.assertEqual(doc["addon_myservice"], "installed")
+
     def test_a_failed_run_also_preserves_an_addons_key(self):
         with tempfile.TemporaryDirectory() as d:
             directory = Path(d)
