@@ -962,7 +962,7 @@ class RegisterTests(unittest.TestCase):
             note = package.tools_context()["context"]
             for rule in ("mcp__workspace_browser__cua_alans_way_open {url}", "with no tool_search or tool_describe",
                          "focus_app(app, raise_window=true)", "cmd+shift+g", "cmd+option+v", "fresh capture",
-                         "capture_after=true", "only when stuck", "absolute path"):
+                         "capture_after=true", "only when stuck", "absolute path", "keyboard shortcut"):
                 self.assertIn(rule, note)
             for platform in ("telegram", "desktop", "tui", "cli", "subagent", "cron",
                              "discord", "slack", "api_server", "webhook", "bot_room", "", None):
