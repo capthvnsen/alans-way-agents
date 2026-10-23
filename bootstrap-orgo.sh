@@ -168,6 +168,15 @@ first_conf_running() {
 }
 
 # state <state> <step> [error] — atomic write via tmp file + mv.
+#
+# Merge semantics: an add-on script run after bootstrap may write its own
+# key into this file (e.g. {"addon_myservice": "ready"}). A prior version
+# of this function rewrote the file from scratch on every call, silently
+# destroying any such key the moment bootstrap's own loop advanced past it.
+# Read the existing document first and only set the four keys bootstrap
+# itself owns, so unknown keys survive. "warnings" is one of the keys
+# add-ons and pollers look for; default it to an empty list so it is
+# always present even on the very first write.
 state() {
     local s="$1" step="$2" err="${3:-}"
     if [ "$DRY_RUN" = 1 ]; then
@@ -175,18 +184,25 @@ state() {
         return 0
     fi
     local tmp="$STATE_DIR/.state.json.$$"
-    python3 - "$tmp" "$s" "$step" "$err" <<'PY'
+    python3 - "$STATE_FILE" "$tmp" "$s" "$step" "$err" <<'PY'
 import datetime
 import json
 import sys
 
-path, state, step, err = sys.argv[1:5]
-doc = {
-    "state": state,
-    "step": step,
-    "error": err if err else None,
-    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-}
+existing_path, path, state, step, err = sys.argv[1:6]
+doc = {}
+try:
+    with open(existing_path, encoding="utf-8") as f:
+        loaded = json.load(f)
+    if isinstance(loaded, dict):
+        doc = loaded
+except Exception:
+    doc = {}
+doc["state"] = state
+doc["step"] = step
+doc["error"] = err if err else None
+doc["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+doc.setdefault("warnings", [])
 with open(path, "w", encoding="utf-8") as f:
     json.dump(doc, f)
 PY
