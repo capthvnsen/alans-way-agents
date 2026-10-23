@@ -5,7 +5,7 @@
 # Idempotent: every step checks real state before acting, so a re-run after a
 # partial failure resumes instead of reinstalling or duplicating supervisord
 # entries. Progress is written atomically to $ALAN_STATE_DIR/state.json as
-# {state, step, error, updated_at} for the provisioning backend to poll.
+# {state, step, error, warnings, updated_at} for the provisioning backend to poll.
 set -eEuo pipefail
 
 STATE_DIR="${ALAN_STATE_DIR:-/var/lib/alan}"
@@ -167,30 +167,51 @@ first_conf_running() {
     return 0
 }
 
-# state <state> <step> [error] — atomic write via tmp file + mv.
+# state <state> <step> [error] — atomic write via tmp file + rename, under
+# $STATE_DIR/.state.lock. Add-ons write their own keys here, so set only
+# bootstrap's keys and keep the rest.
 state() {
     local s="$1" step="$2" err="${3:-}"
     if [ "$DRY_RUN" = 1 ]; then
         log "state -> $s $step${err:+ error=$err}"
         return 0
     fi
-    local tmp="$STATE_DIR/.state.json.$$"
-    python3 - "$tmp" "$s" "$step" "$err" <<'PY'
+    python3 - "$STATE_FILE" "$STATE_DIR/.state.json.$$" "$STATE_DIR/.state.lock" "$s" "$step" "$err" <<'PY'
 import datetime
+import fcntl
 import json
+import os
 import sys
 
-path, state, step, err = sys.argv[1:5]
-doc = {
-    "state": state,
-    "step": step,
-    "error": err if err else None,
-    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(doc, f)
+existing_path, path, lock_path, state, step, err = sys.argv[1:7]
+with open(lock_path, "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    doc, warning = {}, None
+    try:
+        with open(existing_path, "rb") as f:
+            raw = f.read(1 << 20)
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("not an object")
+        doc = loaded
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        # Never drop a document silently: an add-on's keys may be in it.
+        os.replace(existing_path, existing_path + ".corrupt")
+        warning = "state.json could not be read and was moved to state.json.corrupt"
+    doc["state"] = state
+    doc["step"] = step
+    doc["error"] = err if err else None
+    doc["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    if not isinstance(doc.get("warnings"), list):
+        doc["warnings"] = []
+    if warning:
+        doc["warnings"].append(warning)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    os.replace(path, existing_path)
 PY
-    mv -f "$tmp" "$STATE_FILE"
 }
 
 on_err() {

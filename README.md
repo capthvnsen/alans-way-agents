@@ -380,6 +380,11 @@ Useful flags: `bootstrap-orgo.sh --dry-run` prints what it would do;
 (required on the piped one-liner, since stdin is the script itself);
 `--hermes-home`/`--remote-home` cover non-standard layouts.
 
+A private add-on script run right after `bootstrap-orgo.sh` finishes can
+rely on [docs/addon-interface.md](docs/addon-interface.md): the CLI flags,
+the status file's keys and merge semantics, the `hermes-gateway` supervisord
+program, and the `HERMES_HOME` layout.
+
 ## The workspace_browser tools
 
 Each bot needs its own `--bot-id` — it owns that bot's tabs. The router passes
@@ -450,7 +455,7 @@ alans-way/            the plugin (plugin.yaml + tool + idle-nudge and voice hook
 alans-way/skills/     workspace-setup, workspace-operations, web-errands and integrations (with recipes)
 deploy/               systemd unit for the Mac availability watcher, example browser_exec Chromium unit
 alans-way-computer/   the computer-use provider plugin (approval-gated computer_use)
-docs/                 proactivity and voice guides, agent-driven setup prompt
+docs/                 proactivity and voice guides, agent-driven setup prompt, the stable add-on interface
 docs/catalog/         Hermes plugin-catalog entry drafts (alans-way-computer.yaml)
 scripts/              check_publication.py, the pre-publication secret and path check CI runs;
                       voice_eval.py, a local-only model-judged eval of the texting voice
