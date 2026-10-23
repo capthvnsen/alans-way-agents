@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -67,8 +68,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (c.os) { s.os = c.os; save(s); }
   let result;
   if (name === 'workspace_computer_apps') result = text({ host: s.os || 'mac', apps: APPS });
+  else if (name === 'cua_alans_way_status') result = text({ capabilities: ['computer-launch-v1'] });
   else if (c.error) result = fail(c.error);
-  else if (args.pid === 103) result = fail('That app is the one in front. Leave it there; the pointer stays where it is.');
+  else if (args.pid === 103) result = fail('in_front: The user is using that app in front right now. Retry in a few seconds.');
+  else if (name === 'workspace_computer_launch') result = args.app === 'Calculator'
+    ? text({ pid: 105, bundleId: 'com.apple.calculator' }) : fail('unsupported_action: Unknown action launch.');
   else if (name === 'workspace_computer_snapshot') result = c.snap ? text({ ...tree(s.generation), ...c.snap })
     : args.since === s.generation ? text({ unchanged: true, generation: s.generation }) : text(tree(s.generation));
   else if (name === 'workspace_computer_screenshot' && s.noshot) result = fail('That app has no window to capture.');
@@ -278,10 +282,12 @@ R["unsupported"] = {
     "triple": plain(be.click(x=1, y=1, click_count=3)),
     "drag_right": plain(be.drag(from_xy=(0, 0), to_xy=(1, 1), button="right")),
     "set_value_no_el": plain(be.set_value("x")),
-    "foreground": plain(be.click(x=1, y=1, delivery_mode="foreground")),
-    "bring": plain(be.key("return", bring_to_front=True)),
 }
 R["unsupported_calls"] = action_calls(m)
+m = mark()
+R["foreground"] = plain(be.click(x=1, y=1, delivery_mode="foreground"))
+R["bring"] = plain(be.key("return", bring_to_front=True))
+R["foreground_calls"] = action_calls(m)
 
 # --- policy refusals
 try:
@@ -292,12 +298,14 @@ except Exception as e:
 R["focus_op"] = plain(be.focus_app("1Password"))
 R["off_limits"] = plain(be.click(x=1, y=1))
 
-# --- focus_app never focuses: it only retargets
+# --- focus_app delegates target activation and missing-app launch to the host
 m = mark()
 R["focus"] = plain(be.focus_app("Safari", raise_window=True))
 R["focus_calls"] = [c["name"] for c in calls(m)]
 R["focus_target"] = [be._last_target, be._last_app]
 R["focus_unknown"] = plain(be.focus_app("Nope"))
+R["focus_launch"] = plain(be.focus_app("Calculator"))
+R["launch_target"] = [be._last_target, be._last_app]
 be.focus_app("Notes")
 
 # --- host notice rides along
@@ -477,6 +485,11 @@ class StaticTests(unittest.TestCase):
         self.assertRegex(manifest, r'(?m)^name:\s*"?alans-way-computer"?\s*$')
         self.assertRegex(manifest, r'(?m)^requires_hermes:\s*"?>=0\.21\.5"?\s*$')
 
+    def test_provider_description_identifies_the_stock_native_mac_tool(self):
+        description = (PLUGIN / "plugin.yaml").read_text()
+        for identity in ("stock computer_use", "alans-way-computer", "native Mac", "through Alan's Workspace"):
+            self.assertIn(identity, description)
+
     def test_provider_markers_sit_in_the_first_8k_for_exclusive_classification(self):
         head = (PLUGIN / "__init__.py").read_text(encoding="utf-8-sig")[:8192]
         self.assertIn("register_computer_use_provider", head)
@@ -507,6 +520,16 @@ class StaticTests(unittest.TestCase):
         self.assertNotIn("TELEGRAM_BOT_TOKEN", child_env)
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", child_env)
 
+    def test_router_log_home_uses_the_bound_profile_instead_of_launch_env(self):
+        spec = importlib.util.spec_from_file_location("alans_way_computer_profile", PLUGIN / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        constants = mock.Mock(get_hermes_home=lambda: "/tmp/hermes/profiles/test")
+        with mock.patch.dict(sys.modules, {"hermes_constants": constants}), \
+                mock.patch.dict(os.environ, {"HERMES_HOME": "/tmp/hermes"}):
+            _, env = mod._launch({"command": sys.executable})
+        self.assertEqual(env["HERMES_HOME"], "/tmp/hermes/profiles/test")
+
     def test_catalog_draft_pins_docs_to_the_sha_and_lists_known_issues(self):
         entry = (ROOT / "docs/catalog/alans-way-computer.yaml").read_text()
         self.assertRegex(entry, r"(?m)^sha: (0{40}|[0-9a-f]{40})$")
@@ -529,6 +552,223 @@ class ReplyFoldingTests(unittest.TestCase):
         be._pid = 101
         be._tree = {"pid": 101, "gen": 1, "els": [{"ref": r, "role": "AXButton", "name": r.upper()} for r in refs], "notes": []}
         return be
+
+    def test_foreground_requests_reach_the_target_host(self):
+        for action in (lambda be: be.click(element=1, delivery_mode="foreground"),
+                       lambda be: be.key("return", bring_to_front=True),
+                       lambda be: be.drag(from_xy=(1, 2), to_xy=(3, 4), bring_to_front=True),
+                       lambda be: be.scroll(direction="down", bring_to_front=True),
+                       lambda be: be.type_text("hello", bring_to_front=True)):
+            with self.subTest(action=action):
+                be = self.backend(["a"])
+                with mock.patch.object(be, "_call", return_value={"content": []}) as call, \
+                        mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                    self.assertTrue(action(be).ok)
+                args = call.call_args.args[1]
+                self.assertEqual(args["pid"], 101)
+                self.assertEqual(args["action"], "batch")
+                self.assertEqual(args["steps"][0], {"action": "activate"})
+                self.assertEqual(len(args["steps"]), 2)
+
+    def test_foreground_batch_keeps_window_generation_and_target_confirmation(self):
+        be = self.backend(["a"])
+        be._window_id, be._os, be._host = 41, "mac", "mac"
+        reply = {"content": [{"type": "text", "text": json.dumps({"generation": 2,
+                 "changed": [{"ref": "a", "role": "AXButton", "name": "Saved"}], "removed": []})}]}
+        with mock.patch.object(be, "_call", return_value=reply) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.click(element=1, bring_to_front=True)
+        args = call.call_args.args[1]
+        self.assertEqual((args["windowId"], args["generation"], args["expect_host"]), (41, 1, "computer"))
+        self.assertEqual(args["steps"][1]["ref"], "a")
+        self.assertEqual(result.effect, "confirmed")
+
+    def test_in_front_keeps_the_host_refusal_and_gives_one_retry(self):
+        be = self.backend(["a"])
+        with mock.patch.object(be, "_call", return_value={"isError": True, "content": [
+                {"type": "text", "text": "in_front: The user is using this app right now."}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.key("return", bring_to_front=True)
+        self.assertEqual(result["code"], "in_front")
+        self.assertIn("wait a few seconds and retry once", result["message"])
+        self.assertIn("tell the user briefly", result["message"])
+        self.assertEqual(call.call_count, 1)
+
+    def test_a_window_out_of_focus_is_raised_and_retried_once(self):
+        for text in ("The selected window does not have keyboard focus. Bring that window forward when you are idle, then take a fresh snapshot.",
+                     "That window is not on the current screen. Bring it forward with activate, then take a fresh snapshot."):
+            be = self.backend(["a"])
+            refused = {"isError": True, "content": [{"type": "text", "text": text}]}
+            with self.subTest(text=text), mock.patch.object(be, "_call", side_effect=[refused, {"content": []}]) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                self.assertTrue(be.key("cmd+shift+g").ok)
+            self.assertEqual(call.call_count, 2)
+            retry = call.call_args.args[1]
+            self.assertEqual(retry["action"], "batch")
+            self.assertEqual(retry["steps"][0], {"action": "activate"})
+        be = self.backend(["a"])
+        with mock.patch.object(be, "_call", return_value={"isError": True, "content": [{"type": "text", "text": "stale_ref: c1 changed."}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertFalse(be.key("return").ok)
+        self.assertEqual(call.call_count, 1)
+
+    def test_step_notes_reach_the_model(self):
+        be = self.backend(["a"])
+        reply = {"content": [{"type": "text", "text": json.dumps({"results": [{"ok": True, "note": "This app has no open windows. Its menus still work (menubar:true), for example File > New."}]})}]}
+        with mock.patch.object(be, "_call", return_value=reply), mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be._run("focus_app", {"action": "activate"})
+        self.assertIn("File > New", result.message)
+
+    def test_foreground_batch_reports_step_refusals_without_replaying_input(self):
+        for results in ([{"error": "The user is using this app.", "code": "in_front"}],
+                        [{"ok": True}, {"error": "The control changed.", "code": "stale_ref"}]):
+            be = self.backend(["a"])
+            reply = {"content": [{"type": "text", "text": json.dumps({"results": results})}]}
+            with self.subTest(results=results), mock.patch.object(be, "_call", return_value=reply) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                result = be.click(element=1, bring_to_front=True)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, results[-1]["code"])
+            self.assertIn("Capture before continuing", result.message)
+            self.assertEqual(call.call_count, 1)
+
+    def test_focus_launches_a_missing_named_app_and_targets_its_pid(self):
+        be = self.backend([])
+        with mock.patch.object(be, "list_apps", return_value=[]), \
+                mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}, {"content": [
+                    {"type": "text", "text": '{"pid": 105, "name": "Calculator"}'}],
+                    "_meta": {"workspace": {"host": "mac"}}}]) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.focus_app("Calculator")
+        self.assertTrue(result["ok"])
+        self.assertEqual((be._pid, be._app), (105, "Calculator"))
+        self.assertEqual(call.call_args_list[0].args, ("cua_alans_way_status", {}))
+        self.assertEqual(call.call_args.args, ("workspace_computer_launch", {"app": "Calculator", "expect_host": "computer"}))
+
+    def test_focus_only_launches_when_the_same_host_advertises_the_capability(self):
+        for capabilities in ([], None, "computer-launch-v1"):
+            be = self.backend([])
+            def reply(name, args):
+                body = {"capabilities": capabilities} if name == "cua_alans_way_status" else {"pid": 105}
+                return {"content": [{"type": "text", "text": json.dumps(body)}]}
+            with self.subTest(capabilities=capabilities), mock.patch.object(be, "list_apps", return_value=[]), \
+                    mock.patch.object(be, "_call", side_effect=reply) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                result = be.focus_app("Calculator")
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "not_found")
+            self.assertEqual([c.args[0] for c in call.call_args_list], ["cua_alans_way_status"])
+
+        be = self.backend([])
+        be._host = "mac"
+        with mock.patch.object(be, "list_apps", return_value=[]), \
+                mock.patch.object(be, "_call", return_value={"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "vps"}}}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.focus_app("Calculator")
+        self.assertEqual(result.code, "host_changed")
+        self.assertIsNone(be._pid)
+        self.assertEqual([c.args[0] for c in call.call_args_list], ["cua_alans_way_status"])
+
+    def test_focus_does_not_launch_an_ambiguous_match_or_hide_old_host_error(self):
+        be = self.backend([])
+        with mock.patch.object(be, "list_apps", return_value=[
+                {"pid": 1, "name": "Notes", "bundle_id": "one.notes"},
+                {"pid": 2, "name": "Notes copy", "bundle_id": "two.notes"}]), \
+                mock.patch.object(be, "_call") as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            self.assertEqual(be.focus_app("Note")["code"], "not_found")
+        self.assertFalse(call.called)
+        with mock.patch.object(be, "list_apps", return_value=[]), \
+                mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                    '{"capabilities": ["computer-launch-v1"]}'}]}, {"isError": True, "content": [
+                    {"type": "text", "text": "unsupported_action: Unknown action launch."}]}]), \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.focus_app("Calculator")
+        self.assertEqual(result["code"], "not_found")
+        self.assertIn("No running app matches", result["message"])
+
+    def test_a_path_in_a_save_dialog_name_field_is_refused_with_the_recipe(self):
+        be = self.backend(["a", "b"])
+        be._tree["els"] = [{"ref": "a", "role": "AXStaticText", "name": "Save As:"}, {"ref": "b", "role": "AXTextField", "name": "", "value": "Untitled.txt"}]
+        with mock.patch.object(be, "_call", return_value={"content": []}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.set_value("/tmp/targets/x/note.txt", element=2)
+            self.assertFalse(result.ok)
+            self.assertIn("cmd+shift+g", result.message)
+            self.assertFalse(call.called)
+            self.assertTrue(be.set_value("note.txt", element=2).ok)
+
+    def test_a_cmd_shortcut_lets_the_next_capture_follow_the_focused_window(self):
+        for keys, dropped in (("cmd+o", True), ("cmd+shift+g", True), ("return", False)):
+            be = self.backend(["a"])
+            be._window_id = 41
+            with self.subTest(keys=keys), mock.patch.object(be, "_call", return_value={"content": []}), \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+                self.assertTrue(be.key(keys).ok)
+            self.assertEqual(be._window_id is None, dropped)
+
+    def test_focus_app_with_a_path_opens_that_document_in_its_app(self):
+        be = self.backend([])
+        status = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1", "computer-open-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        opened = {"content": [{"type": "text", "text": '{"pid": 107, "bundleId": "com.apple.TextEdit"}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": []}]) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("/tmp/task/edit.txt", raise_window=True).ok)
+        self.assertEqual(call.call_args_list[1].args[:2], ("workspace_computer_launch", {"path": "/tmp/task/edit.txt", "expect_host": "computer"}))
+        self.assertEqual(call.call_args_list[2].args[1], {"pid": 107, "action": "activate", "expect_host": "computer"})
+        self.assertEqual(be._pid, 107)
+        be = self.backend([])
+        old = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[old]), mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.focus_app("/tmp/task/edit.txt")
+        self.assertFalse(result.ok)
+        self.assertIn("cannot open files", result.message)
+
+    def test_a_path_binds_the_window_that_shows_it(self):
+        be = self.backend([])
+        status = {"content": [{"type": "text", "text": '{"capabilities": ["computer-launch-v1", "computer-open-v1"]}'}], "_meta": {"workspace": {"host": "mac"}}}
+        opened = {"content": [{"type": "text", "text": '{"pid": 778, "bundleId": "com.apple.finder", "windowId": 4242}'}], "_meta": {"workspace": {"host": "mac"}}}
+        with mock.patch.object(be, "_call", side_effect=[status, opened, {"content": [{"type": "text", "text": '{"windowId": 4242}'}]}]) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("/tmp/task", raise_window=True).ok)
+        self.assertEqual(call.call_args_list[2].args[1], {"pid": 778, "action": "activate", "windowId": 4242, "expect_host": "computer"})
+        self.assertEqual(be._window_id, 4242)
+
+    def test_raising_an_app_drops_a_window_its_dialogs_replaced(self):
+        be = self.backend(["a"])
+        be._window_id = 41
+        with mock.patch.object(be, "list_apps", return_value=[{"name": "TextEdit", "bundle_id": "com.apple.TextEdit", "pid": 101, "frontmost": False}]), \
+                mock.patch.object(be, "_call", return_value={"content": []}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            self.assertTrue(be.focus_app("TextEdit", raise_window=True).ok)
+        self.assertEqual(call.call_args.args[1], {"pid": 101, "action": "activate"})
+        self.assertIsNone(be._window_id)
+
+    def test_launch_refusals_and_host_changes_never_target_a_returned_pid(self):
+        for reply, code in (({"isError": True, "content": [{"type": "text", "text": "off_limits: Refused."}]}, "off_limits"),
+                            ({"content": [{"type": "text", "text": '{"pid": 105}'}], "_meta": {"workspace": {"host": "vps"}}}, "host_changed")):
+            be = self.backend([])
+            be._host = "mac"
+            with self.subTest(code=code), mock.patch.object(be, "list_apps", return_value=[]), \
+                    mock.patch.object(be, "_call", side_effect=[{"content": [{"type": "text", "text":
+                        '{"capabilities": ["computer-launch-v1"]}'}]}, reply]) as call, \
+                    mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+                result = be.focus_app("Calculator")
+            self.assertEqual(result["code"], code)
+            self.assertNotEqual(be._pid, 105)
+            self.assertEqual(call.call_args.args[1]["expect_host"], "computer")
+
+    def test_focus_only_raises_the_resolved_target_and_keeps_host_idle_refusals(self):
+        be = self.backend([])
+        with mock.patch.object(be, "_resolve", return_value=(102, "Safari")), \
+                mock.patch.object(be, "_call", return_value={"isError": True, "content": [
+                    {"type": "text", "text": "in_front: The user is using this app."}]}) as call, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=lambda **kw: kw):
+            result = be.focus_app("Safari", raise_window=True)
+        self.assertEqual(result["code"], "in_front")
+        self.assertEqual(call.call_args.args[1], {"pid": 102, "action": "activate"})
 
     def test_actions_expect_the_last_seen_host(self):
         for host, expected in (("mac", "computer"), ("windows", "computer"), ("linux", "computer"), ("vps", "vm"), ("vm", "vm")):
@@ -851,6 +1091,11 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertIn("cut", notes[2])
         self.assertEqual(self.mod._tree_notes({"hidden": 0}), [])
 
+    def test_app_hints_name_this_tools_raise_action(self):
+        bring = "That window is not on the current screen. Bring it forward with activate, then take a fresh snapshot."
+        self.assertIn("focus_app with raise_window=true", self.mod._tree_notes({"note": bring})[0])
+        self.assertNotIn("with activate", self.mod._coded(bring, "stale_window")[1])
+
 
 @NEEDS_HERMES
 class OldHermesTests(unittest.TestCase):
@@ -983,7 +1228,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(held, gen + 2)  # the delta click and the click on element 4
         self.assertEqual(self.r["delta_gone"]["code"], "no_such_element")
         self.assertIn("disappeared", self.r["delta_gone"]["message"])
-        self.assertEqual(self.r["delta_new_call"], [{"pid": 101, "action": "press", "ref": "c4", "generation": gen + 1}])
+        self.assertEqual(self.r["delta_new_call"], [{"pid": 101, "action": "press", "ref": "c4", "generation": gen + 1, "expect_host": "computer"}])
 
     def test_a_capture_after_a_delta_keeps_the_numbers_it_handed_out(self):
         cap = self.r["delta_capture"]
@@ -1009,8 +1254,8 @@ class ProviderTests(unittest.TestCase):
         self.assertIsInstance(gen, int)
         self.assertEqual(held, gen + 2)
         self.assertEqual(names, ["a.txt", None, "c.txt", "d.txt"])
-        self.assertEqual(r["fold_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen},
-                                           {"pid": 101, "action": "press", "ref": "c3", "generation": gen + 1}])
+        self.assertEqual(r["fold_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen, "expect_host": "computer"},
+                                           {"pid": 101, "action": "press", "ref": "c3", "generation": gen + 1, "expect_host": "computer"}])
         self.assertTrue(r["fold_third"]["ok"], r["fold_third"])
 
     def test_positional_refs_keep_the_old_generation_so_a_shifted_number_is_refused(self):
@@ -1026,8 +1271,8 @@ class ProviderTests(unittest.TestCase):
         self.assertIsInstance(gen, int)
         self.assertEqual(held, gen)
         self.assertEqual(names, ["a.txt", "b.txt", "c.txt", "d.txt"])
-        self.assertEqual(r["win_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen},
-                                          {"pid": 101, "action": "press", "ref": "c3", "generation": gen}])
+        self.assertEqual(r["win_calls"], [{"pid": 101, "action": "press", "ref": "c2", "generation": gen, "expect_host": "computer"},
+                                          {"pid": 101, "action": "press", "ref": "c3", "generation": gen, "expect_host": "computer"}])
         self.assertEqual((r["win_third"].get("ok"), r["win_third"].get("code")), (False, "stale_ref"), r["win_third"])
 
     def test_each_error_code_says_the_next_step(self):
@@ -1052,12 +1297,12 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(snapshot, {"pid": 101, "since": 7, "delta": True})
 
     def test_click_by_element_sends_the_capture_generation(self):
-        self.assertEqual(self.r["click_el_call"], [{"pid": 101, "action": "press", "ref": "c1", "generation": 7}])
+        self.assertEqual(self.r["click_el_call"], [{"pid": 101, "action": "press", "ref": "c1", "generation": 7, "expect_host": "computer"}])
         self.assertTrue(self.r["click_el"]["ok"])
 
     def test_double_and_right_click_use_refs_with_generation(self):
         generation = self.r["double"][0]["generation"]
-        self.assertEqual(self.r["double"], [{"pid": 101, "action": "double_click", "ref": "c2", "generation": generation}])
+        self.assertEqual(self.r["double"], [{"pid": 101, "action": "double_click", "ref": "c2", "generation": generation, "expect_host": "computer"}])
         self.assertEqual(self.r["right"][0]["action"], "right_click")
         self.assertEqual(self.r["right"][0]["ref"], "c2")
 
@@ -1090,7 +1335,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_set_value_and_keys(self):
         generation = self.r["set_value"][0]["generation"]
-        self.assertEqual(self.r["set_value"], [{"pid": 101, "action": "type", "ref": "c2", "text": "hello", "generation": generation}])
+        self.assertEqual(self.r["set_value"], [{"pid": 101, "action": "type", "ref": "c2", "text": "hello", "generation": generation, "expect_host": "computer"}])
         self.assertEqual(bare(self.r["key_combo"]), [{"pid": 101, "action": "hotkey", "keys": "cmd+s"}])
         self.assertEqual(bare(self.r["key_plain"]), [{"pid": 101, "action": "key", "key": "return"}])
         # A VM desktop the agent owns types at the focus; a host that cannot refuses in the helper.
@@ -1116,12 +1361,18 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.r["off_limits"]["code"], "off_limits")
         self.assertFalse(self.r["off_limits"]["ok"])
 
-    def test_focus_app_only_retargets_and_never_calls_the_router(self):
+    def test_focus_app_delegates_activation_and_launch_to_the_host(self):
         self.assertTrue(self.r["focus"]["ok"])
-        self.assertIn("never", self.r["focus"]["message"])
-        self.assertEqual(self.r["focus_calls"], ["workspace_computer_apps"])
+        self.assertEqual(self.r["focus_calls"], ["workspace_computer_apps", "workspace_computer_action"])
         self.assertEqual(self.r["focus_target"], [{"pid": 102, "window_id": 0}, "Safari"])
         self.assertEqual(self.r["focus_unknown"]["code"], "not_found")
+        self.assertTrue(self.r["focus_launch"]["ok"])
+        self.assertEqual(self.r["launch_target"], [{"pid": 105, "window_id": 0}, "Calculator"])
+        self.assertTrue(self.r["foreground"]["ok"])
+        self.assertTrue(self.r["bring"]["ok"])
+        for args in self.r["foreground_calls"]:
+            self.assertEqual(args["pid"], 101)
+            self.assertEqual(args["steps"][0], {"action": "activate"})
 
     def test_router_notice_is_passed_to_the_model(self):
         self.assertTrue(self.r["notice"]["ok"])

@@ -435,11 +435,20 @@ class ProfileOptionTests(unittest.TestCase):
             text = config.read_text(encoding="utf-8")
             self.assertIn("workspace_browser:", text)
             self.assertIn("alan-local", str(config))
+            self.assertIn(f'HERMES_HOME: "{profile_dir}"', text)
 
     def test_profile_and_config_are_mutually_exclusive(self):
         result = run("--bot-id", "bot123", "--profile", "p", "--config", "/x.yaml", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mutually exclusive", result.stderr)
+
+    def test_relative_config_binds_an_absolute_profile_log_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([SH or "/bin/sh", str(SCRIPT), "--bot-id", "bot123",
+                                     "--config", "profile/config.yaml"], cwd=directory, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = (Path(directory) / "profile/config.yaml").read_text()
+            self.assertIn(f'HERMES_HOME: "{Path(directory).resolve() / "profile"}"', text)
 
     def test_profile_rejects_bad_characters(self):
         result = run("--bot-id", "bot123", "--profile", "bad/profile", check=False)

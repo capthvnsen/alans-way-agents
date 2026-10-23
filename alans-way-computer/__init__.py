@@ -6,8 +6,8 @@ first 8 KB, which is how Hermes classifies this directory as a provider and keep
 
 Transport: the same workspace router the profile already runs as its `workspace_browser` MCP server
 (mcp_servers.workspace_browser in config.yaml, written by setup-workspace.sh). One router child per backend, JSON-RPC
-over its stdio, so host-to-VM failover is the router's. Alan's Way never takes focus: input is delivered in the
-background, focus_app only retargets, and the stock `type` (no field) has no equivalent; use set_value."""
+over its stdio, so host-to-VM failover is the router's. The host enforces target-app and idle checks for foreground
+input. Prefer set_value for a named field; free typing depends on the host's support."""
 
 from __future__ import annotations
 
@@ -56,8 +56,8 @@ _NEXT = {
     "stale_ref": "That control changed since your element list: capture again for fresh element numbers.",
     "locked": "Nothing can be read or driven until the user unlocks it; then capture again.",
     "permission": "Ask the user to turn it on for alans-way-localapp in System Settings > Privacy & Security, then retry.",
-    "in_front": "The app in front is the user's and is never driven: ask the user to switch to another app, then retry.",
-    "no_window": "Its windows are closed, minimized or on another Space: ask the user to open one on this Space, then capture again.",
+    "in_front": "The user is using this app right now: wait a few seconds and retry once, then tell the user briefly if it still refuses. Never ask for approval per action.",
+    "no_window": "Its windows are closed, minimized or on another Space: bring it forward with focus_app (raise_window true), then capture again. If it still has no window, ask the user to open one.",
     "off_limits": "It stays off limits: do not retry or work around it; tell the user.",
     "not_found": "Call list_apps if the app may have quit, otherwise capture again and use an element number from that list.",
     "unresponsive": "The app is hung: do not repeat the action; wait a moment, then capture to see whether it ran.",
@@ -74,6 +74,7 @@ _STABLE_REFS = {"mac", "windows"}
 MIN_COVERAGE = 0.35  # share of the window named controls must cover for som to leave the screenshot out
 NEAR = 120  # screen points around the acted-on control in which a change counts as the action's effect
 _LOST = ("NOT retried", "connection dropped")
+_UNFOCUSED = ("does not have keyboard focus", "not on the current screen")
 _MANAGED = {"node", "npm", "npx", "uv", "uvx"}
 
 
@@ -91,6 +92,12 @@ def _launch(block, *, spawn=True):
     availability check: for Hermes-managed launchers like node it never provisions anything."""
     env = {k: v for k, v in os.environ.items() if k.upper() in _SAFE_ENV or k.startswith("XDG_")}
     env.update({str(k): str(v) for k, v in (block.get("env") or {}).items()})
+    try:
+        from hermes_constants import get_hermes_home
+        env["HERMES_HOME"] = str(get_hermes_home())
+    except ImportError:
+        if "HERMES_HOME" not in env and os.environ.get("HERMES_HOME"):
+            env["HERMES_HOME"] = os.environ["HERMES_HOME"]
     command = os.path.expanduser(str(block["command"]).strip())
     try:
         if spawn or re.sub(r"\.(cmd|exe)$", "", command, flags=re.I) not in _MANAGED:
@@ -176,10 +183,8 @@ class _Router:
                 raise _Unavailable("this profile has no mcp_servers.workspace_browser block; run setup-workspace.sh")
             try:
                 argv, env = _launch(block)
-                # The provider is the approval-gated desktop path (Hermes asks
-                # before every action), so its private router child may still
-                # serve workspace_computer_action; the agent-facing managed
-                # block excludes it unless the operator opted in.
+                # The private child uses Hermes's approval gate; the agent-facing
+                # connector excludes desktop input unless the operator opted in.
                 env["HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS"] = "1"
                 proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         env=env, text=True, encoding="utf-8", errors="replace")
@@ -281,7 +286,7 @@ def _json(text):
 
 class AlansWayComputerBackend(ComputerUseBackend):
     def __init__(self, permission_mode="standard"):
-        # The cua driver's permission modes do not apply; the app's own policy (no focus, no keychains) always does.
+        # The cua driver's permission modes do not apply; the host's target, idle and secure-field checks always do.
         self.permission_mode = permission_mode
         self._router = _Router(self._reset)
         self._reset()
@@ -340,14 +345,34 @@ class AlansWayComputerBackend(ComputerUseBackend):
         return [{"name": a.get("name", ""), "bundle_id": a.get("bundleId", ""), "pid": a.get("pid"),
                  "frontmost": bool(a.get("frontmost"))} for a in body.get("apps", [])]
 
-    def _resolve(self, app):
+    def _resolve(self, app, *, launch=False):
         wanted = app.strip().lower()
         apps = self.list_apps()
         hits = [a for a in apps if wanted in (a["name"].lower(), a["bundle_id"].lower())] or [
             a for a in apps if wanted in a["name"].lower() or wanted in a["bundle_id"].lower()]
         if len(hits) != 1:
             names = ", ".join(f"{a['name']} (pid {a['pid']})" for a in (hits or apps))
-            raise LookupError(f"{'Several apps match' if hits else 'No running app matches'} {app!r}: {names}")
+            missing = f"{'Several apps match' if hits else 'No running app matches'} {app!r}: {names}"
+            if not hits and launch:
+                try:
+                    _, status, _ = self._read("cua_alans_way_status", {}, self._host)
+                    capabilities = _json(status[0] if status else "").get("capabilities")
+                    if not isinstance(capabilities, list) or "computer-launch-v1" not in capabilities:
+                        raise LookupError(missing)
+                    args = {"app": app}
+                    if self._host:
+                        args["expect_host"] = "vm" if self._host in ("vps", "vm") else "computer"
+                    _, texts, _ = self._read("workspace_computer_launch", args, self._host)
+                except _ToolError as e:
+                    if _coded(str(e), e.code)[0] in ("unsupported_action", "bad_request") or any(
+                            marker in str(e).lower() for marker in ("unknown tool", "unknown browser tool", "cannot open apps by name")):
+                        raise LookupError(missing) from e
+                    raise
+                body = _json(texts[0] if texts else "")
+                if type(body.get("pid")) is not int or body["pid"] <= 0:
+                    raise LookupError(missing)
+                return body["pid"], body.get("name") or app
+            raise LookupError(missing)
         return hits[0]["pid"], hits[0]["name"]
 
     def _target(self, pid, name):
@@ -536,8 +561,6 @@ class AlansWayComputerBackend(ComputerUseBackend):
         return self._fail(action, "no_target", "No app is targeted. Call capture(app=...) first.")
 
     def _limits(self, action, delivery_mode, bring_to_front, modifiers=None):
-        if delivery_mode == "foreground" or bring_to_front:
-            return self._fail(action, "unsupported_action", "Alan's Way never takes the focused window, so foreground delivery is not available. Input is delivered in the background.")
         if modifiers:
             return self._fail(action, "unsupported_action", "Modifier keys are not available with pointer actions. Use key for shortcuts.")
         return None
@@ -602,7 +625,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         was, now = collections.Counter(map(_key, old)), collections.Counter(map(_key, new))
         return _pick(new, now - was), [] if body.get("truncated") else _pick(old, was - now)
 
-    def _run(self, action, step):
+    def _run(self, action, step, *, bring_to_front=False):
         if self._pid is None:
             return self._no_target(action)
         if self._window_id is not None:
@@ -610,14 +633,22 @@ class AlansWayComputerBackend(ComputerUseBackend):
         tree = self._tree if self._tree and self._tree["pid"] == self._pid else None
         if tree and tree["gen"] is not None:
             step["generation"] = tree["gen"]  # every action, not just ref ones: the reply is then a delta against it
-        acted = next((e for e in tree["els"] if e and e["ref"] == step["ref"]), None) if tree and "ref" in step else None
+        retry = {k: v for k, v in step.items() if k not in ("windowId", "generation")}
+        target_ref = step.get("ref")
+        acted = next((e for e in tree["els"] if e and e["ref"] == target_ref), None) if tree and target_ref else None
         box = _box(acted) if acted else (step["x"], step["y"], step["x"], step["y"]) if "x" in step else None
+        if bring_to_front:
+            binding = {k: step[k] for k in ("windowId", "generation") if k in step}
+            step = {"action": "batch", "steps": [{"action": "activate"}, step], **binding}
         before = self._host
         if before is not None:
             step["expect_host"] = "vm" if before in ("vps", "vm") else "computer"
         try:
             _, texts, host = _unpack(self._call("workspace_computer_action", {"pid": self._pid, **step}))
         except _ToolError as e:
+            # The host refuses these before any input lands, so raising the window and retrying once cannot repeat input.
+            if not bring_to_front and any(m in str(e) for m in _UNFOCUSED):
+                return self._run(action, retry, bring_to_front=True)
             return self._error(action, str(e), e.code)
         except _Unavailable as e:
             return self._fail(action, "unavailable", f"The workspace router is unavailable: {e}")
@@ -633,6 +664,10 @@ class AlansWayComputerBackend(ComputerUseBackend):
             self._window(body, self._window_id)
         except _ToolError as e:
             return self._fail(action, "stale_window", _coded(str(e), e.code)[1])
+        if bring_to_front:
+            failed = next((r for r in body.get("results", []) if r.get("error") or r.get("ok") is False), None)
+            if failed:
+                return self._error(action, f"{failed.get('error') or 'The action failed.'} Capture before continuing; earlier steps may have run.", failed.get("code"))
         held = tree["notes"] if tree else []
         parts, effect = [f"{action} sent to {self._app}."], None
         if self._os in _STABLE_REFS:
@@ -641,7 +676,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 parts.append("The element list is updated, so no capture is needed to read the result.")
                 parts += [f"Changed: {_listed(changed)}." if changed else "", f"Gone: {_listed(gone)}." if gone else ""]
                 # A ticking clock elsewhere also changes: only a change at or near the target confirms the action.
-                if any(e.get("ref") == step.get("ref") or _near(e, box) for _, e in changed + gone):
+                if any(e.get("ref") == target_ref or _near(e, box) for _, e in changed + gone):
                     effect = "confirmed"
         else:
             appeared, vanished = self._diff(body)
@@ -650,11 +685,12 @@ class AlansWayComputerBackend(ComputerUseBackend):
                           "Element numbers here follow position and may now point at other controls: capture before acting by number."]
         if body.get("unchanged"):
             parts.append("The app's element tree did not change. If the effect only shows in pixels, capture(mode='vision') to check before retrying.")
-        parts += [*(n for n in _tree_notes(body) if n not in held), *texts[1:]]
+        steps = [_ours(r["note"]) for r in body.get("results", []) if isinstance(r, dict) and isinstance(r.get("note"), str)]
+        parts += [*steps, *(n for n in _tree_notes(body) if n not in held and n not in steps), *texts[1:]]
         return ActionResult(ok=True, action=action, message=" ".join(p for p in parts if p), effect=effect,
                             meta={k: v for k, v in (("host", host), ("generation", body.get("generation"))) if v is not None})
 
-    def _by_element_or_point(self, action, step, element, x, y):
+    def _by_element_or_point(self, action, step, element, x, y, *, bring_to_front=False):
         if self._pid is None:
             return self._no_target(action)
         if element is not None:
@@ -664,9 +700,9 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 return self._fail(action, "no_such_element", f"Element {element} " + (
                     "disappeared after an earlier action. Use a number from the latest list, or capture again." if gone
                     else "is not in the last capture. Capture again."))
-            return self._run(action, {**step, "ref": e["ref"]})
+            return self._run(action, {**step, "ref": e["ref"]}, bring_to_front=bring_to_front)
         if x is not None and y is not None:
-            return self._run(action, {**step, **self._point(x, y)})
+            return self._run(action, {**step, **self._point(x, y)}, bring_to_front=bring_to_front)
         return self._fail(action, "bad_request", f"{action} needs an element or a coordinate.")
 
     def click(self, *, element=None, x=None, y=None, button="left", click_count=1, modifiers=None, delivery_mode=None, bring_to_front=False):
@@ -676,7 +712,7 @@ class AlansWayComputerBackend(ComputerUseBackend):
         if button == "middle" or click_count not in (1, 2) or (button == "right" and click_count != 1):
             return self._fail(action, "unsupported_action", "Only single left clicks, double clicks and single right clicks are available.")
         verb = action if action != "click" or element is None else "press"
-        return self._by_element_or_point(action, {"action": verb}, element, x, y)
+        return self._by_element_or_point(action, {"action": verb}, element, x, y, bring_to_front=bring_to_front or delivery_mode == "foreground")
 
     def drag(self, *, from_element=None, to_element=None, from_xy=None, to_xy=None, button="left", modifiers=None, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("drag", delivery_mode, bring_to_front, modifiers):
@@ -687,22 +723,22 @@ class AlansWayComputerBackend(ComputerUseBackend):
         end = self._center(to_element) if to_element is not None else self._point(*to_xy) if to_xy else None
         if not start or not end:
             return self._fail("drag", "bad_request", "drag needs two elements that have a position in the last capture, or two coordinates.")
-        return self._run("drag", {"action": "drag", "x": start["x"], "y": start["y"], "x2": end["x"], "y2": end["y"]})
+        return self._run("drag", {"action": "drag", "x": start["x"], "y": start["y"], "x2": end["x"], "y2": end["y"]},
+                         bring_to_front=bring_to_front or delivery_mode == "foreground")
 
     def scroll(self, *, direction, amount=3, element=None, x=None, y=None, modifiers=None, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("scroll", delivery_mode, bring_to_front, modifiers):
             return bad
         step = {"action": "scroll", "direction": direction, "amount": round(min(max(amount * PAGES_PER_TICK, 0.1), 10), 2)}
         if element is None and (x is None or y is None):
-            return self._run("scroll", step)
-        return self._by_element_or_point("scroll", step, element, x, y)
+            return self._run("scroll", step, bring_to_front=bring_to_front or delivery_mode == "foreground")
+        return self._by_element_or_point("scroll", step, element, x, y, bring_to_front=bring_to_front or delivery_mode == "foreground")
 
-    # A VM desktop the agent owns types at the focused window; a host whose
-    # apps never take focus refuses in its helper and points to set_value.
+    # Hosts without free typing refuse in their helper and point to set_value.
     def type_text(self, text, *, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("type", delivery_mode, bring_to_front):
             return bad
-        result = self._run("type", {"action": "type", "text": text})
+        result = self._run("type", {"action": "type", "text": text}, bring_to_front=bring_to_front or delivery_mode == "foreground")
         if not result.ok and "needs a ref" in (result.message or ""):
             return self._fail("type", result.code, result.message + " Use set_value(element=<field number>, value=<text>) to replace a field's text, or key for shortcuts.")
         return result
@@ -710,23 +746,65 @@ class AlansWayComputerBackend(ComputerUseBackend):
     def set_value(self, value, element=None):
         if element is None:
             return self._fail("set_value", "unsupported_action", "set_value needs an element number.")
+        in_dialog = self._tree and any(e and e.get("name", "").startswith(("Save As:", "Where:")) for e in self._tree["els"])
+        if in_dialog and isinstance(value, str) and value.startswith(("/", "~/")) and "/" in value.strip("/"):
+            return self._fail("set_value", "bad_request", "That is a save dialog's name field: a path there becomes part of the file name. "
+                              "Press cmd+shift+g, type the folder path, press return, then set the bare file name and press return.")
         return self._by_element_or_point("set_value", {"action": "type", "text": value}, element, None, None)
 
     def key(self, keys, *, delivery_mode=None, bring_to_front=False):
         if bad := self._limits("key", delivery_mode, bring_to_front):
             return bad
-        return self._run("key", {"action": "hotkey", "keys": keys} if "+" in keys and len(keys) > 1 else {"action": "key", "key": keys})
+        result = self._run("key", {"action": "hotkey", "keys": keys} if "+" in keys and len(keys) > 1 else {"action": "key", "key": keys},
+                           bring_to_front=bring_to_front or delivery_mode == "foreground")
+        if getattr(result, "ok", False) and "cmd+" in keys.lower():
+            # App shortcuts open and close windows (Open panels, Go to Folder); read whichever window has focus next.
+            self._window_id, self._tree = None, None
+        return result
+
+    def _open_path(self, path):
+        """Open a document or folder by absolute path in its app; returns (pid, app name)."""
+        _, status, _ = self._read("cua_alans_way_status", {}, self._host)
+        capabilities = _json(status[0] if status else "").get("capabilities")
+        if not isinstance(capabilities, list) or "computer-open-v1" not in capabilities:
+            raise LookupError("This computer cannot open files by path; open the app with focus_app and use its Open dialog.")
+        args = {"path": path}
+        if self._host:
+            args["expect_host"] = "vm" if self._host in ("vps", "vm") else "computer"
+        _, texts, _ = self._read("workspace_computer_launch", args, self._host)
+        body = _json(texts[0] if texts else "")
+        if type(body.get("pid")) is not int or body["pid"] <= 0:
+            raise LookupError(f"Could not open {path!r}.")
+        shown = body.get("windowId")
+        self._opened_window = shown if type(shown) is int and 1 <= shown <= 0xffffffff else None
+        return body["pid"], body.get("bundleId") or path.rsplit("/", 1)[-1]
 
     def focus_app(self, app, raise_window=False):
+        self._opened_window = None
         try:
-            pid, name = self._resolve(app)
+            # An absolute path opens that document or folder in its app, skipping the Open dialog.
+            pid, name = self._open_path(app) if isinstance(app, str) and app.startswith("/") else self._resolve(app, launch=True)
         except LookupError as e:
             return self._fail("focus_app", "not_found", str(e))
         except RuntimeError as e:
             return self._fail("focus_app", "unavailable", str(e))
+        except _ToolError as e:
+            return self._error("focus_app", str(e), e.code)
+        except _Unavailable as e:
+            return self._fail("focus_app", "unavailable", str(e))
+        except _Dead as e:
+            self._reset()
+            return self._fail("focus_app", "host_changed", f"{e}. Call list_apps and capture again before continuing.")
         self._target(pid, name)
-        return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Alan's Way never raises or focuses windows; "
-                            "input is delivered in the background.")
+        if self._opened_window is not None:
+            # Read the window that shows the opened item, not another window of the same app.
+            self._window_id, self._tree = self._opened_window, None
+        if raise_window:
+            # Raising is about the app: a held window may be gone after a dialog opened or closed.
+            if self._opened_window is None:
+                self._window_id, self._tree = None, None
+            return self._run("focus_app", {"action": "activate"})
+        return ActionResult(ok=True, action="focus_app", message=f"Targeting {name} (pid {pid}). Capture before acting.")
 
 
 def _snapshot_valid(body, tree):
@@ -749,8 +827,15 @@ def _snapshot_valid(body, tree):
             and not set(refs).intersection(removed) and set(removed) <= known)
 
 
+def _ours(text):
+    # The app names its raw activate step; this tool's way to raise a window is focus_app.
+    return text.replace("with activate", "with focus_app with raise_window=true").replace(
+        "Bring that window forward when you are idle", "Bring it forward with focus_app with raise_window=true")
+
+
 def _coded(text, code=None):
     """(code, message with the next step) for an error text the router passed through."""
+    text = _ours(text)
     m = re.match(r"([a-z_]+): (.*)", text, re.S)
     if code:
         message = m.group(2) if m and m.group(1) == code else text
@@ -811,7 +896,7 @@ def _listed(pairs_or_els):
 
 def _tree_notes(body):
     """The app's own words about a tree: why it is empty, what is scrolled away, whether it was cut."""
-    notes = [body["note"]] if isinstance(body.get("note"), str) and body["note"] else []
+    notes = [_ours(body["note"])] if isinstance(body.get("note"), str) and body["note"] else []
     if isinstance(body.get("hidden"), int) and body["hidden"] > 0:
         notes.append(f"{body['hidden']} more controls are scrolled out of view; scroll to reach them.")
     if body.get("truncated"):
@@ -826,7 +911,7 @@ def _label(e):
 
 class AlansWayComputerProvider(ComputerUseProvider):
     name = NAME
-    display_name = "Alan's Way (your computer, VM desktop as fallback)"
+    display_name = "Alan's Way native app control through Alan's Workspace (VM fallback)"
 
     def create_backend(self, *, permission_mode):
         return AlansWayComputerBackend(permission_mode)

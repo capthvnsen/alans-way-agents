@@ -336,13 +336,13 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 // Desktop input is ungated at the MCP layer (this server carries no trust
-// key), so workspace_computer_action is hidden from tools/list and refused
+// key), so desktop action and launch tools are hidden from tools/list and refused
 // unless the operator opted in: setup-workspace.sh --allow-desktop-actions
 // writes HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS into the managed block, and
 // the alans-way-computer provider sets it on its own private router child
 // (Hermes's computer_use approval gate sits above that path). The read-only
 // computer tools above stay exposed either way.
-const DESKTOP_INPUT_TOOL = 'workspace_computer_action';
+const DESKTOP_INPUT_TOOLS = new Set(['workspace_computer_action', 'workspace_computer_launch']);
 const desktopActionsAllowed = !['', '0', 'false', 'no'].includes(
   (process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '').trim().toLowerCase());
 
@@ -885,14 +885,17 @@ function workspaceMeta(host, mac, ms, tabIdChanged) {
 
 // Older connectors still declare open's `host` as Ignored; the router routes
 // it now, so the advertised schema says what it does. open's description also
-// carries the search routing: the tool list is in every turn, the skill is not.
+// carries routing guidance: the tool list is in every turn, the skill is not.
 const SEARCH_ROUTING = 'For a plain lookup, use web_search or web_extract when you have them instead of opening a search engine page. '
   + 'When a search needs the real page, omit host so it runs on the user\'s computer: the VM browser meets far more CAPTCHAs. '
   + 'Never solve a CAPTCHA: release the tab with reason captcha and ask the user.';
-function rewriteOpenHost(result) {
+function rewriteToolRouting(result) {
   const tools = result && result.tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
+    if (tool && READ_ONLY_TOOLS.has(tool.name) && tool.name.startsWith('workspace_computer_')) {
+      tool.description = `${tool.description ? `${tool.description} ` : ''}Native input uses the stock computer_use tool (backend alans-way-computer), Alan's Way's own Mac control through Alan's Workspace, with VM fallback when the computer is unreachable.`;
+    }
     if (!tool || tool.name !== 'cua_alans_way_open') continue;
     tool.description = tool.description ? `${tool.description} ${SEARCH_ROUTING}` : SEARCH_ROUTING;
     const props = tool.inputSchema && tool.inputSchema.properties;
@@ -1050,7 +1053,7 @@ function cleanCommit(commit) {
 // and structuredContent are agent-visible in ordinary Hermes clients, so the
 // proof stays in tabPages; it is never moved into another outbound field.
 function projectWorkspaceReply(result, req) {
-  if (!req || req.method !== 'tools/call' || !['cua_alans_way_snapshot', 'cua_alans_way_action'].includes(req.name)
+  if (!req || req.method !== 'tools/call' || !['cua_alans_way_open', 'cua_alans_way_snapshot', 'cua_alans_way_action'].includes(req.name)
       || !result || result.isError || !Array.isArray(result.content)) return;
   const part = result.content.find(p => p && p.type === 'text');
   if (!part || typeof part.text !== 'string' || !part.text.includes('"approvalContext"')) return;
@@ -1058,7 +1061,9 @@ function projectWorkspaceReply(result, req) {
   try { data = JSON.parse(part.text); } catch { return; }
   // Recognize the workspace page envelope, never a page's eval/CDP value or
   // arbitrary JSON whose business keys happen to have the same spelling.
-  if (!data || Array.isArray(data) || typeof data.tab?.id !== 'string' || !Number.isInteger(data.generation)) return;
+  const observed = req.name === 'cua_alans_way_open' ? data?.observation : data;
+  if (!observed || Array.isArray(observed) || typeof observed.tab?.id !== 'string' || !Number.isInteger(observed.generation)) return;
+  if (req.name === 'cua_alans_way_open' && observed.tab.id !== data.id) return;
   const projectPage = (page) => {
     const context = page?.approvalContext;
     // Future proof versions and older hosts retain their original replies.
@@ -1072,7 +1077,7 @@ function projectWorkspaceReply(result, req) {
     }
     return true;
   };
-  if (!projectPage(data)) return;
+  if (!projectPage(observed)) return;
   // Older hosts may include page observations in successful batch step
   // envelopes. Never descend into value, effect, errors, or nested user JSON.
   if (req.name === 'cua_alans_way_action' && Array.isArray(data.results)) {
@@ -1091,7 +1096,7 @@ function projectWorkspaceReply(result, req) {
 function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotId, req) {
   if (!msg || typeof msg !== 'object' || !msg.result || typeof msg.result !== 'object') return msg;
   projectWorkspaceReply(msg.result, req);
-  rewriteOpenHost(msg.result);
+  rewriteToolRouting(msg.result);
   rewriteTabDefaults(msg.result);
   addCommitParam(msg.result);
   // The app lists owners and grants, but a new conversation may not know
@@ -1108,7 +1113,7 @@ function annotateResult(msg, host, mac, notice, ms, tabIdChanged, requestingBotI
     });
   }
   if (!desktopActionsAllowed && Array.isArray(msg.result.tools)) {
-    msg.result.tools = msg.result.tools.filter((tool) => !tool || tool.name !== DESKTOP_INPUT_TOOL);
+    msg.result.tools = msg.result.tools.filter((tool) => !tool || !DESKTOP_INPUT_TOOLS.has(tool.name));
   }
   msg.result._meta = { ...(msg.result._meta || {}), workspace: workspaceMeta(host, mac, ms, tabIdChanged) };
   if (notice && Array.isArray(msg.result.content)) {
@@ -1374,11 +1379,8 @@ async function main() {
   // that window costs ~a second instead. A missing response does not prove
   // an action was refused: only reads and calls never written may replay.
   //
-  // A backend that already answered and then drops (host asleep, network
-  // gone, app quit, a call stuck past its deadline) fails over in-process
-  // instead of waiting for Hermes to respawn the router: reads in flight are
-  // replayed on the VPS backend, actions in flight are NOT (they may have
-  // happened) and answer with an error naming where to continue.
+  // A dropped connector gets one warm reconnect while mac-watch is online.
+  // Otherwise fail over in-process; actions in flight are never replayed.
   let activeChild = null;
   let activeHost = null;
   let provedAlive = false;
@@ -1387,6 +1389,7 @@ async function main() {
     ? macSeen && macSeen.state === 'offline' ? 'watcher_offline' : 'probe_failed'
     : null;
   let macRetried = false;
+  let lastMacReconnectAt = -Infinity;
   let shuttingDown = false;
   // Terminal shutdown owns every connector, including a superseded child
   // whose close event has not arrived yet. EOF drains existing requests for
@@ -1519,9 +1522,11 @@ async function main() {
   }
 
   // Killing the connector cannot undo an action it already received.
-  function retryMacBackend() {
+  function retryMacBackend(reason) {
     if (activeHost !== 'mac' || !activeChild || fellBack || shuttingDown) return;
     macRetried = true;
+    provedAlive = false;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     const old = activeChild;
     superseded.add(old);
     try { old.kill('SIGKILL'); } catch { /* already gone */ }
@@ -1530,11 +1535,15 @@ async function main() {
       if (req.cancelled) answerCancelled(req);
       else if (req.sent && req.method === 'tools/call' && !READ_ONLY_TOOLS.has(req.name)) failCall(req, COMMIT_LOST);
     }
-    process.stderr.write(
+    if (reason) {
+      lastMacReconnectAt = Date.now();
+      process.stderr.write(`workspace-router: ${reason} — reconnecting to ${hostName}\n`);
+    } else process.stderr.write(
       `workspace-router: ${hostName} backend silent ${MAC_WATCHDOG_MS}ms after initialize; mac-watch reports it online — retrying the spawn\n`,
     );
     startMacBackend();
-    for (const line of [...bufferedStdin]) writeToChild(line);
+    if (reason) replayHandshake(activeChild, [...pendingRequests.values()].filter(req => req.via !== 'vm' && !req.awaitingApproval));
+    else for (const line of [...bufferedStdin]) writeToChild(line);
     armWatchdog(MAC_RETRY_MS);
   }
 
@@ -1763,6 +1772,12 @@ async function main() {
         }
         msg.params._meta = { ...msg.params._meta, 'alans-way/remainingMs': remainingMs };
         line = JSON.stringify(msg);
+        if (child === activeChild && activeHost === 'mac') {
+          const args = msg.params.arguments || {};
+          for (const target of [args, ...(Array.isArray(args.steps) ? args.steps : [])]) {
+            if (typeof target?.tabId === 'string' && !vmTabs.has(target.tabId)) macTabIds.add(target.tabId);
+          }
+        }
       }
       if (child && child.exitCode === null && child.stdin.writable) {
         // Handing bytes to the pipe never proves refusal or completion.
@@ -1818,16 +1833,27 @@ async function main() {
   function logServed(req, host) {
     // Only fixed tool names and routing facts may reach this diagnostic.
     if (!req || req.method !== 'tools/call'
-        || !/^cua_alans_way_(status|tabs|open|snapshot|screenshot|action|close|recordings)$/.test(req.name)) return;
+        || !/^(cua_alans_way_(status|tabs|open|snapshot|screenshot|action|close|recordings)|workspace_computer_(apps|snapshot|screenshot|menu|action|launch))$/.test(req.name)) return;
     const requested = normalizeHost(JSON.parse(req.line).params.arguments?.host);
     const fallback = host === 'vm' && macSsh && req.via !== 'vm' && requested !== 'vm';
-    process.stderr.write(`workspace-router: served ${JSON.stringify({
+    const line = `workspace-router: served ${JSON.stringify({
+      requestId: typeof req.id === 'number' ? req.id : crypto.createHash('sha256').update(String(req.id)).digest('hex').slice(0, 16),
       tool: req.name,
       host,
       selection: fallback ? 'fallback' : requested ? 'requested' : 'defaulted',
       reason: fallback ? fallbackReason : null,
       elapsedMs: Date.now() - req.acceptedAt,
-    })}\n`);
+    })}\n`;
+    process.stderr.write(line);
+    // MCP clients may capture stderr without forwarding it to the profile log.
+    const home = process.env.HERMES_HOME || path.join(process.env.LOCALAPPDATA || os.homedir(), process.platform === 'win32' ? 'hermes' : '.hermes');
+    try {
+      const dir = path.join(home, 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, 'workspace-router.log'), line, { mode: 0o600 });
+    } catch {
+      process.stderr.write('workspace-router: could not write profile serving log\n');
+    }
   }
 
   function emitToolError(id, text, note = annotate) {
@@ -1974,6 +2000,7 @@ async function main() {
   // invented or bumped: a stale one still fails at the backend after a human
   // takeover instead of being silently repaired.
   const knownTabs = new Map(); // tabId -> { backend: 'computer'|'vm', epoch?: number }
+  const macTabIds = new Set(); // Retain affinity even when an uncertain action is removed from pending calls.
   let currentTabId = '';
   const CURRENT_TAB_TOOLS = new Set([
     'cua_alans_way_open',
@@ -2211,6 +2238,10 @@ async function main() {
     const used = (data && data.tab && data.tab.id) || (data && data.id) || (data && data.continuedTab) || argsTabId(req);
     if (typeof used === 'string' && TAB_ID.test(used)) {
       noteKnownTab(used, undefined, backend);
+      if (req.name === 'cua_alans_way_open' && data?.observation?.tab?.id === used) {
+        data = data.observation;
+        learnTabData(data, backend);
+      }
       learnTabPage(used, data, actedRefs(req));
       currentTabId = used;
     }
@@ -2578,7 +2609,7 @@ async function main() {
                 && (!row || targetName(control.row).includes(row));
             });
             if (moved || !page || !page.full || matches.length !== 1) {
-              found.unbound = found.unbound || `the name "${name}"${role ? ` with role "${cardText(role, 30)}"` : ''} cannot be bound to one current observed control. Take a complete snapshot and use its ref`;
+              found.unbound = found.unbound || `the name "${name}"${role ? ` with role "${cardText(role, 30)}"` : ''} cannot be bound to one current observed control`;
             } else if (follows) actionHref(matches[0][0]);
           }
         } else if (typeof end.selector === 'string' && end.selector) {
@@ -2691,11 +2722,8 @@ async function main() {
         ? `challenge_present: this page shows a ${kind} challenge and bots never solve one. It did not run. Release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can; it comes back to you once the challenge clears.`
         : `challenge_present: this page shows a ${kind} challenge and this connector cannot tell whether ${targets.blind} would land on it; bots never solve one. It did not run. Act on the page's other controls by ref or name, or, if the challenge must be solved to go on, release the tab with reason "captcha" (control: controller "human", reason "captcha") so the person can.`);
     }
-    if (targets.unseen) {
-      return refuse(`snapshot_required: ${targets.unseen}. It did not run. Take a snapshot and use its refs, or target the control by name.`);
-    }
-    if (targets.unbound) {
-      return refuse(`snapshot_required: ${targets.unbound}. It did not run.`);
+    if (targets.unseen || targets.unbound) {
+      return refuse(`snapshot_required: ${targets.unseen || targets.unbound}. It did not run. Take a snapshot without a small maxElements limit (raise it up to 300 if controls are cut off), then use an observed ref or the control's exact name.`);
     }
     if (args.commit === undefined && !targets.commits.length) {
       return refuse(`snapshot_required: ${targets.unread}, or pass commit so the user can approve it. It did not run.`);
@@ -2923,16 +2951,22 @@ async function main() {
       const req = pendingRequests.get(msg.id);
       if (req) req.line = out;
     }
-    if (!desktopActionsAllowed && msg.params && msg.params.name === DESKTOP_INPUT_TOOL) {
+    if (!desktopActionsAllowed && msg.params && DESKTOP_INPUT_TOOLS.has(msg.params.name)) {
       pendingRequests.delete(msg.id);
       unbuffer(line);
       emitToolError(
         msg.id,
-        'workspace_computer_action is not exposed by this server. Desktop input goes through the approval-gated computer_use tool.',
+        'Desktop input is not exposed by this server. Use the approval-gated computer_use tool.',
       );
       return null;
     }
     const args = (msg.params && msg.params.arguments) || {};
+    if (activeHost === 'vps' && [args, ...(Array.isArray(args.steps) ? args.steps : [])].some(target =>
+      typeof target?.tabId === 'string' && (macTabIds.has(target.tabId) || knownTabs.get(target.tabId)?.backend === 'computer'))) {
+      const req = pendingRequests.get(msg.id);
+      if (req) failCall(req, `The ${hostName} connection dropped. This tab is on your ${hostName}, so it cannot be read or changed in the VM browser. Wait for the connection or reopen the page in the VM browser.`);
+      return null;
+    }
     const host = normalizeHost(args.host);
     if (host === undefined && typeof args.host === 'string' && args.host.trim()) {
       pendingRequests.delete(msg.id);
@@ -2943,7 +2977,7 @@ async function main() {
     const wantsVm = host === 'vm'
       || (typeof args.tabId === 'string' && vmTabs.has(args.tabId))
       || (Array.isArray(args.steps) && args.steps.some((step) => step && vmTabs.has(step.tabId)));
-    if (msg.params?.name === DESKTOP_INPUT_TOOL && args.expect_host !== undefined) {
+    if (DESKTOP_INPUT_TOOLS.has(msg.params?.name) && args.expect_host !== undefined) {
       const targetHost = host || (wantsVm || activeHost === 'vps' ? 'vm' : 'computer');
       const invalid = !['computer', 'vm'].includes(args.expect_host);
       if (invalid || args.expect_host !== targetHost) {
@@ -2998,6 +3032,9 @@ async function main() {
         if (c !== activeChild) return;
         if (!validBackendFrame(line, false)) return;
         touchActivity();
+        provedAlive = true;
+        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+        bufferedStdin.length = 0;
         if (swallowLine(line)) return;
         if (deadReplyLine(line)) return;
         if (host === 'mac') {
@@ -3019,9 +3056,6 @@ async function main() {
         if (mergeMacLine(line, callMs)) return;
         learnVmTabs(line, false);
         learnTabUse(line, seenReq, host === 'mac' ? 'computer' : 'vm');
-        provedAlive = true;
-        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-        bufferedStdin.length = 0;
         let out;
         try {
           out = annotate(line, callMs, seenReq);
@@ -3045,10 +3079,16 @@ async function main() {
       if (superseded.has(c)) return;
       if (c !== activeChild) return;
       if (host === 'mac' && !shuttingDown) {
+        const reason = `${hostName} backend exited (${code === null ? sig : code})`;
+        const mac = freshMacState(macStateFile);
+        if (provedAlive && Date.now() - lastMacReconnectAt >= 60000 && mac && mac.state === 'online') {
+          retryMacBackend(reason);
+          return;
+        }
         // Spawn can emit error and exit for the same death; failOver only
         // acts once.
         failOver(provedAlive
-          ? `${hostName} backend exited (${code === null ? sig : code})`
+          ? reason
           : `${hostName} backend died before its first response`);
         return;
       }

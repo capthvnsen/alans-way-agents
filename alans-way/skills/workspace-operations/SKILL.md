@@ -1,6 +1,6 @@
 ---
 name: workspace-operations
-description: Use whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
+description: Use for native Mac app tasks with stock computer_use (backend alans-way-computer), or whenever a task needs a real browser: sites or web apps with no API, logged-in pages, forms, visual verification, or a link worth opening. Also use for installed versions of Hermes, the plugin, Alan's Tools or Alan's Workspace. Covers VPS desktop control, computer/VM browser handoff, human takeover, and sharing a tab with another bot.
 ---
 
 # Workspace operations
@@ -181,7 +181,7 @@ usually a Mac, so this skill says "Mac", but it can be a Windows or Linux PC
 instead, and every rule below is identical either way. (Likewise "VPS" is
 Hermes' own computer, which can be a Linux VPS or a macOS virtual machine.)
 All web work goes through the `cua_alans_way_*` tools, never another browser
-tool (browser_exec, computer-use drivers), and never opening a URL in the
+tool such as browser_exec, and never opening a URL in the
 human's personal browser via terminal/`open`. Never call the app's HTTP API
 yourself (curl or a script with its `connection.json` token, locally or over
 SSH): those tabs carry another bot id, and the tools refuse them afterwards.
@@ -225,20 +225,35 @@ read with
 `mcp__workspace_browser__workspace_computer_snapshot`,
 `mcp__workspace_browser__workspace_computer_menu` and
 `mcp__workspace_browser__workspace_computer_screenshot`, and acted on
-with the `computer_use` tool, which asks the user for approval on each
-action. Press a ref from the accessibility
-tree, leave the focused window alone, and do not move the pointer.
+with the `computer_use` tool. Approvals follow the user's Hermes settings;
+honor that gate without adding a separate chat approval for each action.
+Press a ref from the accessibility tree and do not move the human's cursor.
 
 **Where to act.** A web page is `cua_alans_way_*` work, following the host
-policy above. A native app is `computer_use` work; `workspace_computer_apps` says which
+policy above. A native app is `computer_use` work. With backend `alans-way-computer`,
+this stock tool drives the user's Mac through Alan's Workspace.
+`workspace_computer_apps` says which
 machine answers (`host`: `mac`, `windows` or `linux` is the user's computer,
-`vps` is the VM desktop). If the app is in front, on another Space, or the
-screen is locked, the error or capture note says so: ask the user instead of
-working around it.
+`vps` is the VM desktop). When the user asks for a task in an app,
+bringing that app forward is part of the task; use `focus_app` to launch a
+named app if it is not running. On Mac, the target app may be read in front
+and driven or raised when the user has been idle for at least 2 seconds.
+For `in_front`, wait a few seconds and retry once, then tell the user briefly
+if it still refuses. Do not ask for permission to use the front window.
+If the app is on another Space or minimized, the error or capture note says
+so: bring it forward with `focus_app` (`raise_window: true`) and capture again.
+If the screen is locked, ask the user instead of working around it. Other hosts keep
+their own foreground restrictions.
+On a Mac with no window open, `key` `cmd+n` or `cmd+o` opens one. `type` without
+an element types into the focused field, such as a rename box the capture
+does not list. In an Open or Save dialog, never put a path in the name field:
+press `cmd+shift+g`, type the folder path, press `return`, then type the bare
+file name and press `return`. Before reporting done, confirm the saved path or
+the new name in a fresh capture.
 
 For a Linux window the snapshot cannot name, `workspace_computer_screenshot`
 is one small jpeg of that window. Read [VPS desktop operations](references/vps-desktop.md)
-for that boundary. Do not use an external computer-use driver.
+for that boundary. For native input, use this profile's configured `computer_use` tool.
 
 ## The connector layer self-heals; never operate on it
 
@@ -475,6 +490,21 @@ ignore that CAPTCHA. This is a change of source, not a browser failure: say
 in your reply which source you used. If no other source can answer, ask the
 user how to go on.
 
+## Sign-in handback
+
+When sign-in or 2FA needs the user, including when the user only asks you to open a sign-in page,
+open and inspect the tab, then call `cua_alans_way_action` with its tab id and current epoch,
+`action:"release"`, `reason:"login"` (or `reason:"two_factor"`), and a short `note`
+naming the site and what the user needs to do. Confirm the reply marks it
+`awaiting_human` before saying it is ready; report a failed release plainly.
+Opening the page alone does not complete the handback.
+The existing hold shows a banner and notification in Alan's Workspace and keeps
+bot input paused until Give back or the hold expires. Send one short chat message;
+for a VM tab include the handback's `viewerUrl` when returned, otherwise direct
+them to the VM viewer in Alan's Workspace. On `human_returned`, read current
+tab state and a fresh epoch before resuming. Follow the [human-only steps](../web-errands/SKILL.md#the-walls-you-hand-back)
+for other sensitive fields and the [CAPTCHA handback](#when-a-site-shows-a-captcha) for challenges.
+
 ## Hand a task between computers
 
 Control handoff of a Mac tab keeps that same live tab, login and page state on
@@ -511,8 +541,10 @@ takes priority: acquire the fresh state required by the recovery instructions.
 A screenshot is only for a canvas, a chart, or a page the snapshot says it could not read.
 Never screenshot a page you can already read as text.
 
-Desktop apps, on the Mac and on the Linux machine, are driven by the
-`computer_use` tool. Hermes asks the user for approval before each action;
+Desktop apps, on the Mac and on the Linux machine, are driven by the stock
+`computer_use` tool with backend `alans-way-computer`: Alan's Way's own native
+app control. It drives the user's Mac through Alan's Workspace, using the VM
+desktop when that computer is unreachable. Hermes applies the user's configured approvals;
 that approval gate is the only desktop-input path, so never look for a way
 around it. `computer_use` `list_apps` names the running apps; `capture` with
 `app` returns one app's numbered element list, with a small window
@@ -524,7 +556,7 @@ successful action reply lists current changes or unchanged state, so use that
 observation instead of capturing it again. Recovery from an uncertain action
 or missing current state needs a fresh capture before deciding on more input;
 on Linux (the VM desktop or a Linux computer), capture before acting by number again. `set_value` replaces a field's text; free typing with no target
-element is not available because nothing takes focus. A stale element
+element depends on the host's support; prefer a named field. A stale element
 number comes back `stale_ref`, and a switch between the computer and the VM
 comes back `host_changed`: `list_apps` and `capture` again. To look without
 acting, `workspace_computer_apps`, `workspace_computer_snapshot`,
@@ -532,7 +564,7 @@ acting, `workspace_computer_apps`, `workspace_computer_snapshot`,
 desktop directly. If `computer_use` is not loaded at all, this Hermes has no
 approval-gated desktop path: report that and stop; do not improvise one.
 These calls do not move the
-human's cursor. Skip the focused window, Keychain, and password fields. Do not open
+human's cursor. Skip Keychain, password managers and password fields. Do not open
 a browser tab to do a native app's job, and do not drive a native app to do
 a website's job.
 
