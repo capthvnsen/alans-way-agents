@@ -1,5 +1,5 @@
 name: alans-way-computer
-version: "0.21.8"
+version: "0.21.9"
 description: "The stock computer_use tool with backend alans-way-computer is Alan's Way's native Mac app control through Alan's Workspace. It drives the user's computer, with the VM desktop as fallback when that computer is offline. Needs the alans-way plugin's workspace_browser block."
 author: "capthvnsen, Hermes Agent"
 license: MIT
