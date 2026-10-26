@@ -327,8 +327,16 @@ class AlansWayComputerBackend(ComputerUseBackend):
         for attempt in (0, 1):
             try:
                 deadline = time.monotonic() + 30
+                busy = None
                 while True:
-                    result = self._router.call(name, args, CALL_TIMEOUT)
+                    timeout = CALL_TIMEOUT
+                    if busy is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            holder = re.search(r"The Mac is being used by (.+?)(?:[.;](?:\s|$)|$)", str(busy))
+                            raise _ToolError(f"The Mac is busy with {holder[1] if holder else 'another agent'}", "desktop_busy") from busy
+                        timeout = min(timeout, remaining)
+                    result = self._router.call(name, args, timeout)
                     if name not in {"workspace_computer_launch", "workspace_computer_menu", "workspace_computer_action"}:
                         return result
                     try:
@@ -337,10 +345,8 @@ class AlansWayComputerBackend(ComputerUseBackend):
                         text = str(e)
                         if "desktop_busy" not in text and "The Mac is being used by" not in text:
                             return result
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            holder = re.search(r"The Mac is being used by (.+?)(?:[.;](?:\s|$)|$)", text)
-                            raise _ToolError(f"The Mac is busy with {holder[1] if holder else 'another agent'}", "desktop_busy") from e
+                        busy = e
+                        remaining = max(0, deadline - time.monotonic())
                         after = re.search(r"(?:retry[-_ ]after[\s:=]*|(?:retry|try again) in\s+)(\d+(?:\.\d+)?)", text, re.I)
                         time.sleep(min(max(float(after[1]), 0.1) if after else 2, remaining))
                         continue

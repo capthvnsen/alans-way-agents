@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -102,6 +103,41 @@ class RemoteAgentTests(unittest.TestCase):
         self.assertTrue((self.home / ".ssh/alans-way-remote-agent-one").exists())
         self.run_setup("--bot-id", "one", "--remove")
 
+    def test_concurrent_installs_preserve_all_twelve_bots(self):
+        # Widen the stale-read window so an unlocked read/replace reliably loses entries.
+        (self.home / "sitecustomize.py").write_text('''from pathlib import Path
+import time
+read_bytes = Path.read_bytes
+def slow_read(path):
+    data = read_bytes(path)
+    if path.name == "authorized_keys":
+        time.sleep(0.2)
+    return data
+Path.read_bytes = slow_read
+''')
+        env = dict(self.env, PYTHONPATH=str(self.home))
+        processes = []
+        try:
+            for i in range(12):
+                processes.append(subprocess.Popen(["sh", str(SCRIPT), "--bot-id", f"b{i}"],
+                                 env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 start_new_session=True))
+            for proc in processes:
+                stdout, stderr = proc.communicate(timeout=15)
+                self.assertEqual(proc.returncode, 0, stderr + stdout)
+        finally:
+            for proc in processes:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.communicate()
+        rows = self.authorized.read_text().splitlines()
+        self.assertEqual({row.split()[-1] for row in rows[2:]},
+                         {f"alans-way-remote-agent:b{i}" for i in range(12)})
+        self.assertTrue(self.authorized.read_text().startswith(self.original))
+        self.assertEqual(self.config.read_text(), self.config_text)
+
     def test_preview_and_remove_preview_do_not_write(self):
         self.run_setup("--bot-id", "one", "--print")
         self.run_setup("--bot-id", "one", "--remove", "--print")
@@ -109,12 +145,13 @@ class RemoteAgentTests(unittest.TestCase):
         self.assertEqual(self.authorized.read_text(), self.original)
 
     def test_bad_ids_names_and_users_are_rejected_without_writes(self):
-        for bot_id in ("", "a" * 65, "a/b", "bad id", "a\nb", 'a"b', "$(id)"):
+        modes = ("-agent", "--watch", "--probe", "--host-timezone-command")
+        for bot_id in ("", "a" * 65, "a/b", "bad id", "a\nb", 'a"b', "$(id)", *modes):
             with self.subTest(bot_id=bot_id):
-                self.assertEqual(self.run_setup("--bot-id", bot_id, check=False).returncode, 2)
-        for name in ('bad"name', "bad'name", "bad\nname", "bad\rname"):
+                self.assertEqual(self.run_setup("--bot-id=" + bot_id, check=False).returncode, 2)
+        for name in ('bad"name', "bad'name", "bad\nname", "bad\rname", *modes):
             with self.subTest(name=name):
-                self.assertEqual(self.run_setup("--bot-id", "one", "--bot-name", name, check=False).returncode, 2)
+                self.assertEqual(self.run_setup("--bot-id", "one", "--bot-name=" + name, check=False).returncode, 2)
         self.assertEqual(self.run_setup("--bot-id", "one", "--user=-root", check=False).returncode, 2)
         self.assertEqual(list(self.authorized.parent.iterdir()), [self.authorized])
 

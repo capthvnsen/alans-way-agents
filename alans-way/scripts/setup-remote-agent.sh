@@ -13,6 +13,8 @@ command -v python3 >/dev/null || { echo "setup-remote-agent: python3 is required
 ROUTER="$(cd "$(dirname "$0")" && pwd)/workspace-router.cjs"
 python3 - "$0" "$ROUTER" "$@" <<'PY'
 import argparse
+from contextlib import contextmanager
+import fcntl
 import getpass
 import json
 import os
@@ -41,12 +43,12 @@ parser.add_argument("--mac-ssh", default="")
 parser.add_argument("--host-os", choices=("mac", "windows", "linux"), default="mac")
 parser.add_argument("--state-file", default="")
 args = parser.parse_args(sys.argv[3:])
-if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.bot_id):
-    parser.error("--bot-id must match [A-Za-z0-9._-]{1,64}")
+if args.bot_id.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.bot_id):
+    parser.error("--bot-id must match [A-Za-z0-9._-]{1,64} and must not begin with '-'")
 if args.bot_name is None:
     args.bot_name = args.bot_id
-if any(c in args.bot_name for c in "\"'\r\n"):
-    parser.error("--bot-name must not contain quotes or newlines")
+if args.bot_name.startswith("-") or any(c in args.bot_name for c in "\"'\r\n"):
+    parser.error("--bot-name must not begin with '-' or contain quotes or newlines")
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", args.user):
     parser.error("invalid --user")
 
@@ -54,6 +56,16 @@ ssh = Path.home() / ".ssh"
 authorized = ssh / "authorized_keys"
 key = ssh / f"alans-way-remote-agent-{args.bot_id}"
 marker = f"alans-way-remote-agent:{args.bot_id}"
+
+
+@contextmanager
+def ssh_lock():
+    ssh.mkdir(mode=0o700, exist_ok=True)
+    ssh.chmod(0o700)
+    # Lock a stable file: authorized_keys itself is atomically replaced below.
+    with (ssh / ".alans-way-remote-agent.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def update_keys(line=None):
@@ -66,8 +78,6 @@ def update_keys(line=None):
         kept = kept + ("\n" if kept and not kept.endswith("\n") else "") + line + "\n"
     if kept == previous:
         return
-    ssh.mkdir(mode=0o700, exist_ok=True)
-    ssh.chmod(0o700)
     if authorized.exists():
         shutil.copy2(authorized, ssh / f"authorized_keys.bak-{time.time_ns()}")
     fd, temporary = tempfile.mkstemp(dir=ssh, prefix=".authorized_keys-")
@@ -82,7 +92,8 @@ def update_keys(line=None):
 
 if args.remove:
     if not args.preview:
-        update_keys()
+        with ssh_lock():
+            update_keys()
     print(f"{'Would remove' if args.preview else 'Removed'} {marker} (private key retained at {key})")
     sys.exit(0)
 
@@ -128,18 +139,17 @@ if not Path(args.router).is_file():
 command = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
 command += " exec " + shlex.join(["node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
 if not args.preview:
-    ssh.mkdir(mode=0o700, exist_ok=True)
-    ssh.chmod(0o700)
-    if not key.exists():
-        if key.with_suffix(key.suffix + ".pub").exists():
-            parser.error(f"private key missing for {key}; move its orphaned .pub file before regenerating")
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", marker, "-f", str(key)], check=True)
-    public = subprocess.check_output(["ssh-keygen", "-y", "-P", "", "-f", str(key)], text=True).split()
-    if public[0] != "ssh-ed25519":
-        parser.error(f"{key} must be an ed25519 key")
-    public = " ".join(public[:2])
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-    update_keys(f'restrict,command="{escaped}" {public} {marker}')
+    with ssh_lock():
+        if not key.exists():
+            if key.with_suffix(key.suffix + ".pub").exists():
+                parser.error(f"private key missing for {key}; move its orphaned .pub file before regenerating")
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", marker, "-f", str(key)], check=True)
+        public = subprocess.check_output(["ssh-keygen", "-y", "-P", "", "-f", str(key)], text=True).split()
+        if public[0] != "ssh-ed25519":
+            parser.error(f"{key} must be an ed25519 key")
+        public = " ".join(public[:2])
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        update_keys(f'restrict,command="{escaped}" {public} {marker}')
 print(json.dumps({"command": "ssh", "args": ["-T", "-i", str(key), "-o", "StrictHostKeyChecking=accept-new",
       "-o", "ServerAliveInterval=30", f"{args.user}@HOST"]}, indent=2))
 print(f"\nForced command:\n{command}")

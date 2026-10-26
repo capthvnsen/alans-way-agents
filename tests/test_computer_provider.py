@@ -561,11 +561,13 @@ class ReplyFoldingTests(unittest.TestCase):
                         "desktop_busy: The Mac is being used by Remote Agent; try again in 3 s."}]}
                 success = {"content": [{"type": "text", "text": '{"ok": true}'}]}
                 with mock.patch.object(be._router, "call", side_effect=[busy, success]) as call, \
-                        mock.patch.object(self.mod.time, "sleep") as sleep:
+                        mock.patch.object(self.mod.time, "sleep") as sleep, \
+                        mock.patch.object(self.mod.time, "monotonic", side_effect=[0, 0, 3]):
                     self.assertIs(be._call(tool, {"app": "Notes"}), success)
                 sleep.assert_called_once_with(3)
                 self.assertEqual(call.call_count, 2)
-                self.assertEqual(call.call_args_list[0], call.call_args_list[1])
+                self.assertEqual(call.call_args_list, [mock.call(tool, {"app": "Notes"}, self.mod.CALL_TIMEOUT),
+                                                      mock.call(tool, {"app": "Notes"}, 27)])
 
     def test_busy_until_cap_returns_a_plain_holder_error(self):
         be = self.backend(["a"])
@@ -583,7 +585,32 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertEqual(result.code, "desktop_busy")
         self.assertEqual(result.message, "The Mac is busy with Remote Agent")
         self.assertEqual(sleep.call_args_list, [mock.call(20), mock.call(10)])
-        self.assertEqual(call.call_count, 3)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual([call.args[2] for call in call.call_args_list], [self.mod.CALL_TIMEOUT, 10])
+
+    def test_busy_retry_rechecks_budget_after_sleep_overshoots(self):
+        be = self.backend([])
+        busy = {"isError": True, "content": [{"type": "text", "text": "desktop_busy"}]}
+        elapsed = [0]
+        def wait(seconds):
+            elapsed[0] += 31
+        with mock.patch.object(be._router, "call", return_value=busy) as call, \
+                mock.patch.object(self.mod.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                mock.patch.object(self.mod.time, "sleep", side_effect=wait), \
+                self.assertRaises(self.mod._ToolError) as error:
+            be._call("workspace_computer_action", {})
+        self.assertEqual(error.exception.code, "desktop_busy")
+        call.assert_called_once_with("workspace_computer_action", {}, self.mod.CALL_TIMEOUT)
+
+    def test_busy_retry_timeout_is_not_replayed(self):
+        be = self.backend([])
+        busy = {"isError": True, "content": [{"type": "text", "text": "desktop_busy"}]}
+        with mock.patch.object(be._router, "call", side_effect=[busy, self.mod._Dead("no answer")]) as call, \
+                mock.patch.object(self.mod.time, "monotonic", side_effect=[0, 0, 2]), \
+                mock.patch.object(self.mod.time, "sleep"), self.assertRaises(self.mod._Dead):
+            be._call("workspace_computer_action", {})
+        self.assertEqual(call.call_args_list, [mock.call("workspace_computer_action", {}, self.mod.CALL_TIMEOUT),
+                                              mock.call("workspace_computer_action", {}, 28)])
 
     def test_busy_defaults_to_two_seconds_without_retry_after(self):
         be = self.backend([])
