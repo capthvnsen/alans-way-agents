@@ -553,6 +553,59 @@ class ReplyFoldingTests(unittest.TestCase):
         be._tree = {"pid": 101, "gen": 1, "els": [{"ref": r, "role": "AXButton", "name": r.upper()} for r in refs], "notes": []}
         return be
 
+    def test_busy_desktop_inputs_wait_for_the_lease_then_succeed(self):
+        for tool in ("workspace_computer_launch", "workspace_computer_menu", "workspace_computer_action"):
+            with self.subTest(tool=tool):
+                be = self.backend([])
+                busy = {"isError": True, "content": [{"type": "text", "text":
+                        "desktop_busy: The Mac is being used by Remote Agent; try again in 3 s."}]}
+                success = {"content": [{"type": "text", "text": '{"ok": true}'}]}
+                with mock.patch.object(be._router, "call", side_effect=[busy, success]) as call, \
+                        mock.patch.object(self.mod.time, "sleep") as sleep:
+                    self.assertIs(be._call(tool, {"app": "Notes"}), success)
+                sleep.assert_called_once_with(3)
+                self.assertEqual(call.call_count, 2)
+                self.assertEqual(call.call_args_list[0], call.call_args_list[1])
+
+    def test_busy_until_cap_returns_a_plain_holder_error(self):
+        be = self.backend(["a"])
+        busy = {"isError": True, "content": [{"type": "text", "text":
+                "desktop_busy: The Mac is being used by Remote Agent; try again in 20 s."}]}
+        elapsed = [0]
+        def wait(seconds):
+            elapsed[0] += seconds
+        with mock.patch.object(be._router, "call", return_value=busy) as call, \
+                mock.patch.object(self.mod.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                mock.patch.object(self.mod.time, "sleep", side_effect=wait) as sleep, \
+                mock.patch.object(self.mod, "ActionResult", side_effect=SimpleNamespace):
+            result = be.key("return")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "desktop_busy")
+        self.assertEqual(result.message, "The Mac is busy with Remote Agent")
+        self.assertEqual(sleep.call_args_list, [mock.call(20), mock.call(10)])
+        self.assertEqual(call.call_count, 3)
+
+    def test_busy_defaults_to_two_seconds_without_retry_after(self):
+        be = self.backend([])
+        for text in ("desktop_busy", "The Mac is being used by Remote Agent."):
+            with self.subTest(text=text), \
+                    mock.patch.object(be._router, "call", side_effect=[
+                        {"isError": True, "content": [{"type": "text", "text": text}]}, {"content": []}]), \
+                    mock.patch.object(self.mod.time, "sleep") as sleep:
+                be._call("workspace_computer_action", {})
+                sleep.assert_called_once_with(2)
+
+    def test_busy_reads_and_other_errors_keep_their_existing_behavior(self):
+        be = self.backend([])
+        for tool, text in (("workspace_computer_snapshot", "desktop_busy: The Mac is being used by Remote Agent."),
+                           ("workspace_computer_action", "in_front: The user is using this app.")):
+            result = {"isError": True, "content": [{"type": "text", "text": text}]}
+            with self.subTest(tool=tool), mock.patch.object(be._router, "call", return_value=result) as call, \
+                    mock.patch.object(self.mod.time, "sleep") as sleep:
+                self.assertIs(be._call(tool, {}), result)
+                call.assert_called_once()
+                sleep.assert_not_called()
+
     def test_foreground_requests_reach_the_target_host(self):
         for action in (lambda be: be.click(element=1, delivery_mode="foreground"),
                        lambda be: be.key("return", bring_to_front=True),
