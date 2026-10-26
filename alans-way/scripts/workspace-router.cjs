@@ -894,7 +894,10 @@ function rewriteToolRouting(result) {
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
     if (tool && READ_ONLY_TOOLS.has(tool.name) && tool.name.startsWith('workspace_computer_')) {
-      tool.description = `${tool.description ? `${tool.description} ` : ''}Native input uses the stock computer_use tool (backend alans-way-computer), Alan's Way's own Mac control through Alan's Workspace, with VM fallback when the computer is unreachable.`;
+      const inputGuidance = desktopActionsAllowed
+        ? 'Native input uses workspace_computer_launch and workspace_computer_action; send expect_host from the observation used to choose the target.'
+        : "Native input uses the stock computer_use tool (backend alans-way-computer), Alan's Way's own Mac control through Alan's Workspace, with VM fallback when the computer is unreachable.";
+      tool.description = `${tool.description ? `${tool.description} ` : ''}${inputGuidance}`;
     }
     if (!tool || tool.name !== 'cua_alans_way_open') continue;
     tool.description = tool.description ? `${tool.description} ${SEARCH_ROUTING}` : SEARCH_ROUTING;

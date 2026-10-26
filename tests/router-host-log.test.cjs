@@ -93,14 +93,24 @@ else {
 }
 const serving = c => c.stderr().split('\n').filter(line => line.startsWith('workspace-router: served ')).map(line => JSON.parse(line.slice('workspace-router: served '.length)));
 
-test('native tool discovery points read-only Mac tools to the configured stock input tool', () => {
+for (const enabled of [false, true]) test(`native tool discovery describes ${enabled ? 'raw' : 'stock'} input for desktop actions ${enabled ? 'enabled' : 'disabled'}`, () => {
   const names = ['apps', 'snapshot', 'menu', 'screenshot'].map(name => 'workspace_computer_' + name);
   const tools = [...names, 'workspace_computer_unknown'].map(name => ({ name,
     description: 'Existing read description.', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }));
-  const result = require(router).annotateResult({ result: { tools } }, 'mac', null, null).result;
+  const env = { ...process.env };
+  if (enabled) env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS = '1';
+  else delete env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS;
+  const child = spawnSync(process.execPath, ['-e', `
+    const msg = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+    process.stdout.write(JSON.stringify(require(process.argv[1]).annotateResult(msg, 'mac', null, null).result));
+  `, router], { env, input: JSON.stringify({ result: { tools } }), encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  const guidance = enabled
+    ? 'Native input uses workspace_computer_launch and workspace_computer_action; send expect_host from the observation used to choose the target.'
+    : "Native input uses the stock computer_use tool (backend alans-way-computer), Alan's Way's own Mac control through Alan's Workspace, with VM fallback when the computer is unreachable.";
   for (const tool of result.tools.filter(t => names.includes(t.name))) {
-    for (const identity of ['Existing read description.', 'stock computer_use', 'alans-way-computer', "through Alan's Workspace"])
-      assert.ok(tool.description.includes(identity), tool.description);
+    assert.equal(tool.description, 'Existing read description. ' + guidance);
     assert.deepEqual(tool.inputSchema, { type: 'object' });
     assert.equal(tool.annotations.readOnlyHint, true);
   }
