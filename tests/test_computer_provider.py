@@ -566,8 +566,8 @@ class ReplyFoldingTests(unittest.TestCase):
                     self.assertIs(be._call(tool, {"app": "Notes"}), success)
                 sleep.assert_called_once_with(3)
                 self.assertEqual(call.call_count, 2)
-                self.assertEqual(call.call_args_list, [mock.call(tool, {"app": "Notes"}, self.mod.CALL_TIMEOUT),
-                                                      mock.call(tool, {"app": "Notes"}, 27)])
+                # A retry that gets the lease runs real input, so it keeps the full call timeout.
+                self.assertEqual(call.call_args_list, [mock.call(tool, {"app": "Notes"}, self.mod.CALL_TIMEOUT)] * 2)
 
     def test_busy_until_cap_returns_a_plain_holder_error(self):
         be = self.backend(["a"])
@@ -586,7 +586,7 @@ class ReplyFoldingTests(unittest.TestCase):
         self.assertEqual(result.message, "The Mac is busy with Remote Agent")
         self.assertEqual(sleep.call_args_list, [mock.call(20), mock.call(10)])
         self.assertEqual(call.call_count, 2)
-        self.assertEqual([call.args[2] for call in call.call_args_list], [self.mod.CALL_TIMEOUT, 10])
+        self.assertEqual([call.args[2] for call in call.call_args_list], [self.mod.CALL_TIMEOUT] * 2)
 
     def test_busy_retry_rechecks_budget_after_sleep_overshoots(self):
         be = self.backend([])
@@ -609,8 +609,7 @@ class ReplyFoldingTests(unittest.TestCase):
                 mock.patch.object(self.mod.time, "monotonic", side_effect=[0, 0, 2]), \
                 mock.patch.object(self.mod.time, "sleep"), self.assertRaises(self.mod._Dead):
             be._call("workspace_computer_action", {})
-        self.assertEqual(call.call_args_list, [mock.call("workspace_computer_action", {}, self.mod.CALL_TIMEOUT),
-                                              mock.call("workspace_computer_action", {}, 28)])
+        self.assertEqual(call.call_args_list, [mock.call("workspace_computer_action", {}, self.mod.CALL_TIMEOUT)] * 2)
 
     def test_busy_defaults_to_two_seconds_without_retry_after(self):
         be = self.backend([])

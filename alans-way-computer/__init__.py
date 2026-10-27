@@ -329,14 +329,11 @@ class AlansWayComputerBackend(ComputerUseBackend):
                 deadline = time.monotonic() + 30
                 busy = None
                 while True:
-                    timeout = CALL_TIMEOUT
-                    if busy is not None:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            holder = re.search(r"The Mac is being used by (.+?)(?:[.;](?:\s|$)|$)", str(busy))
-                            raise _ToolError(f"The Mac is busy with {holder[1] if holder else 'another agent'}", "desktop_busy") from busy
-                        timeout = min(timeout, remaining)
-                    result = self._router.call(name, args, timeout)
+                    # The cap bounds waiting only: a retry that gets the lease runs real input and keeps the full timeout.
+                    if busy is not None and deadline - time.monotonic() <= 0:
+                        holder = re.search(r"The Mac is being used by (.+?)(?:[.;](?:\s|$)|$)", str(busy))
+                        raise _ToolError(f"The Mac is busy with {holder[1] if holder else 'another agent'}", "desktop_busy") from busy
+                    result = self._router.call(name, args, CALL_TIMEOUT)
                     if name not in {"workspace_computer_launch", "workspace_computer_menu", "workspace_computer_action"}:
                         return result
                     try:
