@@ -98,7 +98,8 @@ def prepare_repo_source(directory: Path) -> tuple[Path, str]:
         dest = src / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, dest)
-    for args in (["init", "-q"], ["add", "-A"]):
+    # maintenance.auto off: a detached repack would race the temp dir cleanup.
+    for args in (["init", "-q"], ["config", "maintenance.auto", "false"], ["add", "-A"]):
         subprocess.run(["git", "-C", str(src), *args], check=True)
     subprocess.run(
         ["git", "-C", str(src), "-c", "user.email=sim@example.com",

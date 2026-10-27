@@ -57,6 +57,14 @@ browser approval/CAPTCHA/ownership gates remain. This is not universal read-only
 enforcement. Offline files are pruned when an explicitly activated profile starts,
 then every 60 seconds while connected. Dormant profiles perform no store access.
 
+Remote agents: `scripts/setup-remote-agent.sh` runs only when the operator runs
+it. It creates one ed25519 key per bot ID under `~/.ssh` and adds an
+`authorized_keys` line restricted (`restrict,command=...`) to the workspace
+router, backing the file up first; `--remove` deletes only that line. The
+opt-in `scripts/remote-agent-bridge.cjs` serves the same router over HTTP only
+when `ALANS_WAY_REMOTE_BRIDGE=1` and a bearer token are set, and binds to
+loopback or a private address. Neither changes Hermes config or opens a firewall.
+
 ## Reviewed scanner inventory
 
 Previous candidate: `f7de103a3f895f97986f45bfa76e302d31dcbe64`.
@@ -64,7 +72,7 @@ Original plugin baseline: `fb3571cb70b7f65e57a31c328ba14e7662ecff9c`.
 Unmodified upstream scanner: `6e7b83a2f1c093e992a8d838ed77ea320fbd8e51`,
 `tools/plugin_guard.py`, `tools/plugin_guard_context.py`, `tools/skills_guard.py`.
 Stage 2 base: `f6bd48069a45342dff8a42f144b49ee635d59484` (`release/plugin-0.21.7`; includes #114 export/control).
-Paths below are relative to `alans-way/`. Five reviewed matches remain; no scanner
+Paths below are relative to `alans-way/`. Sixteen reviewed matches remain; no scanner
 rule was changed. Queue/receiver and primary check-in dispatch code add no findings.
 LOW findings document the loopback-only forward/check/app examples. The only
 HIGH finding (`python_os_environ` at the former
@@ -79,9 +87,14 @@ the human-run document outside the plugin.
 | `skills/workspace-setup/SKILL.md:408` | `hardcoded_ip_port` | LOW | `-L 127.0.0.1:16080:127.0.0.1:<viewer-port> <vm-user>@<vm-tailnet-host> 'sleep 1800'` | 1 → 1 |
 | `skills/workspace-setup/SKILL.md:414` | `hardcoded_ip_port` | LOW | `curl --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:16080/vnc.html -o /dev/null` | 1 → 1 |
 | `skills/workspace-setup/SKILL.md:417` | `hardcoded_ip_port` | LOW | `http://127.0.0.1:16080/vnc.html` in Remote desktop connection | 1 → 1 |
+| `scripts/setup-remote-agent.sh:37,56,73,82,83` | `ssh_backdoor` | MEDIUM | `authorized_keys` read, backup and atomic replace for the restricted router key | 0 → 5 |
+| `scripts/setup-remote-agent.sh:65` | `ssh_backdoor` | LOW | comment naming `authorized_keys` | 0 → 1 |
+| `scripts/setup-remote-agent.sh:146,147` | `ssh_keygen` | MEDIUM | `ssh-keygen` creating and reading the bot's ed25519 key | 0 → 2 |
+| `scripts/setup-remote-agent.sh:146,147,160` | `python_subprocess` | MEDIUM | `ssh-keygen` calls and the local `--probe` run of the forced command | 0 → 3 |
 
 Verdict: **SAFE**. Current baseline → completed cross-bot proactivity: 0 HIGH + 2 MEDIUM + 3 LOW
-→ 0 HIGH + 2 MEDIUM + 3 LOW. Scanner output: `verdict: safe`.
+→ 0 HIGH + 2 MEDIUM + 3 LOW. Remote-agent setup adds 0 HIGH + 10 MEDIUM + 1 LOW
+(above; the HTTP bridge adds none) → 0 HIGH + 12 MEDIUM + 4 LOW. Scanner output: `verdict: safe`.
 Historically, removing the Mastodon recipe changed CAUTION to SAFE.
 
 `tests/test_plugin_scan.py` asserts exact counts by rule, severity and file,
