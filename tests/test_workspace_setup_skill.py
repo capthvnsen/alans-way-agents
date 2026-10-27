@@ -413,6 +413,8 @@ class SetupPinProcedureTests(unittest.TestCase):
         self.env = dict(os.environ, HERMES_HOME=str(self.home), GIT_CONFIG_GLOBAL=os.devnull,
                         GIT_CONFIG_SYSTEM=os.devnull)
         subprocess.run(["git", "init", "-q", str(self.source)], check=True, env=self.env)
+        # A detached auto-maintenance repack would race the temp dir cleanup.
+        self.git("config", "maintenance.auto", "false")
         self.git("remote", "add", "origin", "https://github.com/capthvnsen/alans-way-agents")
 
     def git(self, *args):

@@ -690,6 +690,8 @@ class PinAndListTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
         subprocess.run([*git, "init", "-q"], check=True)
+        # A detached auto-maintenance repack would race the temp dir cleanup.
+        subprocess.run([*git, "config", "maintenance.auto", "false"], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-qm", "x"], check=True)
         result = run(*flags, env=env, check=False, script=script)
@@ -706,6 +708,8 @@ class PinAndListTests(unittest.TestCase):
         script = repo / "setup.sh"
         git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
         subprocess.run([*git, "init", "-q"], check=True)
+        # A detached auto-maintenance repack would race the temp dir cleanup.
+        subprocess.run([*git, "config", "maintenance.auto", "false"], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-qm", "x"], check=True)
         subprocess.run([*git, "tag", "v9.9.9"], check=True)
@@ -727,6 +731,8 @@ class PinAndListTests(unittest.TestCase):
         shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(".git", "tests", "__pycache__"))
         git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
         subprocess.run([*git, "init", "-q"], check=True)
+        # A detached auto-maintenance repack would race the temp dir cleanup.
+        subprocess.run([*git, "config", "maintenance.auto", "false"], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-qm", "x"], check=True)
         return repo / "setup.sh", git
