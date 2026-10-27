@@ -24,7 +24,11 @@ result = scan_plugin(Path("alans-way"))
 findings = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
 expected = Counter({
     ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"): 2,
-    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3})
+    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3,
+    ("ssh_backdoor", "medium", "scripts/setup-remote-agent.sh"): 5,
+    ("ssh_backdoor", "low", "scripts/setup-remote-agent.sh"): 1,
+    ("ssh_keygen", "medium", "scripts/setup-remote-agent.sh"): 2,
+    ("python_subprocess", "medium", "scripts/setup-remote-agent.sh"): 3})
 assert findings == expected, (findings, expected, result.findings)
 assert result.verdict == "safe", result.verdict
 assert should_allow_plugin_install(result)[0] is True
