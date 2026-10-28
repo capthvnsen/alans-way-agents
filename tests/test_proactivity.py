@@ -100,7 +100,7 @@ class ValidateTests(unittest.TestCase):
                     {"active_start": 24}, {"active_start": 8, "active_end": 8},
                     {"paused_until": "tomorrow"}, {"paused_until": "2026-10-08T09:00"},
                     {"level": "max"}, {"nonsense": 1}, {"morning_brief": "yes"},
-                    {"morning_brief": 1}, "not a dict"):
+                    {"morning_brief": 1}, {"weekly_report": "yes"}, {"weekly_report": 1}, "not a dict"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 P.validate(P.Settings(), bad)
 
@@ -129,12 +129,16 @@ class LoosensTests(unittest.TestCase):
             (P.Settings(active_start=7), "/proactivity hours 7-22"),
             (P.Settings(active_end=23), "/proactivity hours 8-23"),
             (P.Settings(morning_brief=True), "/proactivity brief on"),
+            (P.Settings(weekly_report=True), "/proactivity report on"),
         ):
             with self.subTest(new=new):
                 self.assertEqual(P.loosens(s, new, self.NOW), expected)
 
     def test_turning_the_brief_off_is_quieter(self):
         self.assertIsNone(P.loosens(P.Settings(morning_brief=True), P.Settings(), self.NOW))
+
+    def test_turning_the_report_off_is_quieter(self):
+        self.assertIsNone(P.loosens(P.Settings(weekly_report=True), P.Settings(), self.NOW))
 
     def test_a_lower_base_suggests_the_nearest_level(self):
         self.assertEqual(P.loosens(P.Settings(base_minutes=240), P.Settings(),
@@ -530,11 +534,13 @@ class ToolTests(unittest.TestCase):
             out = json.loads(p.tool({"action": "set"}))
         self.assertEqual(out, {"ok": False, "error": "set needs at least one setting"})
 
-    def test_schema_exposes_the_seven_fields_beside_action(self):
+    def test_schema_exposes_the_settings_fields_beside_action(self):
         props = P.SCHEMA["parameters"]["properties"]
         self.assertNotIn("settings", props)
+        self.assertEqual(props["action"]["enum"], ["status", "set", "weekly_report"])
+        self.assertEqual(props["tasks"]["items"]["properties"]["kind"]["enum"], list(P.MINUTES))
         for name in ("level", "base_minutes", "active_start", "active_end", "timezone", "paused_until",
-                     "morning_brief"):
+                     "morning_brief", "weekly_report"):
             self.assertIn(name, props)
         self.assertEqual(props["level"]["enum"], list(P.LEVELS))
         self.assertEqual((props["base_minutes"]["minimum"], props["base_minutes"]["maximum"]), (15, 1440))
@@ -614,6 +620,34 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertFalse(p.settings(p.load()).morning_brief)
 
+    def test_set_cannot_turn_the_report_on_but_can_turn_it_off(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "set", "weekly_report": True}))
+        self.assertEqual(out["ask_user_to_send"], "/proactivity report on")
+        self.assertFalse(p.settings(p.load()).weekly_report)
+        p.update({"weekly_report": True})
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            self.assertTrue(json.loads(p.tool({"action": "set", "weekly_report": False}))["ok"])
+        self.assertFalse(p.settings(p.load()).weekly_report)
+
+    def test_weekly_report_formats_the_tasks_for_the_bound_chat_only(self):
+        p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
+        args = {"action": "weekly_report", "tasks": [{"what": "Booked the dentist", "kind": "errand"},
+                                                     {"what": "Compared flights", "kind": "research"}]}
+        with patch.object(P, "caller_session_key", return_value="agent:main:telegram:dm:7"):
+            out = json.loads(p.tool(args))
+        self.assertEqual(out, {"ok": False, "error": "The weekly report only goes to the bound chat."})
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool(args))
+        self.assertEqual((out["ok"], out["tasks"], out["minutes"]), (True, 2, 45))
+        self.assertEqual(out["message"], P.format_report(args["tasks"]))
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            out = json.loads(p.tool({"action": "weekly_report", "tasks": [{"what": "x", "kind": "magic"}]}))
+        self.assertFalse(out["ok"])
+        self.assertIn("kind", out["error"])
+        self.assertNotIn("dentist", json.dumps(p.load()))   # task text is never stored
+
 
 class CommandTests(unittest.TestCase):
     """`/proactivity ...`: the operator path inside the chat. Plain text, never raises."""
@@ -641,6 +675,8 @@ class CommandTests(unittest.TestCase):
             ("pause", {}, lambda s: s.paused_until == "off"),
             ("brief on", {}, lambda s: s.morning_brief),
             ("brief OFF", {"morning_brief": True}, lambda s: not s.morning_brief),
+            ("report on", {}, lambda s: s.weekly_report),
+            ("report off", {"weekly_report": True}, lambda s: not s.weekly_report),
         ):
             with self.subTest(args=args):
                 p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
@@ -656,7 +692,8 @@ class CommandTests(unittest.TestCase):
 
     def test_garbage_is_a_usage_line(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))
-        for args in ("fly me to the moon", "hours", "hours nine-ten", "tz", "brief", "brief maybe"):
+        for args in ("fly me to the moon", "hours", "hours nine-ten", "tz", "brief", "brief maybe",
+                     "report", "report weekly"):
             with self.subTest(args=args):
                 self.assertIn("/proactivity", self.command(p, args))
 
@@ -716,6 +753,21 @@ class CommandTests(unittest.TestCase):
         out = self.command(p, "brief on")
         # 2026-10-08's jitter is 10 minutes
         self.assertIn("Morning brief next at 8:10 AM tomorrow.", out)
+
+    def test_status_shows_the_next_report_only_when_on(self):
+        # Wednesday 2026-10-07; the report goes Sunday 2026-10-11 at 18:00 plus that date's jitter.
+        p, clock = runtime(FakeCtx(), at("2026-10-07T14:01", "America/Denver"), timezone="America/Denver")
+        self.assertNotIn("report", self.command(p, "status"))
+        out = self.command(p, "report on")
+        due = P.report_at(p.settings(p.load()), date(2026, 10, 11)).astimezone(ZoneInfo("America/Denver"))
+        self.assertIn(f"Weekly report next at 6:{due.minute:02d} PM Sunday.", out)
+        clock.now = at("2026-10-11T18:30", "America/Denver")
+        self.assertIn("Weekly report next at 6:", self.command(p, "status"))
+        self.assertIn("PM today.", self.command(p, "status"))
+        state = p.load()
+        state["last_report_date"] = "2026-10-11"
+        p.save(state)
+        self.assertRegex(self.command(p, "status"), r"Weekly report next at 6:\d\d PM October 18\.")
 
     def test_next_check_in_wording_across_days(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T23:00", "America/Denver"),
@@ -904,6 +956,156 @@ class BriefTests(unittest.TestCase):
         self.assertTrue(ctx.sent[-1][0].startswith(P.BRIEF_MARKER))
 
 
+class ReportScheduleTests(unittest.TestCase):
+    """The opt-in weekly report, on a fake clock ticking like the 60-second timer."""
+    TZ = "America/Chicago"
+
+    def run_ticks(self, p, clock, start, end, step=timedelta(minutes=1)):
+        sent = []
+        clock.now = start
+        while clock.now <= end:
+            before = len(p.ctx.sent)
+            p.tick()
+            sent += [clock.now for text, _ in p.ctx.sent[before:] if text.startswith(P.REPORT_MARKER)]
+            clock.now += step
+        return sent
+
+    def test_off_by_default(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-10T20:00", self.TZ), timezone=self.TZ)
+        self.assertEqual(self.run_ticks(p, clock, at("2026-10-11T00:00", self.TZ),
+                                        at("2026-10-12T00:00", self.TZ), timedelta(minutes=5)), [])
+
+    def test_one_report_each_sunday_evening_inside_the_window(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T20:00", self.TZ), timezone=self.TZ, weekly_report=True,
+                           base_minutes=1440, paused_until="")
+        sent = self.run_ticks(p, clock, at("2026-10-08T00:00", self.TZ), at("2026-10-26T00:00", self.TZ),
+                              timedelta(minutes=5))
+        s = p.settings(p.load())
+        sundays = (date(2026, 10, 11), date(2026, 10, 18), date(2026, 10, 25))
+        self.assertEqual(len(sent), 3)
+        for t, day in zip(sent, sundays):
+            local = t.astimezone(ZoneInfo(self.TZ))
+            self.assertEqual((local.date(), local.hour), (day, 18))
+            self.assertLess(t - P.report_at(s, day), timedelta(minutes=5))
+            self.assertTrue(8 <= local.hour < 22)
+
+    def test_report_time_falls_back_to_the_start_of_narrow_hours(self):
+        sunday = date(2026, 10, 11)
+        for hours, hour in (((8, 22), 18), ((9, 17), 9), ((18, 2), 18), ((20, 4), 20)):
+            with self.subTest(hours=hours):
+                s = P.Settings(timezone=self.TZ, active_start=hours[0], active_end=hours[1])
+                local = P.report_at(s, sunday).astimezone(ZoneInfo(self.TZ))
+                self.assertEqual(local.hour, hour)
+                self.assertTrue(P.in_window(s, P.report_at(s, sunday)))
+
+    def test_dst_keeps_six_pm_local(self):
+        # US DST ends Sunday 2026-11-01.
+        s = P.Settings(timezone=self.TZ)
+        self.assertEqual(P.report_at(s, date(2026, 11, 1)).astimezone(ZoneInfo(self.TZ)).hour, 18)
+
+    def test_waits_for_a_quiet_chat_and_leaves_the_backoff_alone(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-10T20:00", self.TZ), timezone=self.TZ, weekly_report=True,
+                           base_minutes=1440)
+        state = p.load()
+        state.update(nudges=2, last_nudge_ts=at("2026-10-10T21:00", self.TZ).timestamp())
+        p.save(state)
+        due = P.report_at(p.settings(p.load()), date(2026, 10, 11))
+        turn(p, clock, due - timedelta(minutes=10))
+        clock.now = due
+        self.assertIsNone(p.tick())   # chatted 10 minutes ago
+        clock.now = due + timedelta(minutes=20)
+        self.assertTrue(p.tick())
+        text = ctx.sent[-1][0]
+        self.assertTrue(text.startswith(P.REPORT_MARKER))
+        self.assertEqual(ctx.sent[-1][1], KEY)
+        turn(p, clock, clock.now + timedelta(minutes=1), text=text)   # the bot answers the report
+        state = p.load()
+        self.assertEqual(state["nudges"], 0)   # the user's own turn above reset it
+        self.assertEqual(state["last_report_date"], "2026-10-11")
+        clock.now += timedelta(minutes=30)
+        self.assertIsNone(p.tick())            # no second report the same Sunday
+
+    def test_report_turn_does_not_count_as_the_user_replying(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-10T20:00", self.TZ), timezone=self.TZ, weekly_report=True)
+        state = p.load()
+        state.update(nudges=3)
+        p.save(state)
+        clock.now = P.report_at(p.settings(p.load()), date(2026, 10, 11))
+        self.assertTrue(p.tick())
+        turn(p, clock, clock.now, text=ctx.sent[-1][0])
+        self.assertEqual(p.load()["nudges"], 3)
+        self.assertNotIn("last_user_ts", p.load())
+
+    def test_a_missed_evening_waits_for_next_sunday(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-10T20:00", self.TZ), timezone=self.TZ, weekly_report=True,
+                           paused_until="off")
+        due = P.report_at(p.settings(p.load()), date(2026, 10, 11))
+        self.assertEqual(self.run_ticks(p, clock, due, due + timedelta(hours=1)), [])
+        p.update({"paused_until": ""})
+        self.assertEqual(self.run_ticks(p, clock, due + P.REPORT_LATE, at("2026-10-11T23:59", self.TZ),
+                                        timedelta(minutes=5)), [])
+
+    def test_a_busy_turn_delays_the_report(self):
+        ctx = FakeCtx()
+        p, clock = runtime(ctx, at("2026-10-10T20:00", self.TZ), timezone=self.TZ, weekly_report=True)
+        due = P.report_at(p.settings(p.load()), date(2026, 10, 11))
+        turn(p, clock, due - timedelta(hours=1), finish=False)
+        clock.now = due + timedelta(minutes=5)
+        self.assertIsNone(p.tick())
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            p.on_turn_end()
+        clock.now = due + timedelta(minutes=36)
+        self.assertTrue(p.tick())
+        self.assertTrue(ctx.sent[-1][0].startswith(P.REPORT_MARKER))
+
+
+class ReportFormatTests(unittest.TestCase):
+    """The transparent estimate: fixed minutes per task kind, summed by the code."""
+
+    def test_nothing_done_is_silent(self):
+        self.assertEqual(P.format_report([]), "[SILENT]")
+
+    def test_totals_top_wins_and_method(self):
+        tasks = [{"what": "Answered the visa question", "kind": "answer"},
+                 {"what": "Drafted the landlord email", "kind": "message"},
+                 {"what": "Compared three CRMs", "kind": "research"},
+                 {"what": "Fixed the calendar sync", "kind": "fix"},
+                 {"what": "Booked the car service", "kind": "errand"}]
+        self.assertEqual(P.format_report(tasks), "\n".join([
+            "This week I finished 5 tasks for you and saved you about 1.5 hours.",
+            "",
+            "Top wins:",
+            "1. Compared three CRMs (~30 min)",
+            "2. Fixed the calendar sync (~30 min)",
+            "3. Booked the car service (~15 min)",
+            "",
+            "Estimate, not a measurement: fixed minutes per task (answer 5, message 10, errand 15,"
+            " research 30, document 30, fix 30)."]))
+
+    def test_small_totals_stay_in_minutes(self):
+        text = P.format_report([{"what": "Found the receipt", "kind": "answer"}])
+        self.assertTrue(text.startswith("This week I finished 1 task for you and saved you about 5 minutes."))
+        self.assertIn("1. Found the receipt (~5 min)", text)
+        self.assertNotIn("2.", text)
+
+    def test_estimate_is_the_sum_of_the_table(self):
+        tasks = [{"what": k, "kind": k} for k in P.MINUTES] * 2
+        self.assertIn(f"about {round(sum(P.MINUTES.values()) * 2 / 60, 1):g} hours", P.format_report(tasks))
+        self.assertTrue(all(0 < m <= 30 for m in P.MINUTES.values()))   # conservative by design
+        self.assertEqual(set(P.KINDS), set(P.MINUTES))
+
+    def test_report_tasks_tidies_and_rejects(self):
+        self.assertEqual(P.report_tasks([{"what": "  Booked\n the   flight ", "kind": "errand"}]),
+                         [{"what": "Booked the flight", "kind": "errand"}])
+        self.assertEqual(len(P.report_tasks([{"what": "a" * 200, "kind": "fix"}])[0]["what"]), 80)
+        for bad in (None, "tasks", [{"what": "x"}], [{"what": "", "kind": "fix"}], [{"what": 5, "kind": "fix"}],
+                    ["x"], [{"what": "x", "kind": "fix"}] * (P.MAX_TASKS + 1)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                P.report_tasks(bad)
+
+
 class PromptTests(unittest.TestCase):
     """Golden checks that the prompts carry the tone rules. Model output isn't tested."""
     NOW = at("2026-10-07T11:00")
@@ -913,6 +1115,14 @@ class PromptTests(unittest.TestCase):
         return {"check-in": p.prompt(s, timedelta(hours=3), self.NOW),
                 "asked": p.prompt(s, timedelta(hours=3), self.NOW, asked=True),
                 "brief": p.brief_prompt(s, self.NOW)}
+
+    def test_the_report_prompt_asks_for_finished_tasks_through_the_tool(self):
+        text = P.Proactivity(FakeCtx()).report_prompt(P.Settings(timezone="UTC"), self.NOW)
+        self.assertTrue(text.startswith(P.REPORT_MARKER))
+        for part in (BriefTests.SAFETY, "last 7 days", "only the tasks you actually finished",
+                     "action weekly_report", "no passwords", "exactly the message it returns",
+                     "reply with exactly [SILENT]", *P.MINUTES):
+            self.assertIn(part, text)
 
     def test_every_prompt_keeps_the_safety_sentence_and_the_voice(self):
         for name, text in self.prompts().items():

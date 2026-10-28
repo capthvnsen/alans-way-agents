@@ -46,10 +46,12 @@ permissions, touches production, or deletes anything without asking.
 | "Not before 9am" | Start the day at 9:00 |
 | "When will you check in next?" | Shows the next check-in time |
 | "Stop the morning brief" | Turns the morning brief off |
+| "Stop the weekly report" | Turns the weekly report off |
 
-To check in more, start again, widen the hours or turn on the morning brief, send
-`/proactivity more`, `/proactivity resume`, `/proactivity hours 9-21` or
-`/proactivity brief on` yourself: the bot's tool can only make check-ins
+To check in more, start again, widen the hours or turn on the morning brief or
+weekly report, send `/proactivity more`, `/proactivity resume`,
+`/proactivity hours 9-21`, `/proactivity brief on` or `/proactivity report on`
+yourself: the bot's tool can only make check-ins
 quieter, because anything the model reads can be prompt-injected. Only the
 bound chat can change these.
 
@@ -103,26 +105,45 @@ arrive two minutes after you stop chatting. Set it back with
 
 ## Weekly time-saved report
 
-Optional. A plain Hermes cron job, separate from check-ins, that sends a short
-weekly recap of what the bot did and roughly how much time it saved you:
+Off unless you turn it on with `/proactivity report on` (or `hermes proactivity
+set --settings '{"weekly_report": true}'`). Every Sunday at about 18:00 your
+time (18:00 to 18:20; if 18:00 is outside your hours, at the start of them), the
+bot looks back over the week and sends one short message to the bound chat:
+how many tasks it finished for you, roughly how much time that saved, and the
+top three wins. If it finished nothing, it stays silent.
 
-```sh
-hermes cron create '0 18 * * 0' --name weekly-time-saved --deliver telegram \
-  "Write my weekly time-saved report. Use session_search and memory to find what you actually did for me in the last 7 days: tasks finished, messages drafted, research done, problems fixed. Skip chatter and anything you only offered or planned. List each item on one line with your estimate of the minutes it saved me compared with doing it by hand, then a total in hours. Keep estimates conservative and say they are estimates. Under 15 lines. If you did nothing useful this week, reply exactly [SILENT]."
-```
+The estimate is transparent on purpose. The bot only lists what it actually
+finished and labels each task with a kind; the plugin does the arithmetic from a
+fixed, conservative table (`MINUTES` in `alans-way/proactivity.py`), and the
+message ends with that table:
 
-It runs Sundays at 18:00 in the configured Hermes timezone (or the server's
-local time), and goes to your Telegram home channel. The minutes are the
-bot's estimates, not measurements. `hermes cron list` shows the job's ID;
-`hermes cron run <id>` queues one for the next tick and `hermes
-cron remove <id>` turns it off.
+| Kind | Minutes |
+| --- | --- |
+| answer: a quick fact, lookup or reminder | 5 |
+| message: an email, text or post drafted | 10 |
+| errand: a booking, form, order or filing done | 15 |
+| research: options compared or sources summarized | 30 |
+| document: a document, plan or spreadsheet made | 30 |
+| fix: a problem diagnosed and fixed | 30 |
+
+It stays private: it goes only to the bound Telegram DM, only the bound chat can
+ask the tool to build it, task text is never saved in plugin state, and report
+turns are never exported to cross-bot digests. It waits until the chat has been
+quiet for 30 minutes and the bot isn't mid-reply; if it can't go out within three
+hours of its time (paused, busy or offline), it skips to the next Sunday. It
+doesn't count as a check-in, but the next check-in is measured from it.
+`/proactivity status` shows when the next one is due and `/proactivity report
+off` (or telling the bot "stop the weekly report") turns it off.
+
+If you used the old `weekly-time-saved` cron recipe, remove it with
+`hermes cron list` and `hermes cron remove <id>` so you don't get two reports.
 
 ## How it works
 
 The plugin's `pre_llm_call` and `post_llm_call` hooks note when the bound chat
 was last active and whether the bot is mid-turn. A 60-second timer, started
-only when the gateway connects Telegram, checks whether a check-in or brief is
-due. When one is, it injects one internal prompt into that chat, and the bot decides what
+only when the gateway connects Telegram, checks whether a check-in, brief or weekly report
+is due. When one is, it injects one internal prompt into that chat, and the bot decides what
 to do with its own memory and tools. A `[SILENT]` reply is never delivered.
 State lives in Hermes' plugin state (`ctx.state`).
 

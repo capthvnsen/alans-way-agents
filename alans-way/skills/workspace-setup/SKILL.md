@@ -551,7 +551,8 @@ restarted (the next time the user writes to you), ask for the app's Check setup
 report for a full audit of the running install. Never execute setup.sh --verify
 inside the gateway. Report the app's output verbatim, including failed checks. Remind the user that check-ins are on once bound and are
 tuned by talking to the bot ("stop checking in" pauses them; `/proactivity resume` starts them
-again), and that desktop control asks
+again), that a weekly time-saved report is off until they send `/proactivity report on`
+themselves, and that desktop control asks
 for approval per action unless they re-run setup with `--allow-desktop-actions`
 (offer that, never add it yourself: on a Hermes without the computer-use
 provider API it also exposes a desktop-input tool that runs with no approval

@@ -422,6 +422,7 @@ class CollectorTests(unittest.TestCase):
             ("hi", "", {}, {}),
             (P.MARKER + " work", None, {}, {}),
             (P.BRIEF_MARKER + " brief", None, {}, {}),
+            (P.REPORT_MARKER + " report", None, {}, {}),
             ("[Cross-bot ask] draft", None, {}, {}),
             ("hi", None, {"parent_session_id": "parent"}, {}),
             ("hi", None, {"origin": "cron"}, {}),
@@ -717,7 +718,7 @@ class RegistrationTests(unittest.TestCase):
     def test_off_primary_and_secondary_match_base_without_cross_state_or_store_io(self):
         # Cross-bot off preserves the base schema and shared voice, including
         # the task-completion wording; only explicit voice changes update these hashes.
-        schema_sha = "94a082ce76756e20d76a4f9701c1a9cf3ed3eadf007efc1094d17da351f2d622"
+        schema_sha = "5428ca29f9a9252455fd9777d3b40fcffd7c512503795eaf243aef05850e0a73"
         for profile in ("default", "primary", "specialist"):
             for configured in (False, True):
                 with self.subTest(profile=profile, configured=configured), tempfile.TemporaryDirectory() as tmp:
