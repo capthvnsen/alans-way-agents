@@ -134,7 +134,7 @@ _CLOSER = re.compile(
     r"|you need anything else|there['’]s anything else(?: i can (?:help with|do))?)"
     r"|feel free to (?:ask|reach out)(?: if you have any (?:other |more |further )?questions)?"
     r"|is there anything else i can (?:help (?:you )?with|do(?: for you)?)"
-    r"|happy to help(?: further| with anything else)?)[!.?]*[ \t\u2600-\u27bf\ufe0f\U0001f300-\U0001faff]*\Z",
+    r"|happy to help(?: further| with anything else)?)" + _REPLY_SEPARATOR + r"*\Z",
     re.IGNORECASE)
 # Every line break str.splitlines() honours except "\n": CR, VT, FF, FS, GS, RS, NEL, LS, PS.
 _OTHER_LINE_BREAKS = ("\r\v\f"
@@ -147,7 +147,7 @@ _OTHER_LINE_BREAKS = ("\r\v\f"
 _PROTECTED = re.compile(
     r"^ {0,3}(?P<fence>(?P<fc>[`~])(?P=fc){2,})[^\n]*(?:\n.*?(?:^ {0,3}(?P=fence)(?P=fc)*[ \t]*$|\Z)|\Z)"
     r"|^[ \t]+[^\n]*"
-    r"|(?P<tick>`+)(?:.*?(?<!`)(?P=tick)(?!`)|.*)"
+    r"|(?P<tick>`+)(?:.*?[^`](?P=tick)(?!`)|.*)"
     r"|!?\[[^\[\]\n]*\](?:\((?:[^()\n]|\([^()\n]*\))*\)|\[[^\[\]\n]*\])"
     r"|^ {0,3}\[[^\[\]\n]+\]:[^\n]*"
     r"|<(?:https?|mailto):[^>\s]*>|(?:https?://|www\.)[^\s<>]*",
