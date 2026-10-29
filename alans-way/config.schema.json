@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Alan's Way shared agent config (draft v1)",
+  "description": "One preference contract for Alan's Plugin for Hermes and Alan's Plugin for Grok Bot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "persona", "voice", "proactivity", "identity"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The assistant's character and approach to helping the user."
+        }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tone", "reply_length"],
+      "properties": {
+        "tone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Text reply style; this does not select a speech or TTS provider."
+        },
+        "reply_length": {
+          "type": "string",
+          "enum": ["short", "balanced", "detailed"],
+          "description": "Preferred amount of detail, never a truncation limit."
+        }
+      }
+    },
+    "proactivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "timezone", "idle_minutes", "active_hours"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Preference for unsolicited check-ins, subject to native scheduling and operator consent."
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IANA timezone name, for example Etc/UTC. Readers must verify it exists."
+        },
+        "idle_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum quiet time before a check-in; native backoff may increase it."
+        },
+        "active_hours": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "description": "Same-day local window, start inclusive and end exclusive. Readers must require start < end.",
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+            }
+          }
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "role"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The assistant's display name, not an account or routing identifier."
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "description": "How the assistant describes its role to the user."
+        }
+      }
+    }
+  }
+}

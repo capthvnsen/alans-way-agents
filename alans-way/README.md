@@ -12,14 +12,21 @@ Alan's CU MCP (the shared Node `workspace-mcp` server) live in a separate repo:
 ask the agent to follow the `workspace-setup` skill. It fetches that repo's
 setup page and walks through the rest. It does not replace this plugin.
 
-## Shared config contract (draft)
+## Shared config
 
-[`shared/README.md`](../shared/README.md) defines the common persona, voice,
-proactivity and identity config for Alan's Plugin for Hermes and
-[Alan's Plugin for Grok Bot](../alans-way-grok-bot/README.md). Hermes does not yet
-read that JSON file. Keep using the existing [tone](../docs/voice.md) and
-[proactivity](../docs/proactivity.md) controls and Hermes persona settings.
-This contract adds no hooks, state migration or runtime setting changes.
+The plugin reads `~/.config/alans-way/config.json` on load, validated against the
+[shared schema](../shared/config.schema.json). A missing file preserves existing
+defaults; an invalid file reports an error before registration applies anything.
+Install `jsonschema>=4.18,<5` in Hermes's Python environment when needed.
+
+Shared identity/persona reach every profile. With texting voice on, shared tone
+and reply length replace the built-in voice prompt. Shared timezone, idle time
+and minute-level active hours control the native scheduler, while route binding,
+operator pauses and brief/report choices remain local. Shared proactivity off
+blocks unsolicited messages; shared on never binds a chat or resumes a pause.
+Edit the JSON and reload the plugin to apply changes. See the
+[shared usage and precedence rules](../shared/README.md#use-with-hermes-and-grok-bot)
+and [Grok Bot generator](../alans-way-grok-bot/README.md).
 
 ## Disclosures
 

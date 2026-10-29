@@ -1,10 +1,13 @@
 # Contributing
 
-You need Python 3.11+ and Node 18+ (the router and VPS browser host scripts use fetch and AbortSignal.timeout; Electron is only for the Mac app). The tests use only the standard library, so no virtual environment or install step is needed.
+You need Python 3.11+ and Node 18+ (the router and VPS browser host scripts use fetch and AbortSignal.timeout; Electron is only for the Mac app). The shared-config tests require `jsonschema`; use a Python virtual environment.
 
 ```sh
 git clone https://github.com/capthvnsen/alans-way-agents && cd alans-way-agents
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r shared/requirements.txt
+python -m unittest discover -s tests -v
 python3 scripts/check_publication.py
 ```
 

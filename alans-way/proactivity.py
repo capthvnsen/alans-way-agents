@@ -40,6 +40,8 @@ class Settings:
     paused_until: str = ""  # "", "off", or an ISO time with a UTC offset
     morning_brief: bool = False
     weekly_report: bool = False
+    active_start_minute: int = 0
+    active_end_minute: int = 0
 
 
 def zone(s):
@@ -47,10 +49,12 @@ def zone(s):
 
 
 def in_window(s, t):
-    hour = t.astimezone(zone(s)).hour
-    if s.active_start < s.active_end:
-        return s.active_start <= hour < s.active_end
-    return hour >= s.active_start or hour < s.active_end
+    local = t.astimezone(zone(s))
+    minute = local.hour * 60 + local.minute
+    start, end = s.active_start * 60 + s.active_start_minute, s.active_end * 60 + s.active_end_minute
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end
 
 
 def next_active(s, t):
@@ -58,20 +62,22 @@ def next_active(s, t):
     if in_window(s, t):
         return t
     local = t.astimezone(zone(s))
-    start = local.replace(hour=s.active_start, minute=0, second=0, microsecond=0)
+    start = local.replace(hour=s.active_start, minute=s.active_start_minute, second=0, microsecond=0)
     if start <= local:
-        start = (local + timedelta(days=1)).replace(hour=s.active_start, minute=0, second=0, microsecond=0)
+        start = (local + timedelta(days=1)).replace(hour=s.active_start, minute=s.active_start_minute,
+                                                  second=0, microsecond=0)
     return start.astimezone(timezone.utc)
 
 
 def due_at(s, anchor, nudges):
     """One rule: base wait, doubled per unanswered nudge, capped at a week."""
-    wait = min(timedelta(minutes=s.base_minutes) * 2 ** min(nudges, 16), MAX_WAIT)
+    base = timedelta(minutes=s.base_minutes)
+    wait = max(base, min(base * 2 ** min(nudges, 16), MAX_WAIT))
     return next_active(s, anchor + wait)
 
 
 def day_start(s, day):
-    return datetime.combine(day, time(s.active_start), zone(s)).astimezone(timezone.utc)
+    return datetime.combine(day, time(s.active_start, s.active_start_minute), zone(s)).astimezone(timezone.utc)
 
 
 def brief_at(s, day):
@@ -84,7 +90,10 @@ def brief_at(s, day):
 def report_at(s, day):
     """The local Sunday's report time: 18:00, or the start of their hours when 18:00 falls
     outside them, plus the brief's per-date jitter."""
-    hour = REPORT_HOUR if REPORT_HOUR in _window_hours(s) else s.active_start
+    report_time = datetime.combine(day, time(REPORT_HOUR), zone(s))
+    if not in_window(s, report_time):
+        return day_start(s, day) + timedelta(minutes=zlib.crc32(day.isoformat().encode()) % 21)
+    hour = REPORT_HOUR
     jitter = zlib.crc32(day.isoformat().encode()) % 21
     return datetime.combine(day, time(hour), zone(s)).astimezone(timezone.utc) + timedelta(minutes=jitter)
 
@@ -158,7 +167,10 @@ def validate(s, changes, *, min_base=15):
         value = getattr(out, name)
         if type(value) is not int or not 0 <= value <= 23:
             raise ValueError(f"{name} must be an hour from 0 to 23")
-    if out.active_start == out.active_end:
+    for name in ("active_start_minute", "active_end_minute"):
+        if type(getattr(out, name)) is not int or not 0 <= getattr(out, name) <= 59:
+            raise ValueError(f"{name} must be a minute from 0 to 59")
+    if (out.active_start, out.active_start_minute) == (out.active_end, out.active_end_minute):
         raise ValueError("active_start and active_end must differ")
     if type(out.paused_until) is not str:
         raise ValueError("paused_until must be a string")
@@ -176,11 +188,11 @@ def validate(s, changes, *, min_base=15):
     return out
 
 
-def _window_hours(s):
-    """The local hours a check-in may fire in, as a set: 8-22 -> {8..21}."""
-    if s.active_start < s.active_end:
-        return set(range(s.active_start, s.active_end))
-    return set(range(s.active_start, 24)) | set(range(s.active_end))
+def _window_minutes(s):
+    start, end = s.active_start * 60 + s.active_start_minute, s.active_end * 60 + s.active_end_minute
+    if start < end:
+        return set(range(start, end))
+    return set(range(start, 1440)) | set(range(end))
 
 
 def loosens(current, new, now):
@@ -202,7 +214,7 @@ def loosens(current, new, now):
                        < datetime.fromisoformat(current.paused_until))
             if earlier:
                 return "/proactivity resume"
-    if _window_hours(new) - _window_hours(current):
+    if _window_minutes(new) - _window_minutes(current):
         return f"/proactivity hours {new.active_start}-{new.active_end}"
     if new.morning_brief and not current.morning_brief:
         return "/proactivity brief on"
@@ -234,8 +246,9 @@ def caller_session_key():
 
 
 class Proactivity:
-    def __init__(self, ctx, *, clock=None, legacy_home=None):
+    def __init__(self, ctx, *, clock=None, legacy_home=None, shared_config=None):
         self.ctx = ctx
+        self.shared_config = shared_config
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.legacy_home = Path(legacy_home) if legacy_home else None
         self.gateway = False   # set once Telegram connects inside the gateway process
@@ -256,7 +269,7 @@ class Proactivity:
     def save(self, state):
         self.ctx.state.set(STATE_KEY, state)
 
-    def settings(self, state, *, resolve_timezone=True):
+    def settings(self, state, *, resolve_timezone=True, apply_shared=True):
         try:
             out = validate(Settings(), state.get("settings") or {}, min_base=1)
             if self.error == "corrupt settings: using defaults":
@@ -272,6 +285,13 @@ class Proactivity:
                                  else None}).paused_until)
             except ValueError:
                 out = Settings()
+        if apply_shared and self.shared_config:
+            shared = self.shared_config["proactivity"]
+            start, end = shared["active_hours"]["start"], shared["active_hours"]["end"]
+            out = replace(out, timezone=shared["timezone"], base_minutes=shared["idle_minutes"],
+                          active_start=int(start[:2]), active_start_minute=int(start[3:]),
+                          active_end=int(end[:2]), active_end_minute=int(end[3:]),
+                          paused_until=out.paused_until if shared["enabled"] else "off")
         if resolve_timezone and not out.timezone:
             # Plugins can't read the profile's top-level Hermes timezone through a
             # supported API; an unset zone runs on UTC until set with /proactivity tz.
@@ -279,12 +299,23 @@ class Proactivity:
         return out
 
     def update(self, changes, *, min_base=15):
+        self._check_shared_changes(changes)
         with self._lock:
             state = self.load()
             # Persist explicit overrides only, so an unset zone keeps reading as UTC.
-            state["settings"] = asdict(validate(self.settings(state, resolve_timezone=False),
+            state["settings"] = asdict(validate(self.settings(state, resolve_timezone=False, apply_shared=False),
                                                changes, min_base=min_base))
             self.save(state)
+
+    def _check_shared_changes(self, changes):
+        if not self.shared_config:
+            return
+        if set(changes) & {"timezone", "base_minutes", "level", "active_start", "active_end",
+                           "active_start_minute", "active_end_minute"}:
+            raise ValueError("Shared config controls timezone, idle time and active hours; edit it and reload Hermes.")
+        if ("paused_until" in changes and changes["paused_until"] != "off"
+                and not self.shared_config["proactivity"]["enabled"]):
+            raise ValueError("Proactivity is disabled in shared config; edit it and reload Hermes before resuming.")
 
     def bind(self, session_key):
         # ponytail: shape check only; setup.sh lists real routes, and a wrong key
@@ -570,11 +601,12 @@ class Proactivity:
                 if not own:
                     return json.dumps({"ok": False, "error": "Check-in settings can only be changed from the bound chat."})
                 changes = {k: v for k, v in args.items() if k != "action"}
+                self._check_shared_changes(changes)
                 if not changes:
                     return json.dumps({"ok": False, "error": "set needs at least one setting"})
                 with self._lock:
                     state = self.load()
-                    current = self.settings(state)
+                    current = self.settings(state, apply_shared=False)
                     new = validate(current, changes, min_base=15)
                     hint = loosens(current, new, self.clock())
                     if hint:
@@ -653,7 +685,8 @@ class Proactivity:
         wait = (f"{mins} minutes" if mins % 60 else
                 f"{mins // 60} hour" + ("s" if mins > 60 else ""))
         text = (f"{prefix}Check-ins after {wait} of quiet (level {st['level']}), "
-                f"{s['active_start']}:00-{s['active_end']}:00 {s['timezone'] or 'UTC (timezone not set)'}")
+                f"{s['active_start']}:{s['active_start_minute']:02d}-"
+                f"{s['active_end']}:{s['active_end_minute']:02d} {s['timezone'] or 'UTC (timezone not set)'}")
         if st["paused"]:
             until = s["paused_until"]
             return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."

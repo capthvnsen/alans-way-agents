@@ -2,26 +2,26 @@
 
 Alan's Plugin for Hermes and Alan's Plugin for Grok Bot target one JSON config
 contract for persona, voice, proactivity and identity. This directory owns that
-contract; plugin packages reference it rather than maintaining their own schemas
-or preference copies.
+contract; plugin packages share its validation and never keep separate preference
+files.
 
-**Status:** documentation and structure only. Hermes has no reader for this
-format yet, and the Grok Bot package is a skill/settings scaffold. Adding these
-files changes no running agent. The example values are proposed preferences,
-not a change to Hermes defaults.
+Both consumers now validate this contract. Hermes reads it when the plugin
+loads; the Grok Bot generator renders a portable snapshot. No config means
+Hermes retains its existing behavior. Invalid config fails plugin registration
+before applying any preferences, with an error naming the field and rule rather
+than echoing its value.
 
 ## Files and location
 
 - [`config.schema.json`](config.schema.json): JSON Schema Draft 2020-12, with
   `schema_version: 1` and unknown fields rejected at every object level.
 - [`config.example.json`](config.example.json): a complete, non-secret example.
-- Proposed user config: `~/.config/alans-way/config.json`. Both future plugin
-  readers on the same host use this one file. Expand `~` to the running user's
+- User config: `~/.config/alans-way/config.json`. Both consumers on the same host use this one file. Expand `~` to the running user's
   home; this path is independent of the current directory and Hermes profiles.
 
-To prepare a config for review, copy the example to that location without
-overwriting an existing file, then edit it. Creating the file does not activate
-it in Hermes. The schema stays in this repo; the user config contains values,
+Copy the example to that location without overwriting an existing file, then
+edit it. Reload the Hermes plugin (normally by restarting its gateway through
+its owner) to apply edits. The schema stays in this repo; the user config contains values,
 not a second schema. Separate hosts require an explicitly managed copy; this
 contract supplies no synchronization service.
 
@@ -44,8 +44,7 @@ with a plugin-specific JSON preference copy.
 
 ## Reader contract
 
-These requirements describe future adapters and the Grok Bot skill's use of the
-config; they do not install a loader or scheduler.
+Both adapters follow this contract; generation alone does not install a scheduler.
 
 1. Read the same user config path and validate the complete document against
    this schema before applying preferences. Verify the IANA timezone and the
@@ -63,19 +62,49 @@ config; they do not install a loader or scheduler.
    widen permissions or override a pause. If scheduling is unavailable, report
    it; do not promise background check-ins.
 
-## Consumer status
+## Use with Hermes and Grok Bot
 
-| Consumer | Current state |
-|---|---|
-| [Alan's Plugin for Hermes](../alans-way/README.md) | References this contract only. Existing persona settings, `/tone`, `/proactivity` and per-profile state remain authoritative. A future adapter needs a separate runtime change and tests. |
-| [Alan's Plugin for Grok Bot](../alans-way-grok-bot/README.md) | `settings.json` points to this schema and user config; `SKILL.md` describes reading the values. Native settings loading, packaging and scheduling are pending. |
+Install `jsonschema>=4.18,<5` in each consumer's Python environment:
 
-## Decisions for Alex
+```sh
+python -m pip install -r shared/requirements.txt
+mkdir -p ~/.config/alans-way
+cp -n shared/config.example.json ~/.config/alans-way/config.json
+```
 
-- TODO: approve the draft field names, example preferences and shared user path,
-  including whether a later version needs separate identities per bot/profile.
-- TODO: decide how a future Hermes adapter resolves shared preferences against
-  existing persona, tone and proactivity settings. This draft performs no migration.
+Hermes declares this dependency in `alans-way/plugin.yaml`; installations that
+only warn about dependencies need the pip command above using Hermes's Python.
+A missing config needs no validator and preserves all previous plugin defaults.
+All fields are required when a file exists; partial or unknown fields are errors.
+JSON must be UTF-8, with unique keys and finite numbers. The reader also checks
+that the timezone exists and `start < end`. Error messages never echo input values.
+
+**Hermes precedence:** shared identity/persona are injected as preferences on
+every profile and surface. With `/tone texting`, shared tone and reply length
+replace the built-in texting prompt and formatting cleanup on chat surfaces.
+`/tone default` disables that voice override; identity/persona remain. Existing
+pacing stays local. Shared reply length is guidance, not a character limit.
+Shared timezone, idle time and exact active hours control the native scheduler;
+edit the shared file and reload to change them. Conflicting `/proactivity` or CLI
+schedule edits return a clear error. Profile route bindings, pauses, backoff,
+morning-brief and weekly-report choices remain local. A shared `enabled: false`
+blocks all unsolicited plugin check-ins, briefs and reports; local resume cannot
+bypass it. `enabled: true` preserves local pauses and never creates a route.
+An explicitly requested `/proactivity now` remains a manual action.
+Shared values are never written into profile state, SOUL.md or config.yaml.
+Deleting the shared file and reloading restores the existing local preferences.
+
+**Grok Bot:** run the [generator](../alans-way-grok-bot/README.md#generate-and-use)
+and give its two outputs to your Bot. The settings JSON contains persona, voice
+and schedule+prompt routine definitions, with its own output schema. It is a
+handoff format, not a native importer. Generation and skill loading make no
+changes to running Bots; native routine setup remains operator-requested.
+
+`shared/config.schema.json` is canonical. Hermes installs only the `alans-way/`
+subdirectory, so `alans-way/config.schema.json` is a bundled copy, checked byte
+for byte in tests. When updating the contract, copy the canonical schema there
+and run the config tests. Both readers use the same implementation in
+`alans-way/shared_config.py`; no second preference file is maintained.
 
 ## License
 
