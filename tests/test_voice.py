@@ -17,44 +17,118 @@ from test_proactivity import FakeState, P  # noqa: E402  (loads the plugin packa
 V = importlib.import_module("alans_way_idle_test.voice")
 
 
-QUOTES = ("'", '"', "“", "”", "‘", "’", "«", "»", "‹", "›", "„", "‚", "〝", "〞", "〟", "⸂", "⸃",
-          "「", "」", "『", "』", "＂", "＇", "❝", "❞")
+def is_subsequence(out, text):
+    chars = iter(text)
+    return all(ch in chars for ch in out)
 
 
 class PolishTests(unittest.TestCase):
-    def test_drops_a_known_opener_at_the_very_start(self):
+    def test_drops_known_openers_at_the_very_start(self):
         for raw, want in (
             ("Certainly! The deploy is green.", "The deploy is green."),
             ("Great question! Obsidian, because your notes stay local.",
              "Obsidian, because your notes stay local."),
             ("Absolutely!\nDone.", "Done."),
             ("Of course!   Done.", "Done."),
-            ("Certainly! ## Plan\n**Ship** it.", "## Plan\n**Ship** it."),   # no flattening
-            ("Sure thing! Great question. Done.", "Great question. Done."),  # only the first one
+            ("Of course!\n\nDone.", "Done."),
+            ("Certainly!\tDone.", "Done."),
+            ("Sure thing! Great question. Done.", "Done."),
+            ("I'd be happy to help with that. Standup is at 9:30.", "Standup is at 9:30."),
+            ("Happy to help! It's at 9.", "It's at 9."),
+            ("Certainly!\n    def f():\n        return 1", "    def f():\n        return 1"),  # keeps indentation
         ):
-            self.assertEqual(V.polish(raw), want)
+            with self.subTest(raw):
+                self.assertEqual(V.polish(raw), want)
+
+    def test_drops_generic_sign_offs_at_the_very_end(self):
+        for raw, want in (
+            ("Done. Hope this helps!", "Done."),
+            ("Booked for 7.\n\nLet me know if you have any other questions. 😊", "Booked for 7."),
+            ("Fixed. I hope this helps! Let me know if you need anything else.", "Fixed."),
+            ("All set. Feel free to reach out if you have any more questions!", "All set."),
+            ("Sent. Is there anything else I can help you with?", "Sent."),
+            ("Hope this helps! Let me know if you have any other questions.", "Hope this helps!"),
+            ("Done. Hope this helps!\n", "Done."),
+            ("Done.\n\nHope this helps!\n\n", "Done."),
+            ("Status: green. Hope this helps!", "Status: green."),
+            ("It's at http://x.com. Hope this helps!", "It's at http://x.com."),
+            ("Done.**\nHope this helps!", "Done.**"),
+        ):
+            with self.subTest(raw):
+                self.assertEqual(V.polish(raw), want)
+
+    def test_headings_become_plain_lines(self):
+        for raw, want in (
+            ("## Plan\nShip it.", "Plan\nShip it."),
+            ("Certainly! ## Plan\n**Ship** it.", "Plan\n**Ship** it."),
+            ("# Status #\n\nGreen.\n\n### Next\nDeploy.", "Status\n\nGreen.\n\nNext\nDeploy."),
+            ("   ## Indented lines are left alone", "   ## Indented lines are left alone"),
+            ("## ## Nested", "Nested"),
+        ):
+            with self.subTest(raw):
+                self.assertEqual(V.polish(raw), want)
+
+    def test_walls_of_bold_and_bold_pseudo_headings_are_unwrapped(self):
+        for raw, want in (
+            ("**Status:** green. **Tests:** pass. **Deploy:** done.", "Status: green. Tests: pass. Deploy: done."),
+            ("**Next steps**\nRun it.", "Next steps\nRun it."),
+            ("**Summary:**\nAll good.", "Summary:\nAll good."),
+            ("**a**", "a"),
+            ("## Plan\n**a** **b** **c** **d** **e**", "Plan\na b c d e"),
+        ):
+            with self.subTest(raw):
+                self.assertEqual(V.polish(raw), want)
+        # One or two bold spans inside a sentence are real emphasis.
+        for text in ("**Warning:** this deletes prod.", "Use **staging**, not **prod**.",
+                     "2**3**4 and 5**6**7 and 8**9**0", "a ** b ** c ** d", "**"):
+            with self.subTest(text):
+                self.assertEqual(V.polish(text), text)
+
+    def test_lists_keep_their_markers(self):
+        raw = ("Three options:\n- **Notion**: shared\n- **Obsidian**: local\n- **Bear**: simple\n"
+               "1. first\n2. second\n* starred")
+        self.assertEqual(V.polish(raw), "Three options:\n- Notion: shared\n- Obsidian: local\n- Bear: simple\n"
+                                         "1. first\n2. second\n* starred")
+
+    def test_code_links_and_urls_are_never_edited(self):
+        for text in (
+            "[docs](relative(path)/**one**/**two**/**three**/**four**/**five**)",
+            "See [the docs][d].\n\n[d]: ./guide/**one**/**two**/**three**/**four**/**five**",
+            "Use ``a ** b ** c ** d ** e ** f`` here.",
+            "Run `cat <<EOF\n## header line\nEOF` and done.",
+            "```md\n## inside a fence\n**a** **b** **c**\n```",
+            "~~~\n# comment\n~~~",
+            "```\nunclosed fence\n## still code",
+            "    ## indented code\n    x = **a** **b** **c** **d** **e**",
+            "Odd `backtick ## then **a** **b** **c**",
+            "<https://e.io/**a**/**b**/**c**>",
+            "https://vps.example.ts.net/viewer/tab-7?token=abc**123**",
+            "![chart](https://e.io/**x**.png)",
+            "# 4417",
+        ):
+            with self.subTest(text=text[:40]):
+                out = V.polish(text)
+                if text != "# 4417":
+                    self.assertEqual(out, text)
+        mixed = "## Fix\n**a** **b** **c**\n```py\n## keep\nx = '**y**'\n```\nSee https://e.io/**z** and `**w**`."
+        self.assertEqual(V.polish(mixed),
+                         "Fix\na b c\n```py\n## keep\nx = '**y**'\n```\nSee https://e.io/**z** and `**w**`.")
 
     def test_everything_else_is_byte_identical(self):
         for text in ("Sure, but only if the card is yours.", "Absolutely. Delete it.",
                      "Certainly not: that would delete prod.", "Great question for Sam, not me.",
                      "As an AI, I can't feel the rain.", "Done. Certainly! More later.",
-                     "I'd be happy to help with that. Standup is at 9:30.",   # the apostrophe blocks it
-                     " Certainly! Leading space.", "Certainly!", "## Plan\n**a** **b** **c** **d** **e**",
-                     "Absolutely!\n\nDone.", "Certainly!\tDone.", "Certainly! \nDone.\n ",
-                     "# 4417 is the ticket", "Total: $1,249.99 for 3 seats, ref #4417.", ""):
-            self.assertEqual(V.polish(text), text)
-
-    def test_any_indented_line_backtick_or_quote_blocks_the_opener(self):
-        for rest in ("    code = 1", "\tcode = 1", "Run `ls`.", *[f"Say {q}hi{q}." for q in QUOTES],
-                     "It's done.", "»x«", "〝x〟", "⸂x⸃"):
-            with self.subTest(rest):
-                text = "Certainly!\n" + rest
+                     " Certainly! Leading space.", "Certainly!", "Hope this helps!",
+                     "Done, hope this helps!", "Let me know if you want me to book it.",
+                     "#4417 is the ticket", "Total: $1,249.99 for 3 seats, ref #4417.", "",
+                     "Say “hi” to *Sam*.", "> ## quoted heading stays"):
+            with self.subTest(text):
                 self.assertEqual(V.polish(text), text)
 
-    def test_any_other_line_break_blocks_the_opener(self):
+    def test_any_other_line_break_leaves_the_message_alone(self):
         for sep in ("\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
-            for text in (f"Certainly!{sep}    def f():{sep}        return 1",   # the reviewer's case
-                         f"Certainly!{sep}Done.", f"Certainly! Done.{sep}"):
+            for text in (f"Certainly!{sep}    def f():{sep}        return 1",
+                         f"Certainly!{sep}Done.", f"## Plan{sep}Done."):
                 with self.subTest(sep=repr(sep), text=text[:20]):
                     self.assertEqual(V.polish(text), text)
 
@@ -62,30 +136,13 @@ class PolishTests(unittest.TestCase):
         breaks = {chr(c) for c in range(0x3000) if len(("a" + chr(c) + "b").splitlines()) > 1}
         self.assertEqual(breaks - {"\n"}, set(V._OTHER_LINE_BREAKS))
 
-    def test_reviewer_cases(self):
-        for text in (
-            "Certainly!\n    def f():\n        return 1",       # an opener must not eat code indentation
-            "Certainly! 〝quoted〟 text",
-            "Certainly! ⸂substituted⸃ text",
-            "'Certainly!\n## Keep this heading'",
-            "[docs](relative(path)/**one**/**two**/**three**/**four**/**five**)",
-            "See [the docs][d].\n\n[d]: ./guide/**one**/**two**/**three**/**four**/**five**",
-            "'## unclosed **a** **b** **c** **d** **e**\n## still kept",
-            "»## reverse **a** **b** **c** **d** **e**«",
-            "Use ``a ** b ** c ** d ** e ** f`` here.",
-            "Run `cat <<EOF\n## header line\nEOF` and done.",
-            "```md\n## inside a fence\n```",
-            "    ## indented code\n    x = **a** **b** **c** **d** **e**",
-        ):
-            with self.subTest(text=text[:40]):
-                self.assertEqual(V.polish(text), text)
-
-    def test_property_code_links_and_quotes_come_back_byte_identical(self):
+    def test_property_protected_spans_survive_and_cleanup_only_removes(self):
         rng = random.Random(93)
-        nasty = ["## h", "**a** **b** **c** **d** **e**", "Certainly!", "# x", "**", "~~", "\n## n\n"]
+        nasty = ["## h", "**a** **b** **c** **d** **e**", "Certainly!", "# x", "**", "~~", "\n## n\n",
+                 "Hope this helps!", "**Bold line**", "- **item**: x", "1. step"]
 
         def bit():
-            return rng.choice(nasty + ["x", "y z", "42", "(p)", "/a/", "#1"])
+            return rng.choice(nasty + ["x", "y z", "42", "(p)", "/a/", "#1", "it's", "“q”"])
 
         def inner():
             return "".join(bit() + rng.choice(["", " ", "\n"]) for _ in range(rng.randint(1, 4))).strip() or "x"
@@ -94,16 +151,13 @@ class PolishTests(unittest.TestCase):
             lambda: "`" + inner().replace("`", "") + "`",
             lambda: "``" + inner().replace("`", "") + " ` " + "``",
             lambda: "```\n" + inner() + "\n```",
+            lambda: "~~~py\n" + inner() + "\n~~~",
             lambda: "    " + inner().replace("\n", "\n    "),
             lambda: "\t" + inner().replace("\n", " "),
-            *[lambda sep=sep: inner() + sep + "    " + inner() for sep in
-              ("\r", "\r\n", "\v", "\f", "\x85", "\u2028", "\u2029")],
-            lambda: "[t](" + inner().replace(")", "").replace("\n", "") + ")",
+            lambda: "[t](" + inner().replace(")", "").replace("(", "").replace("\n", "") + ")",
             lambda: "[t](https://e.io/" + inner().replace(" ", "").replace("\n", "") + ")",
+            lambda: "https://e.io/" + inner().replace(" ", "").replace("\n", "").replace("<", ""),
             lambda: "\n[ref]: ./" + inner().replace(" ", "").replace("\n", "") + "\n",
-            *[lambda o=o, c=c: o + inner() + c for o, c in
-              (("'", "'"), ('"', '"'), ("«", "»"), ("»", "«"), ("‹", "›"), ("“", "”"), ("‘", "’"),
-               ("„", "“"), ("「", "」"), ("〝", "〟"), ("⸂", "⸃"), ("'", ""), ('"', ""))],
         ]
         checked = 0
         for n in range(300):
@@ -111,24 +165,27 @@ class PolishTests(unittest.TestCase):
             parts = pieces + [inner() for _ in range(rng.randint(0, 3))]
             rng.shuffle(parts)
             body = "\n".join(parts).lstrip("\n")
-            opener = rng.choice(["", "Certainly! ", "Great question.\n", "Of course!\n\n"])
-            text = opener + body
-            if not body.strip() or V._SILENCE.search(text) or V._OPENER.match(body):
+            text = rng.choice(["", "Certainly! ", "Great question.\n", "Of course!\n\n"]) + body
+            if not body.strip() or V._SILENCE.search(text):
                 continue
             out = V.polish(text)
-            risky = ("`" in text or any(ch in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029" for ch in text)
-                     or any(line[:1].isspace() for line in text.splitlines())
-                     or any(V._is_quote(ch) for ch in text))
             with self.subTest(n=n, text=text[:60]):
                 for piece in pieces:
                     self.assertIn(piece.strip(), out)
-                self.assertTrue(text.endswith(out))   # only ever a prefix is removed
-                m = V._OPENER.match(text)
-                rest = text[m.end():] if m else ""
-                stripped = not risky and rest.strip() and not rest[:1].isspace()
-                self.assertEqual(out, rest if stripped else text)
+                self.assertTrue(out.strip())
+                self.assertTrue(is_subsequence(out, text))   # only ever removes characters
+                self.assertEqual(V.polish(out), out)        # one pass does all of it
             checked += 1
         self.assertGreaterEqual(checked, 200)
+
+    def test_long_hostile_inputs_stay_fast(self):
+        import time as clock
+        for text in ("\n" * 20000 + "x", "[" * 20000, "**" * 10000, "`" * 20000, "(" * 20000,
+                     "[a](" * 5000, " \n" * 10000 + "Hope this helps!", "# " * 10000 + "x"):
+            with self.subTest(text=text[:10]):
+                start = clock.monotonic()
+                V.polish(text)
+                self.assertLess(clock.monotonic() - start, 0.5)
 
     def test_approval_and_handback_texts_pass_unchanged(self):
         for text in (
@@ -143,13 +200,17 @@ class PolishTests(unittest.TestCase):
             self.assertEqual(V.polish(text), text)
 
     def test_never_empties_or_silences_a_reply(self):
-        for text in ("", "Certainly!", "Certainly!   ", "Certainly! NO_REPLY", "Certainly! The silent auction is at 6."):
-            self.assertEqual(V.polish(text), text)
+        for text in ("", "Certainly!", "Certainly!   ", "Certainly! NO_REPLY", "Certainly! The silent auction is at 6.",
+                     "## "):
+            with self.subTest(text):
+                self.assertEqual(V.polish(text), text)
 
 
 def voice(mode=None):
     ctx = SimpleNamespace(state=FakeState())
     v = V.Voice(ctx)
+    v.slept = []
+    v.sleep = v.slept.append
     if mode:
         v.set(mode)
     return v
@@ -576,7 +637,7 @@ class OutputTests(unittest.TestCase):
         for platform in ("telegram", "desktop", "tui", "bot_room"):
             with self.subTest(platform=platform):
                 self.assertEqual(voice().on_output(response_text=self.TIC, platform=platform),
-                                 "## Plan\nShip it.")
+                                 "Plan\nShip it.")
         for platform in ("discord", "cli", "cron", "api_server"):
             with self.subTest(platform=platform):
                 self.assertIsNone(voice().on_output(response_text=self.TIC, platform=platform))
@@ -627,6 +688,110 @@ class SwitchTests(unittest.TestCase):
             # Hook context is appended to the user turn by Hermes, never the system prompt.
             self.assertEqual(set(result), {"context"})
             self.assertNotIn("system_prompt", json.dumps(v.ctx.state.data))
+
+
+class LengthAndPaceTests(unittest.TestCase):
+    def test_defaults_are_grok_style(self):
+        v = voice()
+        self.assertEqual((v.length(), v.pace_ms()), (280, 2500))
+        self.assertIn("Casual replies: 1-3 short sentences, under 280 characters;", V.NOTE)
+        status = v.command("")
+        self.assertIn("under 280 characters", status)
+        self.assertIn("up to 2.5s", status)
+
+    def test_length_setting_changes_the_note_and_never_the_reply(self):
+        v = voice()
+        self.assertIn("under 140 characters", v.command("length 140"))
+        note = v.on_turn_start(user_message="hi", platform="telegram", session_id="s")["context"]
+        self.assertIn("1-3 short sentences, under 140 characters;", note)
+        long_reply = "Here is the full plan. " * 40
+        self.assertIsNone(v.on_output(response_text=long_reply, platform="telegram", session_id="s"))
+        v.command("length off")
+        note = v.on_turn_start(user_message="hi", platform="telegram")["context"]
+        self.assertIn("Casual replies: 1-3 short sentences; match", note)
+        self.assertNotIn(" characters;", note)
+        self.assertIn("No character target", v.command("status"))
+
+    def test_settings_validate_and_keep_each_other(self):
+        v = voice()
+        for bad in ("length 10", "length 5000", "length lots", "length", "pace -1", "pace 10001",
+                    "pace fast", "pace 1 2", "length 1.5"):
+            with self.subTest(bad):
+                self.assertIn("usage", v.command(bad))
+        self.assertEqual((v.length(), v.pace_ms()), (280, 2500))
+        v.command("length 500")
+        v.command("pace 800")
+        v.command("default")
+        v.command("texting")
+        self.assertEqual((v.mode(), v.length(), v.pace_ms()), ("texting", 500, 800))
+        v.command("pace natural")
+        self.assertEqual(v.pace_ms(), 2500)
+        self.assertIn("aren't paced", v.command("pace off"))
+        self.assertEqual(v.pace_ms(), 0)
+
+    def test_old_and_corrupt_state_fall_back_to_defaults(self):
+        for state in ({"mode": "texting"}, {"mode": "texting", "length": "x", "pace_ms": True},
+                      {"length": [1], "pace_ms": {}}, {"length": None, "pace_ms": 1.5},
+                      {"length": -5, "pace_ms": 99999}, "garbage", None):
+            with self.subTest(state=state):
+                v = voice()
+                v.ctx.state.set(V.STATE_KEY, state)
+                self.assertEqual((v.mode(), v.length(), v.pace_ms()), ("texting", 280, 2500))
+
+    def test_pace_is_typing_time_minus_time_already_taken(self):
+        self.assertAlmostEqual(V.pace_seconds("x" * 20, 2500, 0), 0.9)
+        self.assertAlmostEqual(V.pace_seconds("x" * 20, 2500, 0.5), 0.4)
+        self.assertEqual(V.pace_seconds("x" * 20, 2500, 3), 0)
+        self.assertEqual(V.pace_seconds("x" * 1000, 2500, 0), 2.5)   # capped
+        self.assertEqual(V.pace_seconds("x" * 1000, 0, 0), 0)        # off
+
+    def test_fast_telegram_replies_wait_and_other_turns_do_not(self):
+        clock = iter([100.0, 100.2])
+        with patch.object(V.time, "monotonic", lambda: next(clock)):
+            v = voice()
+            v.on_turn_start(user_message="hi", platform="telegram", session_id="s")
+            v.on_output(response_text="Hey, all good.", platform="telegram", session_id="s")
+        self.assertEqual(len(v.slept), 1)
+        self.assertAlmostEqual(v.slept[0], 0.6 + 0.015 * len("Hey, all good.") - 0.2)
+        cases = (
+            ("desktop", "s", "Hey."),          # the desktop app isn't paced
+            ("telegram", "other", "Hey."),     # no recorded turn start for this session
+            ("telegram", None, "Hey."),        # no session id: nothing to match the turn start
+            ("telegram", "s", "[SILENT]"),     # nothing gets sent
+        )
+        for platform, session, reply in cases:
+            with self.subTest(platform=platform, session=session, reply=reply):
+                v = voice()
+                v.on_turn_start(user_message="hi", platform=platform, session_id="s")
+                v.on_output(response_text=reply, platform=platform, session_id=session)
+                self.assertEqual(v.slept, [])
+        v = voice()
+        v.on_turn_start(user_message="hi", platform="telegram", session_id="s")
+        self.assertIsNone(v.on_output(response_text=None, platform="telegram", session_id="s"))
+        from alans_way_idle_test.proactivity import MARKER
+        v = voice()
+        v.on_turn_start(user_message=MARKER + " check in", platform="telegram", session_id="s")
+        v.on_output(response_text="Still on for 3?", platform="telegram", session_id="s")
+        self.assertEqual(v.slept, [])
+        for setup in ("pace off", "default"):
+            with self.subTest(setup):
+                v = voice()
+                v.on_turn_start(user_message="hi", platform="telegram", session_id="s")
+                v.command(setup)
+                v.on_output(response_text="Hey.", platform="telegram", session_id="s")
+                self.assertEqual(v.slept, [])
+
+    def test_cli_sets_length_and_pace(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        V.cli_setup(parser)
+        v = voice()
+        with patch("builtins.print") as out:
+            self.assertEqual(V.cli_run(v, parser.parse_args(["length", "200"])), 0)
+            self.assertEqual(V.cli_run(v, parser.parse_args(["pace", "OFF"])), 0)
+            self.assertEqual(V.cli_run(v, parser.parse_args(["pace", "fast"])), 2)
+            self.assertEqual(V.cli_run(v, parser.parse_args([])), 0)
+        self.assertEqual(out.call_args_list[-1].args, ("texting", "length=200", "pace_ms=0"))
 
 
 class RegisterTests(unittest.TestCase):

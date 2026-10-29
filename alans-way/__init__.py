@@ -126,10 +126,10 @@ def register(ctx, *, legacy_home=None, background=True):
     voice = voice_mod.Voice(ctx)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
     ctx.register_command("tone", voice.command,
-                         description="Chat voice: texting (default) or Hermes' default voice",
-                         args_hint="[texting|default|status]")
+                         description="Chat voice: texting (default) or Hermes' default voice, reply length and pacing",
+                         args_hint="[texting|default|status|length <chars>|off|pace <ms>|natural|off]")
     if hasattr(ctx, "register_cli_command"):
-        ctx.register_cli_command("tone", "The texting voice: status, texting or default",
+        ctx.register_cli_command("tone", "The texting voice: status, texting, default, length or pace",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
     primary = _primary_profile(ctx)
     runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)

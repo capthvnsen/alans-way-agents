@@ -104,6 +104,29 @@ class WorkspaceSetupSkillTests(unittest.TestCase):
                      "never migrate the legacy marker automatically"):
             self.assertIn(rule, step)
 
+    def test_reactions_turn_on_with_consent_and_preserve_earlier_answers(self):
+        step = self.telegram_step()
+        self.assertNotIn("Reactions default off", step)
+        for rule in ("a yes to these recommendations turns them on",
+                     "changes other choices without naming reactions"):
+            self.assertIn(rule, step)
+        migration = step[step.index("**Reactions for earlier answers.**"):]
+        for rule in ("legacy `keep-ack`/`own-ack` question never offered reactions",
+                     "config get skills.config.workspace-setup.reactions_choice",
+                     "Ask once, only when that marker is a confirmed “Config key not set”",
+                     "not already effective `true`",
+                     "After yes, run `hermes -p <profile> config set platforms.telegram.reactions true`, read it back",
+                     "config set skills.config.workspace-setup.reactions_choice on",
+                     "An explicit no records `keep-current`",
+                     "A recorded `chosen` or `keep-current` presentation answer already covered reactions",
+                     "never re-ask or flip them", "`false` alone is not a user's choice",
+                     "an existing `true` is kept", "TELEGRAM_REACTIONS",
+                     "No answer leaves reactions and the marker untouched",
+                     "config unset skills.config.workspace-setup.reactions_choice"):
+            self.assertIn(rule, migration)
+        self.assertLess(migration.index("read it back"),
+                        migration.index("reactions_choice on"))
+
     def test_timezone_is_city_based_explicit_and_read_back(self):
         step = self.telegram_step()
         for rule in ("config get timezone", "empty", "MST", "EST", "PST", "CST",

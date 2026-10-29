@@ -198,7 +198,9 @@ Memory/skill notices default on (`off|on|verbose`); hiding them changes only
 chat presentation, and background review still runs.
 Hiding “💾 Memory updated / Self-improvement review” notices affects every platform
 this profile uses, not only Telegram.
-Reactions default off; cancellation clears 👀 and 👍 does not verify the user's goal.
+Hermes ships reactions off; a yes to these recommendations turns them on, and so
+does an answer that changes other choices without naming reactions; cancellation
+clears 👀 and 👍 does not verify the user's goal.
 Removing the scheduled-message header, job IDs and management footer is
 **profile-wide**, across all delivery targets; timezone is also profile-wide.
 Disclose that you will remember the answer in this profile's `config.yaml`.
@@ -216,6 +218,24 @@ Disclose that you will remember the answer in this profile's `config.yaml`.
 | `platforms.telegram.reactions` | `true` |
 
 A Telegram-only memory/skill notice switch isn't supported by Hermes yet.
+
+**Reactions for earlier answers.** The legacy `keep-ack`/`own-ack` question never
+offered reactions. With a legacy marker and no `telegram_feel_choice`, read
+`hermes -p <profile> config get skills.config.workspace-setup.reactions_choice`
+and the effective `platforms.telegram.reactions`. Ask once, only when that marker
+is a confirmed “Config key not set” and reactions are not already effective `true`:
+“Want me to react 👀 while I work, then 👍 or 👎 when processing succeeds or fails?”
+After yes, run `hermes -p <profile> config set platforms.telegram.reactions true`,
+read it back, then record
+`hermes -p <profile> config set skills.config.workspace-setup.reactions_choice on`.
+An explicit no records `keep-current` with the same key and leaves reactions as they are.
+A recorded `chosen` or `keep-current` presentation answer already covered reactions:
+never re-ask or flip them. Stock installs store `reactions: false`, so `false`
+alone is not a user's choice and never skips this question; an existing `true` is kept.
+Disclose a `TELEGRAM_REACTIONS` override instead of writing YAML over it. No answer
+leaves reactions and the marker untouched; report a failed write or readback and
+record nothing. The user can revisit it or run
+`hermes -p <profile> config unset skills.config.workspace-setup.reactions_choice`.
 
 If timezone is empty or a fixed abbreviation (MST, EST, PST, CST, UTC offsets)
 rather than an IANA zone, explain “Fixed timezones do not follow daylight-saving

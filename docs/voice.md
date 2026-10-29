@@ -25,6 +25,25 @@ Add `-p <profile>` to the `hermes` commands for a named profile. Without
 `--tone`, setup leaves each profile's switch as it is. The switch lives in the
 plugin's own state (`plugin-data/alans-way/state.json`), not in `config.yaml`.
 
+### Length and pacing
+
+Two more per-bot settings sit next to the switch, in the same state file. Turning
+the voice off and on again keeps them.
+
+| Setting | Default | In the chat | On the server |
+|---|---|---|---|
+| Character target for casual replies (50-4096, or off) | 280 | `/tone length 200`, `/tone length off` | `hermes tone length 200` |
+| Pacing for Telegram replies (cap in ms, 0-10000, or off) | 2500 (`natural`) | `/tone pace 1500`, `/tone pace natural`, `/tone pace off` | `hermes tone pace off` |
+
+`/tone` shows both. The character target is part of the note: the model is asked
+to keep casual replies under it. It is guidance, not a limit: nothing is cut,
+and code, plans and research stay complete. Pacing holds a Telegram reply until
+it could plausibly have been typed: 0.6 seconds plus 15 ms a character, minus
+the time the turn already took, and never more than the cap. Most turns already
+take longer than that, so only quick replies wait. The wait runs before Hermes
+sends the reply, while Telegram still shows "typing…". Desktop, TUI and bot-room
+chats are not paced, and neither is a reply that won't be sent (`SILENT`).
+
 Check-ins and the morning brief keep their own short texting style when the
 voice is off: that style is part of their prompts (`/proactivity` controls
 them), not this switch. With `/tone default` only the send-time polish stops for
@@ -43,7 +62,9 @@ phone and on the desktop). Cron, API, webhook and CLI turns are not affected.
 
 1. **A style note on every chat turn** (`pre_llm_call`). Hermes appends
    it to that turn's user message, never to the system prompt. It asks for:
-   - 1-3 short sentences for casual replies, matching your energy and length;
+   - 1-3 short sentences for casual replies, under the character target (280
+     by default; see [Length and pacing](#length-and-pacing)), matching your
+     energy and length;
    - contractions and plain words, with no "Certainly!", "Great question" or "I'd
      be happy to";
    - no headings or walls of bold, and lists only when you ask for steps or the
@@ -95,32 +116,38 @@ phone and on the desktop). Cron, API, webhook and CLI turns are not affected.
    truncated. Unmatched turns add no reminder tokens.
    This is model guidance, not an enforced output limit: long replies are
    never truncated or silently rewritten to meet the cap.
-2. **A send-time polish** (`transform_llm_output` on the final reply). It is
-   deterministic, with no model call, and does exactly one thing: it drops a
-   known assistant opener ("Certainly!", "Absolutely!", "Of course!", "Sure
-   thing!", "Great question.") from the very start of the message, taking with
-   it only spaces on the same line and at most one newline. It does this only
-   when the whole message has no line break other than `\n` (no CR, VT, FF,
-   NEL, U+2028 or U+2029), no line starting with whitespace, no backtick, and
-   no quotation mark: ASCII `'` and `"`, Unicode initial and final
-   quotes (`“` `”` `‘` `’` `«` `»` `‹` `›` `⸂` `⸃` …), and any other character
-   named a quotation mark or apostrophe (`„` `〝` `〟` `＂` …), plus corner
-   brackets (`「」『』`).
+2. **A send-time cleanup** (`transform_llm_output` on the final reply). It is
+   deterministic, makes no model call and only ever removes characters. It:
+   - drops known assistant openers from the very start ("Certainly!",
+     "Absolutely!", "Of course!", "Sure thing!", "Great question.", "I'd be happy
+     to help with that."), with the blank space after them but never the
+     indentation of the next line;
+   - drops generic sign-offs from the very end ("Hope this helps!", "Let me know
+     if you have any other questions.", "Feel free to reach out…", "Is there
+     anything else I can help you with?"). A specific offer such as "Let me know
+     if you want me to book it." stays;
+   - turns markdown headings (`## Plan`) into plain lines. Hermes would
+     otherwise send them to Telegram as bold lines;
+   - unwraps a line that is only bold (`**Next steps**`, a stand-in heading);
+   - unwraps every bold span once a reply has three or more (a wall of bold).
+     One or two bold words in a sentence are real emphasis and stay.
 
-   If the opener is followed by a blank line or other whitespace, or the reply
-   is only the opener, it is left alone too. Otherwise the reply comes back
-   byte-identical. Headings and bold are never rewritten; the note asks the
-   model not to use them. A contraction counts as a quote, so openers like "I'd
-   be happy to help" are left to the note too. A reply that mentions a silence
-   word (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is never changed, and the polish
-   never empties a reply. A seeded property test generates 300 messages mixing
-   code, links, every quote form and every line break. For the ones it checks,
-   it requires the output to be an exact suffix of the input: the whole input
-   whenever code, a quote, indentation or a non-`\n` line break is present.
+   It never edits fenced code (closed or not), inline code (an unmatched
+   backtick protects the rest of the message), any line that starts with
+   whitespace (indented code, nested list items), links, images, reference
+   definitions or URLs. List markers stay, and so does a quoted line (`>`).
+   `2**3**4` and `a ** b` are not bold. A reply that mentions a silence word
+   (`SILENT`, `NO_REPLY`, `静默`, `沉默`) is never changed, and neither is one
+   with a line break other than `\n` (CR, VT, FF, NEL, U+2028 or U+2029). The
+   cleanup never empties a reply: an opener or sign-off that is the whole
+   message stays. A seeded property test generates 300 messages mixing code,
+   links, URLs, quotes, lists and every heading and bold shape. For each one it
+   checks that every code and link span comes back verbatim, that the output is
+   the input with characters removed, and that a second pass changes nothing.
 3. **Check-ins and the morning brief** already carry the same rules
    (`alans-way/voice.py` holds the shared wording `proactivity.py` uses), so the
-   note is not added on top of them; the polish still applies while the voice
-   is on.
+   note is not added on top of them; the cleanup still applies while the voice
+   is on. They are injected turns with no user waiting, so they aren't paced.
 
 It never changes:
 - SOUL.md, `agent.system_prompt`, `display.personality` or anything else in `config.yaml`;
@@ -198,9 +225,11 @@ Telegram mechanics: Hermes already shows "typing…" for the whole turn
 (`platforms.telegram.typing_indicator`, on by default) and sends a line the
 model writes before a tool call as its own message
 (`display.interim_assistant_messages`, on by default for Telegram). The plugin
-relies on both and fakes nothing. Hermes can't split one final reply into
-several messages except at Telegram's 4096-character limit, so neither can
-the voice.
+relies on both. Its only pacing is the wait described in
+[Length and pacing](#length-and-pacing). Hermes' own `human_delay` setting
+paces only images and files sent with a reply, not the text. Hermes can't split
+one final reply into several messages except at Telegram's 4096-character
+limit, so neither can the voice.
 
 ### Fewer Hermes messages in Telegram
 
@@ -219,7 +248,7 @@ changes those settings or a profile automatically.
 | `display.platforms.telegram.busy_steer_ack_enabled: false` | Hides Hermes's separate steer acknowledgment when new guidance joins an active task. The model can still acknowledge the addition in its own next short line. This does not change busy-input mode or other fixed notices. |
 | `display.memory_notifications: off` | Hides memory-update and self-improvement review bookkeeping across every platform in that profile. Background review still runs. |
 | `display.platforms.telegram.notifications: important` | Makes routine updates silent while finals and approval prompts remain eligible for sound. It changes notification sound, not the number of visible messages; visual notifications can still appear. |
-| `platforms.telegram.typing_indicator: true` and `platforms.telegram.reactions: true` | Show activity and processing success/failure without a narration bubble. A success reaction does not verify the user's goal. |
+| `platforms.telegram.typing_indicator: true` and `platforms.telegram.reactions: true` | Show activity and processing success/failure without a narration bubble. A success reaction does not verify the user's goal. Hermes ships reactions off. Setup turns them on when you accept its recommendations, or when you change other choices without naming reactions. Bots set up under the older acknowledgment-only question get one reactions-only question. An earlier answer and a `TELEGRAM_REACTIONS` override are kept. |
 | `cron.wrap_response: false` | Removes the scheduled-message header, job IDs and management footer across all delivery targets in the profile. The scheduled result or failure itself still arrives. |
 
 For tool progress, the effective value resolves in this order: Telegram
@@ -251,7 +280,9 @@ records the existing controls; it changes no defaults or profiles.
 - Interim assistant messages skip `transform_llm_output`, and
   `on_interim_message` can only observe.
 - No way to split a final reply into 2-3 messages (for example at blank lines)
-  other than the length limit.
+  other than the length limit, and `human_delay` paces only attachments. With
+  both, the voice could send a long reply as a few paced texts. Until then it
+  asks for short replies and waits before quick ones.
 - Cron gives hooks no public view of a job's destinations, and delivers one
   result to all of them. Exposing the job id and its full target list in hook
   kwargs (or per-destination results) would let cron reports that go only to
