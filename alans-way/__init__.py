@@ -178,7 +178,7 @@ def register(ctx, *, legacy_home=None, background=True):
         ctx.register_hook("post_llm_call", runtime.on_turn_end)
     ctx.register_command("proactivity", runtime.command if primary else cross.command,
                          description="Check-ins and cross-bot export/receiver: cross on|off|status",
-                         args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief|cross on|off|status]")
+                         args_hint="[status|now|less|normal|more|pause|resume|hours|tz|brief|report|cross on|off|status]")
     if background:
         def connect(native=None, adapter=None, **kwargs):
             cross.on_telegram_connect(native, adapter, **kwargs)

@@ -1413,7 +1413,7 @@ class CrossBot:
                 return self.error_text(exc)
 
     def on_turn_start(self, user_message="", **kwargs):
-        from .proactivity import MARKER, BRIEF_MARKER
+        from .proactivity import MARKER, BRIEF_MARKER, REPORT_MARKER
         with self._lock:
             if not self.active or self.closed:
                 return None
@@ -1443,7 +1443,7 @@ class CrossBot:
                         and type(user_message) is str and len(user_message) <= EXCHANGE_BYTES):
                     context = self.store.checkin_context(self.profile, user_message, self._bound_key, correlation)
                     ordinary = (kwargs.get("origin") != "checkin"
-                                and not user_message.lstrip().startswith((MARKER, BRIEF_MARKER, IMPORT_MARKER)))
+                                and not user_message.lstrip().startswith((MARKER, BRIEF_MARKER, REPORT_MARKER, IMPORT_MARKER)))
                     results = self.store.consume_results(self.profile) if context is not None or ordinary else []
                     if results:
                         context = (context + "\n" if context else "") + RESULT_FRAMING + "\nResult data: " + data_json(results)
@@ -1455,7 +1455,7 @@ class CrossBot:
                         or kwargs.get("imported") or kwargs.get("is_imported")
                         or kwargs.get("origin") in ("cross_bot", "cron", "child", "checkin", "brief")
                         or type(user_message) is not str or len(user_message) > EXCHANGE_BYTES
-                        or user_message.lstrip().startswith((MARKER, BRIEF_MARKER, "[Cross-bot ask]"))):
+                        or user_message.lstrip().startswith((MARKER, BRIEF_MARKER, REPORT_MARKER, "[Cross-bot ask]"))):
                     return None
                 status = self.store.status(self.profile)
                 if not status["enabled"] or not status["bound"] or len(self._pending) >= 32:

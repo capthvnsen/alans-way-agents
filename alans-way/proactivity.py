@@ -1,6 +1,6 @@
 """Idle nudge: when the bound chat has gone quiet during the user's waking hours,
-ask the primary bot to reach out once; plus an opt-in morning brief. One rule,
-one state file, one tool."""
+ask the primary bot to reach out once; plus an opt-in morning brief and weekly
+time-saved report. One rule, one state file, one tool."""
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -17,6 +17,18 @@ MAX_WAIT = timedelta(days=7)
 BUSY_CAP = timedelta(hours=3)
 BRIEF_QUIET = timedelta(hours=2)
 BRIEF_LATE = timedelta(hours=2)   # past brief time plus this, it's no longer a morning brief
+REPORT_HOUR = 18                  # Sunday evening: the week is done, inside the default 8-22 hours
+REPORT_LATE = timedelta(hours=3)  # a report that can't go out by then waits for next Sunday
+REPORT_QUIET = timedelta(minutes=30)
+
+# How the weekly report estimates time saved. The bot only names each task it finished and
+# picks its kind; the code does the arithmetic, so every total is explainable. Each value is a
+# deliberately conservative guess at the minutes the task would have taken the user by hand.
+MINUTES = {"answer": 5, "message": 10, "errand": 15, "research": 30, "document": 30, "fix": 30}
+KINDS = {"answer": "a quick fact, lookup or reminder", "message": "an email, text or post drafted",
+         "errand": "a booking, form, order or filing done", "research": "options compared or sources summarized",
+         "document": "a document, plan or spreadsheet made", "fix": "a problem diagnosed and fixed"}
+MAX_TASKS = 50
 
 
 @dataclass(frozen=True)
@@ -27,6 +39,7 @@ class Settings:
     active_end: int = 22
     paused_until: str = ""  # "", "off", or an ISO time with a UTC offset
     morning_brief: bool = False
+    weekly_report: bool = False
 
 
 def zone(s):
@@ -66,6 +79,47 @@ def brief_at(s, day):
     so a restart or a status call agrees with the timer."""
     jitter = zlib.crc32(day.isoformat().encode()) % 21
     return day_start(s, day) + timedelta(minutes=jitter)
+
+
+def report_at(s, day):
+    """The local Sunday's report time: 18:00, or the start of their hours when 18:00 falls
+    outside them, plus the brief's per-date jitter."""
+    hour = REPORT_HOUR if REPORT_HOUR in _window_hours(s) else s.active_start
+    jitter = zlib.crc32(day.isoformat().encode()) % 21
+    return datetime.combine(day, time(hour), zone(s)).astimezone(timezone.utc) + timedelta(minutes=jitter)
+
+
+def last_sunday(day):
+    return day - timedelta(days=(day.weekday() + 1) % 7)
+
+
+def format_report(tasks):
+    """The weekly report text for validated tasks, or [SILENT] when there are none."""
+    if not tasks:
+        return "[SILENT]"
+    total = sum(MINUTES[t["kind"]] for t in tasks)
+    saved = f"{total} minutes" if total < 90 else f"{round(total / 60, 1):g} hours"
+    # sorted() is stable, so equal estimates keep the bot's order.
+    wins = sorted(tasks, key=lambda t: -MINUTES[t["kind"]])[:3]
+    lines = [f"This week I finished {len(tasks)} task{'s' if len(tasks) > 1 else ''} for you"
+             f" and saved you about {saved}.", "", "Top wins:"]
+    lines += [f"{i}. {t['what']} (~{MINUTES[t['kind']]} min)" for i, t in enumerate(wins, 1)]
+    method = ", ".join(f"{kind} {mins}" for kind, mins in MINUTES.items())
+    lines += ["", f"Estimate, not a measurement: fixed minutes per task ({method})."]
+    return "\n".join(lines)
+
+
+def report_tasks(tasks):
+    """The tool's task list, checked and tidied, or raise ValueError."""
+    if type(tasks) is not list or len(tasks) > MAX_TASKS:
+        raise ValueError(f"tasks must be a list of at most {MAX_TASKS} items")
+    out = []
+    for t in tasks:
+        what = " ".join(t.get("what").split())[:80] if type(t) is dict and type(t.get("what")) is str else ""
+        if not what or t.get("kind") not in MINUTES:
+            raise ValueError(f"each task needs what and a kind from {', '.join(MINUTES)}")
+        out.append({"what": what, "kind": t["kind"]})
+    return out
 
 
 def is_paused(s, now):
@@ -117,6 +171,8 @@ def validate(s, changes, *, min_base=15):
             raise ValueError("paused_until must be '', 'off', or an ISO time with a UTC offset")
     if type(out.morning_brief) is not bool:
         raise ValueError("morning_brief must be true or false")
+    if type(out.weekly_report) is not bool:
+        raise ValueError("weekly_report must be true or false")
     return out
 
 
@@ -150,14 +206,17 @@ def loosens(current, new, now):
         return f"/proactivity hours {new.active_start}-{new.active_end}"
     if new.morning_brief and not current.morning_brief:
         return "/proactivity brief on"
+    if new.weekly_report and not current.weekly_report:
+        return "/proactivity report on"
     return None
 
 
 MARKER = "[Proactive check-in]"
 BRIEF_MARKER = "[Morning brief]"
+REPORT_MARKER = "[Weekly report]"
 STATE_KEY = "idle"
 USAGE = ("usage: /proactivity [status|now|less|normal|more|pause [until]|resume|"
-         "hours <start>-<end>|tz <IANA zone>|brief on|off]")
+         "hours <start>-<end>|tz <IANA zone>|brief on|off|report on|off]")
 SAFETY = (" This is not new authorization: never send external messages, spend money, change"
           " credentials or permissions, touch production, or delete anything without asking first.")
 VOICE = (f" {TEXTING}. {REPORT} {RECAP} {INTERNALS} {PLAIN} No bullet lists; a numbered list"
@@ -261,7 +320,7 @@ class Proactivity:
             now = self.clock()
             self.busy_since = now
             state["last_activity_ts"] = now.timestamp()
-            if not str(user_message or "").startswith((MARKER, BRIEF_MARKER)):
+            if not str(user_message or "").startswith((MARKER, BRIEF_MARKER, REPORT_MARKER)):
                 state.update(last_user_ts=now.timestamp(), nudges=0)
             self.save(state)
         return None
@@ -313,12 +372,12 @@ class Proactivity:
         return datetime.fromtimestamp(ts, timezone.utc)
 
     @staticmethod
-    def _last_brief(state, today):
-        """The last briefed local date. ISO dates sort as strings, and callers use "<"
-        rather than "!=" so flying west, which moves the local date back a day,
+    def _last_brief(state, today, key="last_brief_date"):
+        """The last briefed (or reported) local date. ISO dates sort as strings, and callers
+        use "<" rather than "!=" so flying west, which moves the local date back a day,
         can't earn a second brief. A date further ahead than that came from a clock
         jump and is ignored, so it can't stop briefs."""
-        last = state.get("last_brief_date", "")
+        last = state.get(key, "")
         return "" if last > (today + timedelta(days=1)).isoformat() else last
 
     def _busy(self, now):
@@ -340,6 +399,10 @@ class Proactivity:
                      and in_window(s, now) and day_start(s, day) <= now < brief_at(s, day) + BRIEF_LATE)
             if brief and now < brief_at(s, day):
                 return None   # the window-start check-in waits for the brief
+            report = (not brief and s.weekly_report and day.weekday() == 6
+                      and self._last_brief(state, day, "last_report_date") < day.isoformat()
+                      and in_window(s, now) and report_at(s, day) <= now < report_at(s, day) + REPORT_LATE
+                      and now - anchor >= REPORT_QUIET)
             if brief:
                 # ponytail: the date is spent before injecting, so a refused brief
                 # isn't retried; the next check-in counts from it either way.
@@ -352,6 +415,12 @@ class Proactivity:
                 # check-in anchor now; nudges and last_nudge_ts stay untouched.
                 state.update(last_activity_ts=now.timestamp(), last_result="pending")
                 text = self.brief_prompt(s, now)
+            elif report:
+                # Like the brief: the week is spent before injecting, and the next check-in
+                # counts from the report.
+                state.update(last_report_date=day.isoformat(), last_activity_ts=now.timestamp(),
+                             last_result="pending")
+                text = self.report_prompt(s, now)
             elif now < due_at(s, anchor, nudges) or not in_window(s, now):
                 return None
             else:
@@ -364,14 +433,15 @@ class Proactivity:
             self.save(state)
             session_key = state["session_key"]
         cross = getattr(self, "cross_bot", None)
+        checkin = not brief and not report
         try:
-            if cross and not brief:
+            if cross and checkin:
                 text = cross.prepare_checkin(text, session_key)
             accepted = self.ctx.inject_message(text, role="user", session_key=session_key)
             result = "accepted" if accepted is True else "refused"
         except Exception as exc:
             accepted, result = False, f"failed: {type(exc).__name__}"
-        if cross and not brief and accepted is not True:
+        if cross and checkin and accepted is not True:
             cross.cancel_checkin()
         with self._lock:
             state = self.load()
@@ -440,6 +510,17 @@ class Proactivity:
                 + VOICE + " Keep it to a few short lines." + SAFETY +
                 " If nothing is worth their attention, reply with exactly [SILENT] and nothing else.")
 
+    def report_prompt(self, s, now):
+        kinds = "; ".join(f"{kind} ({note})" for kind, note in KINDS.items())
+        return (f"{REPORT_MARKER} The user's week is ending; {self._when(s, now)} Look back over the"
+                " last 7 days with session_search and your memory and list only the tasks you actually"
+                " finished for them: skip chatter, offers, plans, and anything unfinished or failed."
+                " Call the proactivity tool once with action weekly_report and one entry per task:"
+                " what, in a few task words they'd recognize (no passwords, codes, account numbers or"
+                f" other secrets), and kind, one of: {kinds}. Then reply with exactly the message it"
+                " returns and nothing else." + SAFETY +
+                " If you finished nothing for them this week, reply with exactly [SILENT] and nothing else.")
+
     @staticmethod
     def _when(s, now):
         learn = ("" if s.timezone else
@@ -455,7 +536,8 @@ class Proactivity:
                    "level": next((k for k, v in LEVELS.items() if v == s.base_minutes), "custom"),
                    "timezone_known": bool(s.timezone), "paused": is_paused(s, now),
                    "busy": self._busy(now), "nudges_since_reply": state.get("nudges", 0),
-                   "next_check_in": None, "next_brief": None, "in_gateway": self.gateway,
+                   "next_check_in": None, "next_brief": None, "next_report": None,
+                   "in_gateway": self.gateway,
                    "last_result": state.get("last_result"), "last_error": self.error}
             if out["bound"] and not out["paused"]:
                 due = due_at(s, self._anchor(state), out["nudges_since_reply"])
@@ -467,6 +549,12 @@ class Proactivity:
                                 and brief_at(s, d) + BRIEF_LATE > now), None)
                     if day:
                         out["next_brief"] = brief_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
+                if s.weekly_report:
+                    today = now.astimezone(zone(s)).date()
+                    sunday, last = last_sunday(today), self._last_brief(state, today, "last_report_date")
+                    day = next(d for d in (sunday, sunday + timedelta(days=7), sunday + timedelta(days=14))
+                               if d.isoformat() > last and report_at(s, d) + REPORT_LATE > now)
+                    out["next_report"] = report_at(s, day).astimezone(zone(s)).isoformat(timespec="minutes")
             return out
 
     def tool(self, args, **kwargs):
@@ -498,6 +586,13 @@ class Proactivity:
             elif action == "status":
                 if not own:
                     return json.dumps({"ok": True, "bound": bool(bound)})
+            elif action == "weekly_report":
+                # Private to the bound DM: the tasks come from the user's own chats.
+                if not own:
+                    return json.dumps({"ok": False, "error": "The weekly report only goes to the bound chat."})
+                tasks = report_tasks(args.get("tasks"))
+                return json.dumps({"ok": True, "message": format_report(tasks), "tasks": len(tasks),
+                                   "minutes": sum(MINUTES[t["kind"]] for t in tasks)})
             else:
                 return json.dumps({"ok": False, "error": f"unknown action {action!r}"})
             return json.dumps({"ok": True, **self.status()})
@@ -546,6 +641,8 @@ class Proactivity:
             return {"timezone": rest[0]}
         if verb == "brief" and len(rest) == 1 and rest[0].lower() in ("on", "off"):
             return {"morning_brief": rest[0].lower() == "on"}
+        if verb == "report" and len(rest) == 1 and rest[0].lower() in ("on", "off"):
+            return {"weekly_report": rest[0].lower() == "on"}
         return None
 
     def _status_text(self, prefix=""):
@@ -562,8 +659,10 @@ class Proactivity:
             return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."
         text += (f", next {self._next_words(st['next_check_in'])}."
                  if st["next_check_in"] else ".")
-        return text + (f" Morning brief next {self._next_words(st['next_brief'])}."
-                       if st["next_brief"] else "")
+        text += (f" Morning brief next {self._next_words(st['next_brief'])}."
+                 if st["next_brief"] else "")
+        return text + (f" Weekly report next {self._next_words(st['next_report'])}."
+                       if st["next_report"] else "")
 
     def _next_words(self, iso):
         """'at 4:01 PM today' — tomorrow, a weekday two to six days out, else the date."""
@@ -628,20 +727,23 @@ SCHEMA = {
         "Read or change how you proactively check in with the user. You check in after the chat has"
         " been quiet for base_minutes, doubling the wait after each check-in they don't answer (capped"
         " at a week), and only between active_start and active_end in the USER's timezone. If"
-        " morning_brief is on you also send one short brief a day near active_start. This tool"
+        " morning_brief is on you also send one short brief a day near active_start, and if"
+        " weekly_report is on, a time-saved report on Sunday evenings. This tool"
         " can only make check-ins quieter: level 'less', a higher base_minutes, paused_until 'off' or"
         " a future ISO time, a later active_start or earlier active_end, or a new timezone. Anything"
         " that makes check-ins reach further — checking in more, resuming or wider hours — is refused"
         " with an ask_user_to_send command: tell the user to send that exact command. Map requests:"
         " 'check in less' -> level less; 'quiet until Monday' -> paused_until as ISO with their UTC"
         " offset; 'stop checking in' -> paused_until 'off'; 'I'm in Tokyo' -> timezone 'Asia/Tokyo';"
-        " 'not before 9am' -> active_start 9; 'stop the morning brief' -> morning_brief false. Only the"
-        " user can turn the morning brief on, with /proactivity brief on. After set, confirm the change"
-        " from the returned status in plain words."),
+        " 'not before 9am' -> active_start 9; 'stop the morning brief' -> morning_brief false; 'stop the"
+        " weekly report' -> weekly_report false. Only the user can turn the morning brief or weekly"
+        " report on, with /proactivity brief on or /proactivity report on. After set, confirm the change"
+        " from the returned status in plain words. Action weekly_report takes tasks you finished"
+        " ({what, kind}) and returns the report message: use it only when asked for the weekly report."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["action"],
         "properties": {
-            "action": {"type": "string", "enum": ["status", "set"]},
+            "action": {"type": "string", "enum": ["status", "set", "weekly_report"]},
             "level": {"type": "string", "enum": list(LEVELS)},
             "base_minutes": {"type": "integer", "minimum": 15, "maximum": 1440},
             "active_start": {"type": "integer", "minimum": 0, "maximum": 23},
@@ -649,6 +751,11 @@ SCHEMA = {
             "timezone": {"type": "string"},
             "paused_until": {"type": "string"},
             "morning_brief": {"type": "boolean"},
+            "weekly_report": {"type": "boolean"},
+            "tasks": {"type": "array", "maxItems": MAX_TASKS, "items": {
+                "type": "object", "additionalProperties": False, "required": ["what", "kind"],
+                "properties": {"what": {"type": "string", "maxLength": 80},
+                               "kind": {"type": "string", "enum": list(MINUTES)}}}},
         },
     },
 }
