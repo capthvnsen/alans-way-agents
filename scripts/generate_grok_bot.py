@@ -87,8 +87,8 @@ def main(argv=None):
     try:
         skill, settings = render(load_config(args.config, missing_ok=False))
         args.output.mkdir(parents=True, exist_ok=True)
-        (args.output / 'SKILL.md').write_text(skill, encoding='utf-8')
-        (args.output / 'settings.json').write_text(settings, encoding='utf-8')
+        (args.output / 'SKILL.md').write_text(skill, encoding='utf-8', newline='\n')
+        (args.output / 'settings.json').write_text(settings, encoding='utf-8', newline='\n')
     except ConfigError as error:
         print(error, file=sys.stderr)
         return 2
