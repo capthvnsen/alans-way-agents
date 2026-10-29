@@ -52,3 +52,7 @@ This contract adds no hooks, state migration or runtime setting changes.
   guides the agent through running `setup.sh`, which installs the workspace
   browser router and services over ssh on your own machines.
 - No telemetry, no stored credentials.
+
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).

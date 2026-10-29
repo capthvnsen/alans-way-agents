@@ -1,6 +1,7 @@
 ---
 name: alans-way-grok-bot
 description: Apply Alan's Way shared persona, text voice and identity preferences in Grok Bot, and check whether requested proactivity has native support.
+license: MIT
 ---
 
 # Alan's Plugin for Grok Bot

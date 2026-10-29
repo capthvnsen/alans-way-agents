@@ -76,3 +76,7 @@ directory for the browser connector; the computer provider also passes Hermes's 
 - It spawns `node`, resolved the way Hermes resolves an MCP server command.
 - Screenshots have no numbered overlays: use the element numbers in the list. Scroll amounts are wheel ticks,
   converted to pages at a quarter page per tick.
+
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).

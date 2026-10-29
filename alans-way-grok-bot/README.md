@@ -40,8 +40,11 @@ the workspace independently of the Hermes packages; see
   before implementing proactive check-ins.
 
 The [shared contract](../shared/README.md#decisions-for-alex) also lists schema
-and future Hermes adapter decisions. This scaffold uses the repository's
-existing [MIT license](../LICENSE).
+and future Hermes adapter decisions.
+
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).
 
 Community: [Discord](https://discord.gg/jBQCPUsVE) ·
 [openalan.com](https://openalan.com).

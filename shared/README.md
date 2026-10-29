@@ -77,4 +77,6 @@ config; they do not install a loader or scheduler.
 - TODO: decide how a future Hermes adapter resolves shared preferences against
   existing persona, tone and proactivity settings. This draft performs no migration.
 
-Covered by the repository's existing [MIT license](../LICENSE).
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](../LICENSE).

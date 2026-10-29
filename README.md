@@ -154,4 +154,6 @@ Come say hi on [Discord](https://discord.gg/jBQCPUsVE).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+All four Alan's Way products—Alan's Workspace, Alan's CU MCP, Alan's Plugin for
+Hermes and Alan's Plugin for Grok Bot—use the MIT License.
+Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).
