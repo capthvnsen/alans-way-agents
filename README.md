@@ -10,7 +10,17 @@ Add a workspace browser, computer use, proactive check-ins and a texting voice t
 the production Hermes you already run. Alan's Plugin for Hermes ships as two
 Python plugin packages in this repo. Your existing Hermes gateway owns the
 conversation; no fork or patched Hermes source is required. Current Hermes
-plugin release: **v0.21.13**.
+plugin release: **v0.21.14**.
+
+## New in v0.21.14
+
+- Hosted computers can finish setup before a Telegram bot exists; Workspace
+  configures the browser after you add the bot.
+- The Hermes plugin passes Hermes 0.21.5's install scan again.
+- Hermes and Grok Bot share persona/voice preferences, with a generator for
+  Grok Bot's skill and settings.
+- Texting and Telegram cleanup improvements, an opt-in weekly time-saved report,
+  and more reliable router tests on Linux and macOS.
 
 ## The four Alan's Way products
 
