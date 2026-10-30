@@ -7,12 +7,15 @@ changed. Run the commands on the VM as the user Hermes runs as.
 **SSH over Tailscale (primary).** For a client that can run a stdio command.
 Put the client on your tailnet and use the VM's Tailscale name or IP as
 `HOST`. Grok Bot's computer reaches the VM this way (tested Oct 26-27, 2026,
-14 tools).
+14 tools). From an `alans-way-agents` checkout (the setup tool is not
+installed with the plugin):
 
 ```sh
-sh ~/.hermes/plugins/alans-way/scripts/setup-remote-agent.sh --bot-id BOT_ID --bot-name "BOT NAME" --user VM_USER
+sh scripts/setup-remote-agent.sh --bot-id BOT_ID --bot-name "BOT NAME" --user VM_USER
 ```
 
+The router defaults to `$HERMES_HOME/plugins/alans-way/scripts/workspace-router.cjs`
+(`HERMES_HOME` defaults to `~/.hermes`); use `--router PATH` to override it.
 It creates `~/.ssh/alans-way-remote-agent-BOT_ID` (ed25519) and an
 `authorized_keys` line restricted to the router (`restrict,command=...`),
 copying the Mac SSH settings from the `workspace_browser` block. It prints the

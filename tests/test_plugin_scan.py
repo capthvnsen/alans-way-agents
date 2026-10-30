@@ -19,24 +19,28 @@ class PluginScanTests(unittest.TestCase):
     def test_exact_reviewed_scan_inventory(self):
         code = '''from collections import Counter
 from pathlib import Path
+from shutil import copyfile
+from tempfile import TemporaryDirectory
 from tools.plugin_guard import scan_plugin, should_allow_plugin_install
 result = scan_plugin(Path("alans-way"))
 findings = Counter((f.pattern_id, f.severity, f.file) for f in result.findings)
 expected = Counter({
     ("python_subprocess", "medium", "skills/workspace-setup/SKILL.md"): 2,
-    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3,
-    ("ssh_backdoor", "medium", "scripts/setup-remote-agent.sh"): 5,
-    ("ssh_backdoor", "low", "scripts/setup-remote-agent.sh"): 1,
-    ("ssh_keygen", "medium", "scripts/setup-remote-agent.sh"): 2,
-    ("python_subprocess", "medium", "scripts/setup-remote-agent.sh"): 3})
+    ("hardcoded_ip_port", "low", "skills/workspace-setup/SKILL.md"): 3})
 assert findings == expected, (findings, expected, result.findings)
 assert result.verdict == "safe", result.verdict
 assert should_allow_plugin_install(result)[0] is True
 result.verdict = "caution"
 assert should_allow_plugin_install(result)[0] is None
 assert should_allow_plugin_install(result, force=True)[0] is True
-result.verdict = "dangerous"
-assert should_allow_plugin_install(result, force=True)[0] is False
+with TemporaryDirectory() as directory:
+    plugin = Path(directory)
+    copyfile("scripts/setup-remote-agent.sh", plugin / "setup-remote-agent.sh")
+    result = scan_plugin(plugin)
+    assert result.verdict == "dangerous", result
+    assert sum(f.severity == "critical" and f.pattern_id == "ssh_backdoor"
+               for f in result.findings) == 5, result.findings
+    assert should_allow_plugin_install(result, force=True)[0] is False
 '''
         env = dict(os.environ, PYTHONPATH=os.environ["HERMES_SCANNER_ROOT"])
         result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,

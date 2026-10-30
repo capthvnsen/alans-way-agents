@@ -3,14 +3,14 @@
 # Install a dedicated SSH key restricted to the workspace router. Hermes config is read only.
 # --print previews without changing SSH files; --probe also checks initialize + tools/list locally.
 # Optional fallback settings: --mac-ssh USER@MAC --host-os mac|windows|linux --state-file PATH.
-# --config PATH selects config.yaml; --router PATH overrides the sibling installed router.
+# --config PATH selects config.yaml; --router PATH overrides the installed plugin router.
 # --user selects the SSH login shown in client JSON. Replace HOST and copy the private key to the client.
 set -eu
 
 # setup.sh uses the same interpreter override on hosts without a working python3.
 if [ -n "${ALANS_WAY_PYTHON:-}" ]; then python3() { "$ALANS_WAY_PYTHON" "$@"; }; fi
 command -v python3 >/dev/null || { echo "setup-remote-agent: python3 is required" >&2; exit 1; }
-ROUTER="$(cd "$(dirname "$0")" && pwd)/workspace-router.cjs"
+ROUTER="${HERMES_HOME:-$HOME/.hermes}/plugins/alans-way/scripts/workspace-router.cjs"
 python3 - "$0" "$ROUTER" "$@" <<'PY'
 import argparse
 from contextlib import contextmanager

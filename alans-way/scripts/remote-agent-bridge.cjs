@@ -2,7 +2,7 @@
 // remote-agent-bridge.cjs — opt-in HTTP MCP front for workspace-router.cjs.
 //
 // For a remote MCP client that cannot hold an SSH stdio session (see
-// setup-remote-agent.sh for the SSH path). Each MCP session started by an
+// repo-level scripts/setup-remote-agent.sh for the SSH path). Each MCP session started by an
 // `initialize` POST runs its own workspace-router.cjs child with this
 // process's arguments and environment, so the router behaves exactly as it
 // does under the SSH forced command. Replies come back as application/json;
