@@ -166,6 +166,7 @@ class StateFileTests(unittest.TestCase):
                      out.index("step: tailscale"), out.index("step: ready")]
             self.assertEqual(order, sorted(order))
             self.assertIn("would run", out)
+            self.assertIn("--non-interactive --defer-bot --skip-services --repo-ref main", out)
             self.assertFalse((directory / "state" / "state.json").exists())
 
 
@@ -261,6 +262,7 @@ class InstallStepTests(unittest.TestCase):
             self.assertEqual(programs.count("[program:tailscaled]"), 1)
             self.assertEqual(programs.count("[program:alans-way-browser]"), 1)
             self.assertIn("--skip-services", calls)
+            self.assertIn("setup.sh: --non-interactive --defer-bot --skip-services --repo-ref main", calls)
             doc = json.loads((directory / "state" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(doc["state"], "ready")
 

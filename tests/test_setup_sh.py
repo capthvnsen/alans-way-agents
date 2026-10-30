@@ -1000,6 +1000,30 @@ class RestartOrderTests(unittest.TestCase):
 
 
 class NoBotTests(unittest.TestCase):
+    def test_defer_bot_warns_then_a_rerun_with_a_bot_configures_the_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            log = root / "log"
+            bin_dir = tooling(root, log)
+            args = ("--no-default-bot", "--defer-bot", "--skip-browser", "--skip-services",
+                    "--non-interactive", "--hermes-home", str(home))
+            env = env_for(root, bin_dir, home)
+            result = run(*args, env=env)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("warn workspace_browser setup deferred (--defer-bot): no Telegram bot found", result.stdout)
+            self.assertIn("hermes gateway setup (choose Telegram, then Automatic), then re-run setup.sh", result.stdout)
+            self.assertNotIn("FAIL", result.stdout)
+            self.assertNotIn("workspace_browser", (home / "config.yaml").read_text() if (home / "config.yaml").exists() else "")
+            self.assertIn("proactivity status", read_log(log))
+
+            (home / ".env").write_text("TELEGRAM_BOT_TOKEN=111222333:token\n", encoding="utf-8")
+            result = run(*args, env=env)
+            self.assertNotIn("setup deferred", result.stdout)
+            self.assertIn("workspace_browser configured", result.stdout)
+            self.assertIn("workspace_browser", (home / "config.yaml").read_text())
+
     def test_a_server_with_no_telegram_bot_fails_with_the_fix(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
