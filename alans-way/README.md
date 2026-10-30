@@ -1,14 +1,32 @@
-# Alan's Way plugin
+# Alan's Plugin for Hermes: main package
 
 A texting voice for chat sessions, idle check-ins and the workspace-browser skills for a
-Hermes gateway. This
-directory is what `hermes plugins install` loads.
+Hermes gateway. This directory is what `hermes plugins install` loads. The
+optional [`alans-way-computer`](../alans-way-computer/README.md) package supplies
+the computer-use provider. See the [repository README](../README.md) for install
+instructions and the four Alan's Way products.
 
-The desktop app (macOS or Windows on the user's computer), Tailscale setup,
-and SSH connect scripts are a separate repo:
+Alan's Workspace (Mac chat/browser, iOS app and lid-close VM handoff) and
+Alan's CU MCP (the shared Node `workspace-mcp` server) live in a separate repo:
 <https://github.com/capthvnsen/alans-way>. After this plugin is installed,
 ask the agent to follow the `workspace-setup` skill. It fetches that repo's
 setup page and walks through the rest. It does not replace this plugin.
+
+## Shared config
+
+The plugin reads `~/.config/alans-way/config.json` on load, validated against the
+[shared schema](../shared/config.schema.json). A missing file preserves existing
+defaults; an invalid file reports an error before registration applies anything.
+Install `jsonschema>=4.18,<5` in Hermes's Python environment when needed.
+
+Shared identity/persona reach every profile. With texting voice on, shared tone
+and reply length replace the built-in voice prompt. Shared timezone, idle time
+and minute-level active hours control the native scheduler, while route binding,
+operator pauses and brief/report choices remain local. Shared proactivity off
+blocks unsolicited messages; shared on never binds a chat or resumes a pause.
+Edit the JSON and reload the plugin to apply changes. See the
+[shared usage and precedence rules](../shared/README.md#use-with-hermes-and-grok-bot)
+and [Grok Bot generator](../alans-way-grok-bot/README.md).
 
 ## Disclosures
 
@@ -41,3 +59,7 @@ setup page and walks through the rest. It does not replace this plugin.
   guides the agent through running `setup.sh`, which installs the workspace
   browser router and services over ssh on your own machines.
 - No telemetry, no stored credentials.
+
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).

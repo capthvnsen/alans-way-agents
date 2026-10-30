@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Alan's Plugin for Grok Bot settings handoff v1",
+  "description": "Generated preferences and native-routine instructions; not a Grok Bot native import format.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["persona", "voice", "routines"],
+  "properties": {
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "role"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1}
+      }
+    },
+    "voice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tone", "reply_length"],
+      "properties": {
+        "tone": {"type": "string", "minLength": 1},
+        "reply_length": {"enum": ["short", "balanced", "detailed"]}
+      }
+    },
+    "routines": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "schedule", "prompt"],
+        "properties": {
+          "name": {"const": "Alan's Way idle check-in"},
+          "prompt": {"type": "string", "minLength": 1},
+          "schedule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["every_minutes", "timezone", "active_hours"],
+            "properties": {
+              "every_minutes": {"type": "integer", "minimum": 5},
+              "timezone": {"type": "string", "minLength": 1},
+              "active_hours": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["start", "end"],
+                "properties": {
+                  "start": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"},
+                  "end": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

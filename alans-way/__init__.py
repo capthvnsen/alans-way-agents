@@ -8,6 +8,7 @@ import sys
 from . import voice as voice_mod
 from .proactivity import Proactivity, SCHEMA, cli_run, cli_setup
 from .cross_bot import CrossBot, CROSS_SCHEMA, ASK_SCHEMA
+from .shared_config import load_config, preference_context
 
 
 TASK_NOTE = (
@@ -114,7 +115,11 @@ def _primary_profile(ctx) -> bool:
     return name in (None, "", "default", "custom")
 
 
-def register(ctx, *, legacy_home=None, background=True):
+def register(ctx, *, legacy_home=None, background=True, shared_config_path=None):
+    shared = load_config(shared_config_path)
+    if shared:
+        ctx.register_hook("pre_llm_call", lambda **kwargs: {
+            "context": preference_context(shared, include_voice=False)})
     ctx.register_hook("pre_llm_call", task_context)
     ctx.register_hook("pre_llm_call", tools_context)
     skills = Path(__file__).parent / "skills"
@@ -123,7 +128,7 @@ def register(ctx, *, legacy_home=None, background=True):
     ctx.register_skill("web-errands", skills / "web-errands" / "SKILL.md")
     ctx.register_skill("integrations", skills / "integrations" / "SKILL.md")
     # Every profile: each bot's voice is its own profile's plugin state, on by default.
-    voice = voice_mod.Voice(ctx)
+    voice = voice_mod.Voice(ctx, shared_config=shared)
     ctx.register_hook("pre_llm_call", voice.on_turn_start)
     ctx.register_command("tone", voice.command,
                          description="Chat voice: texting (default) or Hermes' default voice, reply length and pacing",
@@ -132,7 +137,8 @@ def register(ctx, *, legacy_home=None, background=True):
         ctx.register_cli_command("tone", "The texting voice: status, texting, default, length or pace",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
     primary = _primary_profile(ctx)
-    runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None)
+    runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None,
+                          shared_config=shared)
     runtime.primary = primary
     cross = CrossBot(ctx, runtime)
     if cross.active:
