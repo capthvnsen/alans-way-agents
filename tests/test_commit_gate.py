@@ -255,7 +255,7 @@ class CommitGateTests(unittest.TestCase):
 
     def test_backend_diagnostics_cannot_block_rpc(self):
         stub = self.dir / "mac-stub.cjs"
-        stub.write_text("process.stderr.write('x'.repeat(1024 * 1024));\n" + MAC_STUB)
+        stub.write_text("require('node:fs').writeFileSync(2, 'x'.repeat(1024 * 1024));\n" + MAC_STUB)
         self.open_checkout()
         self.stderr.seek(0)
         self.assertGreaterEqual(len(self.stderr.read()), 1024 * 1024)
