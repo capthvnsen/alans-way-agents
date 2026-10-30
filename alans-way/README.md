@@ -1,14 +1,25 @@
-# Alan's Way plugin
+# Alan's Plugin for Hermes: main package
 
 A texting voice for chat sessions, idle check-ins and the workspace-browser skills for a
-Hermes gateway. This
-directory is what `hermes plugins install` loads.
+Hermes gateway. This directory is what `hermes plugins install` loads. The
+optional [`alans-way-computer`](../alans-way-computer/README.md) package supplies
+the computer-use provider. See the [repository README](../README.md) for install
+instructions and the four Alan's Way products.
 
-The desktop app (macOS or Windows on the user's computer), Tailscale setup,
-and SSH connect scripts are a separate repo:
+Alan's Workspace (Mac chat/browser, iOS app and lid-close VM handoff) and
+Alan's CU MCP (the shared Node `workspace-mcp` server) live in a separate repo:
 <https://github.com/capthvnsen/alans-way>. After this plugin is installed,
 ask the agent to follow the `workspace-setup` skill. It fetches that repo's
 setup page and walks through the rest. It does not replace this plugin.
+
+## Shared config contract (draft)
+
+[`shared/README.md`](../shared/README.md) defines the common persona, voice,
+proactivity and identity config for Alan's Plugin for Hermes and
+[Alan's Plugin for Grok Bot](../alans-way-grok-bot/README.md). Hermes does not yet
+read that JSON file. Keep using the existing [tone](../docs/voice.md) and
+[proactivity](../docs/proactivity.md) controls and Hermes persona settings.
+This contract adds no hooks, state migration or runtime setting changes.
 
 ## Disclosures
 
@@ -41,3 +52,7 @@ setup page and walks through the rest. It does not replace this plugin.
   guides the agent through running `setup.sh`, which installs the workspace
   browser router and services over ssh on your own machines.
 - No telemetry, no stored credentials.
+
+## License
+
+MIT License. Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).

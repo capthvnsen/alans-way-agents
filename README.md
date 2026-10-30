@@ -1,4 +1,4 @@
-# Alan's Way Plugins
+# Alan's Plugin for Hermes
 
 [![Discord](https://img.shields.io/badge/Discord-Alan's%20Way-5865F2?logo=discord&logoColor=white)](https://discord.gg/jBQCPUsVE)
 [![GitHub stars](https://img.shields.io/github/stars/capthvnsen/alans-way?style=social)](https://github.com/capthvnsen/alans-way)
@@ -6,34 +6,50 @@
 **Questions, setup help and release news: join the [Alan's Way Discord](https://discord.gg/jBQCPUsVE).**
 Also on X: [@alexhvnsen](https://x.com/alexhvnsen) · [openalan.com](https://openalan.com)
 
-Two plugins that add a workspace browser, computer use, proactive check-ins and a
-texting voice to the production Hermes you already run. There's no fork and no
-patched Hermes source, and no second gateway: your Telegram gateway keeps owning
-the conversation. Current release: **v0.21.13**.
+Add a workspace browser, computer use, proactive check-ins and a texting voice to
+the production Hermes you already run. Alan's Plugin for Hermes ships as two
+Python plugin packages in this repo. Your existing Hermes gateway owns the
+conversation; no fork or patched Hermes source is required. Current Hermes
+plugin release: **v0.21.13**.
+
+## The four Alan's Way products
+
+| Product | What it is | Where it lives |
+|---|---|---|
+| **Alan's Workspace** | The Mac desktop app with chat and a browser, the iOS app, and lid-close VM handoff | [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way) |
+| **Alan's CU MCP** | The shared Node `workspace-mcp` computer-use server that any agent can connect to | [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way) |
+| **Alan's Plugin for Hermes** | Python plugins, hooks and skills for stock Hermes | This repo: [`alans-way/`](alans-way/README.md) and [`alans-way-computer/`](alans-way-computer/README.md) |
+| **Alan's Plugin for Grok Bot** | A Grok Bot skill and settings package; Grok Bot cannot load Hermes plugins | This repo: [`alans-way-grok-bot/`](alans-way-grok-bot/README.md), currently a scaffold |
+
+Both agent plugins target **one shared config contract** for persona, voice,
+proactivity and identity: [`shared/`](shared/README.md). This change defines the
+contract and Grok Bot scaffold only. Hermes does not yet read the shared JSON
+config; its existing settings and runtime behavior stay as they are.
+
+## What the Hermes plugin provides
 
 | Plugin | What it adds to Hermes |
 |---|---|
 | [`alans-way/`](alans-way/README.md) | The `workspace_browser` MCP router (your computer's browser, with the VM browser as failover), the commit gate on purchases, sends and deletes, idle check-ins, the texting voice, and the `workspace-setup`, `workspace-operations`, `web-errands` and `integrations` skills |
 | [`alans-way-computer/`](alans-way-computer/README.md) | A provider for Hermes' stock, approval-gated `computer_use` tool. It drives desktop apps on your computer through the app, and the VM desktop when your computer is offline |
 
-The desktop app, Alan's Workspace, lives at
-[capthvnsen/alans-way](https://github.com/capthvnsen/alans-way) (download at
-[openalan.com](https://openalan.com)). This repo installs on the machine that runs
-your Hermes agents: a Linux VPS, a macOS VM, or a Windows PC you keep on. The
-app runs on your own computer (Mac or Windows). Tailscale connects the two, and
-every SSH hop runs over your tailnet.
+Install these packages on the machine running your Hermes agents: a Linux VPS,
+macOS VM or Windows PC you keep on. Tailscale connects that host to your own
+computer, and every SSH hop runs over your tailnet. The app and CU MCP server
+are separate products; these packages adapt Hermes to the workspace.
 
-## The seven core features
+Browser work falls back to the VM when your computer is unreachable. A failed
+call in flight is reported and never retried automatically; carrying that action
+across and a "Move to VM" button are not shipped. The app's live VM view needs
+VNC and noVNC on the VM.
 
-| # | Feature | What this repo provides | Status |
-|---|---|---|---|
-| 1 | Simple chat on the left, plus a browser like the one in the ChatGPT desktop app | The chat and the browser are the app. This repo routes the agent's tabs into that browser: each bot owns its own tabs, and an on-page cursor shows the bot's name and color | Shipped |
-| 2 | Codex-level computer use through MCP, on the local Mac and in the workspace browser, fast even for remote agents | `alans-way-computer` drives Mac apps through Hermes' `computer_use`, approved per action type in Telegram. Read-only `workspace_computer_*` tools and the `cua_alans_way_*` browser tools come over MCP, and one long-lived router serves each session. Other agents use the same router over [SSH through Tailscale](docs/remote-agents.md) | Shipped |
-| 3 | Lid-close handoff of browser work to the VM | When your computer is unreachable, new browser work goes to the VM browser. If it drops mid-session, the router moves the session to the VM and rebuilds the bot's tabs from the app's mirror. The call in flight fails visibly and is never retried | Partial: carrying an in-flight action across, and a "Move to VM" button, are not shipped |
-| 4 | Live view of the VM desktop | Setup checks for the VM's X11/VNC stack and prints what is missing. The `workspace-setup` skill hands the app a loopback viewer URL. The view itself is in the app | Shipped, but needs VNC and noVNC on the VM |
-| 5 | The same threads on any device, through Telegram or the agent's own app | Both plugins run inside your existing Hermes gateway, so the Telegram thread you already have is the thread on every device. An agent with its own app (for example the Grok Bot app) keeps its own threads and reaches the workspace as a remote agent | Shipped |
-| 6 | Add-on tools for production Hermes and Grok Bot, no forks | Hermes plugins plus bundled skills on stock Hermes `>= 0.21.5`. Non-Hermes agents get a router-restricted SSH key from `setup-remote-agent.sh` | Shipped |
-| 7 | Proactivity | Idle check-ins in one bound Telegram chat after 2 hours of quiet, only between 08:00 and 22:00 in your timezone. The wait doubles after each unanswered check-in (capped at a week), and a `[SILENT]` reply is never sent. The morning brief and [cross-bot proactivity](docs/proactivity.md#cross-bot-proactivity) are both **off by default** | Shipped |
+Idle check-ins run in one bound Telegram chat after 2 hours of quiet, between
+08:00 and 22:00 in your timezone. The wait doubles after each unanswered check-in
+(capped at a week), and `[SILENT]` replies are not sent. The morning brief,
+weekly report and [cross-bot proactivity](docs/proactivity.md#cross-bot-proactivity)
+are **off by default**. Other MCP clients, including Grok Bot, connect through
+the [remote-agent setup](docs/remote-agents.md); that connection does not install
+Hermes hooks or implement the Grok Bot scaffold's preferences.
 
 ## Install
 
@@ -106,12 +122,16 @@ Full model: [docs/workspace-browser.md](docs/workspace-browser.md#safety-model-s
 | [voice.md](docs/voice.md) | The texting voice and `/tone` |
 | [long-chats.md](docs/long-chats.md) | Compaction and tool-output pruning |
 | [addon-interface.md](docs/addon-interface.md) | Stable interface for add-on scripts run after `bootstrap-orgo.sh` |
+| [Shared config](shared/README.md) | Draft JSON Schema, example and reader contract for both agent plugins |
+| [Grok Bot scaffold](alans-way-grok-bot/README.md) | Skill, settings reference and integration TODOs |
 
 ## Layout
 
 ```
 alans-way/            the main plugin: router, hooks, check-ins, voice, skills, remote-agent setup
 alans-way-computer/   the computer-use provider plugin
+alans-way-grok-bot/   Grok Bot skill + settings scaffold (no Hermes plugin code)
+shared/              one config schema, example and contract for both agent plugins
 docs/                 guides (above), catalog drafts, design notes
 deploy/               systemd units for mac-watch and an optional browser_exec Chromium
 scripts/              pre-publication secret check (CI) and local voice evals
@@ -134,4 +154,6 @@ Come say hi on [Discord](https://discord.gg/jBQCPUsVE).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+All four Alan's Way products—Alan's Workspace, Alan's CU MCP, Alan's Plugin for
+Hermes and Alan's Plugin for Grok Bot—use the MIT License.
+Copyright (c) 2026 Alex Hansen. See [LICENSE](LICENSE).
