@@ -3,12 +3,13 @@ from pathlib import Path
 import json
 import os
 import re
-import select
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
+
+from router_test_support import recv_json
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTER = ROOT / "alans-way" / "scripts" / "workspace-router.cjs"
@@ -165,12 +166,17 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         self.state = self.dir / "mac-state.json"
         self.proc = None
         self.next_id = 1
+        # An unread stderr pipe can block the router before its next RPC reply.
+        self.stderr = tempfile.TemporaryFile(mode="w+")
 
     def tearDown(self):
-        if self.proc:
-            self.proc.kill()
-            self.proc.communicate()
-        self.tmp.cleanup()
+        try:
+            if self.proc:
+                self.proc.kill()
+                self.proc.communicate(timeout=5)
+        finally:
+            self.stderr.close()
+            self.tmp.cleanup()
 
     def start(self, mac=True, mac_mode="ok", vm_mode="ok", vm_tabs=1,
               mac_proxy_vm=False, **extra_env):
@@ -181,6 +187,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         if mac:
             argv += ["--mac-ssh", "fake@host"]
         env = dict(os.environ, PATH=str(self.dir / "bin") + os.pathsep + os.environ["PATH"],
+                   HERMES_HOME=str(self.dir / "hermes"),
                    MAC_STUB=str(self.dir / "mac-stub.cjs"), MAC_MODE=mac_mode,
                    MAC_LOG=str(self.dir / "mac.log"), VPS_LOG=str(self.dir / "vm.log"),
                    PROBE_DOWN=str(self.dir / "probe-down"),
@@ -189,7 +196,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         env.pop("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", None)
         env.update(extra_env)
         self.proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             text=True, env=env)
 
     def send(self, method, **params):
@@ -202,11 +209,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         return msg.get("id")
 
     def recv(self, timeout=15, required=True):
-        if not select.select([self.proc.stdout], [], [], timeout)[0]:
-            if required:
-                self.fail("no response within %ss" % timeout)
-            return None
-        return json.loads(self.proc.stdout.readline())
+        return recv_json(self.proc, timeout, required)
 
     def text(self, msg):
         return " ".join(part["text"] for part in msg["result"]["content"] if part["type"] == "text")

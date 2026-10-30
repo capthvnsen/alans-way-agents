@@ -2,7 +2,6 @@
 from pathlib import Path
 import json
 import os
-import select
 import shutil
 import socket
 import subprocess
@@ -13,6 +12,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # the host tests' stubs, however this file is run
 from test_workspace_host import FAKE_SSH, ROUTER, VM_STUB  # noqa: E402
+
+from router_test_support import recv_json
 
 NODE = shutil.which("node")
 SH = shutil.which("sh")
@@ -149,12 +150,17 @@ class CommitGateTests(unittest.TestCase):
         (self.dir / "conn.json").write_text(json.dumps({"url": "http://127.0.0.1:9", "token": "tok"}))
         self.proc = None
         self.next_id = 1
+        # An unread stderr pipe can block the router before its next RPC reply.
+        self.stderr = tempfile.TemporaryFile(mode="w+")
 
     def tearDown(self):
-        if self.proc:
-            self.proc.kill()
-            self.proc.communicate()
-        self.tmp.cleanup()
+        try:
+            if self.proc:
+                self.proc.kill()
+                self.proc.communicate(timeout=5)
+        finally:
+            self.stderr.close()
+            self.tmp.cleanup()
 
     def start(self, mac_mode="ok", **extra_env):
         argv = [NODE, str(ROUTER), "--bot-id", "bot1", "--bot-name", "Alan",
@@ -163,12 +169,13 @@ class CommitGateTests(unittest.TestCase):
                 "--vps-connection", str(self.dir / "conn.json"),
                 "--mac-state-file", str(self.dir / "mac-state.json")]
         env = dict(os.environ, PATH=str(self.dir / "bin") + os.pathsep + os.environ["PATH"],
+                   HERMES_HOME=str(self.dir / "hermes"),
                    MAC_STUB=str(self.dir / "mac-stub.cjs"), MAC_MODE=mac_mode,
                    MAC_LOG=str(self.dir / "mac.log"), VPS_LOG=str(self.dir / "vm.log"),
                    PROBE_DOWN=str(self.dir / "probe-down"), HERMES_ROUTER_RESTORE_MS="500")
         env.update(extra_env)
         self.proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             text=True, env=env)
 
     def write(self, msg):
@@ -184,11 +191,7 @@ class CommitGateTests(unittest.TestCase):
         return msg.get("id")
 
     def recv(self, timeout=15, required=True):
-        if not select.select([self.proc.stdout], [], [], timeout)[0]:
-            if required:
-                self.fail("no message within %ss" % timeout)
-            return None
-        return json.loads(self.proc.stdout.readline())
+        return recv_json(self.proc, timeout, required)
 
     def text(self, msg):
         return " ".join(part["text"] for part in msg["result"]["content"] if part["type"] == "text")
@@ -249,6 +252,13 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(commit["properties"]["summary"]["maxLength"], 200)
         self.assertEqual(commit["required"], ["kind", "summary"])
         self.assertNotIn("commit", tool["inputSchema"]["required"])
+
+    def test_backend_diagnostics_cannot_block_rpc(self):
+        stub = self.dir / "mac-stub.cjs"
+        stub.write_text("require('node:fs').writeFileSync(2, 'x'.repeat(1024 * 1024));\n" + MAC_STUB)
+        self.open_checkout()
+        self.stderr.seek(0)
+        self.assertGreaterEqual(len(self.stderr.read()), 1024 * 1024)
 
     def test_an_approved_commit_runs_once_without_the_commit_object(self):
         self.open_checkout()
