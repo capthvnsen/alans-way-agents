@@ -66,7 +66,7 @@ release tag matching this plugin's `version:` field in plugin.yaml (`v` + that
 version): the tag must exist, and if the clone cannot resolve it the release
 was never tagged, so stop and report instead of checking out `main`.
 
-https://raw.githubusercontent.com/capthvnsen/alans-way/68f062e79cf14cfa798659eccd3a439f206dcd01/docs/setup-prompt.md
+https://raw.githubusercontent.com/capthvnsen/alans-way/3b3f2597d5aa7b646e1161e0e75496049cd0a94d/docs/setup-prompt.md
 
 Repo: https://github.com/capthvnsen/alans-way
 
@@ -389,7 +389,7 @@ not run this command through your terminal. Use the resolved checkout commit
 (`git -C ~/alans-way-agents rev-parse HEAD`), not a tag name, for `repoRef`:
 
 ```json
-{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"68f062e79cf14cfa798659eccd3a439f206dcd01","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
+{"repoRef":"<resolved 40-character plugin commit>","desktopRef":"3b3f2597d5aa7b646e1161e0e75496049cd0a94d","args":["--bot-id","<numeric-telegram-bot-id>","--mac-ssh","<user@host>","--host-os","<mac|windows|linux>","--timezone","<answered-IANA-zone>","--bind","--proactive","<yes|no>"]}
 ```
 
 Include `--profile` and its name unless default. Add public `--mac-key` and
@@ -406,7 +406,7 @@ For an external shell only (also the command the app constructs):
 ```sh
 ~/alans-way-agents/setup.sh --skip-plugin \
     --repo-ref "$PIN" \
-    --desktop-ref 68f062e79cf14cfa798659eccd3a439f206dcd01 \
+    --desktop-ref 3b3f2597d5aa7b646e1161e0e75496049cd0a94d \
     --bot-id <numeric-telegram-bot-id> \
     --mac-ssh <user>@<host> --host-os <mac|windows|linux> \
     --timezone <IANA-zone> --non-interactive \
