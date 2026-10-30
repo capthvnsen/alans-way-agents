@@ -344,7 +344,7 @@ step_alans_way() {
     fi
     # Flags ride as real argv — folding $REPO_REF into a run_sh string would
     # let a quote or $(...) in it break out of the command.
-    local setup_args=(--non-interactive)
+    local setup_args=(--non-interactive --defer-bot)
     if [ "$needs_supervisor" = 1 ]; then
         setup_args+=(--skip-services)
     fi

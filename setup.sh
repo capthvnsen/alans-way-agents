@@ -15,7 +15,7 @@
 #         --mac-ssh none removes it)
 #        --skip-browser --skip-plugin --skip-services --keep-browser --keep-computer-use --allow-desktop-actions
 #        --cdp-port PORT --dev-plugin-install --bind --proactive yes|no --tone texting|default --timezone IANA
-#        --restart --non-interactive --verify
+#        --restart --non-interactive --defer-bot --verify
 set -eu
 
 REPO_URL="https://github.com/capthvnsen/alans-way-agents"
@@ -26,6 +26,7 @@ BOT_ID="" BOT_NAME="" MAC_SSH="" HOST_OS="" PROFILE="" CONFIG="" TIMEZONE="" PRO
 MAC_SSH_SET=0 HOST_OS_SET=0
 MAC_KEY="" MAC_HOST_KEY="" DESKTOP_DIR="" REPO_REF="" DESKTOP_REF=""
 ONLY_PROFILE=0
+DEFER_BOT=0
 SKIP_BROWSER=0 SKIP_SERVICES=0 SKIP_PLUGIN=0 KEEP_BROWSER=0 KEEP_COMPUTER=0 ALLOW_DESKTOP=0 DO_BIND=0 DO_RESTART=0 NON_INTERACTIVE=0 VERIFY=0 DEV_PLUGIN=0
 CDP_PORT_FLAG=""
 MIN_HERMES="0.21.5"
@@ -58,12 +59,15 @@ while [ $# -gt 0 ]; do
     --timezone) TIMEZONE="$2"; shift 2;;
     --restart) DO_RESTART=1; shift;;
     --non-interactive) NON_INTERACTIVE=1; shift;;
+    --defer-bot) DEFER_BOT=1; shift;;
     --verify) VERIFY=1; shift;;
     -h|--help)
       cat <<'EOF'
 setup.sh: Alan's Way Plugin bootstrap for the Hermes gateway host (usually a VPS).
   --bot-id ID      numeric Telegram bot ID that owns browser tabs
   --bot-name NAME  display name on the agent cursor
+  --defer-bot      warn instead of failing if no Telegram bot exists yet;
+                   configure Telegram, then re-run setup.sh to enable workspace_browser
   --mac-ssh HOST   how this host reaches your computer over ssh (Tailscale name/IP);
                    omitted: keep the configured computer; "none" removes it
   --host-os OS     OS of that computer: mac (default), windows or linux
@@ -2951,9 +2955,13 @@ if [ "$ONLY_PROFILE" = 0 ]; then
   BOT_ID="$_primary_bot" BOT_NAME="$_primary_name" PROFILE="" PROFILE_HOME="$HERMES_HOME" COMPUTER_READY="$_primary_ready"
 fi
 # No bot anywhere means no workspace_browser block, so the browser cannot be
-# used from Telegram: that is a failed setup, not a quiet skip.
+# used from Telegram: fail unless bot setup was explicitly deferred.
 if [ "$NO_PRIMARY_BOT" = 1 ] && [ "$WORKSPACE_CONFIGURED" = 0 ]; then
-  bad "workspace_browser is not configured: no Telegram bot found for this Hermes. Run: hermes${PROFILE:+ -p $PROFILE} gateway setup (choose Telegram, then Automatic), then re-run setup.sh (or pass --bot-id <numeric-telegram-bot-id>)"
+  if [ "$DEFER_BOT" = 1 ]; then
+    warn "workspace_browser setup deferred (--defer-bot): no Telegram bot found; the workspace browser is unavailable until configured. Run: hermes${PROFILE:+ -p $PROFILE} gateway setup (choose Telegram, then Automatic), then re-run setup.sh"
+  else
+    bad "workspace_browser is not configured: no Telegram bot found for this Hermes. Run: hermes${PROFILE:+ -p $PROFILE} gateway setup (choose Telegram, then Automatic), then re-run setup.sh (or pass --bot-id <numeric-telegram-bot-id>)"
+  fi
 fi
 
 # Plugin file changes Hermes refused because a profile's gateway was live are
