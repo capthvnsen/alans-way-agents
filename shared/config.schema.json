@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Alan's Way shared agent config (draft v1)",
-  "description": "One preference contract for Alan's Plugin for Hermes and Alan's Plugin for Grok Bot. Runtime adapters are not included.",
+  "description": "One preference contract for Alan's Plugin for Hermes and Alan's Plugin for Grok Bot.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "persona", "voice", "proactivity", "identity"],

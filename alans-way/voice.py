@@ -8,6 +8,8 @@ writes either."""
 import re
 import time
 
+from .shared_config import preference_context
+
 STATE_KEY = "voice"
 MODES = ("texting", "default")
 NOTE_MARKER = "[Texting voice]"
@@ -239,8 +241,9 @@ def _setting(raw, rng, words):
 
 
 class Voice:
-    def __init__(self, ctx):
+    def __init__(self, ctx, *, shared_config=None):
         self.ctx = ctx
+        self.shared_config = shared_config
         self.sleep = time.sleep
         self._started = {}
 
@@ -276,6 +279,10 @@ class Voice:
             return None
         note = note_for(user_message, platform=platform, chat_type=session_env("HERMES_SESSION_CHAT_TYPE"),
                         length=self.length())
+        if self.shared_config and platform in CHAT_PLATFORMS:
+            note = preference_context(self.shared_config)
+            if session_env("HERMES_SESSION_CHAT_TYPE") in ("group", "forum", "channel"):
+                note += GROUP
         # Only a turn someone is waiting on gets paced; check-ins and the brief get no note.
         if note and platform == "telegram" and kwargs.get("session_id"):
             self._started[kwargs["session_id"]] = time.monotonic()
@@ -285,7 +292,7 @@ class Voice:
         """transform_llm_output: the polished final reply, or None to leave it as is."""
         if not self.on() or platform not in CHAT_PLATFORMS or not isinstance(response_text, str):
             return None
-        out = polish(response_text)
+        out = response_text if self.shared_config else polish(response_text)
         started = self._started.pop(kwargs.get("session_id"), None)
         # Runs on the agent's worker thread, with Telegram's typing indicator still showing.
         if platform == "telegram" and started is not None and not _SILENCE.search(out):
@@ -303,6 +310,8 @@ class Voice:
         self._update(mode=mode)
 
     def set_length(self, raw):
+        if self.shared_config:
+            raise ValueError("Shared config controls reply length; edit it and reload Hermes.")
         self._update(length=_setting(raw, LENGTH_RANGE, {"off": 0}))
 
     def set_pace(self, raw):
@@ -310,10 +319,14 @@ class Voice:
 
     def settings_text(self):
         length, pace = self.length(), self.pace_ms()
-        return (("Casual replies aim for under %d characters" % length if length else "No character target")
+        length_note = "Casual replies aim for under %d characters" % length if length else "No character target"
+        if self.shared_config:
+            length_note = "Tone and reply length come from shared config; edit it and reload Hermes"
+        return (length_note
                 + ("; Telegram replies are paced like typing, up to %.1fs." % (pace / 1000) if pace
                    else "; Telegram replies aren't paced.")
-                + " Change with /tone length <chars>|off and /tone pace <ms>|natural|off.")
+                + (" Change pacing with /tone pace <ms>|natural|off." if self.shared_config else
+                   " Change with /tone length <chars>|off and /tone pace <ms>|natural|off."))
 
     def status_text(self):
         if self.on():
@@ -354,5 +367,8 @@ def cli_run(voice, args):
     except ValueError as exc:
         print(exc)
         return 2
-    print(voice.mode(), "length=%d" % voice.length(), "pace_ms=%d" % voice.pace_ms())
+    if voice.shared_config:
+        print(voice.mode(), voice.settings_text())
+    else:
+        print(voice.mode(), "length=%d" % voice.length(), "pace_ms=%d" % voice.pace_ms())
     return 0

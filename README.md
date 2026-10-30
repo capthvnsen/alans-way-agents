@@ -19,12 +19,12 @@ plugin release: **v0.21.13**.
 | **Alan's Workspace** | The Mac desktop app with chat and a browser, the iOS app, and lid-close VM handoff | [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way) |
 | **Alan's CU MCP** | The shared Node `workspace-mcp` computer-use server that any agent can connect to | [capthvnsen/alans-way](https://github.com/capthvnsen/alans-way) |
 | **Alan's Plugin for Hermes** | Python plugins, hooks and skills for stock Hermes | This repo: [`alans-way/`](alans-way/README.md) and [`alans-way-computer/`](alans-way-computer/README.md) |
-| **Alan's Plugin for Grok Bot** | A Grok Bot skill and settings package; Grok Bot cannot load Hermes plugins | This repo: [`alans-way-grok-bot/`](alans-way-grok-bot/README.md), currently a scaffold |
+| **Alan's Plugin for Grok Bot** | A Grok Bot skill and settings package; Grok Bot cannot load Hermes plugins | This repo: [`alans-way-grok-bot/`](alans-way-grok-bot/README.md) |
 
 Both agent plugins target **one shared config contract** for persona, voice,
-proactivity and identity: [`shared/`](shared/README.md). This change defines the
-contract and Grok Bot scaffold only. Hermes does not yet read the shared JSON
-config; its existing settings and runtime behavior stay as they are.
+proactivity and identity: [`shared/`](shared/README.md). Hermes reads the optional
+shared JSON when its plugin loads. A generator renders the same preferences into
+a Grok Bot skill and settings JSON.
 
 ## What the Hermes plugin provides
 
@@ -49,7 +49,7 @@ Idle check-ins run in one bound Telegram chat after 2 hours of quiet, between
 weekly report and [cross-bot proactivity](docs/proactivity.md#cross-bot-proactivity)
 are **off by default**. Other MCP clients, including Grok Bot, connect through
 the [remote-agent setup](docs/remote-agents.md); that connection does not install
-Hermes hooks or implement the Grok Bot scaffold's preferences.
+Hermes hooks or generate the Grok Bot preference package.
 
 ## Install
 
@@ -88,6 +88,25 @@ notarized) or [Windows](https://openalan.com/download/windows) (unsigned:
 Every flag, the Windows-PC-as-VM path, Orgo and fresh Linux hosts, `migrate.sh`,
 and the plugin security review are in **[docs/install.md](docs/install.md)**.
 
+## Shared preferences for Hermes and Grok Bot
+
+Copy [`shared/config.example.json`](shared/config.example.json) to
+`~/.config/alans-way/config.json` without overwriting an existing file, then edit
+it. Install `shared/requirements.txt` in the Python environment used by the
+consumer. Hermes validates and applies the file on plugin load; a missing file
+preserves its defaults. Shared proactivity never bypasses binding or a pause.
+
+```sh
+python -m pip install -r shared/requirements.txt
+python scripts/generate_grok_bot.py --output /tmp/alans-way-grok-bot
+```
+
+Give the generated `SKILL.md` and `settings.json` to Grok Bot to save the skill,
+apply its persona/voice, and set up any requested native routines. The JSON is a
+[documented handoff](alans-way-grok-bot/README.md), with an output schema; Grok has
+no native settings importer. See [shared config](shared/README.md) for validation,
+precedence and reload behavior.
+
 ## Upgrading
 
 The app's update popup updates the app and the plugin on every saved VM over
@@ -123,14 +142,14 @@ Full model: [docs/workspace-browser.md](docs/workspace-browser.md#safety-model-s
 | [long-chats.md](docs/long-chats.md) | Compaction and tool-output pruning |
 | [addon-interface.md](docs/addon-interface.md) | Stable interface for add-on scripts run after `bootstrap-orgo.sh` |
 | [Shared config](shared/README.md) | Draft JSON Schema, example and reader contract for both agent plugins |
-| [Grok Bot scaffold](alans-way-grok-bot/README.md) | Skill, settings reference and integration TODOs |
+| [Grok Bot package](alans-way-grok-bot/README.md) | Generator, skill, settings schema and native routine setup |
 
 ## Layout
 
 ```
 alans-way/            the main plugin: router, hooks, check-ins, voice, skills, remote-agent setup
 alans-way-computer/   the computer-use provider plugin
-alans-way-grok-bot/   Grok Bot skill + settings scaffold (no Hermes plugin code)
+alans-way-grok-bot/   Generated Grok Bot skill + settings and output schema
 shared/              one config schema, example and contract for both agent plugins
 docs/                 guides (above), catalog drafts, design notes
 deploy/               systemd units for mac-watch and an optional browser_exec Chromium
