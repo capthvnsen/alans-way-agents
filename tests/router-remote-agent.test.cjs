@@ -70,8 +70,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 
 // Forced command printed by setup-remote-agent.sh for this fixture's Mac settings.
 function forcedCommand(f) {
-  const setup = spawnSync('sh', [path.join(scripts, 'setup-remote-agent.sh'), '--bot-id', 'remote-1', '--bot-name', 'Remote Agent',
-    '--mac-ssh', 'owned-fixture-only', '--state-file', f.file('state.json'), '--print'],
+  const setup = spawnSync('sh', [path.resolve(__dirname, '../scripts/setup-remote-agent.sh'), '--bot-id', 'remote-1', '--bot-name', 'Remote Agent',
+    '--router', path.join(scripts, 'workspace-router.cjs'), '--mac-ssh', 'owned-fixture-only', '--state-file', f.file('state.json'), '--print'],
     { env: { ...process.env, HOME: f.dir, HERMES_HOME: f.file('profile') }, encoding: 'utf8' });
   assert.equal(setup.status, 0, setup.stderr);
   return setup.stdout.match(/\nForced command:\n(.+)\n/)[1];

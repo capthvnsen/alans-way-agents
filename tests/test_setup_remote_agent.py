@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "alans-way/scripts/setup-remote-agent.sh"
+SCRIPT = ROOT / "scripts/setup-remote-agent.sh"
 
 
 @unittest.skipUnless(shutil.which("ssh-keygen") and shutil.which("sh"), "needs OpenSSH and sh")
@@ -25,8 +25,11 @@ class RemoteAgentTests(unittest.TestCase):
         self.authorized.parent.mkdir()
         self.original = "# existing keys\nssh-ed25519 AAAA unrelated\n"
         self.authorized.write_text(self.original)
+        self.router = self.home / ".hermes/plugins/alans-way/scripts/workspace-router.cjs"
+        self.router.parent.mkdir(parents=True)
+        self.router.touch()
         self.config = self.home / ".hermes/config.yaml"
-        self.config.parent.mkdir()
+        self.config.parent.mkdir(exist_ok=True)
         self.config_text = '''mcp_servers:
   other:
     env:
@@ -72,9 +75,18 @@ class RemoteAgentTests(unittest.TestCase):
         tokens = shlex.split(self.command())
         self.assertEqual(tokens[:4], ["HERMES_WORKSPACE_MAC_SSH=user@mac.local", "HERMES_WORKSPACE_HOST_OS=mac",
                          "HERMES_MAC_STATE_FILE=/var/lib/workspace/mac state.json", "HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1"])
-        self.assertEqual(tokens[4:], ["exec", "node", str(SCRIPT.with_name("workspace-router.cjs")),
+        self.assertEqual(tokens[4:], ["exec", "node", str(self.router),
                          "--bot-id", "remote.1", "--bot-name", "Remote Agent"])
         self.assertIn("initialize + tools/list", result.stdout)
+
+    def test_default_router_without_hermes_home_uses_home_plugin(self):
+        env = dict(self.env)
+        env.pop("HERMES_HOME")
+        result = subprocess.run(["sh", str(SCRIPT), "--bot-id", "one", "--print"],
+                                env=env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(shlex.quote(str(self.router)), result.stdout)
+        self.assertEqual(list(self.authorized.parent.iterdir()), [self.authorized])
 
     def test_rerun_replaces_only_that_bot_and_keeps_its_key(self):
         self.run_setup("--bot-id", "one")

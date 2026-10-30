@@ -192,7 +192,7 @@ addresses, use **Copy setup command** (the bootstrap above, pre-filled) or
 ### Plugin security review
 
 For the reviewed release candidate, Hermes' unmodified scanner at
-`6e7b83a2f1c093e992a8d838ed77ea320fbd8e51` reports **SAFE: 0 HIGH,
+`08165d58931841cee713468ae89032af7c57060a` (`rc.38-v0.21.5`) reports **SAFE: 0 CRITICAL, 0 HIGH,
 2 MEDIUM and 3 LOW findings** in `alans-way/`. These are real capabilities
 documented in the bundled skills:
 
@@ -205,7 +205,9 @@ documented in the bundled skills:
 
 The Mastodon recipe now lives in [human-run repository documentation](integrations/mastodon.md)
 outside `alans-way/`; the plugin no longer ships its connector or identity probe.
-The scanner and remaining matched commands are unchanged. MEDIUM/LOW findings
+The operator-run remote-agent SSH setup tool lives at repository-level
+`scripts/setup-remote-agent.sh`, outside the installed plugin. CI uses the
+minimum-supported Hermes scanner, which blocks this tool when bundled. MEDIUM/LOW findings
 alone produce SAFE, which requires no scanner confirmation. If a later revision
 receives CAUTION, review every finding and explicitly confirm the exact tree:
 `--enable` and setup consent do not confirm a scanner warning. Follow the bundled
