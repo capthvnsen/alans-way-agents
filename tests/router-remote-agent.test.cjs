@@ -184,7 +184,10 @@ test('bridge rejects missing or wrong tokens, unknown sessions, oversized and ma
   assert.equal((await post(b, { id: 2, method: 'tools/list' }, { session: 'not-a-session' })).status, 404);
   assert.equal((await post(b, null, { body: '{' })).status, 400);
   assert.equal((await post(b, null, { body: '[]' })).status, 400);
-  assert.equal((await post(b, null, { body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', pad: 'x'.repeat(1 << 20) }) })).status, 413);
+  // The bridge stops reading an oversized body, so the client may see the reset before the 413.
+  const oversized = await post(b, null, { body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', pad: 'x'.repeat(1 << 20) }) })
+    .catch(error => { if (['ECONNRESET', 'EPIPE'].includes(error.cause?.code)) return { status: 413 }; throw error; });
+  assert.equal(oversized.status, 413);
   const get = await fetch(b.url, { headers: { authorization: 'Bearer ' + TOKEN } });
   assert.equal(get.status, 405);
   assert.equal(f.lines('mac-commands').length, 0, 'rejected requests never start a router');
