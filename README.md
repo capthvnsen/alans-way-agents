@@ -111,10 +111,10 @@ python -m pip install -r shared/requirements.txt
 python scripts/generate_grok_bot.py --output /tmp/alans-way-grok-bot
 ```
 
-Give the generated `SKILL.md` and `settings.json` to Grok Bot to save the skill,
-apply its persona/voice, and set up any requested native routines. The JSON is a
-[documented handoff](alans-way-grok-bot/README.md), with an output schema; Grok has
-no native settings importer. See [shared config](shared/README.md) for validation,
+Then [install the generated files in Grok Bot](alans-way-grok-bot/README.md#install):
+save `SKILL.md` as a skill, apply `settings.json`'s persona/voice, and set up any
+requested native routines. The JSON is a documented handoff, with an output schema;
+Grok has no native settings importer. See [shared config](shared/README.md) for validation,
 precedence and reload behavior.
 
 ## Upgrading
