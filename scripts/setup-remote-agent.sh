@@ -137,7 +137,8 @@ if any(c in value for value in [*env.values(), args.router] for c in "\r\n\0"):
 if not Path(args.router).is_file():
     parser.error(f"router not found: {args.router}")
 command = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
-command += " exec " + shlex.join(["node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
+# SSH forced commands get sshd's short PATH, not this shell's, so pin the node the probe runs.
+command += " exec " + shlex.join([shutil.which("node") or "node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
 if not args.preview:
     with ssh_lock():
         if not key.exists():

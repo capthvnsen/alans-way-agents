@@ -75,7 +75,7 @@ class RemoteAgentTests(unittest.TestCase):
         tokens = shlex.split(self.command())
         self.assertEqual(tokens[:4], ["HERMES_WORKSPACE_MAC_SSH=user@mac.local", "HERMES_WORKSPACE_HOST_OS=mac",
                          "HERMES_MAC_STATE_FILE=/var/lib/workspace/mac state.json", "HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1"])
-        self.assertEqual(tokens[4:], ["exec", "node", str(self.router),
+        self.assertEqual(tokens[4:], ["exec", shutil.which("node", path=self.env["PATH"]) or "node", str(self.router),
                          "--bot-id", "remote.1", "--bot-name", "Remote Agent"])
         self.assertIn("initialize + tools/list", result.stdout)
 
