@@ -57,6 +57,19 @@ class GeneratorTests(unittest.TestCase):
             self.assertEqual((output / 'SKILL.md').read_text(), 'keep')
             self.assertFalse((output / 'settings.json').exists())
 
+    def test_lone_surrogate_is_invalid_input_and_keeps_existing_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'input.json'
+            output = Path(tmp) / 'output'
+            output.mkdir()
+            (output / 'SKILL.md').write_text('keep')
+            path.write_text((ROOT / 'shared/config.example.json').read_text().replace('"Alan"', '"\\ud800"'))
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/generate_grok_bot.py'),
+                                     '--config', str(path), '--output', str(output)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual((output / 'SKILL.md').read_text(), 'keep')
+
     def test_render_validates_and_serializes_arbitrary_preference_text(self):
         with self.assertRaises(G.ConfigError):
             G.render({})

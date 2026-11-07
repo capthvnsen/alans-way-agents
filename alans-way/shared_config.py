@@ -28,6 +28,11 @@ def validate_config(config):
             path += '.' + ','.join(missing)
         raise ConfigError(f'shared config at {path}: violates {error.validator}')
     try:
+        # JSON escapes can decode to lone surrogates, which are valid to the schema but not UTF-8.
+        json.dumps(config, ensure_ascii=False).encode('utf-8')
+    except UnicodeEncodeError:
+        raise ConfigError('shared config contains text that cannot be encoded as UTF-8') from None
+    try:
         ZoneInfo(config['proactivity']['timezone'])
     except (ValueError, ZoneInfoNotFoundError):
         raise ConfigError('shared config proactivity.timezone: unknown IANA timezone') from None
