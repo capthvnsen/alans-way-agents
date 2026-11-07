@@ -23,7 +23,9 @@ client JSON (`{"command": "ssh", "args": [... "VM_USER@HOST"]}`): replace
 `HOST` with the VM's address and give the client the private key file through
 its own secret store; never paste it into a chat. `--print --probe` checks
 `initialize` + `tools/list` locally without writing anything, and `--remove`
-deletes only that bot's line.
+deletes only that bot's line. Add `--tailnet-only` to accept the key only from
+Tailscale addresses (`from="100.64.0.0/10,fd7a:115c:a1e0::/48"`). Each run
+rewrites the line, so a later run without the flag removes the restriction.
 
 **HTTP bridge (off by default).** For a client that cannot hold an SSH
 session. `remote-agent-bridge.cjs` serves MCP over HTTP at `/mcp` and starts

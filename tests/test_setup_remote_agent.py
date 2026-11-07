@@ -79,6 +79,19 @@ class RemoteAgentTests(unittest.TestCase):
                          "--bot-id", "remote.1", "--bot-name", "Remote Agent"])
         self.assertIn("initialize + tools/list", result.stdout)
 
+    def test_tailnet_only_limits_the_key_source_until_rerun_without_it(self):
+        source = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48"'
+        self.assertIn(f"TAILNET_FROM='{source}'", (SCRIPT.parents[1] / "setup.sh").read_text())
+        self.run_setup("--bot-id", "one")
+        self.assertNotIn("from=", self.authorized.read_text())
+        result = self.run_setup("--bot-id", "one", "--tailnet-only")
+        self.assertIn("Tailscale addresses only", result.stdout)
+        rows = [row for row in self.authorized.read_text().splitlines() if row.endswith("alans-way-remote-agent:one")]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].startswith(f'{source},restrict,command="'), rows[0])
+        self.assertIn("any address", self.run_setup("--bot-id", "one").stdout)
+        self.assertNotIn("from=", self.authorized.read_text())
+
     def test_default_router_without_hermes_home_uses_home_plugin(self):
         env = dict(self.env)
         env.pop("HERMES_HOME")
