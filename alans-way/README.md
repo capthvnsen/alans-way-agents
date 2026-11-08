@@ -41,23 +41,66 @@ and [Grok Bot generator](../alans-way-grok-bot/README.md).
   keep your bound chat, timezone and pause.
 - **Turn hooks see every session:** `pre_llm_call`/`post_llm_call` fire for every
   session's turns; the plugin only compares the bound chat and persists only its
-  timestamps.
+  timestamps. Every turn also gets a task note and a workspace-tools note. With a
+  shared config file, every turn of every session (CLI and cron included) also gets
+  its identity and persona preferences.
 - **Texting voice affects chat replies:** on turns tagged `telegram`, `desktop`,
-  `tui` or `bot_room`, it appends a style note to the model's turn and may remove one leading "Certainly!"-style
-  opener from the final reply, only when the reply has no indented line,
-  backtick or quotation mark. Nothing else in a reply is ever rewritten. It is
-  on by default; `/tone default` or `hermes tone default` turns it off per
-  profile. CLI, cron, webhook and API-server turns keep the default voice. It never
-  writes SOUL.md or config.yaml. The note asks for quiet routine execution, essential
-  questions and blockers, and a concise verified result; it does not suppress fixed
-  Hermes progress, approval or error messages. Hook delivery has scripted tool tests;
-  consistent quiet behavior from a real model remains unverified.
+  `tui` or `bot_room`, it appends a style note (casual replies under 280
+  characters; `/tone length`) and runs a remove-only cleanup on the final reply:
+  known openers and generic sign-offs are dropped, headings become plain lines,
+  and bold is unwrapped on bold-only lines or when a reply has three or more bold
+  spans. Code, links, URLs and indented lines are never edited, and nothing is
+  added. With a shared config the cleanup is off. On by default; `/tone default`
+  or `hermes tone default` turns the note, cleanup and pacing off per profile.
+  CLI, cron, webhook and API-server turns keep the default voice. It never writes
+  SOUL.md or config.yaml, and does not touch fixed Hermes progress, approval or
+  error messages. Consistent quiet behavior from a real model remains unverified.
+- **Reply pacing:** on by default for Telegram turns someone is waiting on. The
+  final-reply hook sleeps on the agent's worker thread so a reply lands no sooner
+  than 0.6 s plus 15 ms per character, at most 2.5 s, minus the time the turn
+  already took. `/tone pace <ms>|natural|off` (0-10 s) changes it.
+- **Weekly time-saved report:** off until the user sends `/proactivity report on`.
+  On Sunday evening it injects one `[Weekly report]` prompt into the bound chat
+  (same injection permission as check-ins); the bot reviews the past 7 days with
+  `session_search` and memory and replies with a fixed-minutes-per-task estimate
+  or stays silent. See [proactivity.md](../docs/proactivity.md#weekly-time-saved-report).
+- **Cross-bot proactivity:** off by default; each bot opts in with
+  `/proactivity cross on` after operator configuration. It shares sanitized,
+  bounded owner-DM excerpts between enabled profiles on one gateway through
+  owner-only files (digests 24 h, queued asks 2 h), and a primary check-in may
+  schedule one read-only or draft-only ask into another bot's bound DM through the
+  `cross_bot_ask` tool. Sanitizing cannot catch every secret, and copied context can
+  remain in Hermes and model-provider history after expiry or opt-out. See
+  [proactivity.md](../docs/proactivity.md#cross-bot-proactivity).
+- **Workspace router:** `scripts/workspace-router.cjs` is a long-running Node MCP
+  server that Hermes starts from the `workspace_browser` block. It reaches the
+  user's computer over SSH on the tailnet, falls back to the VM's own browser and
+  desktop, and appends approval decisions to a local `commit-decisions.jsonl`.
+  Desktop input tools stay hidden and refused unless the operator opts in
+  (`--allow-desktop-actions`); purchases, sends and other commit actions need an
+  approval the router asks for.
+- **Remote-agent bridge:** `scripts/remote-agent-bridge.cjs` ships here but the
+  plugin never starts it. An operator who runs it with `ALANS_WAY_REMOTE_BRIDGE=1`
+  and a token of at least 32 characters serves the router to another MCP client
+  over plain HTTP, on loopback by default (private addresses only), one router per
+  session. The repository README links the remote-agent guide.
 - **Operator surfaces:** the plugin registers the `hermes proactivity` and
   `hermes tone` CLIs and the `/proactivity` and `/tone` slash commands. The model tool can only reduce check-ins;
   increasing them or resuming is operator-only (`/proactivity` or the CLI).
 - **Shell commands:** the plugin's Python runs none. The `workspace-setup` skill
-  guides the agent through running `setup.sh`, which installs the workspace
-  browser router and services over ssh on your own machines.
+  hands a setup plan to the human, and Alan's Workspace runs `setup.sh` outside
+  the gateway. Setup can install browser and display services (with root rights
+  it may install Chrome, Chromium or Xvfb), adds the computer's public SSH key to
+  the VM user's accepted keys, usable only from tailnet addresses, adds an SSH
+  config block for tailnet hosts, and drain-stops and restarts the profile's
+  gateway to apply plugin changes.
+- **Remote-agent SSH setup:** `scripts/setup-remote-agent.sh` lives in the
+  repository, not in this plugin, and runs only when the operator runs it. It
+  creates one ed25519 key per bot and adds it to the VM user's accepted keys,
+  limited to the router (`restrict,command=...`, optionally `--tailnet-only`),
+  backing that file up first. Remote clients set up this way, or through the bridge, get desktop input
+  when the operator sets `HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1`, without
+  Hermes's `computer_use` approval prompts.
 - No telemetry, no stored credentials.
 
 ## License

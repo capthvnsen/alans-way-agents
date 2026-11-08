@@ -70,6 +70,22 @@ Serving diagnostics go to the selected profile's `logs/workspace-router.log` as 
 the host, request id and tool, without page content or arguments. Rerunning workspace setup binds the profile log
 directory for the browser connector; the computer provider also passes Hermes's currently bound profile home.
 
+## Disclosures
+
+- **Long-running child process:** each session starts the workspace router from the profile's
+  `workspace_browser` block as a `node` child and talks to it over stdio. It passes a filtered environment
+  (no keys or tokens) plus `HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1`, which lets this private child serve
+  desktop input; every action still passes Hermes's `computer_use` approval gate first.
+- **Where input goes:** the router reaches the user's computer over SSH on the tailnet and falls back to the VM
+  desktop (xdotool, a screenshot tool and the AT-SPI bus, if installed; the provider installs none of them).
+  On the Mac, raising or launching an app happens only when the model asks, and the host waits for 2 seconds of
+  user idle time.
+- **Busy desktop:** when the Mac reports that another agent holds the desktop, launch, menu and action calls are
+  resent, following the host's retry-after hint or every 2 seconds, for at most 30 seconds of waiting. The
+  host refused those calls before running them, and Hermes's approval is not asked again.
+- The provider itself makes no network calls, stores no credentials and keeps element trees and screenshots in
+  session memory only.
+
 ## Limits
 
 - It runs inside the Hermes process, so it cannot load under `plugins.isolation: host`.
