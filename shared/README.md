@@ -94,7 +94,7 @@ An explicitly requested `/proactivity now` remains a manual action.
 Shared values are never written into profile state, SOUL.md or config.yaml.
 Deleting the shared file and reloading restores the existing local preferences.
 
-**Grok Bot:** run the [generator](../alans-way-grok-bot/README.md#generate-and-use)
+**Grok Bot:** run the [generator](../alans-way-grok-bot/README.md#install)
 and give its two outputs to your Bot. The settings JSON contains persona, voice
 and schedule+prompt routine definitions, with its own output schema. It is a
 handoff format, not a native importer. Generation and skill loading make no
