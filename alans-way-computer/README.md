@@ -4,7 +4,7 @@ With backend `alans-way-computer`, Hermes's stock `computer_use` tool is Alan's 
 It drives the user's own computer through Alan's Workspace. When that computer is offline it drives the VM's desktop
 instead, with no change on the Hermes side.
 
-It needs a Hermes build with the pluggable computer-use API (pull request 133556, merged after 0.21.5). On older
+It needs a Hermes build with the pluggable computer-use API (Hermes 0.21.6 or newer, from pull request 133556). On older
 Hermes the plugin installs and logs that it did nothing.
 
 ## Setup
