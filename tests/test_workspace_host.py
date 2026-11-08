@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -172,7 +173,11 @@ class ExplicitHostRoutingTests(unittest.TestCase):
     def tearDown(self):
         try:
             if self.proc:
-                self.proc.kill()
+                # The whole group: orphaned stub children keep appending to logs in self.dir.
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 self.proc.communicate(timeout=5)
         finally:
             self.stderr.close()
@@ -197,7 +202,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         env.update(extra_env)
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
-            text=True, env=env)
+            text=True, env=env, start_new_session=True)
 
     def send(self, method, **params):
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
