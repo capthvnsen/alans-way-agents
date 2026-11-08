@@ -1,9 +1,9 @@
 # Draft for plugin-catalog/alans-way-computer.yaml in NousResearch/hermes-agent. Not submitted.
-# Built from the live upstream entry (pin 23cce292c867a42ccf9853b99d798add028788f0); only the pin, version, floor and
+# Built from the live upstream entry (pin 23cce292c867a42ccf9853b99d798add028788f0); only the pin, version, capabilities and
 # disclosure text below changed. PR body: docs/catalog/catalog-pr.md.
 name: alans-way-computer
 repo: https://github.com/capthvnsen/alans-way-agents
-sha: f25497e9a6b6f25681727d317efb394aed315f6a
+sha: 957d07fd7f93e17d38af30c6a6abbcd7bd05f4f8
 subdir: alans-way-computer
 version: "0.21.14"
 title: "Alan's Way Plugin: Computer Use"
@@ -12,12 +12,12 @@ description: "Computer-use provider for Hermes: the stock computer_use tool driv
 maintainer: capthvnsen
 tier: community
 category: tools
-requires_hermes: ">=0.21.5"
-docs_url: https://github.com/capthvnsen/alans-way-agents/tree/f25497e9a6b6f25681727d317efb394aed315f6a/alans-way-computer
+requires_hermes: ">=0.21.6"
+docs_url: https://github.com/capthvnsen/alans-way-agents/tree/957d07fd7f93e17d38af30c6a6abbcd7bd05f4f8/alans-way-computer
 readme: true
 platforms: [linux, macos]
 known_issues:
-  - "Needs a Hermes build with the pluggable computer-use API (Hermes 0.21.6 or newer). The install floor is >=0.21.5, matching plugin.yaml: on 0.21.5 the plugin installs, logs that the provider API is missing and registers nothing. Install alans-way first and run its workspace setup, which writes the workspace_browser block this provider reuses."
+  - "Needs a Hermes build with the pluggable computer-use API (Hermes 0.21.6 or newer). On older Hermes the plugin installs and does nothing. Install alans-way first and run its workspace setup, which writes the workspace_browser block this provider reuses."
   - "Hermes asks for approval on every computer_use action type until it is granted. For an unattended Telegram bot, grant them once with Always in Telegram, or add cua:<action>:background entries to command_allowlist (see the README). Takes effect after a gateway restart."
   - "The pinned README requires in-process loading and says plugins.isolation: host is unsupported because the provider hands Hermes a live router session. The current admission validator reports host readiness; remote isolation compatibility has not been verified."
   - "Typing without a target field types into the focused field (still approval-gated). On the user's Mac this needs Alan's Workspace 0.21.9: the target app is brought forward only after the user has been idle for at least 2 seconds, password fields are refused, and the focused field must belong to the target app."

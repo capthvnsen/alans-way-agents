@@ -483,7 +483,7 @@ class StaticTests(unittest.TestCase):
     def test_manifest_name_matches_directory(self):
         manifest = (PLUGIN / "plugin.yaml").read_text()
         self.assertRegex(manifest, r'(?m)^name:\s*"?alans-way-computer"?\s*$')
-        self.assertRegex(manifest, r'(?m)^requires_hermes:\s*"?>=0\.21\.5"?\s*$')
+        self.assertRegex(manifest, r'(?m)^requires_hermes:\s*"?>=0\.21\.6"?\s*$')
 
     def test_provider_description_identifies_the_stock_native_mac_tool(self):
         description = (PLUGIN / "plugin.yaml").read_text()

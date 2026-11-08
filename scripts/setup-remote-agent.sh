@@ -5,6 +5,7 @@
 # Optional fallback settings: --mac-ssh USER@MAC --host-os mac|windows|linux --state-file PATH.
 # --config PATH selects config.yaml; --router PATH overrides the installed plugin router.
 # --user selects the SSH login shown in client JSON. Replace HOST and copy the private key to the client.
+# --tailnet-only accepts the key only from Tailscale addresses; each run rewrites the line, so repeat the flag to keep it.
 set -eu
 
 # setup.sh uses the same interpreter override on hosts without a working python3.
@@ -42,6 +43,7 @@ parser.add_argument("--router", default=router)
 parser.add_argument("--mac-ssh", default="")
 parser.add_argument("--host-os", choices=("mac", "windows", "linux"), default="mac")
 parser.add_argument("--state-file", default="")
+parser.add_argument("--tailnet-only", action="store_true", help="accept this key only from Tailscale addresses")
 args = parser.parse_args(sys.argv[3:])
 if args.bot_id.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.bot_id):
     parser.error("--bot-id must match [A-Za-z0-9._-]{1,64} and must not begin with '-'")
@@ -137,7 +139,8 @@ if any(c in value for value in [*env.values(), args.router] for c in "\r\n\0"):
 if not Path(args.router).is_file():
     parser.error(f"router not found: {args.router}")
 command = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
-command += " exec " + shlex.join(["node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
+# SSH forced commands get sshd's short PATH, not this shell's, so pin the node the probe runs.
+command += " exec " + shlex.join([shutil.which("node") or "node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
 if not args.preview:
     with ssh_lock():
         if not key.exists():
@@ -149,10 +152,13 @@ if not args.preview:
             parser.error(f"{key} must be an ed25519 key")
         public = " ".join(public[:2])
         escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-        update_keys(f'restrict,command="{escaped}" {public} {marker}')
+        # Same ranges as setup.sh's TAILNET_FROM.
+        source = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48",' if args.tailnet_only else ""
+        update_keys(f'{source}restrict,command="{escaped}" {public} {marker}')
 print(json.dumps({"command": "ssh", "args": ["-T", "-i", str(key), "-o", "StrictHostKeyChecking=accept-new",
       "-o", "ServerAliveInterval=30", f"{args.user}@HOST"]}, indent=2))
 print(f"\nForced command:\n{command}")
+print(f"\nKey accepted from: {'Tailscale addresses only' if args.tailnet_only else 'any address (--tailnet-only limits it)'}")
 check = ["sh", str(Path(script).resolve()), *sys.argv[3:]]
 check = [arg for arg in check if arg not in ("--probe", "--print")]
 print("\nLocal self-check (initialize + tools/list):\n" + shlex.join([*check, "--print", "--probe"]))

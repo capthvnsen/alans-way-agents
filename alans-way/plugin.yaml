@@ -11,9 +11,9 @@ tags:
   - proactivity
   - telegram
   - workspace
+# cross_bot_ask is not listed: it registers only on an activated primary cross-bot profile.
 provides_tools:
   - proactivity
-  - cross_bot_ask
 provides_hooks:
   - "pre_tool_call"
   - pre_llm_call

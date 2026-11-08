@@ -11,8 +11,9 @@ Use this skill for Alan's Way conversation preferences and approved check-in rou
 
 Proactivity is disabled: initiate no unsolicited check-ins through this skill.
 
-Apply the adjacent settings.json persona and voice as preferences in Grok Bot.
-Its JSON is a documented handoff format, not a native settings importer.
+Apply the persona and voice above as preferences in Grok Bot. The generated settings.json is
+a documented handoff format the operator supplies, not a native settings importer or a file
+this skill can rely on finding. Ask for it before creating or updating a routine.
 Create or update a native routine only when the operator requests it, after confirming
 its owning Bot, conversation, schedule and timezone. Match an existing routine by name
 before creating another, preserve pauses, and verify its saved schedule and prompt.

@@ -4,7 +4,7 @@ description: "The stock computer_use tool with backend alans-way-computer is Ala
 author: "capthvnsen, Hermes Agent"
 license: MIT
 homepage: "https://github.com/capthvnsen/alans-way-agents"
-requires_hermes: ">=0.21.5"
+requires_hermes: ">=0.21.6"
 tags:
   - computer-use
   - workspace

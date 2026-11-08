@@ -1,9 +1,9 @@
 # Draft for plugin-catalog/alans-way.yaml in NousResearch/hermes-agent. Not submitted.
-# Built from the live upstream entry (pin 0f65549ac1353f6b74b8ac6a22d58f3eb6dea0a3); only the pin, version, floor and
+# Built from the live upstream entry (pin 0f65549ac1353f6b74b8ac6a22d58f3eb6dea0a3); only the pin, version, capabilities and
 # disclosure text below changed. PR body: docs/catalog/catalog-pr.md.
 name: alans-way
 repo: https://github.com/capthvnsen/alans-way-agents
-sha: f25497e9a6b6f25681727d317efb394aed315f6a
+sha: 957d07fd7f93e17d38af30c6a6abbcd7bd05f4f8
 subdir: alans-way
 version: "0.21.14"
 title: "Alan's Way Plugin"
@@ -19,7 +19,7 @@ maintainer: capthvnsen
 tier: community
 category: automation
 requires_hermes: ">=0.21.5"
-docs_url: https://github.com/capthvnsen/alans-way-agents/tree/f25497e9a6b6f25681727d317efb394aed315f6a/alans-way
+docs_url: https://github.com/capthvnsen/alans-way-agents/tree/957d07fd7f93e17d38af30c6a6abbcd7bd05f4f8/alans-way
 readme: true
 platforms: [linux, macos]
 known_issues:
@@ -41,13 +41,12 @@ known_issues:
   - "This pin needs the paired workspace/remote browser host with approval-binding-v1 support for approved browser actions. Older hosts fail closed when that proof is unavailable; update and verify the paired workspace before rollout."
   - "Cross-bot proactivity is off by default and requires operator configuration and per-bot /proactivity cross on; activation needs a gateway restart. It exports bounded completed owner-DM excerpts across enabled profiles on one gateway. /proactivity cross off stops sharing/receiving/dispatch immediately and purges local shared text and permits; body-free hashes remain for 48 hours. Sanitization skips credential/payment-looking exchanges but cannot guarantee secrecy. Digest TTL is 24 hours, queued asks two hours; offline expired files remain until an activated profile prunes them. Copied context in Hermes history, sidecars, compaction, memory-provider records and model-provider retention is not erased by expiry or opt-out. The no-memory instruction is model policy. Shared storage requires POSIX owner-only directories/files. Dormant profiles do no store access."
   - "During a permitted primary check-in the model may automatically schedule one read-only/draft-only ask into an enrolled target bot's existing owner DM, with primary attribution. sent means scheduled, not delivered or completed; there is no delivery receipt or replay. A separate off-by-default results opt-in in both owner DMs permits one sanitized summary (280 UTF-8 bytes) per future ask, held in private results.json for at most two hours from the ask and consumed once at the primary's next owner turn or permitted check-in. There is no wake/retry; missing means unknown. Result opt-out purges pending outcomes and cross opt-out revokes the choice; already copied chat/provider context remains. Imported-session restrictions last at most 30 minutes and survive restart; terminal/code, desktop input, delegation, messaging, scheduling and unknown connectors are blocked, while existing gated browser calls remain possible. Existing approval/CAPTCHA/ownership gates apply; this is not universal read-only enforcement. Targets require gateway-injection permission and verified same-bot routes; missing permission, routing, busy/pause/hours or expiry can prevent delivery."
-  - "Admission validation passes with warnings: cross_bot_ask is declared but only registers for an activated primary cross-bot profile; the default isolated probe does not activate it. proactivity.py and voice.py read gateway.session_context.get_session_env, which current Hermes flags as private imports that may break across releases."
+  - "cross_bot_ask is not declared in provides_tools: it registers only for an activated primary cross-bot profile, which the default isolated probe does not activate. proactivity.py and voice.py read gateway.session_context.get_session_env, which current Hermes flags as private imports that may break across releases."
   - "0.21.9 router changes: when the computer's ssh link drops and mac-watch reports it online, the router reconnects to it at most once a minute, re-initializes and replays only read-only and never-sent calls; an action that may already have run is answered as uncertain, never repeated. Only a failed reconnect or an offline/stale computer fails over to the VM, and after a failover a call that names a computer tab is refused rather than served by the VM. The approval gate also learns page names from a tab-open snapshot. A pre_llm_call note on every turn names the workspace tools and routine Mac moves."
   - "0.21.14 changes: Telegram reply pacing is on by default (holds a reply up to 2.5 s; /tone pace off turns it off). A ~/.config/alans-way/config.json, when present, sets the voice, reply length and proactivity hours, timezone and on/off for that profile, and an invalid file stops the plugin from loading. The weekly time-saved report is off until the user sends /proactivity report on, and its minutes are a fixed per-task estimate, not a measurement."
 capabilities:
   provides_tools:
     - proactivity
-    - cross_bot_ask
   provides_hooks:
     - pre_tool_call
     - pre_llm_call
