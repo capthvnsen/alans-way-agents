@@ -91,6 +91,8 @@ curl -fsSL https://raw.githubusercontent.com/capthvnsen/alans-way-agents/main/se
 `--host-os linux` if your computer is not a Mac. `setup.sh` is idempotent, so
 it is safe to re-run, and `--verify` audits without changing anything.
 
+`setup.sh` installs this repo's plugin with `hermes plugins install file://<clone>#alans-way` and then `hermes plugins enable alans-way`. `hermes plugins install alans-way` installs the catalog pin, which can be older than v0.21.14. The Hermes 0.23.0 commands for a plugin-only install are in [alans-way/README.md](alans-way/README.md#install).
+
 Then install the app: [Mac](https://openalan.com/download/mac) (signed and
 notarized) or [Windows](https://openalan.com/download/windows) (unsigned:
 **More info → Run anyway**). In the app, **Settings → Agent setup → Test agent path**.
