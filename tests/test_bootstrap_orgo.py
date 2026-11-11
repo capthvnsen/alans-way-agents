@@ -59,6 +59,8 @@ def fixture(directory: Path):
     })
     stub(stub_bin, "supervisorctl", 'echo "supervisorctl $*" >> "$STUB_LOG"\n')
     stub(stub_bin, "tailscaled", 'echo "tailscaled $*" >> "$STUB_LOG"\n')
+    # The real pkill is host-wide and kills concurrent test runs' tailscale stubs.
+    stub(stub_bin, "pkill", 'echo "pkill $*" >> "$STUB_LOG"\n')
     # Nothing on :22 by default — 8022 is a decoy for sloppy `22$` matching.
     stub(stub_bin, "ss",
          'printf "LISTEN 0 128 *:8022 *:*\\n"\n')
