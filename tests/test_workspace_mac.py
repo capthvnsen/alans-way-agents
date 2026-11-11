@@ -1021,6 +1021,87 @@ class DeadBackendFallbackTests(unittest.TestCase):
             self.assertIn("moved to the VPS browser", line)
             self.assertNotIn("retrying", err)
 
+    def test_a_failed_probe_is_not_announced_as_back_online(self):
+        """A dead watcher's last "online" must not tell an agent that the
+        router just routed to the VPS (its own probe failed) that the host is
+        back: the agent hears it is on the VPS browser instead."""
+        if not NODE:
+            self.skipTest("node required")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            fake_ssh = bin_dir / "ssh"
+            fake_ssh.write_text("#!/bin/sh\nexit 255\n", encoding="utf-8")  # host unreachable
+            fake_ssh.chmod(0o755)
+            stub = home / "vps-stub.cjs"
+            stub.write_text(
+                "require('readline').createInterface({input:process.stdin}).on('line',l=>{"
+                "const m=JSON.parse(l);if(m.id==null)return;"
+                "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,"
+                "result:{content:[{type:'text',text:'vps'}]}})+'\\n');});\n",
+                encoding="utf-8")
+            state = home / "mac-state.json"
+            state.write_text(
+                json.dumps({"state": "online", "since": "2026-02-01T10:00:00Z"}),
+                encoding="utf-8")
+            stale = time.time() - 60
+            os.utime(state, (stale, stale))
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+            proc = subprocess.Popen(
+                [NODE, str(ROUTER), "--mac-ssh", "fake@host", "--bot-id", "1",
+                 "--vps-script", str(stub),
+                 "--vps-connection", str(home / "conn.json"),
+                 "--mac-state-file", str(state)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env)
+            lines = []
+            try:
+                proc.stdin.write(
+                    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+                    '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+                    '{"jsonrpc":"2.0","id":2,"method":"tools/call",'
+                    '"params":{"name":"cua_alans_way_tabs","arguments":{}}}\n')
+                proc.stdin.flush()
+                for _ in range(2):
+                    if not select.select([proc.stdout], [], [], 15)[0]:
+                        self.fail("no response within 15s")
+                    lines.append(proc.stdout.readline())
+            finally:
+                proc.kill()
+                _, err = proc.communicate()
+            joined = "".join(lines)
+            self.assertIn('"id":2', joined, err)
+            self.assertNotIn("back online", joined)
+            self.assertIn("Mac unreachable since", joined)
+            self.assertIn("routed to VPS browser", joined)
+
+    def test_a_return_after_the_failed_probe_is_still_announced(self):
+        if not NODE:
+            self.skipTest("node required")
+        script = r"""
+const fs = require('fs');
+const router = require(process.argv[1]);
+const file = process.argv[2];
+const failedAt = Date.parse('2026-02-01T10:30:00.500Z');
+const annotate = router.makeAnnotator('vps', true, file, 'Mac', { probeFailedAt: failedAt });
+const line = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'x' }] } });
+const out = [];
+for (const since of ['2026-02-01T10:00:00Z', '2026-02-01T10:30:00Z', '2026-02-01T10:40:00Z']) {
+  fs.writeFileSync(file, JSON.stringify({ state: 'online', since }));
+  out.push(JSON.parse(annotate(line)).result.content.slice(1).map((p) => p.text).join(''));
+}
+process.stdout.write(JSON.stringify(out));
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            proc = subprocess.run([NODE, "-e", script, str(ROUTER), str(Path(directory) / "mac-state.json")],
+                                  capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        before, same_second, after = json.loads(proc.stdout)
+        self.assertIn("Mac unreachable since 2026-02-01T10:30:00Z", before)
+        self.assertIn("Mac is back online as of 2026-02-01T10:30:00Z", same_second)
+        self.assertEqual(after, "")  # announced once per flip
+
     def test_a_silent_mac_spawn_does_not_retry_without_ssh_multiplexing(self):
         """A guest whose ssh cannot multiplex (a Windows guest has no
         ControlMaster) pays a full handshake per spawn, so a retried spawn

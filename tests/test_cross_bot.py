@@ -718,7 +718,7 @@ class RegistrationTests(unittest.TestCase):
     def test_off_primary_and_secondary_match_base_without_cross_state_or_store_io(self):
         # Cross-bot off preserves the base schema and shared voice, including
         # the task-completion wording; only explicit voice changes update these hashes.
-        schema_sha = "5428ca29f9a9252455fd9777d3b40fcffd7c512503795eaf243aef05850e0a73"
+        schema_sha = "9e458efa3d5f846618e5d18f072f70c192082897435048119c8f2b1064486484"
         for profile in ("default", "primary", "specialist"):
             for configured in (False, True):
                 with self.subTest(profile=profile, configured=configured), tempfile.TemporaryDirectory() as tmp:

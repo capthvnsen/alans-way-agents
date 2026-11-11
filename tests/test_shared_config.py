@@ -227,4 +227,5 @@ class HermesTests(unittest.TestCase):
     def test_idle_longer_than_a_week_remains_a_minimum(self):
         settings = P.Settings(base_minutes=15 * 24 * 60)
         anchor = at('2026-10-07T10:00')
-        self.assertGreaterEqual(P.due_at(settings, anchor, 4), anchor + timedelta(days=15))
+        self.assertEqual(P.due_at(settings, anchor, 0), anchor + timedelta(days=15))
+        self.assertIsNone(P.due_at(settings, anchor, 4))

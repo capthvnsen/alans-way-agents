@@ -25,7 +25,7 @@ Keep cron for isolated browser watches; see the
 
 - After **2 hours** of quiet in the bound chat (from you or the bot).
 - Each check-in you don't answer doubles the next wait: about 2h, 6h, 14h, 1.3
-  days, 2.6 days, 5.3 days, 10.6 days, then roughly weekly. Replying resets it.
+  days, 2.6 days, 5.3 days, 10.6 days, then check-ins stop until you reply. Replying resets it.
 - Only between **8:00 and 22:00 in your timezone**, not the server's. Setup reads
   your timezone from your computer; if it can't, the bot asks you.
   An unset check-in timezone runs on UTC (plugins can't read the profile's Hermes
