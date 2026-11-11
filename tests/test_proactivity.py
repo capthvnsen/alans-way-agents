@@ -43,10 +43,26 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(P.due_at(s, anchor, 1), anchor + timedelta(hours=4))
         self.assertEqual(P.due_at(s, anchor, 2), anchor + timedelta(hours=8))
 
-    def test_wait_caps_at_a_week(self):
+    def test_check_ins_stop_once_the_wait_would_pass_a_week(self):
         s = P.Settings(timezone="UTC", active_start=0, active_end=23)
         anchor = at("2026-10-07T09:00")
-        self.assertEqual(P.due_at(s, anchor, 30), P.next_active(s, anchor + timedelta(days=7)))
+        self.assertEqual(P.due_at(s, anchor, 6), anchor + timedelta(hours=128))
+        self.assertIsNone(P.due_at(s, anchor, 7))
+        self.assertIsNone(P.due_at(s, anchor, 30))
+        # a base wait of a week or more still gets its first check-in
+        week = P.Settings(timezone="UTC", active_start=0, active_end=23, base_minutes=10080)
+        self.assertEqual(P.due_at(week, anchor, 0), anchor + timedelta(days=7))
+        self.assertIsNone(P.due_at(week, anchor, 1))
+
+    def test_an_absent_user_gets_no_more_check_ins_until_they_reply(self):
+        p, clock = runtime(FakeCtx(), at("2026-10-07T12:00", "UTC"), timezone="UTC")
+        state = p.load()
+        state.update(nudges=7, last_nudge_ts=at("2026-09-01T12:00").timestamp())
+        p.save(state)
+        self.assertIsNone(p.tick())
+        self.assertIsNone(p.status()["next_check_in"])
+        with patch.object(P, "caller_session_key", return_value=KEY):
+            self.assertIn("on hold until you reply", p.command("status"))
 
     def test_night_due_time_moves_to_the_users_morning(self):
         s = P.Settings(timezone="America/New_York")
@@ -781,9 +797,9 @@ class CommandTests(unittest.TestCase):
         p.save(state)
         self.assertIn("next at 8:00 AM Saturday", self.command(p, "status"))
 
-        state["nudges"] = 8   # the 7-day cap lands the next Wednesday
+        state["nudges"] = 8   # past a week's wait: no more check-ins until a reply
         p.save(state)
-        self.assertIn("next at 8:00 AM October 14", self.command(p, "status"))
+        self.assertIn("on hold until you reply", self.command(p, "status"))
 
     def test_bad_values_reply_with_the_error_and_change_nothing(self):
         p, _ = runtime(FakeCtx(), at("2026-10-07T11:00"))

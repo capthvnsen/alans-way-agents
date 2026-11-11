@@ -70,9 +70,12 @@ def next_active(s, t):
 
 
 def due_at(s, anchor, nudges):
-    """One rule: base wait, doubled per unanswered nudge, capped at a week."""
+    """One rule: base wait, doubled per unanswered nudge. None once the doubled wait would
+    pass a week: an absent user gets no more check-ins until they reply."""
     base = timedelta(minutes=s.base_minutes)
-    wait = max(base, min(base * 2 ** min(nudges, 16), MAX_WAIT))
+    wait = base * 2 ** min(nudges, 16)
+    if nudges and wait > MAX_WAIT:
+        return None
     return next_active(s, anchor + wait)
 
 
@@ -452,7 +455,7 @@ class Proactivity:
                 state.update(last_report_date=day.isoformat(), last_activity_ts=now.timestamp(),
                              last_result="pending")
                 text = self.report_prompt(s, now)
-            elif now < due_at(s, anchor, nudges) or not in_window(s, now):
+            elif (due := due_at(s, anchor, nudges)) is None or now < due or not in_window(s, now):
                 return None
             else:
                 # ponytail: a refused check-in still advances the back-off, so a missing
@@ -572,7 +575,7 @@ class Proactivity:
                    "last_result": state.get("last_result"), "last_error": self.error}
             if out["bound"] and not out["paused"]:
                 due = due_at(s, self._anchor(state), out["nudges_since_reply"])
-                out["next_check_in"] = due.astimezone(zone(s)).isoformat(timespec="minutes")
+                out["next_check_in"] = due and due.astimezone(zone(s)).isoformat(timespec="minutes")
                 if s.morning_brief:
                     today = now.astimezone(zone(s)).date()
                     days = (today + timedelta(days=i) for i in range(3))
@@ -690,8 +693,8 @@ class Proactivity:
         if st["paused"]:
             until = s["paused_until"]
             return text + ", paused" + (f" until {until}" if until not in ("", "off") else "") + "."
-        text += (f", next {self._next_words(st['next_check_in'])}."
-                 if st["next_check_in"] else ".")
+        text += (f", next {self._next_words(st['next_check_in'])}." if st["next_check_in"] else
+                 ", on hold until you reply." if st["bound"] else ".")
         text += (f" Morning brief next {self._next_words(st['next_brief'])}."
                  if st["next_brief"] else "")
         return text + (f" Weekly report next {self._next_words(st['next_report'])}."
@@ -758,8 +761,8 @@ SCHEMA = {
     "name": "proactivity",
     "description": (
         "Read or change how you proactively check in with the user. You check in after the chat has"
-        " been quiet for base_minutes, doubling the wait after each check-in they don't answer (capped"
-        " at a week), and only between active_start and active_end in the USER's timezone. If"
+        " been quiet for base_minutes, doubling the wait after each check-in they don't answer (none once"
+        " the wait would pass a week, until they reply), and only between active_start and active_end in the USER's timezone. If"
         " morning_brief is on you also send one short brief a day near active_start, and if"
         " weekly_report is on, a time-saved report on Sunday evenings. This tool"
         " can only make check-ins quieter: level 'less', a higher base_minutes, paused_until 'off' or"

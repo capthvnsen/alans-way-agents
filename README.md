@@ -55,7 +55,7 @@ VNC and noVNC on the VM.
 
 Idle check-ins run in one bound Telegram chat after 2 hours of quiet, between
 08:00 and 22:00 in your timezone. The wait doubles after each unanswered check-in
-(capped at a week), and `[SILENT]` replies are not sent. The morning brief,
+and check-ins stop once it would pass a week, until you reply. `[SILENT]` replies are not sent. The morning brief,
 weekly report and [cross-bot proactivity](docs/proactivity.md#cross-bot-proactivity)
 are **off by default**. Other MCP clients, including Grok Bot, connect through
 the [remote-agent setup](docs/remote-agents.md); that connection does not install

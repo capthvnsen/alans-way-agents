@@ -1182,7 +1182,13 @@ function makeAnnotator(host, macConfigured, stateFile, label = 'Mac', ctx = {}) 
         if (seen) writeResume(remembered, seen);
       }
     }
-    const mac = macConfigured ? readMacState(stateFile) : null;
+    let mac = macConfigured ? readMacState(stateFile) : null;
+    // This session's own failed probe outranks an "online" verdict older than
+    // it (a dead watcher's last word, or one still inside its hysteresis).
+    const failedAt = ctx.probeFailedAt;
+    if (host === 'vps' && failedAt && mac && mac.state === 'online' && !(Date.parse(mac.since) >= failedAt - (failedAt % 1000))) {
+      mac = { ...mac, state: 'offline', since: new Date(failedAt).toISOString().replace(/\.\d+Z$/, 'Z') };
+    }
     const record = host === 'vps' ? readResumeRecord(remembered) : null;
     const resume = record ? record.url : null;
     const continued = continuedPage(record);
@@ -1346,6 +1352,7 @@ async function main() {
   const pendingRequests = new Map();
   const annotCtx = {
     botId,
+    probeFailedAt: macSsh && !macCommand ? Date.now() : 0,
     failedOver: false,
     restoredNote: null,
     tabIdChanged: null,
