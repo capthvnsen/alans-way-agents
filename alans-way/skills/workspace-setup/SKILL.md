@@ -39,9 +39,13 @@ its exact source revision and explain the capabilities to the user. The pin
 resolver starts bounded, read-only local Git commands; the SSH-forward
 examples name only loopback endpoints. This candidate scans SAFE with only
 MEDIUM/LOW findings; later candidates can require confirmation. Obtain
-explicit consent for that reviewed tree before retrying the same identifier
-and exact `--ref <40-character SHA>` with `hermes -p <profile> plugins install
-<identifier> --ref <SHA> --enable --force`. `--force` confirms a caution verdict
+explicit consent for that reviewed tree and for its Python dependencies before
+retrying the same identifier and exact `--ref <40-character SHA>` with
+`hermes -p <profile> plugins install <identifier> --ref <SHA> --yes-deps --enable --force`.
+`--yes-deps` is that dependency consent. On Hermes 0.23.0, a non-interactive
+`--enable` without it exits 0 and leaves the plugin disabled (`dependency install
+skipped (non-interactive)`); `hermes plugins enable <name>` prepares the
+dependency afterwards. `--force` confirms a caution verdict
 and can replace an existing install; inspect that replacement too. It cannot
 override a dangerous verdict. Stop for unknown findings or absent consent.
 Never disable scanning. Review changed revisions again; setup consent alone

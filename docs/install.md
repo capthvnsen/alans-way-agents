@@ -75,9 +75,17 @@ The bootstrap runs every step in order and says what it did:
 - **Preflight**: hermes version (0.21.5 or newer, or setup stops), python3, Node 22+, HERMES_HOME
 - **Telegram check** — if no `TELEGRAM_BOT_TOKEN` is configured it offers to
   launch `hermes gateway setup` right there
-- **Plugin** — installs `alans-way`, enables the `proactivity` toolset for
-  Telegram sessions (without it, the `proactivity` tool never reaches the bound
-  chat's tool list), and removes the stale 0.6 startup hook if one is installed
+- **Plugin** — `hermes plugins install file://<clone>#alans-way` (no `--ref`;
+  the clone's current commit), then `hermes plugins enable alans-way`. On Hermes
+  0.23.0 that enable installs the declared `jsonschema` and turns the plugin on.
+  A non-interactive `plugins install --enable` stays disabled unless `--yes-deps`
+  is also passed: the command exits 0 and prints `dependency install skipped
+  (non-interactive)`. `--ref` must be the full 40-character commit. `file://`
+  warns that the source is unreviewed and the scheme is local; a SAFE scan still
+  installs. Setup then enables the `proactivity` toolset for Telegram sessions
+  (without it, the `proactivity` tool never reaches the bound chat's tool list),
+  and removes the stale 0.6 startup hook if one is installed. Hand install and
+  `hermes plugins doctor` are in [alans-way/README.md](../alans-way/README.md#install)
 - **Alan's Tools (VPS browser host)** — fetches the companion repo, installs the connector's
   dependencies, writes `config.json`, and installs the Chromium/broker services:
   systemd units on a Linux host where systemd is live, supervisord programs

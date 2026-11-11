@@ -82,16 +82,20 @@ next one is due and `/proactivity brief off` stops it.
 ## Setup
 
 `setup.sh` binds the primary bot (pick its Telegram chat from the list) and sets
-your timezone. To do it by hand:
+your timezone. To install and bind by hand on Hermes 0.23.0, from a clone:
 
 ```sh
-hermes plugins enable alans-way
+hermes plugins install "file://$PWD#alans-way" --ref "$(git rev-parse HEAD)" --yes-deps --enable
 hermes config set plugins.entries.alans-way.allow_gateway_injection true
 hermes tools enable proactivity --platform telegram
 hermes proactivity bind --session-key '<telegram dm session key>' --timezone America/Chicago
 hermes gateway restart
 hermes proactivity status
 ```
+
+`--yes-deps` is required for a non-interactive `--enable`. Without it the install
+exits 0 and the plugin stays disabled; `hermes plugins enable alans-way` prepares
+`jsonschema` and enables it. Details: [alans-way/README.md](../alans-way/README.md#install).
 
 On a host where supervisord runs the gateway, `hermes gateway restart` does
 not reach it: drain it through the supervisor instead — `supervisorctl signal

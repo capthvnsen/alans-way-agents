@@ -12,6 +12,26 @@ Alan's CU MCP (the shared Node `workspace-mcp` server) live in a separate repo:
 ask the agent to follow the `workspace-setup` skill. It fetches that repo's
 setup page and walks through the rest. It does not replace this plugin.
 
+## Install
+
+Hermes `>= 0.21.5`. These commands were run on Hermes 0.23.0. From a clone of
+this repo, on the machine that runs the gateway:
+
+```sh
+hermes plugins install "file://$PWD#alans-way" --ref "$(git rev-parse HEAD)" --yes-deps --enable
+hermes config set plugins.entries.alans-way.allow_gateway_injection true
+hermes tools enable proactivity --platform telegram
+hermes plugins doctor "${HERMES_HOME:-$HOME/.hermes}/plugins/alans-way"
+```
+
+`--ref` is the full 40-character commit. A short SHA is rejected (`--ref must be a full 40-character commit SHA`). `--yes-deps` consents to installing the declared `jsonschema>=4.18,<5` into Hermes's environment and is what makes `--enable` succeed in a non-interactive shell. On Hermes 0.23.0, a non-interactive `plugins install --enable` without `--yes-deps` exits 0, prints `dependency install skipped (non-interactive)`, and leaves the plugin disabled. `hermes plugins enable alans-way` then prepares that dependency and enables it, with no extra flag.
+
+`file://` prints two warnings: the source is unreviewed, and the URL scheme is local. A SAFE scan still installs. `hermes plugins install alans-way` installs the catalog's reviewed pin (`hermes plugins search alans-way`). That pin can be older than `version` in this directory's `plugin.yaml`.
+
+`setup.sh` installs with `hermes plugins install file://<clone>#alans-way` (no `--ref`; Hermes records the clone's current commit and leaves `pinned` false) and then `hermes plugins enable alans-way`. That pair works on Hermes 0.23.0. Pass doctor a path under the Hermes home you installed into. When the current directory contains an `alans-way` folder, `hermes plugins doctor alans-way` checks that folder.
+
+Restart the gateway after enabling so a running process loads the plugin. Workspace, Tailscale and the desktop app are the [repository install](../README.md#install).
+
 ## Shared config
 
 The plugin reads `~/.config/alans-way/config.json` on load, validated against the
