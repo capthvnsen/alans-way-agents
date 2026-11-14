@@ -196,4 +196,11 @@ def register(ctx, *, legacy_home=None, background=True, shared_config_path=None)
                                  lambda args: cli_run(runtime, args))
     ctx.on_unload(runtime.close)
     ctx.on_unload(cross.close)
+    if primary:
+        from . import openpod_room
+        try:
+            openpod_room.start(ctx, lambda: runtime.load().get("session_key"), background=background)
+        except Exception:
+            pass  # misconfigured opt-in bridge stays off; the plugin keeps working
+
     return runtime if primary else None
