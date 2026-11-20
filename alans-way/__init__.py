@@ -3,6 +3,7 @@ plus the workspace skills."""
 from pathlib import Path
 from copy import deepcopy
 import os
+import re
 import sys
 
 from . import voice as voice_mod
@@ -85,6 +86,16 @@ def tools_context(**kwargs):
     return {"context": TOOLS_NOTE}
 
 
+def _has_workspace_browser(home) -> bool:
+    """Whether the profile's config.yaml carries a live (uncommented) workspace_browser block,
+    read the way setup-workspace.sh reads it."""
+    try:
+        text = (Path(home) / "config.yaml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search(r"^[ \t]*workspace_browser[ \t]*:", text, re.M) is not None
+
+
 def _owning_home() -> Path:
     """The home Hermes bound for this plugin load, never the launch env.
 
@@ -121,7 +132,10 @@ def register(ctx, *, legacy_home=None, background=True, shared_config_path=None)
         ctx.register_hook("pre_llm_call", lambda **kwargs: {
             "context": preference_context(shared, include_voice=False)})
     ctx.register_hook("pre_llm_call", task_context)
-    ctx.register_hook("pre_llm_call", tools_context)
+    owning_home = legacy_home or _owning_home()
+    # The note names workspace_browser tools; a bot without that block has none to call.
+    if _has_workspace_browser(owning_home):
+        ctx.register_hook("pre_llm_call", tools_context)
     skills = Path(__file__).parent / "skills"
     ctx.register_skill("workspace-operations", skills / "workspace-operations" / "SKILL.md")
     ctx.register_skill("workspace-setup", skills / "workspace-setup" / "SKILL.md")
@@ -137,7 +151,7 @@ def register(ctx, *, legacy_home=None, background=True, shared_config_path=None)
         ctx.register_cli_command("tone", "The texting voice: status, texting, default, length or pace",
                                  voice_mod.cli_setup, lambda args: voice_mod.cli_run(voice, args))
     primary = _primary_profile(ctx)
-    runtime = Proactivity(ctx, legacy_home=(legacy_home or _owning_home()) if primary else None,
+    runtime = Proactivity(ctx, legacy_home=owning_home if primary else None,
                           shared_config=shared)
     runtime.primary = primary
     cross = CrossBot(ctx, runtime)

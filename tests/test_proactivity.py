@@ -267,6 +267,23 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(p.tick(), True if zone == "Asia/Tokyo" else None)
                 self.assertEqual(p.load()["settings"], settings)
 
+    def test_no_check_in_goes_out_until_a_timezone_is_set(self):
+        for settings, known in (({}, False), ({"timezone": ""}, False), ({"timezone": "UTC"}, True), ({"timezone": "Asia/Tokyo"}, True)):
+            with self.subTest(settings=settings):
+                ctx = FakeCtx()
+                clock = SimpleNamespace(now=at("2026-10-07T00:00"))
+                p = P.Proactivity(ctx, clock=lambda: clock.now)
+                p.gateway = True
+                p.bind(KEY)
+                state = p.load()
+                state["settings"] = settings
+                p.save(state)
+                self.assertEqual(p.status()["timezone_known"], known)
+                # Noon UTC is inside UTC's waking hours and long past the idle wait (03:00 UTC is noon in Tokyo).
+                clock.now = at("2026-10-07T03:00") if settings.get("timezone") == "Asia/Tokyo" else at("2026-10-07T12:00")
+                self.assertEqual(p.tick(), True if known else None)
+                self.assertEqual(len(ctx.sent), int(known))
+
     def test_bind_takes_only_a_telegram_dm_key(self):
         p = P.Proactivity(FakeCtx(), clock=lambda: at("2026-10-07T09:00"))
         for bad in ("", "agent:main:discord:dm:1", "agent:main:telegram:group:1",
@@ -1169,6 +1186,35 @@ class PromptTests(unittest.TestCase):
 
 
 class RegisterTests(unittest.TestCase):
+    def registered_hooks(self, config):
+        package = sys.modules["alans_way_idle_test"]
+        hooks = []
+        ctx = SimpleNamespace(
+            profile_name="default", state=FakeState(),
+            register_tool=lambda **kw: None,
+            register_hook=lambda name, fn: hooks.append((name, fn)),
+            register_skill=lambda *a: None, register_command=lambda *a, **kw: None,
+            on_unload=self.addCleanup)
+        with tempfile.TemporaryDirectory() as home:
+            if config is not None:
+                (Path(home) / "config.yaml").write_text(config)
+            package.register(ctx, legacy_home=home, background=False)
+        return package, hooks
+
+    def test_the_tools_note_rides_along_only_on_a_profile_with_the_browser_block(self):
+        for label, config, expected in (
+            ("block", "mcp_servers:\n  workspace_browser:\n    command: node\n", 1),
+            ("indented block after other servers", "mcp_servers:\n  other:\n    command: x\n  workspace_browser:\n    command: node\n", 1),
+            ("no config file", None, 0),
+            ("other servers only", "mcp_servers:\n  other:\n    command: x\n", 0),
+            ("commented block", "mcp_servers:\n  # workspace_browser:\n  #   command: node\n", 0),
+            ("a name that only contains it", "mcp_servers:\n  my_workspace_browser:\n    command: node\n", 0),
+        ):
+            with self.subTest(label):
+                package, hooks = self.registered_hooks(config)
+                self.assertEqual(hooks.count(("pre_llm_call", package.tools_context)), expected)
+                self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
+
     def test_task_policy_reaches_every_profile_and_surface_with_tone_disabled(self):
         package = sys.modules["alans_way_idle_test"]
         for profile in ("default", "secondary"):
@@ -1182,6 +1228,7 @@ class RegisterTests(unittest.TestCase):
                 register_skill=lambda *a: None, register_command=lambda *a, **kw: None,
                 on_unload=self.addCleanup)
             with tempfile.TemporaryDirectory() as home:
+                (Path(home) / "config.yaml").write_text("mcp_servers:\n  workspace_browser:\n    command: node\n")
                 package.register(ctx, legacy_home=home, background=False)
             self.assertEqual(hooks.count(("pre_llm_call", package.task_context)), 1)
             self.assertEqual(hooks.count(("pre_llm_call", package.tools_context)), 1)

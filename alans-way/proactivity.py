@@ -419,13 +419,19 @@ class Proactivity:
         # turn older than BUSY_CAP is treated as over.
         return self.busy_since is not None and now - self.busy_since < BUSY_CAP
 
+    def timezone_known(self, state):
+        # settings() reads an unset zone as UTC; "known" asks whether one was ever set.
+        return bool(self.settings(state, resolve_timezone=False).timezone)
+
     def tick(self):
         if not self.gateway:
             return None
         with self._lock:
             state = self.load()
             s, now = self.settings(state), self.clock()
-            if not state.get("session_key") or is_paused(s, now) or self._busy(now):
+            # Without the user's zone, waking hours would be UTC's: no spontaneous message.
+            if (not state.get("session_key") or is_paused(s, now) or self._busy(now)
+                    or not self.timezone_known(state)):
                 return None
             anchor, nudges = self._anchor(state), state.get("nudges", 0)
             day = now.astimezone(zone(s)).date()
@@ -568,7 +574,7 @@ class Proactivity:
             s, now = self.settings(state), self.clock()
             out = {"bound": bool(state.get("session_key")), "settings": asdict(s),
                    "level": next((k for k, v in LEVELS.items() if v == s.base_minutes), "custom"),
-                   "timezone_known": bool(s.timezone), "paused": is_paused(s, now),
+                   "timezone_known": self.timezone_known(state), "paused": is_paused(s, now),
                    "busy": self._busy(now), "nudges_since_reply": state.get("nudges", 0),
                    "next_check_in": None, "next_brief": None, "next_report": None,
                    "in_gateway": self.gateway,
