@@ -18,6 +18,7 @@ NODE = shutil.which("node")
 SH = shutil.which("sh")
 
 FAKE_SSH = """#!/bin/sh
+[ -n "$SSH_LOG" ] && printf '%s\\n' "$*" >> "$SSH_LOG"
 for last in "$@"; do :; done
 case "$last" in
   *conn_script*) [ -f "$PROBE_DOWN" ] && exit 1; printf %s "/Users/user/Library/Application Support/Hermes Workspace/connector/scripts/browser-mcp.cjs"; exit 0 ;;
@@ -195,7 +196,7 @@ class ExplicitHostRoutingTests(unittest.TestCase):
                    HERMES_HOME=str(self.dir / "hermes"),
                    MAC_STUB=str(self.dir / "mac-stub.cjs"), MAC_MODE=mac_mode,
                    MAC_LOG=str(self.dir / "mac.log"), VPS_LOG=str(self.dir / "vm.log"),
-                   PROBE_DOWN=str(self.dir / "probe-down"),
+                   PROBE_DOWN=str(self.dir / "probe-down"), SSH_LOG=str(self.dir / "ssh.log"),
                    VM_MODE=vm_mode, VM_TABCOUNT=str(vm_tabs),
                    MAC_PROXY_VM="1" if mac_proxy_vm else "")
         env.pop("HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS", None)
@@ -487,6 +488,19 @@ class ExplicitHostRoutingTests(unittest.TestCase):
         tabs = {tab["id"]: tab for tab in json.loads(msg["result"]["content"][0]["text"])["tabs"]}
         self.assertEqual(set(tabs), {"mac-tab-1", "vm-tab-1"})
         self.assertEqual(tabs["mac-tab-1"]["handback"], handback)
+
+    def test_a_configured_ssh_destination_cannot_be_read_as_an_option(self):
+        # The probe and the backend both spawn ssh; a destination such as
+        # "-oProxyCommand=..." must land after "--" so ssh takes it as a host.
+        self.start()
+        self.handshake()
+        self.call("cua_alans_way_tabs")
+        self.recv()
+        calls = self.log("ssh.log").splitlines()
+        self.assertGreaterEqual(len(calls), 2, calls)
+        for call in calls:
+            self.assertIn(" -- fake@host ", call + " ")
+            self.assertEqual(call.split().index("--"), call.split().index("fake@host") - 1)
 
     def test_a_challenge_page_is_never_the_resume_page(self):
         # Failover reopens the remembered page in the VM browser, where a

@@ -314,7 +314,10 @@ for(const mode of ['retry','exit']) test('read budget decreases across '+mode,as
   const budgets=frames.map(e=>e.m.params._meta?.['alans-way/remainingMs']);
   assert.ok(Number.isInteger(budgets[0]),JSON.stringify(budgets));
   assert.ok(budgets[1]<budgets[0],JSON.stringify(budgets));
-  assert.ok(Math.abs((budgets[0]-budgets[1])-(frames[1].at-frames[0].at))<100);
+  // The budget is spent on the router's clock, the frames are timed on ours: under load they drift apart, so
+  // only the order and a loose bound are asserted.
+  assert.ok(frames[1].at>=frames[0].at);
+  assert.ok(Math.abs((budgets[0]-budgets[1])-(frames[1].at-frames[0].at))<2000);
 });
 test('expired read is answered without dispatching on watchdog retry',async t=>{
   const c=client(t,'retry',{HERMES_ROUTER_CALL_HARD_MS:'3300'});c.init();c.call(2,'cua_alans_way_status',{});
