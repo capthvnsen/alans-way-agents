@@ -113,7 +113,7 @@ least 32 characters, it serves the router over plain HTTP on loopback by default
 and keeps the token out of the router's environment. Repository-level
 `scripts/setup-remote-agent.sh` is not bundled and runs only when the operator
 runs it: it creates one ed25519 key per bot and a router-only
-(`restrict,command=...`) accepted-key line, optionally `--tailnet-only`, backing
+(`restrict,command=...`) accepted-key line limited to tailnet addresses unless `--any-address` is given, backing
 the file up first; `--remove` deletes only that line. Clients set up either way
 get desktop input when the operator sets `HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1`,
 without Hermes's `computer_use` approval prompts. Neither changes Hermes config

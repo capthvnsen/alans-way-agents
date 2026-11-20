@@ -117,7 +117,7 @@ and [Grok Bot generator](../alans-way-grok-bot/README.md).
 - **Remote-agent SSH setup:** `scripts/setup-remote-agent.sh` lives in the
   repository, not in this plugin, and runs only when the operator runs it. It
   creates one ed25519 key per bot and adds it to the VM user's accepted keys,
-  limited to the router (`restrict,command=...`, optionally `--tailnet-only`),
+  limited to the router (`restrict,command=...`) and to tailnet addresses unless `--any-address` is given,
   backing that file up first. Remote clients set up this way, or through the bridge, get desktop input
   when the operator sets `HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS=1`, without
   Hermes's `computer_use` approval prompts.

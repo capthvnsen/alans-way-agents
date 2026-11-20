@@ -153,6 +153,19 @@ test('profile log retains one correlated line for every browser and native Mac r
   for (const secret of ['private-url', 'private-title', 'private-page-content', 'private-token', 'private-bot']) assert.ok(!lines.join('\n').includes(secret));
 });
 
+test('the profile log rotates to one .1 file past its size cap', async t => {
+  const f = fixture(t);
+  const log = f.file('profile/logs/workspace-router.log');
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.writeFileSync(log, 'old line\n'.repeat(120000));
+  const c = f.start();await c.ready();await c.call(2, 'open', { url: 'https://fixture.invalid/' });
+  await until(() => fs.existsSync(log) && fs.statSync(log).size > 0 && fs.statSync(log).size < 4096, 'fresh log after rotation');
+  assert.match(fs.readFileSync(log, 'utf8'), /^workspace-router: served /);
+  assert.ok(fs.statSync(log + '.1').size > 1024 * 1024);
+  assert.equal(fs.statSync(log).mode & 0o777, 0o600);
+  assert.ok(!fs.existsSync(log + '.2'));
+});
+
 test('large replies and backend errors each log once; arbitrary tool names cannot leak into stderr', async t => {
   const f = fixture(t), c = f.start();await c.ready();
   await c.call(2, 'screenshot', { large: true });

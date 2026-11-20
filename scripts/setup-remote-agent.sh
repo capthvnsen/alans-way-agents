@@ -5,7 +5,10 @@
 # Optional fallback settings: --mac-ssh USER@MAC --host-os mac|windows|linux --state-file PATH.
 # --config PATH selects config.yaml; --router PATH overrides the installed plugin router.
 # --user selects the SSH login shown in client JSON. Replace HOST and copy the private key to the client.
-# --tailnet-only accepts the key only from Tailscale addresses; each run rewrites the line, so repeat the flag to keep it.
+# The key is accepted only from Tailscale addresses unless --any-address is given. A re-run with neither flag keeps
+# whatever source restriction (or lack of one) this bot's existing line has; --tailnet-only is the default for a new key.
+# --host-key PATH is this machine's sshd host public key (default /etc/ssh/ssh_host_ed25519_key.pub); when readable, the
+# printed client settings pin it (StrictHostKeyChecking=yes) and print the known_hosts line to add on the client.
 set -eu
 
 # setup.sh uses the same interpreter override on hosts without a working python3.
@@ -43,8 +46,12 @@ parser.add_argument("--router", default=router)
 parser.add_argument("--mac-ssh", default="")
 parser.add_argument("--host-os", choices=("mac", "windows", "linux"), default="mac")
 parser.add_argument("--state-file", default="")
-parser.add_argument("--tailnet-only", action="store_true", help="accept this key only from Tailscale addresses")
+parser.add_argument("--tailnet-only", action="store_true", help="accept this key only from Tailscale addresses (the default for a new key)")
+parser.add_argument("--any-address", action="store_true", help="accept this key from any address")
+parser.add_argument("--host-key", default="/etc/ssh/ssh_host_ed25519_key.pub", help="this machine's sshd host public key, pinned in the client settings")
 args = parser.parse_args(sys.argv[3:])
+if args.tailnet_only and args.any_address:
+    parser.error("--tailnet-only and --any-address conflict")
 if args.bot_id.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.bot_id):
     parser.error("--bot-id must match [A-Za-z0-9._-]{1,64} and must not begin with '-'")
 if args.bot_name is None:
@@ -58,6 +65,8 @@ ssh = Path.home() / ".ssh"
 authorized = ssh / "authorized_keys"
 key = ssh / f"alans-way-remote-agent-{args.bot_id}"
 marker = f"alans-way-remote-agent:{args.bot_id}"
+# Same ranges as setup.sh's TAILNET_FROM.
+TAILNET = "100.64.0.0/10,fd7a:115c:a1e0::/48"
 
 
 @contextmanager
@@ -68,6 +77,17 @@ def ssh_lock():
     with (ssh / ".alans-way-remote-agent.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield
+
+
+def current_source():
+    """This bot's existing from= value: None with no line, "" with a line that has none."""
+    if not authorized.exists():
+        return None
+    for row in authorized.read_bytes().decode("utf-8", "surrogateescape").splitlines():
+        if row.split()[-1:] == [marker]:
+            found = re.match(r'(?:[\w-]+(?:="(?:[^"\\]|\\.)*")?,)*?from="((?:[^"\\]|\\.)*)"', row)
+            return found[1] if found else ""
+    return None
 
 
 def update_keys(line=None):
@@ -141,6 +161,14 @@ if not Path(args.router).is_file():
 command = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
 # SSH forced commands get sshd's short PATH, not this shell's, so pin the node the probe runs.
 command += " exec " + shlex.join([shutil.which("node") or "node", args.router, "--bot-id", args.bot_id, "--bot-name", args.bot_name])
+# A re-run keeps the earlier choice: it never turns a restriction off, or one on, by being run again.
+previous = current_source()
+if args.any_address:
+    source = ""
+elif args.tailnet_only or previous is None:
+    source = TAILNET
+else:
+    source = previous
 if not args.preview:
     with ssh_lock():
         if not key.exists():
@@ -152,13 +180,32 @@ if not args.preview:
             parser.error(f"{key} must be an ed25519 key")
         public = " ".join(public[:2])
         escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-        # Same ranges as setup.sh's TAILNET_FROM.
-        source = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48",' if args.tailnet_only else ""
-        update_keys(f'{source}restrict,command="{escaped}" {public} {marker}')
-print(json.dumps({"command": "ssh", "args": ["-T", "-i", str(key), "-o", "StrictHostKeyChecking=accept-new",
+        restriction = f'from="{source}",' if source else ""
+        update_keys(f'{restriction}restrict,command="{escaped}" {public} {marker}')
+host_key = None
+try:
+    host_key = " ".join(Path(args.host_key).read_text().split()[:2])
+    if not re.fullmatch(r"(?:ssh|ecdsa)-[\w@.-]+ [A-Za-z0-9+/=]+", host_key):
+        host_key = None
+except OSError:
+    pass
+print(json.dumps({"command": "ssh", "args": ["-T", "-i", str(key), "-o",
+      "StrictHostKeyChecking=" + ("yes" if host_key else "accept-new"),
       "-o", "ServerAliveInterval=30", f"{args.user}@HOST"]}, indent=2))
 print(f"\nForced command:\n{command}")
-print(f"\nKey accepted from: {'Tailscale addresses only' if args.tailnet_only else 'any address (--tailnet-only limits it)'}")
+if source == TAILNET:
+    print("\nKey accepted from: Tailscale addresses only (--any-address lifts this)")
+elif source:
+    print(f"\nKey accepted from: {source} (kept from this bot's existing line)")
+else:
+    print("\nKey accepted from: any address (--tailnet-only limits it)")
+if host_key:
+    fingerprint = subprocess.run(["ssh-keygen", "-l", "-f", args.host_key], text=True, capture_output=True).stdout.split()
+    print("\nHost key is pinned. On the client, add this line to known_hosts with HOST replaced by the address it connects to:\n"
+          f"HOST {host_key}\nFingerprint: {fingerprint[1] if len(fingerprint) > 1 else 'unknown'}")
+else:
+    print(f"\nHost key not pinned: {args.host_key} is not readable here, so the client trusts the first host key it sees "
+          "(StrictHostKeyChecking=accept-new). Pass --host-key PATH to pin it.")
 check = ["sh", str(Path(script).resolve()), *sys.argv[3:]]
 check = [arg for arg in check if arg not in ("--probe", "--print")]
 print("\nLocal self-check (initialize + tools/list):\n" + shlex.join([*check, "--print", "--probe"]))

@@ -420,6 +420,23 @@ class RouterRpcTrackingTests(unittest.TestCase):
         self.assertTrue(data["idleReady"])
         self.assertEqual(data["pending"], 0)
 
+    def test_a_session_younger_than_hermes_proof_window_does_not_step_aside(self):
+        # Hermes counts a stdio session healthy after 180 s; leaving sooner burns
+        # one of its five rapid-drop retries and eventually parks the server.
+        data = self.run_helper(
+            "const r = require(process.argv[1]);"
+            "const mac = {state:'online'};"
+            "const call = (sessionAgeMs) => r.mayReconverge({mac, onlineStreak:2,"
+            " lastActivity:Date.now()-r.RECONVERGE_IDLE_MS-1, pendingSize:0, idleMs:r.RECONVERGE_IDLE_MS,"
+            " now:Date.now(), sessionAgeMs});"
+            "process.stdout.write(JSON.stringify({young:call(r.RECONVERGE_IDLE_MS+1), atWindow:call(180000),"
+            " old:call(r.SESSION_PROVEN_MS+1), window:r.SESSION_PROVEN_MS}));"
+        )
+        self.assertFalse(data["young"])
+        self.assertFalse(data["atWindow"])
+        self.assertTrue(data["old"])
+        self.assertGreater(data["window"], 180000)
+
     def test_client_and_server_lines_refresh_activity_tracking(self):
         data = self.run_helper(
             "const r = require(process.argv[1]);"

@@ -185,7 +185,7 @@ function main() {
       const timer = setTimeout(() => {
         if (session.pending.get(key) !== res) return;
         session.pending.delete(key);
-        send(res, 504, rpcError(msg.id, -32603, 'The workspace router did not reply in time.'));
+        send(res, 504, rpcError(msg.id, -32603, 'The workspace router did not reply in time. The action may still have run: check the page before repeating it.'));
       }, REPLY_MS);
       res.on('close', () => {
         clearTimeout(timer);

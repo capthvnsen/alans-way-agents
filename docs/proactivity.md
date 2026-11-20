@@ -28,8 +28,10 @@ Keep cron for isolated browser watches; see the
   days, 2.6 days, 5.3 days, 10.6 days, then check-ins stop until you reply. Replying resets it.
 - Only between **8:00 and 22:00 in your timezone**, not the server's. Setup reads
   your timezone from your computer; if it can't, the bot asks you.
-  An unset check-in timezone runs on UTC (plugins can't read the profile's Hermes
-  timezone through a supported API); set yours with `/proactivity tz Area/City`.
+  Until a timezone is set the bot sends no check-ins, briefs or reports (plugins
+  can't read the profile's Hermes timezone through a supported API, and UTC hours
+  would be wrong for you); set yours with `/proactivity tz Area/City`. `/proactivity now`
+  still works, and status shows `timezone_known`.
 - Never mid-conversation or while the bot is working in the bound chat.
 
 It never sends external messages, spends money, changes credentials or

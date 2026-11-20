@@ -221,6 +221,13 @@ function logMuxTrouble(text) {
 
 const SELF_PROBE_INTERVAL_MS = 600000;
 const RECONVERGE_IDLE_MS = 60000;
+// Hermes counts a stdio MCP session healthy only after a tool call succeeds or
+// the child idles a full 180 s keepalive interval (tools/mcp_tool.py
+// _DEFAULT_KEEPALIVE_INTERVAL). An earlier exit spends one of its five
+// rapid-drop retries, and after five the server is parked with its tools gone.
+const SESSION_PROVEN_MS = 185000;
+// The serving log keeps this much, plus one rotated file (.1).
+const LOG_MAX_BYTES = 1024 * 1024;
 
 function stderrTail(text, maxLen = 200) {
   const s = String(text || '').trim();
@@ -346,10 +353,10 @@ const DESKTOP_INPUT_TOOLS = new Set(['workspace_computer_action', 'workspace_com
 const desktopActionsAllowed = !['', '0', 'false', 'no'].includes(
   (process.env.HERMES_WORKSPACE_ALLOW_DESKTOP_ACTIONS || '').trim().toLowerCase());
 
-function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now }) {
+function mayReconverge({ mac, onlineStreak, lastActivity, pendingSize, idleMs, now, sessionAgeMs = Infinity }) {
   return Boolean(
     mac && mac.state === 'online' && onlineStreak >= 2 && pendingSize === 0
-      && now - lastActivity > idleMs,
+      && now - lastActivity > idleMs && sessionAgeMs > SESSION_PROVEN_MS,
   );
 }
 
@@ -531,6 +538,7 @@ function probeMac(timeoutMs, connectTimeout = 6, onSpawn) {
         '-o',
         'StrictHostKeyChecking=yes',
         ...sshControlArgs,
+        '--',
         macSsh,
         probe,
       ],
@@ -613,13 +621,8 @@ function pageUrlFromMessage(msg) {
     if (/"challenge"\s*:\s*\{/.test(part.text)) continue;
     const match = part.text.match(/"url"\s*:\s*"(https:\/\/[^"\\]{8,500})"/);
     if (!match) continue;
-    try {
-      const url = new URL(match[1]);
-      if (url.username || url.password || url.protocol !== 'https:') continue;
-      url.hash = '';
-      if (url.href.length > 500) continue;
-      return url.href;
-    } catch { /* a bad url is not a page to resume */ }
+    const url = safeResumeUrl(match[1]);
+    if (url) return url;
   }
   return null;
 }
@@ -628,7 +631,7 @@ function writeResumeNow(file, record) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(record));
+    fs.writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
     fs.renameSync(tmp, file);
   } catch { /* remembering a page must not break the tool result */ }
 }
@@ -646,7 +649,9 @@ function flushResumes() {
   resumeQueue.clear();
 }
 
-function writeResume(file, url) {
+function writeResume(file, value) {
+  const url = safeResumeUrl(value);
+  if (!url) return;
   const queued = resumeQueue.get(file);
   if (queued) {
     queued.record = { url, at: Date.now() };
@@ -665,10 +670,15 @@ function writeResume(file, url) {
   resumeQueue.set(file, { record: { url, at: Date.now() }, timer });
 }
 
+// Only origin and path are kept: a query or fragment can carry a token or a
+// one-time link, and failover would replay it in the VM browser. An address
+// that reads like an action is judged whole, query included, and not kept.
 function safeResumeUrl(value) {
   try {
     const url = new URL(value);
     if (url.username || url.password || url.protocol !== 'https:') return null;
+    if (isActionUrl(url.href)) return null;
+    url.search = '';
     url.hash = '';
     if (url.href.length > 500) return null;
     return url.href;
@@ -700,7 +710,7 @@ function markResumeOpened(file, record, tabId, now = Date.now()) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ url, at: record.at, openedAt: now, tabId }));
+    fs.writeFileSync(tmp, JSON.stringify({ url, at: record.at, openedAt: now, tabId }), { mode: 0o600 });
     fs.renameSync(tmp, file);
   } catch { /* the next spawn can open the page again */ }
 }
@@ -1607,6 +1617,7 @@ async function main() {
       '-o',
       'StrictHostKeyChecking=yes',
       ...sshControlArgs,
+      '--',
       macSsh,
       macCommand,
     ];
@@ -1860,7 +1871,9 @@ async function main() {
     try {
       const dir = path.join(home, 'logs');
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(path.join(dir, 'workspace-router.log'), line, { mode: 0o600 });
+      const file = path.join(dir, 'workspace-router.log');
+      try { if (fs.statSync(file).size > LOG_MAX_BYTES) fs.renameSync(file, `${file}.1`); } catch { /* no log yet */ }
+      fs.appendFileSync(file, line, { mode: 0o600 });
     } catch {
       process.stderr.write('workspace-router: could not write profile serving log\n');
     }
@@ -3106,7 +3119,8 @@ async function main() {
     });
   }
 
-  let lastActivity = Date.now();
+  const startedAt = Date.now();
+  let lastActivity = startedAt;
   const touchActivity = () => { lastActivity = Date.now(); };
 
   readJsonLines(process.stdin, (raw) => {
@@ -3267,6 +3281,7 @@ async function main() {
         pendingSize: pendingRequests.size + (holdCalls ? 1 : 0),
         idleMs: RECONVERGE_IDLE_MS,
         now: Date.now(),
+        sessionAgeMs: Date.now() - startedAt,
       })) {
         process.stderr.write(
           `workspace-router: ${hostName} is online — exiting so the next connection re-probes and routes to it\n`,
@@ -3327,4 +3342,5 @@ module.exports = {
   posixAutoBackendCommand,
   SELF_PROBE_INTERVAL_MS,
   RECONVERGE_IDLE_MS,
+  SESSION_PROVEN_MS,
 };

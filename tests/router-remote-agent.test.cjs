@@ -41,7 +41,7 @@ const tools=['cua_alans_way_open','workspace_computer_snapshot','workspace_compu
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  if(m.method==='initialize')fs.appendFileSync(path.join(dir,'mac-initialize'),JSON.stringify(m.params)+'\\n');
- if(m.id===undefined)return;
+ if(m.id===undefined||(m.params&&m.params.arguments&&m.params.arguments.hang))return;
  const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-mac',version:'1'}}:
   m.method==='tools/list'?{tools}:
   {content:[{type:'text',text:JSON.stringify({ok:true,host:'local',tab:{id:'mac-tab',epoch:1},echo:m.params.arguments})}]};
@@ -173,6 +173,19 @@ test('bridge carries a full MCP session to the Mac through the router and never 
   assert.equal(end.status, 204);
   assert.equal((await post(b, { id: 4, method: 'tools/list' }, { session })).status, 404);
   assert.ok(!b.stderr.includes(TOKEN));
+});
+
+test('a call the router never answers gets a 504 that says the action may have run', async t => {
+  const f = fixture(t);
+  // Shorten only the bridge's five-minute reply timer so the test does not wait for it.
+  fs.writeFileSync(f.file('fast-timer.cjs'), 'const t=global.setTimeout;global.setTimeout=(fn,ms,...a)=>t(fn,ms===300000?200:ms,...a);');
+  const b = await startBridge(f, { env: { ...tokenFile(f), NODE_OPTIONS: f.env.NODE_OPTIONS + ' --require=' + f.file('fast-timer.cjs') } }).ready();
+  const { session } = await post(b, initialize());
+  await post(b, { method: 'notifications/initialized' }, { session });
+  const call = await post(b, { id: 2, method: 'tools/call', params: { name: 'cua_alans_way_open', arguments: { url: 'https://example.com/', hang: true } } }, { session });
+  assert.equal(call.status, 504);
+  assert.match(call.body.error.message, /may still have run/);
+  assert.match(call.body.error.message, /before repeating/);
 });
 
 test('bridge rejects missing or wrong tokens, unknown sessions, oversized and malformed bodies', async t => {
