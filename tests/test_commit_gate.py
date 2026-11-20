@@ -1102,6 +1102,14 @@ class CommitNameTests(unittest.TestCase):
         "Buy", "Submit", "Payer", "Valider la commande", "Confirmer la commande",
         "Realizar pedido", "Confirmar pedido", "Kaufen", "Bezahlen", "Jetzt bezahlen",
         "購入する", "支払う", "予約する", "Pay with card and place order", "Pay with PayPal and submit",
+        "Update password", "Change password", "Change your email address", "Update e-mail",
+        "Cancel subscription", "Cancel your membership", "Cancel order",
+        "Withdraw", "Cash out", "Wire funds", "Transfer", "Transferir", "Überweisen", "Virement", "送金", "出金",
+        "Disable 2FA", "Turn off two-factor", "Turn off two-factor authentication", "Disable two-step verification",
+        "Deactivate account", "Close my account", "Revoke access", "Checkout", "Secure checkout",
+        "Unsubscribe", "Start free trial", "Start your 14-day free trial", "Approve",
+        "Passwort ändern", "Changer le mot de passe", "Cancelar suscripción", "Cerrar la cuenta", "Konto schließen",
+        "注文を確定", "パスワードを変更", "解約", "退会",
     ]
     NOT_COMMITS = [
         "Add to cart", "Send code", "Send verification code", "Send me a code",
@@ -1115,6 +1123,10 @@ class CommitNameTests(unittest.TestCase):
         "Continue to payment", "Proceed to payment", "Pay with credit card", "Pay with Visa ending 4242",
         "Confirm new password", "Post code", "Remove from cart", "Use this payment method",
         "Buy it again", "Book a demo", "Subscribe & Save", "subscribe-&-save", "Subscribe and Save", "subscribe-and-save",
+        "Cancel", "Close", "Order history", "Approved", "Approval", "Unsubscribed", "Withdrawals", "Wireless",
+        "Continue to checkout", "Proceed to checkout", "Go to checkout", "Free trial", "Forgot password", "Password",
+        "Two-factor authentication", "Turn off notifications", "Deactivated users", "Cancelar", "Annuler", "Abbrechen",
+        "Sign up", "Invite", "Share", "Upgrade", "Install", "Allow", "Apply now",
     ]
 
     def judge(self, names, selectors=False):
