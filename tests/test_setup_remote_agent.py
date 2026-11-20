@@ -47,6 +47,9 @@ class RemoteAgentTests(unittest.TestCase):
         self.config.write_text(self.config_text)
 
     def run_setup(self, *args, check=True):
+        # The machine running the tests may have real sshd host keys; point at none unless a test says otherwise.
+        if "--host-key" not in args:
+            args = (*args, "--host-key", str(self.home / "no-host-key.pub"))
         result = subprocess.run(["sh", str(SCRIPT), *args], env=self.env, text=True,
                                 capture_output=True, timeout=15)
         if check:
@@ -56,7 +59,7 @@ class RemoteAgentTests(unittest.TestCase):
 
     def command(self):
         line = self.authorized.read_text().splitlines()[-1]
-        match = re.match(r'restrict,command="((?:[^"\\]|\\.)*)" ssh-ed25519 ', line)
+        match = re.match(r'(?:from="[^"]*",)?restrict,command="((?:[^"\\]|\\.)*)" ssh-ed25519 ', line)
         self.assertIsNotNone(match, line)
         return re.sub(r"\\(.)", r"\1", match[1])
 
@@ -79,18 +82,71 @@ class RemoteAgentTests(unittest.TestCase):
                          "--bot-id", "remote.1", "--bot-name", "Remote Agent"])
         self.assertIn("initialize + tools/list", result.stdout)
 
-    def test_tailnet_only_limits_the_key_source_until_rerun_without_it(self):
-        source = 'from="100.64.0.0/10,fd7a:115c:a1e0::/48"'
-        self.assertIn(f"TAILNET_FROM='{source}'", (SCRIPT.parents[1] / "setup.sh").read_text())
-        self.run_setup("--bot-id", "one")
-        self.assertNotIn("from=", self.authorized.read_text())
-        result = self.run_setup("--bot-id", "one", "--tailnet-only")
-        self.assertIn("Tailscale addresses only", result.stdout)
-        rows = [row for row in self.authorized.read_text().splitlines() if row.endswith("alans-way-remote-agent:one")]
+    def sources(self, bot):
+        rows = [row for row in self.authorized.read_text().splitlines() if row.endswith(f"alans-way-remote-agent:{bot}")]
         self.assertEqual(len(rows), 1)
-        self.assertTrue(rows[0].startswith(f'{source},restrict,command="'), rows[0])
-        self.assertIn("any address", self.run_setup("--bot-id", "one").stdout)
-        self.assertNotIn("from=", self.authorized.read_text())
+        return re.match(r'(?:from="([^"]*)",)?restrict,command="', rows[0]).group(1)
+
+    def test_a_new_key_is_tailnet_only_unless_any_address_is_asked_for(self):
+        source = "100.64.0.0/10,fd7a:115c:a1e0::/48"
+        self.assertIn(f"TAILNET_FROM='from=\"{source}\"'", (SCRIPT.parents[1] / "setup.sh").read_text())
+        result = self.run_setup("--bot-id", "one")
+        self.assertIn("Tailscale addresses only", result.stdout)
+        self.assertEqual(self.sources("one"), source)
+        result = self.run_setup("--bot-id", "two", "--any-address")
+        self.assertIn("any address", result.stdout)
+        self.assertIsNone(self.sources("two"))
+        self.assertEqual(self.run_setup("--bot-id", "three", "--tailnet-only").returncode, 0)
+        self.assertEqual(self.sources("three"), source)
+        both = self.run_setup("--bot-id", "four", "--tailnet-only", "--any-address", check=False)
+        self.assertEqual(both.returncode, 2)
+
+    def test_a_rerun_keeps_the_restriction_this_bot_already_has(self):
+        source = "100.64.0.0/10,fd7a:115c:a1e0::/48"
+        self.run_setup("--bot-id", "one")
+        self.run_setup("--bot-id", "one", "--bot-name", "Renamed")
+        self.assertEqual(self.sources("one"), source)
+        # A hand-edited range survives a re-run too.
+        self.authorized.write_text(self.authorized.read_text().replace(f'from="{source}"', 'from="203.0.113.0/24"'))
+        result = self.run_setup("--bot-id", "one", "--bot-name", "Again")
+        self.assertEqual(self.sources("one"), "203.0.113.0/24")
+        self.assertIn("kept from this bot's existing line", result.stdout)
+        # An explicit opt-out is remembered the other way: re-running does not quietly add one.
+        self.run_setup("--bot-id", "one", "--any-address")
+        self.assertIsNone(self.sources("one"))
+        self.assertIn("any address", self.run_setup("--bot-id", "one", "--bot-name", "Third").stdout)
+        self.assertIsNone(self.sources("one"))
+        # Asking for the restriction applies it.
+        self.run_setup("--bot-id", "one", "--tailnet-only")
+        self.assertEqual(self.sources("one"), source)
+
+    def test_preview_shows_the_remembered_restriction_without_writing(self):
+        self.run_setup("--bot-id", "one", "--any-address")
+        before = self.authorized.read_bytes()
+        result = self.run_setup("--bot-id", "one", "--print")
+        self.assertIn("any address", result.stdout)
+        self.assertEqual(self.authorized.read_bytes(), before)
+        self.assertIn("Tailscale addresses only", self.run_setup("--bot-id", "fresh", "--print").stdout)
+
+    def test_a_known_host_key_is_pinned_and_an_unknown_one_says_so(self):
+        unknown = self.run_setup("--bot-id", "one")
+        client, _ = json.JSONDecoder().raw_decode(unknown.stdout)
+        self.assertIn("StrictHostKeyChecking=accept-new", client["args"])
+        self.assertIn("Host key not pinned", unknown.stdout)
+        host = self.home / "ssh_host_ed25519_key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host)], check=True)
+        pinned = self.run_setup("--bot-id", "one", "--host-key", str(host) + ".pub")
+        client, _ = json.JSONDecoder().raw_decode(pinned.stdout)
+        self.assertIn("StrictHostKeyChecking=yes", client["args"])
+        self.assertNotIn("accept-new", pinned.stdout.split("Forced command")[0])
+        public = " ".join((host.parent / (host.name + ".pub")).read_text().split()[:2])
+        self.assertIn(f"HOST {public}", pinned.stdout)
+        self.assertIn("Fingerprint: SHA256:", pinned.stdout)
+        self.assertNotIn("Host key not pinned", pinned.stdout)
+        # Something that is not a public key is not pinned.
+        (self.home / "junk.pub").write_text("not a key\n")
+        junk = self.run_setup("--bot-id", "one", "--host-key", str(self.home / "junk.pub"))
+        self.assertIn("StrictHostKeyChecking=accept-new", json.JSONDecoder().raw_decode(junk.stdout)[0]["args"])
 
     def test_default_router_without_hermes_home_uses_home_plugin(self):
         env = dict(self.env)

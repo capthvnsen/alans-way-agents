@@ -23,9 +23,23 @@ client JSON (`{"command": "ssh", "args": [... "VM_USER@HOST"]}`): replace
 `HOST` with the VM's address and give the client the private key file through
 its own secret store; never paste it into a chat. `--print --probe` checks
 `initialize` + `tools/list` locally without writing anything, and `--remove`
-deletes only that bot's line. Add `--tailnet-only` to accept the key only from
-Tailscale addresses (`from="100.64.0.0/10,fd7a:115c:a1e0::/48"`). Each run
-rewrites the line, so a later run without the flag removes the restriction.
+deletes only that bot's line.
+
+A new key is accepted only from Tailscale addresses
+(`from="100.64.0.0/10,fd7a:115c:a1e0::/48"`). Pass `--any-address` to opt out.
+A later run without either flag keeps whatever that bot's line already has
+(the tailnet limit, a range you edited in by hand, or no limit because you opted
+out), so re-running never drops the restriction on its own; `--tailnet-only`
+applies the limit to a line that has none. `--tailnet-only` and `--any-address`
+conflict.
+
+The client settings pin the VM's SSH host key when the script can read it
+(`/etc/ssh/ssh_host_ed25519_key.pub`, or `--host-key PATH`): they use
+`StrictHostKeyChecking=yes` and the script prints the `known_hosts` line to add
+on the client, with `HOST` replaced by the address it connects to, and the key's
+fingerprint. If the key is not readable here (or the VM answers with another
+key, as Tailscale SSH does), the script says so and the settings keep
+`StrictHostKeyChecking=accept-new`, which trusts the first key the client sees.
 
 **HTTP bridge (off by default).** For a client that cannot hold an SSH
 session. `remote-agent-bridge.cjs` serves MCP over HTTP at `/mcp` and starts
